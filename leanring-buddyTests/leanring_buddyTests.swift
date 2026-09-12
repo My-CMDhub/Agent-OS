@@ -856,23 +856,19 @@ private func windowContaining(_ children: [AccessibilityElementNode]) -> Accessi
     #expect(HarnessPolicy.effectiveDryRun(requested: nil, globalDefault: true) == true)
 }
 
-@Test func requireConfirmationIsNotExecutableOverASocketWithoutAnExplicitYes() async throws {
+@Test func requireConfirmationIsNeverExecutableOverASocketOnItsOwn() async throws {
     let question = SafetyDecision.requireConfirmation(reason: "title suggests a destructive action: delete")
 
-    let unconfirmed = HarnessPolicy.executability(of: question, confirmed: false)
-    #expect(unconfirmed.executable == false)
-    #expect(unconfirmed.reason?.contains("confirmed") == true)
+    // Owner's ruling 2026-09-12: a socket client cannot approve its own
+    // question. Only a ticket the owner answered, or a rule the owner made,
+    // lifts this — see `HarnessServer.gate`. `confirmed` is recorded, not believed.
+    #expect(HarnessPolicy.executableWithoutAHuman(question) == false)
 
-    // Re-issuing with confirmed:true does not change the kernel's answer, it
-    // records who took responsibility for it. The audit line carries the flag.
-    #expect(HarnessPolicy.executability(of: question, confirmed: true).executable)
-
-    // A refusal is a refusal. Confirmation cannot buy past it.
+    // A refusal is a refusal. Nothing buys past it.
     let refusal = SafetyDecision.refuse(reason: ActionSafetyKernel.zeroAreaRefusalReason)
-    #expect(HarnessPolicy.executability(of: refusal, confirmed: true).executable == false)
-    #expect(HarnessPolicy.executability(of: refusal, confirmed: false).executable == false)
+    #expect(HarnessPolicy.executableWithoutAHuman(refusal) == false)
 
-    #expect(HarnessPolicy.executability(of: .allow, confirmed: false).executable)
+    #expect(HarnessPolicy.executableWithoutAHuman(.allow))
 }
 
 @Test func anAuditLineIsOneJSONRecordThatATitleCannotForgeASecondOf() async throws {
@@ -972,8 +968,8 @@ private let wholeScreen = CGRect(x: 0, y: 0, width: 1920, height: 1200)
     #expect(decision == .refuse(
         reason: ActionSafetyKernel.secureFieldRefusalReason(subrole: "AXSecureTextField")
     ))
-    // A refusal, not a question: `confirmed: true` cannot execute it.
-    #expect(HarnessPolicy.executability(of: decision, confirmed: true).executable == false)
+    // A refusal, not a question: no ticket or rule can execute it.
+    #expect(HarnessPolicy.executableWithoutAHuman(decision) == false)
 }
 
 @Test func aRoleThatDoesNotAcceptTextIsRefusedRatherThanAskedAbout() async throws {
@@ -1428,10 +1424,9 @@ private func menuItemNode(_ label: String) -> AccessibilityElementNode {
         }
         #expect(reason.hasPrefix(ActionSafetyKernel.irreversibleRefusalPrefix))
 
-        // The whole point of the list: the socket's escape hatch does not open
-        // this door. `confirmed` only ever answers a requireConfirmation.
-        let (executable, _) = HarnessPolicy.executability(of: decision, confirmed: true)
-        #expect(executable == false)
+        // The whole point of the list: a refusal has no ticket path at all —
+        // tickets only ever answer a requireConfirmation.
+        #expect(HarnessPolicy.executableWithoutAHuman(decision) == false)
 
         // And it is the shape of an attempt, so the recorder keeps the context.
         #expect(ActionSafetyKernel.isSecurityRefusal(reason: reason))
@@ -2061,8 +2056,8 @@ private func menuItemNode(_ label: String) -> AccessibilityElementNode {
     func refusalReason(_ inspection: CaptureInspection) -> String? {
         let decision = ActionSafetyKernel.evaluateCapture(inspection)
         guard case .refuse(let reason) = decision else { return nil }
-        // No `confirmed: true` lifts it, and it earns the flight recorder.
-        #expect(HarnessPolicy.executability(of: decision, confirmed: true).executable == false)
+        // Nothing lifts it, and it earns the flight recorder.
+        #expect(HarnessPolicy.executableWithoutAHuman(decision) == false)
         #expect(ActionSafetyKernel.isSecurityRefusal(reason: reason))
         return reason
     }
@@ -2597,9 +2592,9 @@ private func expectEverySuggestionResolvesToItsOwnCandidate(
         #expect(HarnessAppPolicy.compose(policy: .allow, bundleIdentifier: app, kernel: kernel) == kernel)
     }
 
-    // `confirmed: true` cannot lift a policy refusal — a refuse is never executable.
+    // No ticket or rule can lift a policy refusal — a refuse is never executable.
     let refused = HarnessAppPolicy.compose(policy: .refuse, bundleIdentifier: app, kernel: .allow)
-    #expect(HarnessPolicy.executability(of: refused, confirmed: true).executable == false)
+    #expect(HarnessPolicy.executableWithoutAHuman(refused) == false)
 }
 
 @Test func twoPolicyKeysDifferingOnlyInCaseRefuseTheWholeFile() async throws {
@@ -2634,4 +2629,247 @@ private func expectEverySuggestionResolvesToItsOwnCandidate(
         kernelDecision: nil, verificationStatus: nil, errorCode: "policyUnreadable",
         walkMilliseconds: nil, recentWalkMilliseconds: []
     ) == .policyUnreadable)
+}
+
+// MARK: - Harness confirmations: tickets, approval rules, audit mirror
+//
+// Pure logic only. Whether the panel comes up and the owner's click lands is
+// proven by opening the panel, not by a test.
+
+private let finderEmptyBin = HarnessConfirmations.Shape(verb: "press", bundleIdentifier: "com.apple.finder", rawTarget: "Empty Bin")
+
+private func makeTicket(
+    verb: String = "press", target: String = "Empty Bin", text: String? = nil, mode: String? = nil,
+    bundleIdentifier: String = "com.apple.finder",
+    status: HarnessConfirmations.Status = .pending, createdAt: Date = Date(timeIntervalSince1970: 1_000_000),
+    consumed: Bool = false
+) -> HarnessConfirmations.Ticket {
+    HarnessConfirmations.Ticket(
+        id: "t1", createdAt: createdAt, verb: verb, rawTarget: target, target: UntrustedText(target).forDisplay,
+        text: text, mode: mode, appName: "Finder", bundleIdentifier: bundleIdentifier,
+        reason: "irreversible", status: status, answeredAt: nil, consumed: consumed
+    )
+}
+
+private func temporaryApprovalsURL(contents: String?) throws -> URL {
+    let url = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("clicky-test-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("harness-approvals.json")
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    if let contents { try Data(contents.utf8).write(to: url) }
+    return url
+}
+
+@Test func aPendingTicketExpiresSixtySecondsAfterItWasOpened() async throws {
+    let ticket = makeTicket()
+    #expect(HarnessConfirmations.status(of: ticket, now: ticket.createdAt.addingTimeInterval(59.9)) == .pending)
+    #expect(HarnessConfirmations.status(of: ticket, now: ticket.createdAt.addingTimeInterval(60)) == .expired)
+    // An answered ticket does not expire — the answer is the record.
+    let allowed = makeTicket(status: .allowed)
+    #expect(HarnessConfirmations.status(of: allowed, now: allowed.createdAt.addingTimeInterval(600)) == .allowed)
+}
+
+@Test func aTicketAnswersExactlyOneRequestShape() async throws {
+    let ticket = makeTicket()
+    #expect(HarnessConfirmations.ticketMatches(ticket, finderEmptyBin))
+    #expect(HarnessConfirmations.ticketMatches(ticket, .init(verb: "press", bundleIdentifier: "COM.APPLE.FINDER", rawTarget: "Empty Bin")))
+    #expect(HarnessConfirmations.mismatchedField(ticket, .init(verb: "select", bundleIdentifier: "com.apple.finder", rawTarget: "Empty Bin")) == "verb")
+    #expect(HarnessConfirmations.mismatchedField(ticket, .init(verb: "press", bundleIdentifier: "com.apple.mail", rawTarget: "Empty Bin")) == "bundleIdentifier")
+    #expect(HarnessConfirmations.mismatchedField(ticket, .init(verb: "press", bundleIdentifier: nil, rawTarget: "Empty Bin")) == "bundleIdentifier")
+    #expect(HarnessConfirmations.mismatchedField(ticket, .init(verb: "press", bundleIdentifier: "com.apple.finder", rawTarget: "Empty Bin…")) == "target")
+
+    // Matching is on the RAW string: two titles `forDisplay` truncates alike are two targets.
+    let long = String(repeating: "a", count: 150)
+    let longTicket = makeTicket(target: long + "1")
+    #expect(UntrustedText(long + "1").forDisplay == UntrustedText(long + "2").forDisplay)
+    #expect(!HarnessConfirmations.ticketMatches(longTicket, .init(verb: "press", bundleIdentifier: "com.apple.finder", rawTarget: long + "2")))
+}
+
+@Test func aTypeTicketIsForOneTextInOneMode() async throws {
+    let ticket = makeTicket(verb: "type", target: "<focused>", text: "hello", mode: "insert", bundleIdentifier: "com.apple.TextEdit")
+    let same = HarnessConfirmations.Shape(verb: "type", bundleIdentifier: "com.apple.TextEdit", rawTarget: "<focused>", text: "hello", mode: "insert")
+    #expect(HarnessConfirmations.ticketMatches(ticket, same))
+    // An approved "hello" does not re-issue as "ERASE".
+    var other = same; other.text = "ERASE"
+    #expect(HarnessConfirmations.mismatchedField(ticket, other) == "text")
+    var replaced = same; replaced.mode = "replace"
+    #expect(HarnessConfirmations.mismatchedField(ticket, replaced) == "mode")
+}
+
+@Test func consumingATicketFollowsTheTruthTable() async throws {
+    let now = Date(timeIntervalSince1970: 1_000_010)
+    func consume(_ ticket: HarnessConfirmations.Ticket?, at when: Date = now) -> HarnessConfirmations.Consumption {
+        HarnessConfirmations.consumption(of: ticket, finderEmptyBin, now: when)
+    }
+    #expect(consume(nil) == .unknown)
+    #expect(consume(makeTicket()) == .pending)
+    #expect(consume(makeTicket(status: .denied)) == .denied)
+    #expect(consume(makeTicket(), at: now.addingTimeInterval(120)) == .expired)
+    #expect(consume(makeTicket(status: .allowed)) == .allowed)
+    // One ticket, one action: the second use is `.consumed`, its own case, so a
+    // replay is never confused with a ticket that never existed.
+    #expect(consume(makeTicket(status: .allowed, consumed: true)) == .consumed)
+    // Shape is checked before the flag: a spent ticket for another action is a mismatch.
+    #expect(consume(makeTicket(verb: "select", status: .allowed, consumed: true)) == .mismatch(field: "verb"))
+
+    // And the mutating wrapper flips the flag on the way through.
+    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    guard case .opened(let opened) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "irreversible") else {
+        Issue.record("expected a ticket"); return
+    }
+    confirmations.answer(opened.id, allow: true, scope: .once)
+    #expect(confirmations.consume(ticket: opened.id, finderEmptyBin) == .allowed)
+    #expect(confirmations.consume(ticket: opened.id, finderEmptyBin) == .consumed)
+}
+
+@Test func aTicketIsRefusedForAnUnnamedTargetAnUnidentifiedAppOrAFullQueue() async throws {
+    #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, pendingCount: 0) == nil)
+    #expect(HarnessConfirmations.openRefusal(
+        for: .init(verb: "menu", bundleIdentifier: "com.apple.finder", rawTarget: ""), pendingCount: 0
+    )?.code == "confirmationTargetUnnamed")
+    #expect(HarnessConfirmations.openRefusal(
+        for: .init(verb: "press", bundleIdentifier: nil, rawTarget: "Empty Bin"), pendingCount: 0
+    )?.code == "confirmationAppUnidentified")
+    #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, pendingCount: 2) == nil)
+    #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, pendingCount: 3)?.code == "tooManyPendingConfirmations")
+
+    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    for _ in 0..<3 {
+        guard case .opened = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+            Issue.record("expected a ticket"); return
+        }
+    }
+    #expect(confirmations.open(finderEmptyBin, appName: "Finder", reason: "r")
+        == .refused(code: "tooManyPendingConfirmations",
+                    message: "3 tickets are already waiting in the Clicky panel — answer or let them expire first"))
+}
+
+@Test func theMenuTargetIsThePathAndAFocusedTypeIsNamedAsSuch() async throws {
+    guard case .success(let menu) = HarnessPolicy.decode(line: #"{"verb":"menu","path":["File","Close Window"]}"#),
+          case .success(let typing) = HarnessPolicy.decode(line: #"{"verb":"type","target":"focused","text":"hi"}"#),
+          case .success(let focus) = HarnessPolicy.decode(line: #"{"verb":"focus","app":"Finder"}"#) else {
+        Issue.record("expected three decoded requests"); return
+    }
+    #expect(HarnessServer.auditTarget(for: menu) == "File > Close Window")
+    #expect(HarnessServer.auditTarget(for: typing) == "<focused>")
+    #expect(HarnessServer.auditTarget(for: focus) == "Finder")
+
+    let shape = HarnessServer.confirmationShape(for: typing, bundleIdentifier: "com.apple.TextEdit")
+    #expect(shape == .init(verb: "type", bundleIdentifier: "com.apple.TextEdit", rawTarget: "<focused>", text: "hi", mode: "insert"))
+    // Only `type` carries text into its identity.
+    #expect(HarnessServer.confirmationShape(for: menu, bundleIdentifier: "x").text == nil)
+}
+
+@Test func anApprovalRuleMatchesByAppVerbAndOptionallyTargetAndText() async throws {
+    let anyTarget = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.finder", verb: "press", target: nil)
+    let oneTarget = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.mail", verb: "menu", target: "File > Send")
+    let oneText = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.TextEdit", verb: "type", target: "<focused>", text: "hello")
+    let rules = [anyTarget, oneTarget, oneText]
+
+    func match(_ verb: String, _ app: String?, _ target: String, text: String? = nil) -> HarnessConfirmations.ApprovalRule? {
+        HarnessConfirmations.matchingRule(in: rules, .init(verb: verb, bundleIdentifier: app, rawTarget: target, text: text))
+    }
+    #expect(match("press", "COM.Apple.Finder", "anything") == anyTarget)
+    #expect(match("select", "com.apple.finder", "anything") == nil)
+    #expect(match("menu", "com.apple.mail", "File > Send") == oneTarget)
+    #expect(match("menu", "com.apple.mail", "File > Delete") == nil)
+    #expect(match("press", nil, "anything") == nil)
+    #expect(match("type", "com.apple.TextEdit", "<focused>", text: "hello") == oneText)
+    #expect(match("type", "com.apple.TextEdit", "<focused>", text: "ERASE") == nil)
+}
+
+@Test func alwaysMeansThisActionInThisAppExceptForFocusAndLaunch() async throws {
+    #expect(HarnessConfirmations.rule(for: makeTicket())
+        == .init(bundleIdentifier: "com.apple.finder", verb: "press", target: "Empty Bin", text: nil))
+    #expect(HarnessConfirmations.rule(for: makeTicket(verb: "type", target: "<focused>", text: "hello", mode: "insert"))
+        == .init(bundleIdentifier: "com.apple.finder", verb: "type", target: "<focused>", text: "hello"))
+    #expect(HarnessConfirmations.rule(for: makeTicket(verb: "focus", target: "Finder"))
+        == .init(bundleIdentifier: "com.apple.finder", verb: "focus", target: nil, text: nil))
+    #expect(HarnessConfirmations.rule(for: makeTicket(verb: "launch", target: "Finder"))
+        == .init(bundleIdentifier: "com.apple.finder", verb: "launch", target: nil, text: nil))
+}
+
+@Test func anAlwaysAnswerAppendsToTheFileOnDiskAndTheNextConsultReadsIt() async throws {
+    let existing = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.mail", verb: "menu", target: "File > Send")
+    let url = try temporaryApprovalsURL(contents: String(decoding: try JSONEncoder().encode([existing]), as: UTF8.self))
+    let confirmations = HarnessConfirmations(approvalsURL: url)
+    #expect(confirmations.rule(for: finderEmptyBin).rule == nil)
+
+    guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+        Issue.record("expected a ticket"); return
+    }
+    confirmations.answer(ticket.id, allow: true, scope: .always)
+
+    // Read-append-write: the hand-written rule survives beside the new one.
+    let onDisk = try HarnessConfirmations.loadApprovals(from: url).get()
+    #expect(onDisk == [existing, HarnessConfirmations.rule(for: ticket)])
+    #expect(confirmations.rule(for: finderEmptyBin).rule == HarnessConfirmations.rule(for: ticket))
+    let permissions = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int
+    #expect(permissions == 0o600)
+}
+
+@Test func aMalformedApprovalsFileIsNoRulesPlusAReason() async throws {
+    let good = Data(#"[{"bundleIdentifier":"com.apple.finder","verb":"press","target":null}]"#.utf8)
+    #expect(HarnessConfirmations.parseApprovals(good) == .success([
+        HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.finder", verb: "press", target: nil)
+    ]))
+
+    guard case .failure(let failure) = HarnessConfirmations.parseApprovals(Data("{not json".utf8)) else {
+        Issue.record("expected a parse failure")
+        return
+    }
+    #expect(!failure.reason.isEmpty)
+
+    // A missing file is legitimately "no rules"; a malformed one is reported on
+    // every consult, and an "always" answer does not overwrite it.
+    #expect(HarnessConfirmations.loadApprovals(from: try temporaryApprovalsURL(contents: nil)) == .success([]))
+    let brokenURL = try temporaryApprovalsURL(contents: "{not json")
+    let broken = HarnessConfirmations(approvalsURL: brokenURL)
+    let consulted = broken.rule(for: finderEmptyBin)
+    #expect(consulted.rule == nil)
+    #expect(consulted.unreadable?.contains("harness-approvals.json") == true)
+    guard case .opened(let ticket) = broken.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+        Issue.record("expected a ticket"); return
+    }
+    broken.answer(ticket.id, allow: true, scope: .always)
+    #expect(try String(contentsOf: brokenURL, encoding: .utf8) == "{not json")
+}
+
+@Test func theAuditMirrorIsNamedByUTCDay() async throws {
+    // 2026-09-13T02:00:00Z is still 2026-09-12 in every American time zone.
+    let date = ISO8601DateFormatter().date(from: "2026-09-13T02:00:00Z")!
+    let url = HarnessServer.auditMirrorURL(for: date)
+    #expect(url.lastPathComponent == "harness-audit-2026-09-13.log")
+    #expect(url.deletingLastPathComponent().path.hasSuffix("Library/Logs/Clicky"))
+}
+
+@Test func anEmptyTicketIsARefusalNotARequestWithoutOne() async throws {
+    guard case .failure(let error) = HarnessPolicy.decode(
+        line: #"{"id":"r9","verb":"press","title":"Empty Bin","ticket":""}"#
+    ) else {
+        Issue.record("expected a refusal")
+        return
+    }
+    #expect(error == .invalidField(field: "ticket", value: ""))
+
+    guard case .success(let request) = HarnessPolicy.decode(
+        line: #"{"id":"r9","verb":"press","title":"Empty Bin","ticket":"abc","confirmed":true}"#
+    ) else {
+        Issue.record("expected a decoded request")
+        return
+    }
+    #expect(request.ticket == "abc")
+    // Still decoded and recorded; it just no longer lifts anything.
+    #expect(request.confirmed == true)
+}
+
+@Test func theAuditLineCarriesWhoConfirmedOnlyWhenSomeoneDid() async throws {
+    let at = Date(timeIntervalSince1970: 0)
+    let plain = HarnessPolicy.auditLine(at: at, id: "a", verb: "press", target: "x", app: nil, session: "s",
+                                        dryRun: false, confirmed: false, kernel: "allow", outcome: "ok", milliseconds: 1)
+    #expect(!plain.contains("confirmedBy"))
+    let owned = HarnessPolicy.auditLine(at: at, id: "a", verb: "press", target: "x", app: nil, session: "s",
+                                        dryRun: false, confirmed: false, kernel: "requireConfirmation", outcome: "ok",
+                                        milliseconds: 1, confirmedBy: "owner")
+    #expect(owned.contains(#""confirmedBy":"owner""#))
 }

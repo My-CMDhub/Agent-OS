@@ -37,6 +37,9 @@ struct HarnessRawRequest: Decodable {
     let nearPoint: HarnessPoint?
     let dryRun: Bool?
     let confirmed: Bool?
+    /// A confirmation ticket id from an earlier `confirmationRequired` response,
+    /// answered by the owner in the Clicky panel. See `HarnessConfirmations`.
+    let ticket: String?
 
     /// menu / menus only: the path down the menu bar, e.g. ["File", "New Folder"].
     let path: [String]?
@@ -197,6 +200,9 @@ struct HarnessRequest: Equatable {
     var aimAtFocus: Bool = false
     var thenConfirm: Bool = false
 
+    /// A confirmation ticket the owner answered in-process. nil means none offered.
+    var ticket: String? = nil
+
     /// menu / menus only.
     var path: [String] = []
     /// menu only: press a status icon instead of a path. One target per request.
@@ -309,6 +315,10 @@ enum HarnessPolicy {
         if raw.expectApp?.isEmpty == true {
             return .failure(.invalidField(field: "expectApp", value: ""))
         }
+        // An empty ticket is a caller that lost the id, not a request without one.
+        if raw.ticket?.isEmpty == true {
+            return .failure(.invalidField(field: "ticket", value: ""))
+        }
 
         var mode = TypeMode.insert
         if verb == .type {
@@ -341,6 +351,7 @@ enum HarnessPolicy {
             mode: mode,
             aimAtFocus: aimAtFocus,
             thenConfirm: raw.thenConfirm ?? false,
+            ticket: raw.ticket,
             path: path,
             statusItem: statusItem,
             app: (raw.app?.isEmpty == false) ? raw.app : nil,
@@ -377,27 +388,18 @@ enum HarnessPolicy {
         (killSwitchPresent && verb.isMutating) ? killSwitchReason : nil
     }
 
-    /// Whether a kernel decision may be executed over a socket.
+    /// Whether a kernel decision may run with no human involved: only `.allow`.
     ///
-    /// `requireConfirmation` is the kernel asking a human. There is no human on
-    /// the other end of this socket, so it is returned as a refusal-to-proceed.
-    /// A caller may re-issue with `"confirmed": true` — that does not make the
-    /// kernel's answer different, it records that someone took responsibility
-    /// for it, which is why the audit line carries the flag.
-    static func executability(
-        of decision: SafetyDecision,
-        confirmed: Bool
-    ) -> (executable: Bool, reason: String?) {
-        switch decision {
-        case .allow:
-            return (true, nil)
-        case .requireConfirmation(let reason):
-            return confirmed
-                ? (true, "confirmed by caller: \(reason)")
-                : (false, "requires confirmation: \(reason) — re-issue with \"confirmed\": true")
-        case .refuse(let reason):
-            return (false, "refused: \(reason)")
-        }
+    /// `requireConfirmation` is the kernel asking a human, and no human sits on
+    /// the socket — so a socket client can never approve its own question.
+    /// Owner's ruling 2026-09-12: `"confirmed": true` no longer lifts one. The
+    /// field is still decoded and recorded (response and audit line) as what
+    /// the caller claimed; approval comes from the owner — a ticket answered in
+    /// the Clicky panel, or an approval rule that panel created. See
+    /// `HarnessConfirmations` and `HarnessServer.gate`.
+    static func executableWithoutAHuman(_ decision: SafetyDecision) -> Bool {
+        if case .allow = decision { return true }
+        return false
     }
 
     static func describe(_ decision: SafetyDecision) -> (decision: String, reason: String?) {
@@ -436,7 +438,9 @@ enum HarnessPolicy {
         outcome: String,
         milliseconds: Int,
         frontmostSource: String? = nil,
-        frontmostSystemWideError: Int32? = nil
+        frontmostSystemWideError: Int32? = nil,
+        /// Who lifted a `requireConfirmation`: `caller` / `owner` / `approvalRule`.
+        confirmedBy: String? = nil
     ) -> String {
         var fields: [String: Any] = [
             "timestamp": auditTimestampFormatter.string(from: timestamp),
@@ -455,6 +459,7 @@ enum HarnessPolicy {
         // the only way to count how often a request ran on the cache.
         if let frontmostSource { fields["frontmostSource"] = frontmostSource }
         if let frontmostSystemWideError { fields["frontmostSystemWideError"] = Int(frontmostSystemWideError) }
+        if let confirmedBy { fields["confirmedBy"] = confirmedBy }
         guard let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else {
             return "{\"timestamp\":\"\(auditTimestampFormatter.string(from: timestamp))\",\"outcome\":\"auditEncodingFailed\"}"
@@ -598,8 +603,23 @@ final class HarnessServer {
     static var socketURL: URL { supportDirectory.appendingPathComponent("harness.sock") }
     static var killSwitchURL: URL { supportDirectory.appendingPathComponent("HARNESS_DISABLED") }
     static var policyURL: URL { supportDirectory.appendingPathComponent("harness-policy.json") }
+    static var approvalsURL: URL { supportDirectory.appendingPathComponent("harness-approvals.json") }
     static var auditLogURL: URL { supportDirectory.appendingPathComponent("harness-audit.log") }
     static var rotatedAuditLogURL: URL { supportDirectory.appendingPathComponent("harness-audit.log.1") }
+
+    /// The durable mirror of the audit log: one file per UTC day under
+    /// `~/Library/Logs/Clicky`, never truncated, never rotated — the day split
+    /// is the rotation, and nothing in the support directory's 5 MB budget
+    /// can erase it.
+    nonisolated static func auditMirrorURL(for date: Date) -> URL {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Clicky", isDirectory: true)
+            .appendingPathComponent("harness-audit-\(formatter.string(from: date)).log")
+    }
 
     /// This log lives on the owner's machine and nothing prunes it. 5 MB is
     /// roughly 20,000 audit lines — far more history than any question about
@@ -624,6 +644,19 @@ final class HarnessServer {
     static let sessionIdentifier = String(UUID().uuidString.prefix(8))
 
     private let globalDryRun: Bool
+    /// Shared with the menu-bar panel: tickets opened here are answered there.
+    private let confirmations: HarnessConfirmations
+
+    /// Who lifted a `requireConfirmation` for the request in flight, so every
+    /// audit line of that request carries it. Reset per request, like `loadedPolicy`.
+    private var currentConfirmedBy: String?
+    /// The ticket this request already spent. `focus` asks the gate twice (app
+    /// policy, then window); the second asking re-matches this ticket's shape
+    /// rather than trusting that someone said yes to something.
+    private var consumedTicketID: String?
+
+    /// Mirror writes that failed. Not fatal to a request; counted so `ping` can say so.
+    private(set) var auditMirrorFailures = 0
 
     /// The per-app policy read once by `execute` for the request in flight.
     /// Requests serialise on the main thread, so one slot is enough; nil means
@@ -651,8 +684,9 @@ final class HarnessServer {
     /// ring — the whole point is that repetition is cheap to recognise.
     private var lastAnomalyDumpAt: [String: Date] = [:]
 
-    init(globalDryRun: Bool) {
+    init(globalDryRun: Bool, confirmations: HarnessConfirmations) {
         self.globalDryRun = globalDryRun
+        self.confirmations = confirmations
     }
 
     var versionString: String {
@@ -835,7 +869,7 @@ final class HarnessServer {
                 dryRun: globalDryRun, confirmed: false,
                 kernel: "n/a", outcome: error.code,
                 milliseconds: elapsedMilliseconds(since: startedAt)
-            ))
+            ), at: startedAt)
             return observe(
                 ["ok": false, "id": "", "error": error.code, "message": error.message],
                 verb: "?", startedAt: startedAt
@@ -924,7 +958,7 @@ final class HarnessServer {
             dryRun: globalDryRun, confirmed: false,
             kernel: "n/a", outcome: outcome,
             milliseconds: elapsedMilliseconds(since: startedAt)
-        ))
+        ), at: now)
         return annotated
     }
 
@@ -1034,6 +1068,8 @@ final class HarnessServer {
         // Read once per request, before a target is even read, and fail closed:
         // a policy file that cannot be parsed must never become "allow".
         loadedPolicy = nil
+        currentConfirmedBy = nil
+        consumedTicketID = nil
         if request.verb.isMutating {
             switch HarnessAppPolicy.load(from: Self.policyURL) {
             case .loaded(let policy, _): loadedPolicy = policy
@@ -1054,7 +1090,8 @@ final class HarnessServer {
                 "dryRun": dryRun,
                 "dryRunSource": globalDryRun ? "global --harness-dry-run" : (request.requestedDryRun == true ? "request" : "none"),
                 "killSwitchPresent": Self.killSwitchIsPresent(),
-                "socket": Self.socketURL.path
+                "socket": Self.socketURL.path,
+                "auditMirrorFailures": auditMirrorFailures
             ]
 
         case .snapshot:
@@ -1158,6 +1195,147 @@ final class HarnessServer {
             "app": (bundleIdentifier ?? NSNull()) as Any
         ]
         return HarnessAppPolicy.compose(policy: verdict, bundleIdentifier: bundleIdentifier, kernel: kernel)
+    }
+
+    // MARK: Confirmation gate
+
+    struct GateResult {
+        let executable: Bool
+        /// The kernel's word: allow / requireConfirmation / refuse.
+        let decision: String
+        /// The refusal code when not executable; `allowed` otherwise.
+        let outcome: String
+        let note: String?
+    }
+
+    /// The one place a kernel decision meets the caller's credentials.
+    ///
+    /// `.requireConfirmation` is a question for a human, and no human sits on
+    /// the socket. A request cannot wait for a click either — it runs inside
+    /// `DispatchQueue.main.sync`, so the panel only draws between requests. So
+    /// the question becomes a ticket the owner answers in the panel, and the
+    /// caller re-issues carrying its id. `"confirmed": true` lifts nothing
+    /// (owner's ruling 2026-09-12); it is recorded, not believed.
+    private func gate(
+        _ decision: SafetyDecision,
+        request: HarnessRequest,
+        appName: String?,
+        bundleIdentifier: String?,
+        into response: inout [String: Any]
+    ) -> GateResult {
+        let described = HarnessPolicy.describe(decision)
+        let result: GateResult
+
+        switch decision {
+        case .allow:
+            result = GateResult(executable: true, decision: described.decision, outcome: "allowed", note: nil)
+
+        case .refuse(let reason):
+            result = GateResult(executable: false, decision: described.decision,
+                                outcome: "kernelRefused", note: "refused: \(reason)")
+
+        case .requireConfirmation(let reason):
+            let shape = Self.confirmationShape(for: request, bundleIdentifier: bundleIdentifier)
+            var confirmedBy: String?
+            var confirmation: [String: Any] = [:]
+            var refusal: (outcome: String, note: String)?
+
+            if let id = request.ticket {
+                switch confirmations.consume(ticket: id, shape) {
+                case .allowed:
+                    confirmedBy = "owner"
+                    confirmation["ticket"] = id
+                    consumedTicketID = id
+                case .consumed where id == consumedTicketID:
+                    // Spent earlier in THIS request, and `consumption` checked the
+                    // shape before the flag — so it matched this question too.
+                    confirmedBy = "owner"
+                    confirmation["ticket"] = id
+                case .pending:
+                    refusal = ("confirmationPending", "ticket \(id) has not been answered in the Clicky panel yet")
+                case .denied:
+                    refusal = ("confirmationDenied", "ticket \(id) was denied in the Clicky panel")
+                case .expired:
+                    refusal = ("confirmationExpired",
+                               "ticket \(id) expired after \(Int(HarnessConfirmations.ticketLifetimeInSeconds)) s — re-issue without it to open a new one")
+                case .consumed:
+                    refusal = ("confirmationTicketInvalid", "ticket \(id) was already spent — one ticket, one action")
+                case .unknown:
+                    refusal = ("confirmationTicketInvalid", "no ticket \(id) is known to this harness session")
+                case .mismatch(let field):
+                    refusal = ("confirmationTicketInvalid", "ticket \(id) was issued for a different \(field)")
+                }
+            } else {
+                let consulted = confirmations.rule(for: shape)
+                if let unreadable = consulted.unreadable {
+                    response["approvals"] = ["unreadable": unreadable]
+                }
+                if let rule = consulted.rule {
+                    confirmedBy = "approvalRule"
+                    confirmation["rule"] = [
+                        "bundleIdentifier": rule.bundleIdentifier, "verb": rule.verb,
+                        "target": (rule.target ?? NSNull()) as Any,
+                        "text": (rule.text ?? NSNull()) as Any
+                    ]
+                } else {
+                    switch confirmations.open(shape, appName: appName, reason: reason) {
+                    case .opened(let ticket):
+                        response["ticket"] = ticket.id
+                        response["expiresAt"] = HarnessPolicy.auditTimestampFormatter.string(from: ticket.expiresAt)
+                        response["message"] = "re-issue this request with \"ticket\": \"\(ticket.id)\" once approved in the Clicky panel"
+                        refusal = ("confirmationRequired",
+                                   "requires confirmation: \(reason) — ticket \(ticket.id) is waiting in the Clicky panel")
+                    case .refused(let code, let message):
+                        response["message"] = message
+                        refusal = (code, "requires confirmation: \(reason) — no ticket opened: \(message)")
+                    }
+                }
+            }
+
+            if let refusal {
+                result = GateResult(executable: false, decision: described.decision,
+                                    outcome: refusal.outcome, note: refusal.note)
+            } else {
+                let by = confirmedBy ?? "owner"
+                currentConfirmedBy = by
+                confirmation["by"] = by
+                response["confirmation"] = confirmation
+                result = GateResult(executable: true, decision: described.decision,
+                                    outcome: "allowed", note: "confirmed by \(by): \(reason)")
+            }
+        }
+
+        response["kernel"] = [
+            "decision": result.decision,
+            "reason": (described.reason ?? NSNull()) as Any,
+            "executable": result.executable,
+            "note": (result.note ?? NSNull()) as Any
+        ]
+        return result
+    }
+
+    /// The request shape a ticket or rule is matched against: raw strings, so
+    /// two titles that `forDisplay` would truncate alike stay distinct.
+    nonisolated static func confirmationShape(for request: HarnessRequest, bundleIdentifier: String?) -> HarnessConfirmations.Shape {
+        HarnessConfirmations.Shape(
+            verb: request.verb.rawValue,
+            bundleIdentifier: bundleIdentifier,
+            rawTarget: auditTarget(for: request) ?? "",
+            text: request.verb == .type ? request.text : nil,
+            mode: request.verb == .type ? request.mode.rawValue : nil
+        )
+    }
+
+    /// What a request acted on, for the audit line and the ticket. Title, else
+    /// the menu path, else the status item, else the focused element, else the
+    /// app — a mutating verb whose record does not say what it acted on is
+    /// half a record, and a ticket for it would authorise anything.
+    nonisolated static func auditTarget(for request: HarnessRequest) -> String? {
+        if !request.title.isEmpty { return request.title }
+        if !request.path.isEmpty { return request.path.joined(separator: " > ") }
+        if let statusItem = request.statusItem, !statusItem.isEmpty { return statusItem }
+        if request.aimAtFocus { return "<focused>" }
+        return request.app
     }
 
     private func actResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
@@ -1298,20 +1476,13 @@ final class HarnessServer {
             bundleIdentifier: snapshot.bundleIdentifier, into: &response
         )
         let described = HarnessPolicy.describe(decision)
-        let executability = HarnessPolicy.executability(of: decision, confirmed: request.confirmed)
-        response["kernel"] = [
-            "decision": described.decision,
-            "reason": (described.reason ?? NSNull()) as Any,
-            "executable": executability.executable,
-            "note": (executability.reason ?? NSNull()) as Any
-        ]
+        let gated = gate(decision, request: request, appName: snapshot.applicationName,
+                         bundleIdentifier: snapshot.bundleIdentifier, into: &response)
 
-        guard executability.executable else {
+        guard gated.executable else {
             response["ok"] = false
-            response["error"] = described.decision == "refuse" ? "kernelRefused" : "confirmationRequired"
-            audit(request, dryRun: dryRun, kernel: described.decision,
-                  outcome: described.decision == "refuse" ? "kernelRefused" : "confirmationRequired",
-                  startedAt: startedAt)
+            response["error"] = gated.outcome
+            audit(request, dryRun: dryRun, kernel: described.decision, outcome: gated.outcome, startedAt: startedAt)
             return response
         }
 
@@ -1660,20 +1831,13 @@ final class HarnessServer {
             bundleIdentifier: application.bundleIdentifier, into: &response
         )
         let described = HarnessPolicy.describe(decision)
-        let executability = HarnessPolicy.executability(of: decision, confirmed: request.confirmed)
-        response["kernel"] = [
-            "decision": described.decision,
-            "reason": (described.reason ?? NSNull()) as Any,
-            "executable": executability.executable,
-            "note": (executability.reason ?? NSNull()) as Any
-        ]
+        let gated = gate(decision, request: request, appName: application.localizedName,
+                         bundleIdentifier: application.bundleIdentifier, into: &response)
 
-        guard executability.executable else {
+        guard gated.executable else {
             response["ok"] = false
-            response["error"] = described.decision == "refuse" ? "kernelRefused" : "confirmationRequired"
-            audit(request, dryRun: dryRun, kernel: described.decision,
-                  outcome: described.decision == "refuse" ? "kernelRefused" : "confirmationRequired",
-                  startedAt: startedAt)
+            response["error"] = gated.outcome
+            audit(request, dryRun: dryRun, kernel: described.decision, outcome: gated.outcome, startedAt: startedAt)
             return response
         }
 
@@ -2020,19 +2184,12 @@ final class HarnessServer {
         // Judged before the window read, because reading a window on another
         // Space activates the app — a refused app must never come forward.
         let appDecision = applyAppPolicy(to: .allow, bundleIdentifier: application.bundleIdentifier, into: &response)
-        let appExecutability = HarnessPolicy.executability(of: appDecision, confirmed: request.confirmed)
-        guard appExecutability.executable else {
-            let described = HarnessPolicy.describe(appDecision)
-            response["kernel"] = [
-                "decision": described.decision,
-                "reason": (described.reason ?? NSNull()) as Any,
-                "executable": false,
-                "note": (appExecutability.reason ?? NSNull()) as Any
-            ]
+        let appGate = gate(appDecision, request: request, appName: application.localizedName,
+                           bundleIdentifier: application.bundleIdentifier, into: &response)
+        guard appGate.executable else {
             response["ok"] = false
-            let code = described.decision == "refuse" ? "kernelRefused" : "confirmationRequired"
-            response["error"] = code
-            audit(request, dryRun: dryRun, kernel: described.decision, outcome: code, startedAt: startedAt)
+            response["error"] = appGate.outcome
+            audit(request, dryRun: dryRun, kernel: appGate.decision, outcome: appGate.outcome, startedAt: startedAt)
             return response
         }
 
@@ -2115,17 +2272,12 @@ final class HarnessServer {
             bundleIdentifier: application.bundleIdentifier, into: &response
         )
         let described = HarnessPolicy.describe(decision)
-        let executability = HarnessPolicy.executability(of: decision, confirmed: request.confirmed)
-        response["kernel"] = [
-            "decision": described.decision,
-            "reason": (described.reason ?? NSNull()) as Any,
-            "executable": executability.executable,
-            "note": (executability.reason ?? NSNull()) as Any
-        ]
+        let gated = gate(decision, request: request, appName: application.localizedName,
+                         bundleIdentifier: application.bundleIdentifier, into: &response)
 
-        guard executability.executable else {
+        guard gated.executable else {
             response["ok"] = false
-            response["error"] = described.decision == "refuse" ? "kernelRefused" : "confirmationRequired"
+            response["error"] = gated.outcome
             // An ambiguous window title is precisely what a picture settles, so
             // this verb gets the ladder too — built from the window list, which
             // is the candidate set it resolves against.
@@ -2230,16 +2382,15 @@ final class HarnessServer {
             bundleIdentifier: bundleIdentifier, into: &response
         )
         let described = HarnessPolicy.describe(decision)
-        let executability = HarnessPolicy.executability(of: decision, confirmed: request.confirmed)
-        response["kernel"] = [
-            "decision": described.decision,
-            "reason": (described.reason ?? NSNull()) as Any,
-            "executable": executability.executable,
-            "note": (executability.reason ?? NSNull()) as Any
-        ]
-        guard executability.executable else {
-            let code = described.decision == "refuse" ? "kernelRefused" : "confirmationRequired"
-            return fail(code, executability.reason ?? code, kernel: described.decision)
+        let gated = gate(decision, request: request, appName: url.deletingPathExtension().lastPathComponent,
+                         bundleIdentifier: bundleIdentifier, into: &response)
+        guard gated.executable else {
+            // Not `fail`: a fresh ticket already wrote its re-issue `message`.
+            response["ok"] = false
+            response["error"] = gated.outcome
+            if response["message"] == nil { response["message"] = gated.note ?? gated.outcome }
+            audit(request, dryRun: dryRun, kernel: described.decision, outcome: gated.outcome, startedAt: startedAt)
+            return response
         }
 
         // Read BEFORE launching. Inside a request NSWorkspace's caches are frozen
@@ -2550,14 +2701,15 @@ final class HarnessServer {
         payload["secureFieldCheck"] = inspection.incompleteReason ?? "complete"
         let decision = ActionSafetyKernel.evaluateCapture(inspection)
         let described = HarnessPolicy.describe(decision)
-        let executability = HarnessPolicy.executability(of: decision, confirmed: false)
+        // No human is asked for a picture: anything but `allow` is a refusal.
+        let executable = HarnessPolicy.executableWithoutAHuman(decision)
         payload["kernel"] = [
             "decision": described.decision,
             "reason": (described.reason ?? NSNull()) as Any,
-            "executable": executability.executable,
-            "note": (executability.reason ?? NSNull()) as Any
+            "executable": executable,
+            "note": (described.reason.map { "refused: \($0)" } ?? NSNull()) as Any
         ]
-        guard executability.executable else {
+        guard executable else {
             return (payload, "kernelRefused")
         }
 
@@ -2841,18 +2993,12 @@ final class HarnessServer {
             bundleIdentifier: descriptor.ownerBundleIdentifier, into: &response
         )
         let described = HarnessPolicy.describe(decision)
-        let executability = HarnessPolicy.executability(of: decision, confirmed: request.confirmed)
-        response["kernel"] = [
-            "decision": described.decision,
-            "reason": (described.reason ?? NSNull()) as Any,
-            "executable": executability.executable,
-            "note": (executability.reason ?? NSNull()) as Any
-        ]
-        guard executability.executable else {
-            let outcome = described.decision == "refuse" ? "kernelRefused" : "confirmationRequired"
+        let gated = gate(decision, request: request, appName: descriptor.ownerName,
+                         bundleIdentifier: descriptor.ownerBundleIdentifier, into: &response)
+        guard gated.executable else {
             response["ok"] = false
-            response["error"] = outcome
-            audit(request, dryRun: dryRun, kernel: described.decision, outcome: outcome, startedAt: startedAt)
+            response["error"] = gated.outcome
+            audit(request, dryRun: dryRun, kernel: described.decision, outcome: gated.outcome, startedAt: startedAt)
             return response
         }
         guard !dryRun else {
@@ -2945,11 +3091,7 @@ final class HarnessServer {
             at: startedAt,
             id: request.id,
             verb: request.verb.rawValue,
-            // A focus request may name only an app, and a mutating verb whose
-            // audit line does not say what it acted on is half a record.
-            target: request.title.isEmpty
-                ? (request.aimAtFocus ? "<focused>" : request.app)
-                : request.title,
+            target: Self.auditTarget(for: request),
             app: frontmost.application?.bundleIdentifier,
             session: Self.sessionIdentifier,
             dryRun: dryRun,
@@ -2958,25 +3100,35 @@ final class HarnessServer {
             outcome: outcome,
             milliseconds: elapsedMilliseconds(since: startedAt),
             frontmostSource: frontmost.source.rawValue,
-            frontmostSystemWideError: frontmost.systemWideErrorRawValue
-        ))
+            frontmostSystemWideError: frontmost.systemWideErrorRawValue,
+            confirmedBy: currentConfirmedBy
+        ), at: startedAt)
     }
 
     /// Append-only, and it rotates rather than truncates. The log is the only
     /// record that a refusal happened at all — a refused request leaves nothing
     /// else behind — so history is kept, just bounded.
-    private func appendAudit(_ line: String) {
-        let url = Self.auditLogURL
+    ///
+    /// The same line also goes to the day-split mirror under `~/Library/Logs`,
+    /// which nothing rotates. A mirror failure never fails the request; it is
+    /// counted and `ping` reports the count.
+    private func appendAudit(_ line: String, at date: Date = Date()) {
         let data = Data((line + "\n").utf8)
         rotateAuditLogIfLarge()
+        _ = Self.append(data, to: Self.auditLogURL)
+        if !Self.append(data, to: Self.auditMirrorURL(for: date)) { auditMirrorFailures += 1 }
+    }
+
+    private static func append(_ data: Data, to url: URL) -> Bool {
         if let handle = try? FileHandle(forWritingTo: url) {
             defer { try? handle.close() }
             _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
-        } else {
-            try? FileManager.default.createDirectory(at: Self.supportDirectory, withIntermediateDirectories: true)
-            try? data.write(to: url)
+            return (try? handle.write(contentsOf: data)) != nil
         }
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        return (try? data.write(to: url)) != nil
     }
 
     /// One old file, then the previous one goes. Two files is enough to answer

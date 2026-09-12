@@ -263,10 +263,10 @@ enum ActionSafetyKernel {
     /// the rectangle, and a screenshot of a field mid-entry is a credential
     /// leak that no later refusal undoes — the file is already on disk.
     ///
-    /// Like the typing refusal, `confirmed: true` cannot lift this. That is
-    /// automatic rather than argued: `HarnessPolicy.executability` has no
-    /// confirmed branch for `.refuse` at all. It is stated here because a
-    /// reader of this function should not have to go and check.
+    /// Like the typing refusal, nothing lifts this: `.refuse` has no ticket,
+    /// no approval rule and no confirmed branch anywhere (`HarnessServer.gate`).
+    /// It is stated here because a reader of this function should not have to
+    /// go and check.
     ///
     /// Note what is NOT checked: the field's value. The kernel decides on the
     /// subrole alone and never reads the text it is protecting.

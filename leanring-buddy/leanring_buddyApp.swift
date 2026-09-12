@@ -32,6 +32,8 @@ struct leanring_buddyApp: App {
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
     private let companionManager = CompanionManager()
+    /// One object, two owners: the harness opens tickets, the panel answers them.
+    private let confirmations = HarnessConfirmations(approvalsURL: HarnessServer.approvalsURL)
     private var sparkleUpdaterController: SPUStandardUpdaterController?
     private var harnessServer: HarnessServer?
 
@@ -76,7 +78,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         // with a socket open beside it.
         if CommandLine.arguments.contains("--harness") {
             let server = HarnessServer(
-                globalDryRun: CommandLine.arguments.contains("--harness-dry-run")
+                globalDryRun: CommandLine.arguments.contains("--harness-dry-run"),
+                confirmations: confirmations
             )
             server.start()
             harnessServer = server
@@ -90,7 +93,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         ClickyAnalytics.configure()
         ClickyAnalytics.trackAppOpened()
 
-        menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
+        menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager, confirmations: confirmations)
         companionManager.start()
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.

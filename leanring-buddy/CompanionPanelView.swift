@@ -12,10 +12,15 @@ import SwiftUI
 
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
+    @ObservedObject var confirmations: HarnessConfirmations
     @State private var emailInput: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Harness confirmations first: a pending question is the one thing
+            // on this panel that something else is waiting on.
+            ConfirmationPromptView(confirmations: confirmations)
+
             panelHeader
             Divider()
                 .background(DS.Colors.borderSubtle)

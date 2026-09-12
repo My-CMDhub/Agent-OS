@@ -108,8 +108,8 @@ enum HarnessAppPolicy {
 
     /// Policy `refuse` beats everything; a kernel refuse beats a policy
     /// `confirm`; `allow` is the kernel unchanged. `.refuse` is never
-    /// executable in `HarnessPolicy.executability`, so `confirmed: true`
-    /// cannot lift a policy refusal either.
+    /// executable (`HarnessServer.gate` has no ticket path for it), so no
+    /// ticket or approval rule can lift a policy refusal either.
     static func compose(policy: Verdict, bundleIdentifier: String?, kernel: SafetyDecision) -> SafetyDecision {
         let app = bundleIdentifier ?? "an app with no bundle identifier"
         switch (policy, kernel) {

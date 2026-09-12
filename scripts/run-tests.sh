@@ -36,10 +36,20 @@ for _ in {1..180}; do
   bundleNow=$(ls -dt "$TEST_LOG_DIRECTORY"/*.xcresult 2>/dev/null | head -1)
   [[ "$bundleNow" == "$bundleBefore" || -z "$bundleNow" ]] && continue
   summary=$(xcrun xcresulttool get test-results summary --path "$bundleNow" 2>/dev/null) || continue
-  echo "$summary" | python3 -c "
-import sys, json
+  # A build failure is a finished bundle with zero tests and result "unknown".
+  # Measured 2026-09-12: a missing `import Combine` printed "unknown: 0 passed,
+  # 0 failed" — the dead-and-silent shape CLAUDE.md warns about. Name the errors.
+  build=$(xcrun xcresulttool get build-results --path "$bundleNow" 2>/dev/null)
+  echo "$summary" | BUILD_JSON="$build" python3 -c "
+import sys, json, os
 d = json.load(sys.stdin)
 if not d.get('result'): raise SystemExit(1)
+if d['totalTestCount'] == 0:
+    try: b = json.loads(os.environ.get('BUILD_JSON') or '{}')
+    except Exception: b = {}
+    print(f\"BUILD FAILED: {b.get('errorCount', '?')} errors, 0 tests ran\")
+    for e in (b.get('errors') or [])[:20]: print('  ERROR', e.get('message'), '|', (e.get('sourceURL') or '').split('/')[-1][:120])
+    raise SystemExit(1)
 print(f\"{d['result']}: {d['passedTests']} passed, {d['failedTests']} failed, {d['skippedTests']} skipped\")
 for failure in d.get('testFailures', []):
     print('  FAIL', failure.get('testName'), '-', failure.get('failureText', '')[:300])
