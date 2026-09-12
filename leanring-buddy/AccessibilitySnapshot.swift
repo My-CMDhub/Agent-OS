@@ -248,6 +248,11 @@ struct AccessibilityWindowSnapshot {
     /// Which source named the app this walk treated as frontmost. Nil for a
     /// walk of a window the caller named, which was never "whatever is in front".
     var frontmostSource: AccessibilityTreeWalker.FrontmostSource? = nil
+
+    /// The process that was walked. The capture that follows a failed
+    /// resolution photographs THIS app — never a second frontmost read, which
+    /// can name a different one 0.8 s later (measured 2026-09-11).
+    var application: NSRunningApplication? = nil
 }
 
 enum AccessibilitySnapshotError: Error {
@@ -688,7 +693,8 @@ enum AccessibilityTreeWalker {
             containersReducedToVisibleChildren: containersReducedToVisibleChildren,
             childrenElidedByVisibleSubset: childrenElidedByVisibleSubset,
             duplicateElementsSkipped: duplicateElementsSkipped,
-            focusChangedDuringWalk: focusChangedDuringWalk
+            focusChangedDuringWalk: focusChangedDuringWalk,
+            application: application
         )
     }
 

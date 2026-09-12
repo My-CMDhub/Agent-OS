@@ -106,6 +106,7 @@ enum ActionSafetyKernel {
     /// requests are worth having on disk.
     static func isSecurityRefusal(reason: String) -> Bool {
         reason == implausibleNameRefusalReason
+            || reason == secureStatusItemRefusalReason
             || reason.hasPrefix("refusing to type into a secure field")
             || reason.hasPrefix(secureFieldCaptureRefusalPrefix)
             || reason.hasPrefix(incompleteCaptureCheckRefusalPrefix)
@@ -255,6 +256,11 @@ enum ActionSafetyKernel {
     }
 
     static let secureFieldCaptureRefusalPrefix = "refusing to capture a region containing a secure field"
+
+    /// A credential manager's status item is refused like a secure field: its
+    /// dropdown IS the password list. A constant so the flight recorder's
+    /// security rule recognises it — a free-text reason in the harness did not.
+    static let secureStatusItemRefusalReason = "refusing to press a credential manager's status item, like a secure field"
 
     /// Whether a region may be photographed.
     ///

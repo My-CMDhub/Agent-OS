@@ -854,6 +854,13 @@ enum AccessibilityMenu {
         return direct
     }
 
+    /// nil when the item is a leaf; otherwise the labels of what the submenu
+    /// holds (unlabelled children dropped), so a refusal can name a leaf instead.
+    static func submenuChildLabels(of node: Node, children: (Node) -> [Node]) -> [String]? {
+        let inside = entries(of: node, children: children)
+        return inside.isEmpty ? nil : inside.compactMap(\.label)
+    }
+
     /// Walks **only the path**. `children` is the one impure part: live it is an
     /// AX read, in a test it is `\.children` over a hand-built tree, and both
     /// exercise the same stepping and the same `AXMenu` descent.

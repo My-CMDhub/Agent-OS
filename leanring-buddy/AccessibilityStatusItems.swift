@@ -133,11 +133,29 @@ enum AccessibilityStatusItems {
         AccessibilityWindows.frameAttribute, kAXChildrenAttribute as String
     ]
 
+    /// "No such attribute" is a process with no status item. Anything else
+    /// (-25204 busy, -25212 not answering) is a process we could not read — and
+    /// a read failure returned as absence is the bug this repo has hit four times.
+    static func isAbsence(_ error: AXError) -> Bool {
+        error == .noValue || error == .attributeUnsupported
+    }
+
+    struct ReadAll {
+        let items: [Item]
+        let processesAsked: Int
+        let processesAnswered: Int
+        /// Processes whose extras bar or its children did not answer, with the raw `AXError`.
+        let processesFailed: [(name: String, axErrorRawValue: Int32)]
+        /// Children whose batched attribute read failed; they are not in `items`.
+        let childrenFailed: Int
+        let milliseconds: Int
+    }
+
     /// Every status item on the machine, from every `.regular`/`.accessory`
     /// process. Measured 2026-09-12: 25-40 ms per process regardless of answer,
     /// and the 23 `.prohibited` processes held none — skipping them is the
     /// only cut that costs nothing.
-    static func readAll() -> (items: [Item], processesAsked: Int, processesAnswered: Int, milliseconds: Int) {
+    static func readAll() -> ReadAll {
         let startedAt = Date()
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), messagingTimeoutInSeconds)
         let primaryDisplayHeight = NSScreen.screens.first?.frame.height ?? 0
@@ -145,16 +163,27 @@ enum AccessibilityStatusItems {
         var items: [Item] = []
         var asked = 0
         var answered = 0
+        var failed: [(name: String, axErrorRawValue: Int32)] = []
+        var childrenFailed = 0
         for application in NSWorkspace.shared.runningApplications
         where application.activationPolicy == .regular || application.activationPolicy == .accessory {
             asked += 1
+            let processName = application.localizedName ?? application.bundleIdentifier ?? "pid \(application.processIdentifier)"
             let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
             var barValue: AnyObject?
-            guard AXUIElementCopyAttributeValue(applicationElement, extrasMenuBarAttribute as CFString, &barValue) == .success,
-                  let barValue, CFGetTypeID(barValue) == AXUIElementGetTypeID() else { continue }
+            let barError = AXUIElementCopyAttributeValue(applicationElement, extrasMenuBarAttribute as CFString, &barValue)
+            guard barError == .success else {
+                if !isAbsence(barError) { failed.append((processName, barError.rawValue)) }
+                continue
+            }
+            guard let barValue, CFGetTypeID(barValue) == AXUIElementGetTypeID() else { continue }
             var childrenValue: AnyObject?
-            guard AXUIElementCopyAttributeValue(barValue as! AXUIElement, kAXChildrenAttribute as CFString, &childrenValue) == .success,
-                  let children = childrenValue as? [AXUIElement] else { continue }
+            let childrenError = AXUIElementCopyAttributeValue(barValue as! AXUIElement, kAXChildrenAttribute as CFString, &childrenValue)
+            guard childrenError == .success else {
+                if !isAbsence(childrenError) { failed.append((processName, childrenError.rawValue)) }
+                continue
+            }
+            guard let children = childrenValue as? [AXUIElement] else { continue }
             answered += 1
 
             for child in children {
@@ -162,7 +191,8 @@ enum AccessibilityStatusItems {
                 let batchResult = AXUIElementCopyMultipleAttributeValues(
                     child, batchedAttributes as CFArray, AXCopyMultipleAttributeOptions(), &rawValues
                 )
-                let values = (batchResult == .success ? rawValues as? [AnyObject] : nil) ?? []
+                guard batchResult == .success else { childrenFailed += 1; continue }
+                let values = (rawValues as? [AnyObject]) ?? []
                 func entry(_ index: Int) -> AnyObject? {
                     guard index < values.count else { return nil }
                     let value = values[index]
@@ -199,7 +229,11 @@ enum AccessibilityStatusItems {
                 ))
             }
         }
-        return (items, asked, answered, Int(Date().timeIntervalSince(startedAt) * 1000))
+        return ReadAll(
+            items: items, processesAsked: asked, processesAnswered: answered,
+            processesFailed: failed, childrenFailed: childrenFailed,
+            milliseconds: Int(Date().timeIntervalSince(startedAt) * 1000)
+        )
     }
 
     /// `AXSelected` on the item. Measured 2026-09-12 on Cursor's status menu:

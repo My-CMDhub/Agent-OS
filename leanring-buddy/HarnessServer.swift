@@ -315,6 +315,11 @@ enum HarnessPolicy {
         if raw.expectApp?.isEmpty == true {
             return .failure(.invalidField(field: "expectApp", value: ""))
         }
+        // A status listing spans every process, so an expectation about "the
+        // app" has nothing to be checked against — refused, not silently ignored.
+        if verb == .status, let expectApp = raw.expectApp {
+            return .failure(.invalidField(field: "expectApp", value: expectApp))
+        }
         // An empty ticket is a caller that lost the id, not a request without one.
         if raw.ticket?.isEmpty == true {
             return .failure(.invalidField(field: "ticket", value: ""))
@@ -410,6 +415,15 @@ enum HarnessPolicy {
         }
     }
 
+    /// A title is caller/app text of any length; a 5,000-character one would be
+    /// a 5 KB audit line. Same cap as `UntrustedText.forDisplay`, true length kept.
+    /// Deliberately raw-but-capped here because JSON encoding is the escaping in the
+    /// audit line; the panel uses `forDisplay` because the UI is not JSON.
+    static func cappedAuditTarget(_ target: String) -> String {
+        guard target.count > UntrustedText.maximumDisplayLength else { return target }
+        return String(target.prefix(UntrustedText.maximumDisplayLength)) + "… (\(target.count) chars)"
+    }
+
     static let auditTimestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -446,7 +460,7 @@ enum HarnessPolicy {
             "timestamp": auditTimestampFormatter.string(from: timestamp),
             "id": id,
             "verb": verb,
-            "target": target ?? NSNull(),
+            "target": target.map(cappedAuditTarget) ?? NSNull(),
             "app": app ?? NSNull(),
             "session": session,
             "dryRun": dryRun,
@@ -537,6 +551,8 @@ enum HarnessObservability {
         // says which rule fired. Only a refusal on SECURITY grounds is worth a
         // dump — see `kernelReason` below.
         "kernelRefused",
+        // The per-app policy refusing a capture is the file doing its job.
+        "policyRefused",
         // An app with no ordinary on-screen window — measured 2026-09-11,
         // Finder showing only its desktop — is not listed by ScreenCaptureKit,
         // so the one-app capture refuses. Explained and safe; three dumps of it
@@ -642,6 +658,14 @@ final class HarnessServer {
     /// without this their lines are indistinguishable — including a stale
     /// binary's, which this project has already been fooled by once.
     static let sessionIdentifier = String(UUID().uuidString.prefix(8))
+
+    /// Matches the listen backlog. Over it a client is told so and closed —
+    /// a thread per connection with no cap is a thread per stuck client.
+    nonisolated static let maximumConcurrentConnections = 8
+    /// A client that connects and sends nothing holds a slot; this is how long.
+    nonisolated static let clientReceiveTimeoutInSeconds: Int = 30
+    nonisolated static let clientSendTimeoutInSeconds: Int = 2
+    nonisolated private let connectionSlots = DispatchSemaphore(value: HarnessServer.maximumConcurrentConnections)
 
     private let globalDryRun: Bool
     /// Shared with the menu-bar panel: tickets opened here are answered there.
@@ -774,30 +798,47 @@ final class HarnessServer {
                 print("❌ harness: accept() failed, errno \(errno)")
                 return
             }
+            // The refusal below is written on this thread; a client that never reads
+            // it must not hold the accept loop.
+            var sendTimeout = timeval(tv_sec: Self.clientSendTimeoutInSeconds, tv_usec: 0)
+            setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, socklen_t(MemoryLayout<timeval>.size))
+            guard connectionSlots.wait(timeout: .now()) == .success else {
+                _ = writeLine("{\"ok\":false,\"error\":\"tooManyConnections\",\"message\":\"\(Self.maximumConcurrentConnections) connections are already open\"}", to: client)
+                close(client)
+                continue
+            }
+            var receiveTimeout = timeval(tv_sec: Self.clientReceiveTimeoutInSeconds, tv_usec: 0)
+            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &receiveTimeout, socklen_t(MemoryLayout<timeval>.size))
             // A thread per connection, but the *work* is serialised onto the
             // main thread below, so two callers can never interleave against
             // the same app. This only stops a silent client from wedging
             // everyone else.
-            Thread.detachNewThread { [weak self] in
-                self?.serve(client)
-            }
+            // Strong: the server lives as long as the app. A weak capture that
+            // found nil would leak the fd and the slot it just took.
+            Thread.detachNewThread { self.serve(client) }
         }
     }
 
     /// The largest single request line accepted. Nothing legitimate comes close:
     /// the biggest verb carries a title, a role and a point.
-    static let maximumRequestBytes = 1 << 20
+    nonisolated static let maximumRequestBytes = 1 << 20
 
     /// Newline-delimited JSON, both directions. A client that disconnects
     /// mid-line loses its own connection and nothing else.
     nonisolated private func serve(_ client: Int32) {
-        defer { close(client) }
+        defer { close(client); connectionSlots.signal() }
         var pending = Data()
         var buffer = [UInt8](repeating: 0, count: 8192)
 
         while true {
             let bytesRead = read(client, &buffer, buffer.count)
-            if bytesRead <= 0 { return }   // 0 = peer closed, <0 = error
+            if bytesRead == 0 { return }   // peer closed
+            if bytesRead < 0 {
+                // SO_RCVTIMEO fired. An idle client is fine — a ticket round trip
+                // waits on a person, longer than 30 s; a stalled half-line is not.
+                if errno == EAGAIN || errno == EWOULDBLOCK, pending.isEmpty { continue }
+                return
+            }
             pending.append(contentsOf: buffer[0..<bytesRead])
 
             // A client that never sends a newline would otherwise grow this
@@ -806,6 +847,8 @@ final class HarnessServer {
             // — but a client stuck in a loop is an ordinary bug, and a harness
             // that can be killed by one is not a harness.
             guard pending.count <= Self.maximumRequestBytes else {
+                // Still a request someone made of this machine: logged like `malformedJSON`.
+                DispatchQueue.main.sync { self.auditUnparsed(outcome: "requestTooLarge", startedAt: Date()) }
                 _ = writeLine(
                     "{\"ok\":false,\"error\":\"requestTooLarge\",\"message\":\"a single request line may not exceed \(Self.maximumRequestBytes) bytes\"}",
                     to: client
@@ -863,13 +906,7 @@ final class HarnessServer {
         case .failure(let error):
             // A malformed line is still a request someone made of this machine,
             // so it is logged exactly like one that ran.
-            appendAudit(HarnessPolicy.auditLine(
-                at: startedAt, id: "", verb: "?", target: nil,
-                app: Self.frontmostBundleIdentifier(), session: Self.sessionIdentifier,
-                dryRun: globalDryRun, confirmed: false,
-                kernel: "n/a", outcome: error.code,
-                milliseconds: elapsedMilliseconds(since: startedAt)
-            ), at: startedAt)
+            auditUnparsed(outcome: error.code, startedAt: startedAt)
             return observe(
                 ["ok": false, "id": "", "error": error.code, "message": error.message],
                 verb: "?", startedAt: startedAt
@@ -883,6 +920,16 @@ final class HarnessServer {
         }
     }
 
+    private func auditUnparsed(outcome: String, startedAt: Date) {
+        appendAudit(HarnessPolicy.auditLine(
+            at: startedAt, id: "", verb: "?", target: nil,
+            app: Self.frontmostBundleIdentifier(), session: Self.sessionIdentifier,
+            dryRun: globalDryRun, confirmed: false,
+            kernel: "n/a", outcome: outcome,
+            milliseconds: elapsedMilliseconds(since: startedAt)
+        ), at: startedAt)
+    }
+
     /// The whole observability slice, in one place on the way out.
     ///
     /// Every input is already in the response — no second walk, no extra clock,
@@ -892,10 +939,7 @@ final class HarnessServer {
         verb: String,
         startedAt: Date
     ) -> [String: Any] {
-        var summary = response
-        // The elements array is most of a snapshot's bytes and none of its
-        // diagnostic value. Everything else stays.
-        summary["elements"] = nil
+        var summary = Self.summaryForRing(response)
         summary["_verb"] = verb
         summary["_at"] = HarnessPolicy.auditTimestampFormatter.string(from: startedAt)
 
@@ -962,6 +1006,21 @@ final class HarnessServer {
         return annotated
     }
 
+    /// The per-response arrays are most of a response's bytes and none of its
+    /// diagnostic value; their counts stay.
+    nonisolated static let ringStrippedArrays = ["elements", "items", "windows", "applications", "candidates", "processesFailed"]
+
+    nonisolated static func summaryForRing(_ response: [String: Any]) -> [String: Any] {
+        var summary = response
+        for key in ringStrippedArrays {
+            guard let array = response[key] as? [Any] else { continue }
+            summary[key] = nil
+            let countKey = key.hasSuffix("s") ? String(key.dropLast()) + "Count" : key + "Count"
+            if summary[countKey] == nil { summary[countKey] = array.count }
+        }
+        return summary
+    }
+
     /// Writes the ring buffer out, keeping at most five files. Returns the path
     /// so the response and the audit line can name it.
     private func writeAnomalyDump(
@@ -1010,6 +1069,8 @@ final class HarnessServer {
 
     /// Which app a line refers to. Clicky is `LSUIElement`, so it never takes
     /// focus itself — the frontmost app is the one being acted on.
+    /// For audit lines and guards only: a guard and what it guards read ONE
+    /// answer, so a verb about to walk or capture an app carries that app, never this.
     static func frontmostBundleIdentifier() -> String? {
         AccessibilityTreeWalker.focusedApplication()?.bundleIdentifier
     }
@@ -1070,7 +1131,9 @@ final class HarnessServer {
         loadedPolicy = nil
         currentConfirmedBy = nil
         consumedTicketID = nil
-        if request.verb.isMutating {
+        // `look` is read-only but takes a photograph, and a policy `refuse` is
+        // "do not touch this app" — a picture of it counts.
+        if request.verb.isMutating || request.verb == .look {
             switch HarnessAppPolicy.load(from: Self.policyURL) {
             case .loaded(let policy, _): loadedPolicy = policy
             case .missing: break
@@ -1170,15 +1233,42 @@ final class HarnessServer {
     /// escaping — but `nameIsPlausibleLabel` travels beside it so the caller
     /// knows whether the app published a label or a document.
     static func summarise(_ node: AccessibilityElementNode) -> [String: Any] {
-        let frame = node.frameInAppKitCoordinates
-        return [
+        var entry: [String: Any] = [
             "role": node.role,
             "subrole": node.subrole ?? NSNull(),
             "name": node.displayName?.raw ?? NSNull(),
             "nameIsPlausibleLabel": node.displayName?.isPlausibleControlLabel ?? false,
-            "frame": ["x": frame.origin.x, "y": frame.origin.y, "w": frame.size.width, "h": frame.size.height],
             "actions": node.publishedActionNames
         ]
+        Self.attachFrame(node.frameInAppKitCoordinates, to: &entry)
+        return entry
+    }
+
+    /// An app-supplied frame can carry NaN or infinity, and `JSONSerialization`
+    /// throws on either — the whole response would then encode as
+    /// `responseEncodingFailed`. Non-finite components become null and the
+    /// entry is flagged, so the caller sees the bad frame instead of nothing.
+    nonisolated static func frameJSON(_ rect: CGRect) -> (frame: [String: Any], invalid: Bool) {
+        let components: [(String, CGFloat)] = [
+            ("x", rect.origin.x), ("y", rect.origin.y), ("w", rect.size.width), ("h", rect.size.height)
+        ]
+        var frame: [String: Any] = [:]
+        var invalid = false
+        for (key, value) in components {
+            if value.isFinite { frame[key] = value } else { frame[key] = NSNull(); invalid = true }
+        }
+        return (frame, invalid)
+    }
+
+    nonisolated static func pointJSON(_ point: CGPoint) -> (point: [String: Any], invalid: Bool) {
+        let (frame, invalid) = frameJSON(CGRect(origin: point, size: CGSize(width: 1, height: 1)))
+        return (["x": frame["x"]!, "y": frame["y"]!], invalid)
+    }
+
+    nonisolated static func attachFrame(_ rect: CGRect, to entry: inout [String: Any], key: String = "frame") {
+        let (frame, invalid) = frameJSON(rect)
+        entry[key] = frame
+        if invalid { entry["frameInvalid"] = true }
     }
 
     // MARK: press / select
@@ -1189,12 +1279,12 @@ final class HarnessServer {
         to kernel: SafetyDecision, bundleIdentifier: String?, into response: inout [String: Any]
     ) -> SafetyDecision {
         let (verdict, source) = HarnessAppPolicy.verdict(for: bundleIdentifier, in: loadedPolicy)
-        response["policy"] = [
-            "verdict": verdict.rawValue,
-            "source": source,
-            "app": (bundleIdentifier ?? NSNull()) as Any
-        ]
+        response["policy"] = policyBlock(verdict: verdict, source: source, bundleIdentifier: bundleIdentifier)
         return HarnessAppPolicy.compose(policy: verdict, bundleIdentifier: bundleIdentifier, kernel: kernel)
+    }
+
+    private func policyBlock(verdict: HarnessAppPolicy.Verdict, source: String, bundleIdentifier: String?) -> [String: Any] {
+        ["verdict": verdict.rawValue, "source": source, "app": (bundleIdentifier ?? NSNull()) as Any]
     }
 
     // MARK: Confirmation gate
@@ -1221,6 +1311,7 @@ final class HarnessServer {
         request: HarnessRequest,
         appName: String?,
         bundleIdentifier: String?,
+        dryRun: Bool,
         into response: inout [String: Any]
     ) -> GateResult {
         let described = HarnessPolicy.describe(decision)
@@ -1241,11 +1332,13 @@ final class HarnessServer {
             var refusal: (outcome: String, note: String)?
 
             if let id = request.ticket {
-                switch confirmations.consume(ticket: id, shape) {
+                // A dry run reports what the gate WOULD decide and leaves the
+                // ticket unspent — the caller still has its one action.
+                switch confirmations.consume(ticket: id, shape, spend: !dryRun) {
                 case .allowed:
                     confirmedBy = "owner"
                     confirmation["ticket"] = id
-                    consumedTicketID = id
+                    if dryRun { confirmation["dryRun"] = true } else { consumedTicketID = id }
                 case .consumed where id == consumedTicketID:
                     // Spent earlier in THIS request, and `consumption` checked the
                     // shape before the flag — so it matched this question too.
@@ -1322,7 +1415,11 @@ final class HarnessServer {
             bundleIdentifier: bundleIdentifier,
             rawTarget: auditTarget(for: request) ?? "",
             text: request.verb == .type ? request.text : nil,
-            mode: request.verb == .type ? request.mode.rawValue : nil
+            mode: request.verb == .type ? request.mode.rawValue : nil,
+            withinNamed: request.withinNamed,
+            nearPoint: request.nearPoint,
+            role: request.role,
+            thenConfirm: request.thenConfirm
         )
     }
 
@@ -1410,7 +1507,7 @@ final class HarnessServer {
                 // The two answers a tree walk cannot improve on its own are the
                 // two that get a rung offered. Everything else here is a
                 // decision the harness already made.
-                attachEscalation(to: &response, request: request, rootNode: rootNode)
+                attachEscalation(to: &response, request: request, rootNode: rootNode, application: snapshot.application)
                 audit(request, dryRun: dryRun, kernel: "n/a", outcome: "notFound", startedAt: startedAt)
                 return response
             case .ambiguous(let matchCount):
@@ -1437,7 +1534,7 @@ final class HarnessServer {
                     response["warning"] = "THIS LIST IS A FLOOR, NOT A MEASUREMENT — showing "
                         + "\(Self.maximumCandidates) of \(suggestions.count) matches"
                 }
-                attachEscalation(to: &response, request: request, rootNode: rootNode)
+                attachEscalation(to: &response, request: request, rootNode: rootNode, application: snapshot.application)
                 audit(request, dryRun: dryRun, kernel: "n/a", outcome: "ambiguous", startedAt: startedAt)
                 return response
             }
@@ -1477,7 +1574,7 @@ final class HarnessServer {
         )
         let described = HarnessPolicy.describe(decision)
         let gated = gate(decision, request: request, appName: snapshot.applicationName,
-                         bundleIdentifier: snapshot.bundleIdentifier, into: &response)
+                         bundleIdentifier: snapshot.bundleIdentifier, dryRun: dryRun, into: &response)
 
         guard gated.executable else {
             response["ok"] = false
@@ -1778,6 +1875,8 @@ final class HarnessServer {
         }
     }
 
+    static let maximumSubmenuLabelsListed = 5
+
     private func menuResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
         var response: [String: Any] = [
             "dryRun": dryRun, "confirmed": request.confirmed, "path": request.path
@@ -1808,9 +1907,25 @@ final class HarnessServer {
         }
 
         let resolvedNode = AccessibilityMenu.elementNode(for: node)
+        // Pressing a submenu PARENT starts menu tracking, and there is no
+        // structural way back out — `AXCancel` is inert (measured 2026-09-12) and
+        // keystrokes are forbidden. Refused before the press; the leaves are listed.
+        if let childLabels = AccessibilityMenu.submenuChildLabels(of: node, children: AccessibilityMenu.liveChildren) {
+            response["resolution"] = [
+                "status": "targetIsSubmenu", "matchCount": 1, "hasSubmenu": true,
+                "available": childLabels.prefix(Self.maximumSubmenuLabelsListed).map { UntrustedText($0).forDisplay }
+            ]
+            response["ok"] = false
+            response["error"] = "targetIsSubmenu"
+            response["message"] = "\(request.path.joined(separator: " > ")) has a submenu; name a leaf item, e.g. "
+                + "\(request.path.joined(separator: " > ")) > \(childLabels.first ?? "<unlabelled>")"
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "targetIsSubmenu", startedAt: startedAt)
+            return response
+        }
         response["resolution"] = [
             "status": "resolved", "matchCount": 1,
             "enabled": node.isEnabled,
+            "hasSubmenu": false,
             "shortcut": (node.shortcut ?? NSNull()) as Any
         ]
         response["resolved"] = Self.summarise(resolvedNode)
@@ -1832,7 +1947,7 @@ final class HarnessServer {
         )
         let described = HarnessPolicy.describe(decision)
         let gated = gate(decision, request: request, appName: application.localizedName,
-                         bundleIdentifier: application.bundleIdentifier, into: &response)
+                         bundleIdentifier: application.bundleIdentifier, dryRun: dryRun, into: &response)
 
         guard gated.executable else {
             response["ok"] = false
@@ -1873,7 +1988,8 @@ final class HarnessServer {
         response["performed"] = [
             "status": result.error == .success ? "sent" : "failed",
             "axErrorRawValue": result.error.rawValue,
-            "milliseconds": result.milliseconds
+            "milliseconds": result.milliseconds,
+            "hasSubmenu": false
         ]
         guard result.error == .success else {
             response["ok"] = false
@@ -2086,19 +2202,19 @@ final class HarnessServer {
     private static func summariseWindow(
         _ candidate: AccessibilityWindows.WindowCandidate
     ) -> [String: Any] {
-        let frame = candidate.frameInAppKitCoordinates
-        return [
+        var entry: [String: Any] = [
             // Raw, because JSON encoding is the escaping — same rule as
             // `summarise`. The plausibility flag travels beside it.
             "title": (candidate.title?.raw ?? NSNull()) as Any,
             "titleIsPlausibleLabel": candidate.title?.isPlausibleControlLabel ?? false,
             "role": candidate.role,
             "subrole": (candidate.subrole ?? NSNull()) as Any,
-            "frame": ["x": frame.origin.x, "y": frame.origin.y, "w": frame.size.width, "h": frame.size.height],
             "main": candidate.isMain,
             "minimized": candidate.isMinimized,
             "actions": candidate.publishedActionNames
         ]
+        Self.attachFrame(candidate.frameInAppKitCoordinates, to: &entry)
+        return entry
     }
 
     private func windowsResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
@@ -2185,7 +2301,7 @@ final class HarnessServer {
         // Space activates the app — a refused app must never come forward.
         let appDecision = applyAppPolicy(to: .allow, bundleIdentifier: application.bundleIdentifier, into: &response)
         let appGate = gate(appDecision, request: request, appName: application.localizedName,
-                           bundleIdentifier: application.bundleIdentifier, into: &response)
+                           bundleIdentifier: application.bundleIdentifier, dryRun: dryRun, into: &response)
         guard appGate.executable else {
             response["ok"] = false
             response["error"] = appGate.outcome
@@ -2273,7 +2389,7 @@ final class HarnessServer {
         )
         let described = HarnessPolicy.describe(decision)
         let gated = gate(decision, request: request, appName: application.localizedName,
-                         bundleIdentifier: application.bundleIdentifier, into: &response)
+                         bundleIdentifier: application.bundleIdentifier, dryRun: dryRun, into: &response)
 
         guard gated.executable else {
             response["ok"] = false
@@ -2383,7 +2499,7 @@ final class HarnessServer {
         )
         let described = HarnessPolicy.describe(decision)
         let gated = gate(decision, request: request, appName: url.deletingPathExtension().lastPathComponent,
-                         bundleIdentifier: bundleIdentifier, into: &response)
+                         bundleIdentifier: bundleIdentifier, dryRun: dryRun, into: &response)
         guard gated.executable else {
             // Not `fail`: a fresh ticket already wrote its re-issue `message`.
             response["ok"] = false
@@ -2633,7 +2749,13 @@ final class HarnessServer {
             var entry = summarise(nodes[index])
             entry["index"] = index
             let point = EscalationLadder.separatingPoint(forCandidateAt: index, among: frames)
-            entry["suggestedPoint"] = point.map { ["x": $0.x, "y": $0.y] } ?? NSNull()
+            if let point {
+                let (json, invalid) = pointJSON(point)
+                entry["suggestedPoint"] = json
+                if invalid { entry["pointInvalid"] = true }
+            } else {
+                entry["suggestedPoint"] = NSNull()
+            }
             // Never omitted, and never a "nearest" fallback: `false` is the
             // answer that stops a caller re-issuing a point that will only come
             // back ambiguous again.
@@ -2667,10 +2789,7 @@ final class HarnessServer {
             return (payload, nil)
         }
 
-        payload["region"] = [
-            "x": plan.region.origin.x, "y": plan.region.origin.y,
-            "w": plan.region.size.width, "h": plan.region.size.height
-        ]
+        Self.attachFrame(plan.region, to: &payload, key: "region")
         // The true total, always — the list below may be shorter. A count that
         // silently equalled the list length would be the truncation defect this
         // project already paid for once, in a new place.
@@ -2691,6 +2810,17 @@ final class HarnessServer {
         guard let application = plan.application else {
             payload["message"] = "no application to restrict the capture to, and a display-wide capture is never taken"
             return (payload, "captureFailed")
+        }
+        // The per-app policy judges the photograph too. Review 2026-09-13: a
+        // `refuse`d app could not be pressed but could still be captured, from
+        // every acting verb's escalation and from `look`.
+        // Coordinator's ruling 2026-09-13: a photograph is not an action — `confirm`
+        // gates acting, `refuse` gates looking too. So `confirm` photographs without asking.
+        let (verdict, source) = HarnessAppPolicy.verdict(for: application.bundleIdentifier, in: loadedPolicy)
+        payload["policy"] = policyBlock(verdict: verdict, source: source, bundleIdentifier: application.bundleIdentifier)
+        guard verdict != .refuse else {
+            payload["message"] = "app policy refuses \(application.bundleIdentifier ?? "this app") — nothing was photographed"
+            return (payload, "policyRefused")
         }
         let inspectStartedAt = Date()
         let inspection = EscalationLadder.inspectForCapture(region: plan.region, of: application)
@@ -2749,10 +2879,7 @@ final class HarnessServer {
             payload["imagePixels"] = ["w": outcome.pixelWidth, "h": outcome.pixelHeight]
             // What was actually photographed, which is the request clipped to
             // the display — not the request.
-            payload["region"] = [
-                "x": outcome.region.origin.x, "y": outcome.region.origin.y,
-                "w": outcome.region.size.width, "h": outcome.region.size.height
-            ]
+            Self.attachFrame(outcome.region, to: &payload, key: "region")
             // The case for a crop is sharpness, not cost, so the resolution is
             // in the response rather than left to be inferred from two numbers.
             // Points per pixel: 0.5 is a Retina display captured at full scale,
@@ -2778,13 +2905,14 @@ final class HarnessServer {
     private func attachEscalation(
         to response: inout [String: Any],
         request: HarnessRequest,
-        rootNode: AccessibilityElementNode
+        rootNode: AccessibilityElementNode,
+        application: NSRunningApplication?
     ) {
-        // The frontmost app — the same cached value `snapshotFocusedWindow`
-        // read moments ago in this request, so the app walked is the app shot.
+        // The app the snapshot walked — not a second frontmost read, which is a
+        // live system-wide AX query and can name whatever came forward since.
         guard let plan = escalationPlan(
             forcedTier: request.tier, title: request.title, role: request.role, rootNode: rootNode,
-            application: AccessibilityTreeWalker.focusedApplication()
+            application: application
         ) else { return }
 
         let result = escalationPayload(plan: plan, capture: request.escalate)
@@ -2831,18 +2959,23 @@ final class HarnessServer {
         // A failed walk is not fatal here: the display rung needs no tree at
         // all, and "I could not read the window, here is the screen" is a more
         // useful answer than a refusal. Why it failed still travels.
+        // One application for the guard, the walk and the capture. On a failed
+        // walk the fallback is read once here and shot below — never re-read.
         var rootNode: AccessibilityElementNode?
+        let application: NSRunningApplication?
         do {
             let snapshot = try AccessibilityTreeWalker.snapshotFocusedWindow()
             rootNode = snapshot.rootNode
+            application = snapshot.application
             response["application"] = snapshot.applicationName
             response["bundleIdentifier"] = snapshot.bundleIdentifier
             response["frontmostSource"] = snapshot.frontmostSource?.rawValue ?? NSNull()
             response["walkMilliseconds"] = Int(snapshot.walkDurationInSeconds * 1000)
         } catch {
+            application = AccessibilityTreeWalker.focusedApplication()
             response["snapshotError"] = Self.errorCode(for: error)
-            response["application"] = AccessibilityTreeWalker.focusedApplication()?.localizedName ?? "unknown"
-            response["bundleIdentifier"] = Self.frontmostBundleIdentifier() ?? "unknown"
+            response["application"] = application?.localizedName ?? "unknown"
+            response["bundleIdentifier"] = application?.bundleIdentifier ?? "unknown"
         }
 
         // Against whichever app this response says it read — the walked one, or
@@ -2856,7 +2989,7 @@ final class HarnessServer {
 
         guard let plan = escalationPlan(
             forcedTier: request.tier, title: request.title, role: request.role, rootNode: rootNode,
-            application: AccessibilityTreeWalker.focusedApplication()
+            application: application
         ) else {
             return fail(
                 "notFound",
@@ -2887,8 +3020,7 @@ final class HarnessServer {
     static let statusMenuPressTimeoutInSeconds: Float = 0.5
 
     private static func summariseStatusItem(_ descriptor: AccessibilityStatusItems.Descriptor) -> [String: Any] {
-        let frame = descriptor.frameInAppKitCoordinates
-        return [
+        var entry: [String: Any] = [
             "owner": [
                 "name": (descriptor.ownerName ?? NSNull()) as Any,
                 "bundleIdentifier": (descriptor.ownerBundleIdentifier ?? NSNull()) as Any
@@ -2899,30 +3031,62 @@ final class HarnessServer {
             "description": (descriptor.elementDescription?.raw ?? NSNull()) as Any,
             "value": (descriptor.value?.raw ?? NSNull()) as Any,
             "enabled": descriptor.isEnabled,
-            "frame": ["x": frame.origin.x, "y": frame.origin.y, "w": frame.size.width, "h": frame.size.height],
             "actions": descriptor.publishedActionNames,
             "hasMenu": descriptor.hasMenu,
             "secure": AccessibilityStatusItems.isSecure(descriptor)
         ]
+        Self.attachFrame(descriptor.frameInAppKitCoordinates, to: &entry)
+        return entry
     }
 
-    /// Not app-scoped: icons are global, so no `expectApp` and no frontmost check.
+    /// Merges into the response already collected (`dryRun`, `statusItem`…), like every other refusal.
+    private func refuseIfScreenIsLocked(_ request: HarnessRequest, dryRun: Bool, startedAt: Date,
+                                        _ message: String, into response: inout [String: Any]) -> Bool {
+        guard LockScreenGuard.isLockScreen(Self.frontmostBundleIdentifier()) else { return false }
+        response["ok"] = false
+        response["error"] = "screenIsLocked"
+        response["message"] = message
+        audit(request, dryRun: dryRun, kernel: "n/a", outcome: "screenIsLocked", startedAt: startedAt)
+        return true
+    }
+
+    /// A process that did not answer is not a process with no icon — so every
+    /// list of status items, including an `available` list, says what it missed.
+    private static func attachReadFailures(_ read: AccessibilityStatusItems.ReadAll, to response: inout [String: Any]) {
+        response["processesFailedCount"] = read.processesFailed.count
+        response["processesFailed"] = read.processesFailed.map {
+            ["name": UntrustedText($0.name).forDisplay, "axErrorRawValue": Int($0.axErrorRawValue)] as [String: Any]
+        }
+        response["childrenFailed"] = read.childrenFailed
+        if !read.processesFailed.isEmpty || read.childrenFailed > 0 {
+            response["warning"] = "THIS LIST IS A FLOOR, NOT A MEASUREMENT — \(read.processesFailed.count) process(es) "
+                + "and \(read.childrenFailed) item(s) did not answer"
+        }
+    }
+
+    /// Not app-scoped: icons are global, so `expectApp` is refused at decode and
+    /// there is no frontmost check — but the lock screen still has a menu bar.
     private func statusResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        var response: [String: Any] = [:]
+        if refuseIfScreenIsLocked(request, dryRun: dryRun, startedAt: startedAt,
+                                  "the screen is locked — the status items are not the user's", into: &response) { return response }
         let read = AccessibilityStatusItems.readAll()
         audit(request, dryRun: dryRun, kernel: "n/a", outcome: "ok", startedAt: startedAt)
-        return [
-            "ok": true,
-            "itemCount": read.items.count,
-            "processesAsked": read.processesAsked,
-            "processesAnswered": read.processesAnswered,
-            "statusMilliseconds": read.milliseconds,
-            "items": read.items.map { Self.summariseStatusItem($0.descriptor) }
-        ]
+        response["ok"] = true
+        response["itemCount"] = read.items.count
+        response["processesAsked"] = read.processesAsked
+        response["processesAnswered"] = read.processesAnswered
+        response["statusMilliseconds"] = read.milliseconds
+        response["items"] = read.items.map { Self.summariseStatusItem($0.descriptor) }
+        Self.attachReadFailures(read, to: &response)
+        return response
     }
 
     private func statusItemPressResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
         let query = request.statusItem ?? ""
         var response: [String: Any] = ["dryRun": dryRun, "confirmed": request.confirmed, "statusItem": query]
+        if refuseIfScreenIsLocked(request, dryRun: dryRun, startedAt: startedAt,
+                                  "the screen is locked — there is no status item of the user's to press", into: &response) { return response }
 
         let read = AccessibilityStatusItems.readAll()
         response["statusMilliseconds"] = read.milliseconds
@@ -2935,6 +3099,7 @@ final class HarnessServer {
             response["resolution"] = ["status": "ambiguous", "matchCount": matchCount, "matchedOn": tier.rawValue]
             response["ok"] = false
             response["error"] = "ambiguous"
+            Self.attachReadFailures(read, to: &response)
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: "ambiguous", startedAt: startedAt)
             return response
         case .notFound(let available):
@@ -2944,11 +3109,26 @@ final class HarnessServer {
             ]
             response["ok"] = false
             response["error"] = "notFound"
+            Self.attachReadFailures(read, to: &response)
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: "notFound", startedAt: startedAt)
             return response
         }
         let descriptor = item.descriptor
         response["item"] = Self.summariseStatusItem(descriptor)
+
+        // The "app" a status item belongs to is its owner, so that is what an
+        // expectation is checked against — before anything is judged or pressed.
+        if let expected = request.expectApp,
+           !HarnessPolicy.appMatches(expected: expected, bundleIdentifier: descriptor.ownerBundleIdentifier, name: descriptor.ownerName) {
+            response["ok"] = false
+            response["error"] = "expectAppMismatch"
+            response["expectedApp"] = expected
+            response["message"] = "the matched status item is owned by "
+                + "\(UntrustedText(descriptor.ownerName ?? descriptor.ownerBundleIdentifier ?? "unknown").forDisplay), "
+                + "not \(UntrustedText(expected).forDisplay) — nothing was pressed"
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "expectAppMismatch", startedAt: startedAt)
+            return response
+        }
 
         // Security first, above the kernel: `confirmed: true` cannot lift it,
         // like a secure field.
@@ -2956,7 +3136,7 @@ final class HarnessServer {
             _ = applyAppPolicy(to: .allow, bundleIdentifier: descriptor.ownerBundleIdentifier, into: &response)
             response["kernel"] = [
                 "decision": "refuse",
-                "reason": "a credential manager's status item is refused, like a secure field",
+                "reason": ActionSafetyKernel.secureStatusItemRefusalReason,
                 "executable": false
             ]
             response["ok"] = false
@@ -2994,7 +3174,7 @@ final class HarnessServer {
         )
         let described = HarnessPolicy.describe(decision)
         let gated = gate(decision, request: request, appName: descriptor.ownerName,
-                         bundleIdentifier: descriptor.ownerBundleIdentifier, into: &response)
+                         bundleIdentifier: descriptor.ownerBundleIdentifier, dryRun: dryRun, into: &response)
         guard gated.executable else {
             response["ok"] = false
             response["error"] = gated.outcome

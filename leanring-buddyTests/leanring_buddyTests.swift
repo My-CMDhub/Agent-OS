@@ -2873,3 +2873,198 @@ private func temporaryApprovalsURL(contents: String?) throws -> URL {
                                         milliseconds: 1, confirmedBy: "owner")
     #expect(owned.contains(#""confirmedBy":"owner""#))
 }
+
+// MARK: - Review 2026-09-13: ticket shape, audit cap, status items, frames, dry run
+
+@Test func aTicketIsForOneQualifierSetNotJustOneTitle() async throws {
+    // Approved for the Delete inside "Drafts"; the Delete inside "Bank" is a different button.
+    var drafts = HarnessConfirmations.Ticket(
+        id: "t2", createdAt: Date(), verb: "press", rawTarget: "Delete", target: "\"Delete\"", text: nil, mode: nil,
+        appName: "Mail", bundleIdentifier: "com.apple.mail", reason: "destructive", status: .allowed, answeredAt: nil
+    )
+    drafts.withinNamed = "Drafts"
+    var shape = HarnessConfirmations.Shape(verb: "press", bundleIdentifier: "com.apple.mail", rawTarget: "Delete")
+    shape.withinNamed = "Drafts"
+    #expect(HarnessConfirmations.ticketMatches(drafts, shape))
+    shape.withinNamed = "Bank"
+    #expect(HarnessConfirmations.mismatchedField(drafts, shape) == "withinNamed")
+    shape.withinNamed = "Drafts"; shape.nearPoint = CGPoint(x: 1, y: 2)
+    #expect(HarnessConfirmations.mismatchedField(drafts, shape) == "nearPoint")
+    shape.nearPoint = nil; shape.role = "AXButton"
+    #expect(HarnessConfirmations.mismatchedField(drafts, shape) == "role")
+
+    // An approved plain `type` does not re-issue with a confirm bolted on.
+    let typing = makeTicket(verb: "type", target: "<focused>", text: "hi", mode: "insert", status: .allowed)
+    var confirmed = HarnessConfirmations.Shape(verb: "type", bundleIdentifier: "com.apple.finder", rawTarget: "<focused>", text: "hi", mode: "insert")
+    #expect(HarnessConfirmations.ticketMatches(typing, confirmed))
+    confirmed.thenConfirm = true
+    #expect(HarnessConfirmations.mismatchedField(typing, confirmed) == "thenConfirm")
+
+    // The wire fields reach the shape, and `open` carries them onto the ticket.
+    guard case .success(let request) = HarnessPolicy.decode(
+        line: #"{"verb":"press","title":"Delete","withinNamed":"Drafts","role":"AXButton","nearPoint":{"x":3,"y":4}}"#
+    ) else { Issue.record("expected a decoded request"); return }
+    let decoded = HarnessServer.confirmationShape(for: request, bundleIdentifier: "com.apple.mail")
+    #expect(decoded.withinNamed == "Drafts" && decoded.role == "AXButton" && decoded.nearPoint == CGPoint(x: 3, y: 4))
+    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    guard case .opened(let ticket) = confirmations.open(decoded, appName: "Mail", reason: "r") else {
+        Issue.record("expected a ticket"); return
+    }
+    #expect(ticket.withinNamed == "Drafts" && ticket.role == "AXButton" && ticket.nearPoint == CGPoint(x: 3, y: 4))
+}
+
+@Test func aFiveThousandCharacterTitleIsCappedInTheAuditLine() async throws {
+    let long = String(repeating: "x", count: 5_000)
+    let capped = HarnessPolicy.cappedAuditTarget(long)
+    #expect(capped.count <= UntrustedText.maximumDisplayLength + 20)
+    #expect(capped.hasSuffix("(5000 chars)"))
+    #expect(HarnessPolicy.cappedAuditTarget("Empty Bin") == "Empty Bin")
+
+    let line = HarnessPolicy.auditLine(at: Date(timeIntervalSince1970: 0), id: "a", verb: "press", target: long, app: nil,
+                                       session: "s", dryRun: false, confirmed: false, kernel: "allow", outcome: "ok", milliseconds: 1)
+    let fields = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+    #expect((fields?["target"] as? String)?.count ?? .max <= UntrustedText.maximumDisplayLength + 20)
+}
+
+@Test func statusRefusesExpectAppAtDecodeAndAStatusItemIsMatchedOnItsOwner() async throws {
+    guard case .failure(let error) = HarnessPolicy.decode(line: #"{"verb":"status","expectApp":"com.apple.finder"}"#) else {
+        Issue.record("a listing that spans every app cannot honour an expectation"); return
+    }
+    #expect(error == .invalidField(field: "expectApp", value: "com.apple.finder"))
+    // `menu statusItem` keeps it: the "app" is the icon's owner.
+    guard case .success(let press) = HarnessPolicy.decode(line: #"{"verb":"menu","statusItem":"WiFi","expectApp":"Control Centre"}"#) else {
+        Issue.record("expected a decoded request"); return
+    }
+    #expect(press.expectApp == "Control Centre")
+    let wifi = AccessibilityStatusItems.Descriptor(
+        ownerName: "Control Centre", ownerBundleIdentifier: "com.apple.controlcenter", identifier: "WiFi", title: nil, elementDescription: nil
+    )
+    #expect(HarnessPolicy.appMatches(expected: "control centre", bundleIdentifier: wifi.ownerBundleIdentifier, name: wifi.ownerName))
+    #expect(HarnessPolicy.appMatches(expected: "COM.APPLE.CONTROLCENTER", bundleIdentifier: wifi.ownerBundleIdentifier, name: wifi.ownerName))
+    #expect(!HarnessPolicy.appMatches(expected: "com.apple.finder", bundleIdentifier: wifi.ownerBundleIdentifier, name: wifi.ownerName))
+}
+
+@Test func aStatusBarReadThatDidNotAnswerIsNotAProcessWithNoIcon() async throws {
+    #expect(AccessibilityStatusItems.isAbsence(.noValue))
+    #expect(AccessibilityStatusItems.isAbsence(.attributeUnsupported))
+    // -25204 busy and -25212 not answering are failures, and so is a success — it is not an absence.
+    #expect(!AccessibilityStatusItems.isAbsence(.cannotComplete))
+    #expect(!AccessibilityStatusItems.isAbsence(.apiDisabled))
+    #expect(!AccessibilityStatusItems.isAbsence(.success))
+}
+
+@Test func aCredentialManagersStatusItemRefusalIsASecurityRefusal() async throws {
+    #expect(ActionSafetyKernel.isSecurityRefusal(reason: ActionSafetyKernel.secureStatusItemRefusalReason))
+    #expect(HarnessObservability.anomaly(
+        kernelDecision: "refuse", kernelReason: ActionSafetyKernel.secureStatusItemRefusalReason,
+        verificationStatus: nil, errorCode: "kernelRefused", walkMilliseconds: nil, recentWalkMilliseconds: []
+    ) == .securityRefusal)
+}
+
+@Test func aNonFiniteFrameEncodesAsNullAndIsFlagged() async throws {
+    let bad = HarnessServer.frameJSON(CGRect(x: CGFloat.nan, y: 10, width: CGFloat.infinity, height: 20))
+    #expect(bad.invalid)
+    #expect(bad.frame["x"] is NSNull && bad.frame["w"] is NSNull)
+    #expect(bad.frame["y"] as? CGFloat == 10 && bad.frame["h"] as? CGFloat == 20)
+    #expect(JSONSerialization.isValidJSONObject(bad.frame))
+    let good = HarnessServer.frameJSON(CGRect(x: 1, y: 2, width: 3, height: 4))
+    #expect(!good.invalid && good.frame.count == 4)
+    var entry: [String: Any] = [:]
+    HarnessServer.attachFrame(CGRect(x: CGFloat.nan, y: 0, width: 0, height: 0), to: &entry)
+    #expect(entry["frameInvalid"] as? Bool == true)
+}
+
+@Test func theFlightRecorderStripsEveryBulkArrayAndKeepsTheCounts() async throws {
+    let response: [String: Any] = [
+        "ok": true, "elements": [1, 2, 3], "items": [1], "windows": [1, 2], "applications": [1, 2, 3, 4],
+        "candidates": [1], "candidateCount": 9, "itemCount": 1
+    ]
+    let summary = HarnessServer.summaryForRing(response)
+    for key in HarnessServer.ringStrippedArrays { #expect(summary[key] == nil, "\(key) should be stripped") }
+    #expect(summary["elementCount"] as? Int == 3)
+    #expect(summary["windowCount"] as? Int == 2)
+    #expect(summary["applicationCount"] as? Int == 4)
+    // A count the response already carries is the truth, not the list's (possibly truncated) length.
+    #expect(summary["candidateCount"] as? Int == 9)
+    #expect(summary["itemCount"] as? Int == 1)
+    #expect(summary["ok"] as? Bool == true)
+}
+
+@Test func aDryRunReportsTheGatesAnswerWithoutSpendingTheTicket() async throws {
+    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+        Issue.record("expected a ticket"); return
+    }
+    confirmations.answer(ticket.id, allow: true, scope: .once)
+    #expect(confirmations.consume(ticket: ticket.id, finderEmptyBin, spend: false) == .allowed)
+    #expect(confirmations.consume(ticket: ticket.id, finderEmptyBin, spend: false) == .allowed)
+    // Still usable for the real run — exactly once.
+    #expect(confirmations.consume(ticket: ticket.id, finderEmptyBin) == .allowed)
+    #expect(confirmations.consume(ticket: ticket.id, finderEmptyBin, spend: false) == .consumed)
+}
+
+@Test func openingATicketDoesNotShowThePanelInsideTheRequest() async throws {
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        var posts: Int { lock.withLock { value } }
+        func increment() { lock.withLock { value += 1 } }
+    }
+    let counter = Counter()
+    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    // Scoped to THIS instance: another test's `open` posting concurrently must not count.
+    let observer = NotificationCenter.default.addObserver(forName: .clickyShowPanel, object: confirmations, queue: nil) { _ in
+        counter.increment()
+    }
+    defer { NotificationCenter.default.removeObserver(observer) }
+
+    guard case .opened = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+        Issue.record("expected a ticket"); return
+    }
+    // Inside the request nothing may pump the run loop: the post is deferred.
+    #expect(counter.posts == 0)
+    // The next main-queue turn delivers it — FIFO behind the block `open` enqueued.
+    // At least one, not exactly one: other tests in this process open tickets
+    // too, and their deferred posts drain on the same turn (measured: 4).
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        DispatchQueue.main.async { continuation.resume() }
+    }
+    #expect(counter.posts >= 1)
+}
+
+@Test func theFingerprintSeesANonPressableNameChange() async throws {
+    // A Finder file list is AXTextFields with no AXPress; only their names say what changed.
+    func tree(label: String) -> AccessibilityElementNode {
+        windowContaining([
+            pressableNodeTitled("Open", at: CGRect(x: 0, y: 0, width: 50, height: 20)),
+            AccessibilityElementNode(role: "AXStaticText", subrole: nil, title: label, value: nil,
+                                     frameInAppKitCoordinates: CGRect(x: 0, y: 30, width: 100, height: 20), depth: 1, children: [])
+        ])
+    }
+    let before = await AccessibilityDumpRunner.namedElementFingerprint(in: tree(label: "Recent"))
+    let after = await AccessibilityDumpRunner.namedElementFingerprint(in: tree(label: "Applications"))
+    #expect(before != after)
+    #expect(before.contains(UntrustedText("Recent").forDisplay))
+}
+
+@Test func aMenuItemWithASubmenuIsRefusedBeforeItIsPressedAndItsLeavesAreListed() async throws {
+    let services = AccessibilityMenu.Node(label: "Services", role: AccessibilityMenu.menuItemRole, children: [
+        AccessibilityMenu.Node(label: nil, role: AccessibilityMenu.menuRole, children: [
+            AccessibilityMenu.Node(label: "Open URL", role: AccessibilityMenu.menuItemRole),
+            AccessibilityMenu.Node(label: nil, role: AccessibilityMenu.menuItemRole),
+            AccessibilityMenu.Node(label: "Show Map", role: AccessibilityMenu.menuItemRole)
+        ])
+    ])
+    // The AXMenu wrapper is descended, the unlabelled separator dropped.
+    #expect(AccessibilityMenu.submenuChildLabels(of: services, children: \.children) == ["Open URL", "Show Map"])
+    let leaf = AccessibilityMenu.Node(label: "Close Window", role: AccessibilityMenu.menuItemRole)
+    #expect(AccessibilityMenu.submenuChildLabels(of: leaf, children: \.children) == nil)
+}
+
+@Test func aNonFiniteSuggestedPointIsNullAndFlagged() async throws {
+    let bad = HarnessServer.pointJSON(CGPoint(x: CGFloat.nan, y: 5))
+    #expect(bad.invalid && bad.point["x"] is NSNull && bad.point["y"] as? CGFloat == 5)
+    #expect(JSONSerialization.isValidJSONObject(bad.point))
+    let good = HarnessServer.pointJSON(CGPoint(x: 1, y: 2))
+    #expect(!good.invalid && good.point.count == 2)
+}

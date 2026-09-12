@@ -41,6 +41,13 @@ final class HarnessConfirmations: ObservableObject {
         /// `type` only: the text and mode are part of the action's identity.
         let text: String?
         let mode: String?
+        /// The resolution qualifiers. Review 2026-09-13: without them a ticket
+        /// approved for `press "Delete" withinNamed:"Drafts"` re-issued as
+        /// `withinNamed:"Bank"` matched — same verb, app and title, different button.
+        var withinNamed: String? = nil
+        var nearPoint: CGPoint? = nil
+        var role: String? = nil
+        var thenConfirm: Bool = false
         let appName: String?
         let bundleIdentifier: String
         let reason: String
@@ -60,6 +67,10 @@ final class HarnessConfirmations: ObservableObject {
         let rawTarget: String
         var text: String? = nil
         var mode: String? = nil
+        var withinNamed: String? = nil
+        var nearPoint: CGPoint? = nil
+        var role: String? = nil
+        var thenConfirm: Bool = false
     }
 
     enum Consumption: Equatable {
@@ -116,6 +127,10 @@ final class HarnessConfirmations: ObservableObject {
         if ticket.verb != shape.verb { return "verb" }
         if !sameBundleIdentifier(ticket.bundleIdentifier, shape.bundleIdentifier) { return "bundleIdentifier" }
         if ticket.rawTarget != shape.rawTarget { return "target" }
+        if ticket.withinNamed != shape.withinNamed { return "withinNamed" }
+        if ticket.nearPoint != shape.nearPoint { return "nearPoint" }
+        if ticket.role != shape.role { return "role" }
+        if ticket.thenConfirm != shape.thenConfirm { return "thenConfirm" }
         if shape.verb == "type" {
             if ticket.text != shape.text { return "text" }
             if ticket.mode != shape.mode { return "mode" }
@@ -216,6 +231,7 @@ final class HarnessConfirmations: ObservableObject {
             id: UUID().uuidString, createdAt: now, verb: shape.verb,
             rawTarget: shape.rawTarget, target: UntrustedText(shape.rawTarget).forDisplay,
             text: shape.text, mode: shape.mode,
+            withinNamed: shape.withinNamed, nearPoint: shape.nearPoint, role: shape.role, thenConfirm: shape.thenConfirm,
             appName: appName.map { UntrustedText($0).forDisplay },
             bundleIdentifier: shape.bundleIdentifier ?? "", reason: reason, status: .pending
         )
@@ -229,7 +245,7 @@ final class HarnessConfirmations: ObservableObject {
         // the panel pumps the run loop, and a second socket request would land
         // inside the first. And only when the panel is not already asking.
         if pending == 0 {
-            DispatchQueue.main.async { NotificationCenter.default.post(name: .clickyShowPanel, object: nil) }
+            DispatchQueue.main.async { [self] in NotificationCenter.default.post(name: .clickyShowPanel, object: self) }
         }
         return .opened(ticket)
     }
@@ -239,14 +255,20 @@ final class HarnessConfirmations: ObservableObject {
               Self.status(of: tickets[index], now: Date()) == .pending else { return }
         tickets[index].status = allow ? .allowed : .denied
         tickets[index].answeredAt = Date()
+        // Measured 2026-09-13: a shown panel is Clicky's key window, so the
+        // system-wide focused app reads "Clicky" and every `focus Finder` after
+        // the click failed to verify — the planner fell to 4/6. When nothing is
+        // left to ask, the panel goes away and focus returns to the app in use.
+        if pendingCount() == 0 {
+            DispatchQueue.main.async { NotificationCenter.default.post(name: .clickyDismissPanel, object: nil) }
+        }
         guard allow, scope == .always else { return }
         // Read, append, write: the file is the store, so a hand-edit made after
         // launch survives. A file we cannot read is not one we overwrite — the
         // ticket still allows this once, and every consult keeps reporting it.
-        guard case .success(var rules) = Self.loadApprovals(from: approvalsURL) else { return }
+        guard case .success(let rules) = Self.loadApprovals(from: approvalsURL) else { return }
         let rule = Self.rule(for: tickets[index])
         guard !rules.contains(rule), let data = try? JSONEncoder().encode(rules + [rule]) else { return }
-        rules.append(rule)
         try? FileManager.default.createDirectory(
             at: approvalsURL.deletingLastPathComponent(), withIntermediateDirectories: true
         )
@@ -254,10 +276,12 @@ final class HarnessConfirmations: ObservableObject {
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: approvalsURL.path)
     }
 
-    func consume(ticket id: String, _ shape: Shape, now: Date = Date()) -> Consumption {
+    /// `spend: false` answers what the gate would decide without marking the
+    /// ticket used — a dry run must not cost the caller its one approval.
+    func consume(ticket id: String, _ shape: Shape, spend: Bool = true, now: Date = Date()) -> Consumption {
         let index = tickets.firstIndex { $0.id == id }
         let result = Self.consumption(of: index.map { tickets[$0] }, shape, now: now)
-        if result == .allowed, let index { tickets[index].consumed = true }
+        if spend, result == .allowed, let index { tickets[index].consumed = true }
         return result
     }
 

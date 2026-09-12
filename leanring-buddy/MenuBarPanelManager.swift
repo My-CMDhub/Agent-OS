@@ -50,7 +50,9 @@ final class MenuBarPanelManager: NSObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.showPanel()
+            // Front, not key: a key panel makes Clicky the focused application
+            // and the harness then reads its own panel as "frontmost".
+            self?.showPanel(makeKey: false)
         }
 
         dismissPanelObserver = NotificationCenter.default.addObserver(
@@ -142,14 +144,14 @@ final class MenuBarPanelManager: NSObject {
 
     // MARK: - Panel Lifecycle
 
-    private func showPanel() {
+    private func showPanel(makeKey: Bool = true) {
         if panel == nil {
             createPanel()
         }
 
         positionPanelBelowStatusItem()
 
-        panel?.makeKeyAndOrderFront(nil)
+        if makeKey { panel?.makeKeyAndOrderFront(nil) }
         panel?.orderFrontRegardless()
         installClickOutsideMonitor()
     }

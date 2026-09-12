@@ -54,6 +54,16 @@ struct ConfirmationPromptView: View {
             Text("Clicky wants to \(ticket.verb) \(ticket.target)")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(status == .pending ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+            // The qualifiers are part of what is being approved, so they are shown.
+            if ticket.withinNamed != nil || ticket.role != nil {
+                Text([
+                    ticket.withinNamed.map { "within \(UntrustedText($0).forDisplay)" },
+                    ticket.role.map { "role \(UntrustedText($0).forDisplay)" }
+                ].compactMap { $0 }.joined(separator: ", "))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(DS.Colors.codeText)
+                    .lineLimit(1)
+            }
             if let text = ticket.text {
                 Text("text: \(UntrustedText(text).forDisplay) (\(ticket.mode ?? "insert"))")
                     .font(.system(size: 11, design: .monospaced))
