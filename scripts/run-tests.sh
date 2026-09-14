@@ -40,7 +40,10 @@ for _ in {1..180}; do
   # Measured 2026-09-12: a missing `import Combine` printed "unknown: 0 passed,
   # 0 failed" — the dead-and-silent shape CLAUDE.md warns about. Name the errors.
   build=$(xcrun xcresulttool get build-results --path "$bundleNow" 2>/dev/null)
-  echo "$summary" | BUILD_JSON="$build" python3 -c "
+  # printf, not echo: sh's echo turns the \" and \n inside a failure message
+  # into bytes that break the JSON, so the one run with a failure crashed
+  # instead of naming it (2026-09-14).
+  printf '%s' "$summary" | BUILD_JSON="$build" python3 -c "
 import sys, json, os
 d = json.load(sys.stdin)
 if not d.get('result'): raise SystemExit(1)

@@ -554,6 +554,11 @@ enum HarnessObservability {
         // 2026-09-14): a full queue is the signature of someone flooding the card
         // to get a click on the wrong row, and an over-long question is someone
         // probing what the card will draw. Neither happens to an honest planner.
+        // `confirmationStale` stays OUT too (2026-09-14): it is the same re-aiming
+        // as a mismatched ticket, done with the selection instead of the words —
+        // an approval for one item spent while another is selected. Nothing the
+        // harness does moves a selection between open and re-issue, so the
+        // twenty requests before it show whether a caller moved it.
         "confirmationPending", "confirmationDenied", "confirmationExpired",
         "dryRun", "unknownVerb", "malformedJSON", "missingField", "invalidField",
         // A kernel refusal is the policy working, and the audit line already
@@ -1328,6 +1333,7 @@ final class HarnessServer {
         appName: String?,
         bundleIdentifier: String?,
         dryRun: Bool,
+        bindingSubject: ActionBinding.Subject? = nil,
         into response: inout [String: Any]
     ) -> GateResult {
         let described = HarnessPolicy.describe(decision)
@@ -1348,6 +1354,18 @@ final class HarnessServer {
             var refusal: (outcome: String, note: String)?
 
             if let id = request.ticket {
+                // The words matched; now the thing. Checked while the ticket is
+                // pending OR allowed, so a stale ticket never becomes spendable —
+                // and even on a dry run, because a dry run that reported "allowed"
+                // for a moved selection would be the one wrong answer here.
+                let peek = confirmations.consume(ticket: id, shape, spend: false)
+                if let bindingSubject, let approved = confirmations.ticket(id: id)?.binding,
+                   peek == .pending || peek == .allowed {
+                    let recheck = ActionBinding.recheck(approved, subject: bindingSubject, bundleIdentifier: bundleIdentifier)
+                    if let moved = recheck.movedPart { confirmations.invalidateAsStale(ticket: id, movedPart: moved) }
+                    response["binding"] = ActionBinding.responsePayload(recheck.current, bundleIdentifier: bundleIdentifier,
+                                                                        stalePart: recheck.movedPart)
+                }
                 // A dry run reports what the gate WOULD decide and leaves the
                 // ticket unspent — the caller still has its one action.
                 switch confirmations.consume(ticket: id, shape, spend: !dryRun) {
@@ -1373,6 +1391,9 @@ final class HarnessServer {
                     refusal = ("confirmationTicketInvalid", "no ticket \(id) is known to this harness session")
                 case .mismatch(let field):
                     refusal = ("confirmationTicketInvalid", "ticket \(id) was issued for a different \(field)")
+                case .stale(let field):
+                    refusal = ("confirmationStale",
+                               "ticket \(id) is stale: the \(field) it was approved for has changed — re-issue without it to ask again")
                 }
             } else {
                 let consulted = confirmations.rule(for: shape)
@@ -1395,7 +1416,11 @@ final class HarnessServer {
                         "thenConfirm": rule.thenConfirm ?? false
                     ]
                 } else {
-                    switch confirmations.open(shape, appName: appName, reason: reason) {
+                    let binding = bindingSubject.map { ActionBinding.capture($0, bundleIdentifier: bundleIdentifier) }
+                    if let binding {
+                        response["binding"] = ActionBinding.responsePayload(binding, bundleIdentifier: bundleIdentifier)
+                    }
+                    switch confirmations.open(shape, appName: appName, reason: reason, binding: binding) {
                     case .opened(let ticket):
                         response["ticket"] = ticket.id
                         response["expiresAt"] = HarnessPolicy.auditTimestampFormatter.string(from: ticket.expiresAt)
@@ -1597,8 +1622,13 @@ final class HarnessServer {
             bundleIdentifier: snapshot.bundleIdentifier, into: &response
         )
         let described = HarnessPolicy.describe(decision)
+        // select is not bound: it CHANGES the selection, it does not act on one.
+        let bindingSubject = request.verb == .select ? nil : ActionBinding.Subject(
+            targetElement: resolvedNode.accessibilityElement, processIdentifier: snapshot.application?.processIdentifier
+        )
         let gated = gate(decision, request: request, appName: snapshot.applicationName,
-                         bundleIdentifier: snapshot.bundleIdentifier, dryRun: dryRun, into: &response)
+                         bundleIdentifier: snapshot.bundleIdentifier, dryRun: dryRun,
+                         bindingSubject: bindingSubject, into: &response)
 
         guard gated.executable else {
             response["ok"] = false
@@ -1970,8 +2000,13 @@ final class HarnessServer {
             bundleIdentifier: application.bundleIdentifier, into: &response
         )
         let described = HarnessPolicy.describe(decision)
+        // A menu item acts on the frontmost window's selection ("Move to Bin").
         let gated = gate(decision, request: request, appName: application.localizedName,
-                         bundleIdentifier: application.bundleIdentifier, dryRun: dryRun, into: &response)
+                         bundleIdentifier: application.bundleIdentifier, dryRun: dryRun,
+                         bindingSubject: ActionBinding.Subject(
+                            targetElement: resolvedNode.accessibilityElement, processIdentifier: application.processIdentifier
+                         ),
+                         into: &response)
 
         guard gated.executable else {
             response["ok"] = false

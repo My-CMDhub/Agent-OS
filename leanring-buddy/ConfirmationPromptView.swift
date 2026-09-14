@@ -48,6 +48,17 @@ struct ConfirmationPromptView: View {
             "eventWindowNumber": evidence.eventWindowNumber ?? NSNull(),
             "hostWindowNumber": evidence.hostWindowNumber ?? NSNull(),
             "rowSettledMilliseconds": evidence.rowSettledSeconds.map { $0 * 1000 } ?? NSNull(),
+            // Both numbers of the inside-the-button check, so the first real click
+            // shows whether the two coordinate spaces actually agree.
+            "clickTopLeft": evidence.clickLocationInWindow.flatMap { location in
+                evidence.hostContentHeight.map { height in
+                    let point = HarnessConfirmations.ApprovalInput.topLeftPoint(fromWindowPoint: location, contentHeight: height)
+                    return [point.x, point.y]
+                }
+            } ?? NSNull(),
+            "pressedButtonFrame": evidence.pressedButtonFrame.map {
+                [$0.minX, $0.minY, $0.width, $0.height]
+            } ?? NSNull(),
             "pressedMouseButtons": NSEvent.pressedMouseButtons,
             "uptime": MeasurementLogFile.roundedUptime(ProcessInfo.processInfo.systemUptime)
         ], toFileNamed: inputLogFileName)
@@ -61,7 +72,19 @@ struct ConfirmationPromptView: View {
             switch HarnessConfirmations.status(of: ticket, now: now) {
             case .pending: return true
             case .expired: return includesAnswered && now.timeIntervalSince(ticket.expiresAt) < lingerInSeconds
-            case .allowed, .denied: return includesAnswered && now.timeIntervalSince(ticket.answeredAt ?? now) < lingerInSeconds
+            case .allowed, .denied, .stale: return includesAnswered && now.timeIntervalSince(ticket.answeredAt ?? now) < lingerInSeconds
+            }
+        }
+    }
+
+    static func buttonFrameKey(_ ticketID: String, _ button: String) -> String { "\(ticketID)|\(button)" }
+
+    /// Records a button's frame in the hosting view's top-left space, so a click
+    /// is counted only when it landed inside the button that was pressed.
+    private func recordsFrame(of button: String, ticketID: String) -> some View {
+        GeometryReader { proxy in
+            Color.clear.onChange(of: proxy.frame(in: .global), initial: true) { _, frame in
+                placementTracker.buttonFrames[Self.buttonFrameKey(ticketID, button)] = frame
             }
         }
     }
@@ -79,6 +102,10 @@ struct ConfirmationPromptView: View {
             rowSettledSeconds: ScreenPlacement.settledSeconds(
                 row: placementTracker.rowPlacements[ticket.id], window: placementTracker.windowPlacement, nowUptime: nowUptime
             ),
+            // Both panels host the SwiftUI tree as the window's content view, so
+            // `.global` frames and this height share one space.
+            hostContentHeight: placementTracker.hostWindow?.contentView?.bounds.height,
+            pressedButtonFrame: placementTracker.buttonFrames[Self.buttonFrameKey(ticket.id, button)],
             nowUptime: nowUptime
         )
         let verdict = confirmations.answerFromPanel(ticket.id, allow: allow, scope: scope, evidence: evidence)
@@ -133,9 +160,13 @@ struct ConfirmationPromptView: View {
             if status == .pending {
                 HStack(spacing: DS.Spacing.sm) {
                     Button("Allow once") { press("allowOnce", ticket, allow: true, scope: .once) }
+                        .background(recordsFrame(of: "allowOnce", ticketID: ticket.id))
                     // The lines above are the definition of "exactly this".
                     // For focus/launch the rule is app-wide, and the label says so.
-                    Button(HarnessConfirmations.alwaysButtonTitle(for: ticket)) { press("always", ticket, allow: true, scope: .always) }
+                    if HarnessConfirmations.offersAlwaysRule(for: ticket) {
+                        Button(HarnessConfirmations.alwaysButtonTitle(for: ticket)) { press("always", ticket, allow: true, scope: .always) }
+                            .background(recordsFrame(of: "always", ticketID: ticket.id))
+                    }
                     Button("Deny") { press("deny", ticket, allow: false, scope: .once) }
                         .tint(DS.Colors.destructive)
                 }
@@ -148,7 +179,7 @@ struct ConfirmationPromptView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
-                Text(status.rawValue)
+                Text(status == .stale ? "stale — ask again (the \(ticket.staleField ?? "binding") changed)" : status.rawValue)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(status == .allowed ? DS.Colors.success
                                      : status == .denied ? DS.Colors.destructiveText : DS.Colors.textTertiary)
@@ -203,6 +234,8 @@ final class ConfirmationPlacementTracker {
     /// nil while the window is not visible.
     private(set) var windowPlacement: ScreenPlacement?
     var rowPlacements: [String: ScreenPlacement] = [:]
+    /// Answer buttons by `ConfirmationPromptView.buttonFrameKey`, SwiftUI `.global`.
+    var buttonFrames: [String: CGRect] = [:]
     private var windowObservers: [NSObjectProtocol] = []
 
     func attach(to window: NSWindow?) {

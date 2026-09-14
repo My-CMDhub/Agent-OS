@@ -2811,6 +2811,35 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
     #expect(confirmations.alwaysRules == [existing, HarnessConfirmations.rule(for: ticket)])
 }
 
+@Test func aDestructiveQuestionCanBeAllowedOnceButNeverAlways() async throws {
+    // Owner's ruling 2026-09-14: a rule cannot carry what is selected, so a
+    // destructive action is asked about every time.
+    let store = temporaryRulesStore()
+    defer { _ = store.deleteItem() }
+    let confirmations = HarnessConfirmations(rulesStore: store)
+    let moveToBin = HarnessConfirmations.Shape(verb: "menu", bundleIdentifier: "com.apple.finder", rawTarget: "File > Move to Bin")
+    let destructiveReason = ActionSafetyKernel.destructiveActionReasonPrefix + "move to bin"
+    guard case .opened(let ticket) = confirmations.open(moveToBin, appName: "Finder", reason: destructiveReason) else {
+        Issue.record("expected a ticket"); return
+    }
+    #expect(!HarnessConfirmations.offersAlwaysRule(for: ticket))
+
+    // Even an in-process "always" answer allows this once and saves nothing.
+    confirmations.answer(ticket.id, allow: true, scope: .always)
+    #expect(confirmations.ticket(id: ticket.id)?.status == .allowed)
+    #expect(try store.load().get() == [])
+
+    #expect(ActionSafetyKernel.isDestructiveConfirmationReason(ActionSafetyKernel.replaceWouldDiscardReason(characterCount: 12)))
+    // The classification reads our own prefix, never text an app could embed later in the line.
+    #expect(!ActionSafetyKernel.isDestructiveConfirmationReason("unrecognised role \(ActionSafetyKernel.destructiveActionReasonPrefix)x"))
+
+    let launch = HarnessConfirmations.Shape(verb: "launch", bundleIdentifier: "com.apple.Terminal", rawTarget: "Terminal")
+    guard case .opened(let launchTicket) = confirmations.open(launch, appName: "Terminal", reason: "launches an app that can run code") else {
+        Issue.record("expected a ticket"); return
+    }
+    #expect(HarnessConfirmations.offersAlwaysRule(for: launchTicket))
+}
+
 @Test func aMalformedApprovalsFileIsNoRulesPlusAReason() async throws {
     let good = Data(#"[{"bundleIdentifier":"com.apple.finder","verb":"press","target":null}]"#.utf8)
     #expect(HarnessConfirmations.parseApprovals(good) == .success([
@@ -3173,7 +3202,11 @@ private func mailShape(
 private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirmations.ApprovalInput.Evidence {
     .init(eventType: .leftMouseUp, sourceProcessID: 0, clickCount: 1, eventAgeSeconds: 0.002,
           eventWindowNumber: 7, hostWindowNumber: 7, rowSettledSeconds: 2,
-          eventIdentity: .init(typeRawValue: NSEvent.EventType.leftMouseUp.rawValue, timestamp: timestamp, windowNumber: 7, mouseEventNumber: 41))
+          eventIdentity: .init(typeRawValue: NSEvent.EventType.leftMouseUp.rawValue, timestamp: timestamp, windowNumber: 7, mouseEventNumber: 41),
+          // Window 200 pt tall; a button at top-left (20, 150) sized 80x22. The click
+          // at window point (60, 39) is top-left (60, 161) — inside it.
+          clickLocationInWindow: CGPoint(x: 60, y: 39), hostContentHeight: 200,
+          pressedButtonFrame: CGRect(x: 20, y: 150, width: 80, height: 22))
 }
 
 @Test func anApprovalCountsOnlyForAMouseOrKeyEventFromTheHIDLayer() {
@@ -3470,4 +3503,184 @@ private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirma
     #expect(GlobalPushToTalkShortcutMonitor.tapDelayMilliseconds(eventTimestamp: 0, callbackUptimeNanoseconds: 5) == nil)
     // A timestamp ahead of the callback means the clocks are not the same; say nothing rather than something negative.
     #expect(GlobalPushToTalkShortcutMonitor.tapDelayMilliseconds(eventTimestamp: 9, callbackUptimeNanoseconds: 5) == nil)
+}
+
+
+// MARK: - Part 2 (2026-09-14): the click must land inside the pressed button
+
+@Test func aClickIsFlippedFromWindowBottomLeftToSwiftUITopLeftBeforeTheButtonTest() {
+    typealias Input = HarnessConfirmations.ApprovalInput
+    #expect(Input.topLeftPoint(fromWindowPoint: CGPoint(x: 5, y: 0), contentHeight: 200) == CGPoint(x: 5, y: 200))
+    #expect(Input.topLeftPoint(fromWindowPoint: CGPoint(x: 5, y: 200), contentHeight: 200) == CGPoint(x: 5, y: 0))
+
+    // Button top-left (20, 150), 80x22: top-left corner at window y 50, bottom-left at window y 28.
+    var evidence = realClickEvidence()
+    evidence.clickLocationInWindow = CGPoint(x: 20, y: 50)        // the button's top-left corner
+    #expect(Input.verdict(evidence, eventAlreadyUsed: false) == .accepted)
+    evidence.clickLocationInWindow = CGPoint(x: 20, y: 28.5)      // just above its bottom-left corner
+    #expect(Input.verdict(evidence, eventAlreadyUsed: false) == .accepted)
+    // Unflipped, the same top-left corner (20, 150) would be window y 150 — outside.
+    evidence.clickLocationInWindow = CGPoint(x: 20, y: 150)
+    #expect(Input.verdict(evidence, eventAlreadyUsed: false) == .rejected(reason: "the click did not land inside the pressed button"))
+    evidence.clickLocationInWindow = CGPoint(x: 101, y: 39)       // right of the button, same row
+    #expect(Input.verdict(evidence, eventAlreadyUsed: false) != .accepted)
+
+    var noFrame = realClickEvidence(); noFrame.pressedButtonFrame = nil
+    #expect(Input.verdict(noFrame, eventAlreadyUsed: false) != .accepted)
+    var emptyFrame = realClickEvidence(); emptyFrame.pressedButtonFrame = .zero
+    #expect(Input.verdict(emptyFrame, eventAlreadyUsed: false) != .accepted)
+    var noHeight = realClickEvidence(); noHeight.hostContentHeight = nil
+    #expect(Input.verdict(noHeight, eventAlreadyUsed: false) != .accepted)
+    // A key press has no location and is judged without one.
+    var key = realClickEvidence(); key.eventType = .keyDown; key.clickCount = 0; key.clickLocationInWindow = nil
+    #expect(Input.verdict(key, eventAlreadyUsed: false) == .accepted)
+}
+
+// MARK: - Part 1 (2026-09-14): a ticket binds the thing, not only the words
+
+private func element(_ pid: pid_t) -> AccessibilityElementKey { AccessibilityElementKey(element: AXUIElementCreateApplication(pid)) }
+
+private func selection(container: pid_t = 900, items: [pid_t] = [901], texts: [[String]] = [["AppKit.framework", "Folder"]],
+                       names: [String]? = ["AppKit.framework"]) -> ActionBinding.Selection {
+    .published(.init(containerKey: element(container), selectionAttribute: "AXSelectedRows",
+                     selectedItemKeys: Set(items.map(element)), namesFingerprint: ActionBinding.namesFingerprint(itemTexts: texts),
+                     count: items.count, displayNames: names))
+}
+
+private func binding(target: pid_t? = 800, selection chosen: ActionBinding.Selection = selection()) -> ActionBinding {
+    ActionBinding(targetElementKey: target.map(element), selection: chosen, readMilliseconds: 3)
+}
+
+@Test func theNamesFingerprintSeparatesEveryDifferentListOfTexts() {
+    let f = ActionBinding.namesFingerprint
+    #expect(f([["AppKit.framework", "Folder"]]) == f([["AppKit.framework", "Folder"]]))
+    #expect(f([["AppKit.framework"]]) != f([["Foundation.framework"]]))
+    #expect(f([["ab"]]) != f([["a", "b"]]))
+    #expect(f([["a"], ["b"]]) != f([["a", "b"]]))
+    #expect(f([["a"], ["b"]]) != f([["b"], ["a"]]))
+    #expect(f([]).count == 64)
+}
+
+@Test func columnViewActsOnTheLastColumnThatHasASelection() {
+    #expect(ActionBinding.lastNonEmptyColumnIndex(selectedCountsByColumn: [1, 1, 0]) == 1)
+    #expect(ActionBinding.lastNonEmptyColumnIndex(selectedCountsByColumn: [1, 0, 2]) == 2)
+    #expect(ActionBinding.lastNonEmptyColumnIndex(selectedCountsByColumn: [0, 0]) == nil)
+    #expect(ActionBinding.lastNonEmptyColumnIndex(selectedCountsByColumn: []) == nil)
+}
+
+@Test func aBindingIsStaleWhenTheTargetOrTheSelectionMovedAndNotOtherwise() {
+    let approved = binding()
+    #expect(ActionBinding.movedPart(approved: approved, currentTargetKey: element(800), currentSelection: selection()) == nil)
+    // A fresh handle on the same element is the same element.
+    #expect(ActionBinding.movedPart(approved: approved, currentTargetKey: AccessibilityElementKey(element: AXUIElementCreateApplication(800)),
+                                    currentSelection: selection()) == nil)
+    #expect(ActionBinding.movedPart(approved: approved, currentTargetKey: element(801), currentSelection: selection()) == "target")
+    #expect(ActionBinding.movedPart(approved: approved, currentTargetKey: nil, currentSelection: selection()) == "target")
+    // Another item selected, one more item selected, same element with new content.
+    #expect(ActionBinding.movedPart(approved: approved, currentTargetKey: element(800), currentSelection: selection(items: [902])) == "selection")
+    #expect(ActionBinding.movedPart(approved: approved, currentTargetKey: element(800), currentSelection: selection(items: [901, 902])) == "selection")
+    #expect(ActionBinding.movedPart(approved: approved, currentTargetKey: element(800),
+                                    currentSelection: selection(texts: [["Foundation.framework", "Folder"]])) == "selection")
+    // The container is gone (its re-read failed), or a different container answered.
+    #expect(ActionBinding.movedPart(approved: approved, currentTargetKey: element(800),
+                                    currentSelection: .unavailable(reason: "reading AXSelectedRows failed: AXError -25202")) == "selection")
+    #expect(ActionBinding.movedPart(approved: approved, currentTargetKey: element(800), currentSelection: selection(container: 999)) == "selection")
+    // Unavailable at open binds the target only.
+    let blind = binding(selection: .unavailable(reason: "the application reports no focused element"))
+    #expect(ActionBinding.movedPart(approved: blind, currentTargetKey: element(800), currentSelection: selection(items: [902])) == nil)
+    #expect(ActionBinding.movedPart(approved: blind, currentTargetKey: element(801), currentSelection: blind.selection) == "target")
+}
+
+@Test func aStaleTicketIsRefusedFromPendingOrAllowedAndNeverBecomesSpendable() {
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
+    for startAllowed in [false, true] {
+        guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", binding: binding()) else {
+            Issue.record("expected a ticket"); return
+        }
+        #expect(ticket.binding == binding())
+        if startAllowed { confirmations.answer(ticket.id, allow: true, scope: .once) }
+        confirmations.invalidateAsStale(ticket: ticket.id, movedPart: "selection")
+        #expect(confirmations.consume(ticket: ticket.id, finderEmptyBin) == .stale(field: "selection"))
+        // Still stale: not answerable, not spendable.
+        confirmations.answer(ticket.id, allow: true, scope: .once)
+        #expect(confirmations.consume(ticket: ticket.id, finderEmptyBin) == .stale(field: "selection"))
+        #expect(confirmations.ticket(id: ticket.id)?.status == .stale)
+    }
+    // A spent ticket stays spent — staleness does not rewrite history.
+    guard case .opened(let spent) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", binding: binding()) else {
+        Issue.record("expected a ticket"); return
+    }
+    confirmations.answer(spent.id, allow: true, scope: .once)
+    #expect(confirmations.consume(ticket: spent.id, finderEmptyBin) == .allowed)
+    confirmations.invalidateAsStale(ticket: spent.id, movedPart: "target")
+    #expect(confirmations.consume(ticket: spent.id, finderEmptyBin, spend: false) == .consumed)
+    #expect(HarnessObservability.anomaly(kernelDecision: "requireConfirmation", verificationStatus: nil,
+                                         errorCode: "confirmationStale", walkMilliseconds: nil, recentWalkMilliseconds: []) == .unexpectedError)
+}
+
+@Test func theCardShowsWhatTheActionAffectsAndNamesOnlyForAnAllowedApp() {
+    let finder = HarnessConfirmations.displayLines(for: finderEmptyBin, appName: "Finder", binding: binding())
+    #expect(finder.contains("affects: 1 selected item"))
+    #expect(finder.contains("selected: \"AppKit.framework\""))
+
+    let mailShape = HarnessConfirmations.Shape(verb: "press", bundleIdentifier: "com.apple.mail", rawTarget: "Delete")
+    let secret = "Your bank statement is ready"
+    let mailBinding = binding(selection: selection(texts: [[secret]], names: [secret]))
+    let mail = HarnessConfirmations.displayLines(for: mailShape, appName: "Mail", binding: mailBinding)
+    #expect(mail.contains("affects: 1 selected item"))
+    #expect(!mail.joined().contains(secret))
+    #expect(!mail.contains { $0.hasPrefix("selected:") })
+    let mailPayload = ActionBinding.responsePayload(mailBinding, bundleIdentifier: "com.apple.mail")
+    #expect(mailPayload["names"] == nil)
+    #expect(!String(describing: mailPayload).contains(secret))
+    #expect(mailPayload["count"] as? Int == 1)
+    let finderPayload = ActionBinding.responsePayload(binding(), bundleIdentifier: "com.apple.finder", stalePart: "selection")
+    #expect(finderPayload["names"] as? [String] == ["\"AppKit.framework\""])
+    #expect(finderPayload["stale"] as? String == "selection")
+
+    let blind = HarnessConfirmations.displayLines(for: finderEmptyBin, appName: "Finder",
+                                                  binding: binding(selection: .unavailable(reason: "AXError -25204")))
+    #expect(blind.contains("can't see what this will affect"))
+
+    // At most three names, the rest counted; names that cannot fit whole are counted, never cut.
+    let five = (1...5).map { "file\($0)" }
+    let many = HarnessConfirmations.displayLines(for: finderEmptyBin, appName: "Finder",
+                                                 binding: binding(selection: selection(items: [1, 2, 3, 4, 5], texts: five.map { [$0] }, names: five)))
+    #expect(many.contains("affects: 5 selected items"))
+    #expect(many.contains("selected: \"file1\", \"file2\", \"file3\" and 2 more"))
+    let long = String(repeating: "x", count: 400)
+    let tooLong = HarnessConfirmations.displayLines(for: finderEmptyBin, appName: "Finder",
+                                                    binding: binding(selection: selection(texts: [[long]], names: [long])))
+    #expect(tooLong.allSatisfy { $0.unicodeScalars.count <= HarnessConfirmations.maximumDisplayLineLength })
+    #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, appName: "Finder",
+                                             binding: binding(selection: selection(texts: [[long]], names: [long])),
+                                             reason: "r", pendingCount: 0) == nil)
+}
+
+@Test func everyFieldOfABindingIsEitherShownOrDeclaredAnIdentityTheOwnerCannotRead() {
+    // Adding a field to PublishedSelection fails here until it is put in one set,
+    // and a field in `shown` must change the card when it alone changes.
+    let identityOnly: Set<String> = ["containerKey", "selectionAttribute", "selectedItemKeys", "namesFingerprint"]
+    let shown: Set<String> = ["count", "displayNames"]
+    guard case .published(let full) = selection() else { Issue.record("expected published"); return }
+    #expect(Set(Mirror(reflecting: full).children.compactMap(\.label)) == identityOnly.union(shown))
+    #expect(Set(Mirror(reflecting: binding()).children.compactMap(\.label)) == ["targetElementKey", "selection", "readMilliseconds"])
+
+    let lines = { (chosen: ActionBinding.Selection) in
+        HarnessConfirmations.displayLines(for: finderEmptyBin, appName: "Finder", binding: binding(selection: chosen))
+    }
+    let base = lines(selection())
+    #expect(lines(selection(items: [901, 902], names: ["AppKit.framework", "AppKit.framework"])) != base, "count is bound but not shown")
+    #expect(lines(selection(names: ["Foundation.framework"])) != base, "displayNames is bound but not shown")
+    #expect(lines(.unavailable(reason: "x")) != base, "availability is bound but not shown")
+
+    // And the ticket carries exactly the lines of its shape plus its binding.
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
+    guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", binding: binding()) else {
+        Issue.record("expected a ticket"); return
+    }
+    #expect(ticket.displayLines == HarnessConfirmations.displayLines(for: finderEmptyBin, appName: "Finder", binding: binding()))
+    // "Always" rules carry no binding: a rule covers future contexts by definition.
+    #expect(HarnessConfirmations.rule(for: ticket) == HarnessConfirmations.ApprovalRule(
+        bundleIdentifier: "com.apple.finder", verb: "press", target: "Empty Bin"))
 }

@@ -25,7 +25,9 @@ import Security
 
 final class HarnessConfirmations: ObservableObject {
 
-    enum Status: String { case pending, allowed, denied, expired }
+    /// `stale`: the element or selection the ticket was opened on moved before it
+    /// was used (`ActionBinding`). Terminal — a stale ticket never becomes spendable.
+    enum Status: String { case pending, allowed, denied, expired, stale }
     enum Scope: String { case once, always }
 
     /// Who pressed an approval button. Measured 2026-09-14 from inside the
@@ -100,16 +102,28 @@ final class HarnessConfirmations: ObservableObject {
             /// How long the row AND its window have been in their current place.
             var rowSettledSeconds: TimeInterval? = nil
             var eventIdentity: EventIdentity? = nil
+            /// `NSEvent.locationInWindow`: AppKit, BOTTOM-left origin. Mouse events only.
+            var clickLocationInWindow: CGPoint? = nil
+            /// Height of the window's content view, which hosts the SwiftUI tree —
+            /// the one number that flips a bottom-left point into top-left.
+            var hostContentHeight: CGFloat? = nil
+            /// The pressed button's frame in the hosting view's SwiftUI `.global`
+            /// space: TOP-left origin.
+            var pressedButtonFrame: CGRect? = nil
 
             /// Reads a live event. Both clocks are seconds since boot:
             /// `NSEvent.timestamp` and `ProcessInfo.systemUptime`.
             static func gathered(from event: NSEvent?, hostWindowNumber: Int?, rowSettledSeconds: TimeInterval?,
+                                 hostContentHeight: CGFloat? = nil, pressedButtonFrame: CGRect? = nil,
                                  nowUptime: TimeInterval) -> Evidence {
-                var evidence = Evidence(hostWindowNumber: hostWindowNumber, rowSettledSeconds: rowSettledSeconds)
+                var evidence = Evidence(hostWindowNumber: hostWindowNumber, rowSettledSeconds: rowSettledSeconds,
+                                        hostContentHeight: hostContentHeight, pressedButtonFrame: pressedButtonFrame)
                 guard let event else { return evidence }
                 let cgEvent = event.cgEvent
                 evidence.eventType = event.type
                 evidence.sourceProcessID = cgEvent?.getIntegerValueField(.eventSourceUnixProcessID)
+                // `locationInWindow` is only meaningful for mouse events.
+                evidence.clickLocationInWindow = mouseButtonEventTypes.contains(event.type) ? event.locationInWindow : nil
                 evidence.clickCount = mouseButtonEventTypes.contains(event.type) ? event.clickCount : 0
                 evidence.eventAgeSeconds = nowUptime - event.timestamp
                 evidence.eventWindowNumber = event.windowNumber
@@ -119,6 +133,20 @@ final class HarnessConfirmations: ObservableObject {
                 )
                 return evidence
             }
+        }
+
+        /// A window point (bottom-left origin) in the hosting view's top-left space.
+        static func topLeftPoint(fromWindowPoint point: CGPoint, contentHeight: CGFloat) -> CGPoint {
+            CGPoint(x: point.x, y: contentHeight - point.y)
+        }
+
+        /// Review 2026-09-14: every other check passes for a real click ANYWHERE in
+        /// the card window, so a programmatic press within 500 ms could borrow a
+        /// click the owner made on blank space, a line of text, or another row.
+        static func clickLandsInsidePressedButton(_ evidence: Evidence) -> Bool {
+            guard let location = evidence.clickLocationInWindow, let height = evidence.hostContentHeight,
+                  let frame = evidence.pressedButtonFrame, !frame.isEmpty else { return false }
+            return frame.contains(topLeftPoint(fromWindowPoint: location, contentHeight: height))
         }
 
         static func verdict(_ evidence: Evidence, eventAlreadyUsed: Bool) -> Verdict {
@@ -143,6 +171,11 @@ final class HarnessConfirmations: ObservableObject {
             }
             guard let host = evidence.hostWindowNumber, evidence.eventWindowNumber == host else {
                 return .rejected(reason: "input event belongs to window \(evidence.eventWindowNumber.map(String.init) ?? "none"), the button is in window \(evidence.hostWindowNumber.map(String.init) ?? "unknown")")
+            }
+            // A key press has no location; it reaches a button only through focus,
+            // which the card can never have (it never becomes key).
+            if mouseButtonEventTypes.contains(eventType), !clickLandsInsidePressedButton(evidence) {
+                return .rejected(reason: "the click did not land inside the pressed button")
             }
             guard !eventAlreadyUsed else {
                 return .rejected(reason: "this input event already reached an answer button")
@@ -188,6 +221,15 @@ final class HarnessConfirmations: ObservableObject {
         /// `open`. The panel renders exactly these — never its own reading of
         /// the fields — so what the owner sees and what the ticket binds cannot drift.
         var displayLines: [String] = []
+        /// What the action would affect when the ticket was opened. nil for verbs
+        /// that act on no element (focus, launch) and in tests of the words alone.
+        var binding: ActionBinding? = nil
+        /// "target" or "selection" once the ticket went stale.
+        var staleField: String? = nil
+        /// Decided from the kernel's RAW reason when the ticket opens — the stored
+        /// `reason` is the quoted display form, which a prefix check never matches
+        /// (caught by `aDestructiveQuestionCanBeAllowedOnceButNeverAlways`).
+        var isDestructive = false
 
         /// The shape this ticket answers — what `mismatchedField` compares.
         var shape: Shape {
@@ -218,6 +260,8 @@ final class HarnessConfirmations: ObservableObject {
         /// A ticket for a different action. Names the field so the caller can
         /// see which half of the request drifted.
         case mismatch(field: String)
+        /// The element or selection moved since the ticket was opened.
+        case stale(field: String)
     }
 
     enum OpenResult: Equatable {
@@ -332,6 +376,11 @@ final class HarnessConfirmations: ObservableObject {
     /// App-written strings are escaped (a newline cannot forge a second line)
     /// and never truncated; `open` refuses instead when a line is too long.
     /// A test walks `Shape` with `Mirror`, so a field added here without a line fails it.
+    static func displayLines(for shape: Shape, appName: String?, binding: ActionBinding?) -> [String] {
+        displayLines(for: shape, appName: appName)
+            + (binding.map { ActionBinding.displayLines(for: $0, bundleIdentifier: shape.bundleIdentifier) } ?? [])
+    }
+
     static func displayLines(for shape: Shape, appName: String?) -> [String] {
         var lines = ["\(shape.verb) \(UntrustedText(shape.rawTarget).forDisplayInFull)"]
         if let withinNamed = shape.withinNamed { lines.append("within \(UntrustedText(withinNamed).forDisplayInFull)") }
@@ -372,6 +421,7 @@ final class HarnessConfirmations: ObservableObject {
         case .pending: return .pending
         case .denied: return .denied
         case .expired: return .expired
+        case .stale: return .stale(field: ticket.staleField ?? "binding")
         case .allowed: return ticket.consumed ? .consumed : .allowed
         }
     }
@@ -384,13 +434,20 @@ final class HarnessConfirmations: ObservableObject {
     /// The "Always" button's words. For `focus`/`launch` the rule `rule(for:)`
     /// creates covers the whole app, so calling it "exactly this" would be the
     /// one line on the card that is not true. `ticket.appName` is already escaped.
+    /// Destructive questions get Allow once and Deny only — see
+    /// `ActionSafetyKernel.isDestructiveConfirmationReason`. The card hides the
+    /// button AND `answer` refuses to save the rule, so no caller can get one.
+    static func offersAlwaysRule(for ticket: Ticket) -> Bool {
+        !ticket.isDestructive
+    }
+
     static func alwaysButtonTitle(for ticket: Ticket) -> String {
         guard appWideRuleVerbs.contains(ticket.verb) else { return "Always allow exactly this" }
         return "Always allow \(ticket.verb) for the whole app \(ticket.appName ?? "(unnamed app)")"
     }
 
     /// Why a ticket may not be opened for this shape, or nil.
-    static func openRefusal(for shape: Shape, appName: String? = nil, reason: String, pendingCount: Int) -> (code: String, message: String)? {
+    static func openRefusal(for shape: Shape, appName: String? = nil, binding: ActionBinding? = nil, reason: String, pendingCount: Int) -> (code: String, message: String)? {
         if shape.rawTarget.isEmpty {
             return ("confirmationTargetUnnamed", "the request names no target, so a ticket for it would authorise anything")
         }
@@ -400,7 +457,7 @@ final class HarnessConfirmations: ObservableObject {
         // Unicode scalars, not Characters (review 2026-09-14): "a" followed by
         // 3,000 combining marks is ONE Character, yet draws a column of marks over
         // the lines around it. Scalars bound what is actually drawn.
-        let shownLines = displayLines(for: shape, appName: appName) + [displayedReason(reason)]
+        let shownLines = displayLines(for: shape, appName: appName, binding: binding) + [displayedReason(reason)]
         if let longest = shownLines.map(\.unicodeScalars.count).max(), longest > maximumDisplayLineLength {
             return ("confirmationTooLongToShow",
                     "a line of the question is \(longest) unicode scalars and the panel shows at most \(maximumDisplayLineLength) in full — the owner cannot approve what they cannot read")
@@ -471,21 +528,23 @@ final class HarnessConfirmations: ObservableObject {
 
     func ticket(id: String) -> Ticket? { tickets.first { $0.id == id } }
 
-    func open(_ shape: Shape, appName: String?, reason: String) -> OpenResult {
+    func open(_ shape: Shape, appName: String?, reason: String, binding: ActionBinding? = nil) -> OpenResult {
         let now = Date()
         let pending = pendingCount(now: now)
-        if let refusal = Self.openRefusal(for: shape, appName: appName, reason: reason, pendingCount: pending) {
+        if let refusal = Self.openRefusal(for: shape, appName: appName, binding: binding, reason: reason, pendingCount: pending) {
             return .refused(code: refusal.code, message: refusal.message)
         }
-        let ticket = Ticket(
+        var ticket = Ticket(
             id: UUID().uuidString, createdAt: now, verb: shape.verb,
             rawTarget: shape.rawTarget, target: UntrustedText(shape.rawTarget).forDisplay,
             text: shape.text, mode: shape.mode,
             withinNamed: shape.withinNamed, nearPoint: shape.nearPoint, role: shape.role, thenConfirm: shape.thenConfirm,
             appName: appName.map { UntrustedText($0).forDisplay },
             bundleIdentifier: shape.bundleIdentifier ?? "", reason: Self.displayedReason(reason), status: .pending,
-            displayLines: Self.displayLines(for: shape, appName: appName)
+            displayLines: Self.displayLines(for: shape, appName: appName, binding: binding),
+            binding: binding
         )
+        ticket.isDestructive = ActionSafetyKernel.isDestructiveConfirmationReason(reason)
         tickets.append(ticket)
         // At most 20: evict the oldest answered/expired first, never a pending one.
         while tickets.count > 20,
@@ -529,7 +588,7 @@ final class HarnessConfirmations: ObservableObject {
         if pendingCount() == 0 {
             DispatchQueue.main.async { NotificationCenter.default.post(name: .clickyDismissPanel, object: nil) }
         }
-        guard allow, scope == .always else { return }
+        guard allow, scope == .always, Self.offersAlwaysRule(for: tickets[index]) else { return }
         // Read, append, write. A keychain item we cannot read is not one we
         // overwrite — the ticket still allows this once, and every consult keeps
         // reporting the read failure.
@@ -571,6 +630,17 @@ final class HarnessConfirmations: ObservableObject {
         let result = Self.consumption(of: index.map { tickets[$0] }, shape, now: now)
         if spend, result == .allowed, let index { tickets[index].consumed = true }
         return result
+    }
+
+    /// Marks a pending or allowed, unspent ticket stale. A stale ticket answers
+    /// `.stale` from then on — the caller must ask again, and the owner sees why.
+    func invalidateAsStale(ticket id: String, movedPart: String, now: Date = Date()) {
+        guard let index = tickets.firstIndex(where: { $0.id == id }) else { return }
+        let status = Self.status(of: tickets[index], now: now)
+        guard status == .pending || (status == .allowed && !tickets[index].consumed) else { return }
+        tickets[index].status = .stale
+        tickets[index].staleField = movedPart
+        tickets[index].answeredAt = now
     }
 
     /// Consults the keychain every time, like the policy layer: a rule removed

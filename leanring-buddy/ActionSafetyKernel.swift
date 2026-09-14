@@ -122,7 +122,18 @@ enum ActionSafetyKernel {
     }
 
     static func replaceWouldDiscardReason(characterCount: Int) -> String {
-        "replace would discard \(characterCount) characters already in the field"
+        "\(replaceWouldDiscardReasonPrefix)\(characterCount) characters already in the field"
+    }
+
+    static let destructiveActionReasonPrefix = "title suggests a destructive action: "
+    static let replaceWouldDiscardReasonPrefix = "replace would discard "
+
+    /// A question about destroying something. Owner's ruling 2026-09-14: such a
+    /// question may be answered once, never "always" — a rule cannot carry what is
+    /// selected, so "always press Delete in Mail" would delete whatever is selected
+    /// next, forever. Both reasons start with our own constant text, never an app's.
+    static func isDestructiveConfirmationReason(_ reason: String) -> Bool {
+        reason.hasPrefix(destructiveActionReasonPrefix) || reason.hasPrefix(replaceWouldDiscardReasonPrefix)
     }
 
     /// Refusal reasons as constants, so the probe can classify a decision by
@@ -441,7 +452,7 @@ enum ActionSafetyKernel {
             let lowercasedTitle = name.raw.lowercased()
 
             if let matchedKeyword = destructiveTitleKeywords.first(where: { lowercasedTitle.contains($0) }) {
-                return .requireConfirmation(reason: "title suggests a destructive action: \(matchedKeyword)")
+                return .requireConfirmation(reason: "\(destructiveActionReasonPrefix)\(matchedKeyword)")
             }
         }
 
