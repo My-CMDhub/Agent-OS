@@ -549,9 +549,12 @@ enum HarnessObservability {
         // A caller re-asking before the owner answered, or after a no, is the
         // ticket flow working — measured 2026-09-14, each re-issue wrote a dump.
         // `confirmationTicketInvalid` stays OUT: a ticket re-aimed at another
-        // action is exactly the moment worth twenty requests of context.
+        // action is exactly the moment worth twenty requests of context. So do
+        // `tooManyPendingConfirmations` and `confirmationTooLongToShow` (review
+        // 2026-09-14): a full queue is the signature of someone flooding the card
+        // to get a click on the wrong row, and an over-long question is someone
+        // probing what the card will draw. Neither happens to an honest planner.
         "confirmationPending", "confirmationDenied", "confirmationExpired",
-        "tooManyPendingConfirmations", "confirmationTooLongToShow",
         "dryRun", "unknownVerb", "malformedJSON", "missingField", "invalidField",
         // A kernel refusal is the policy working, and the audit line already
         // says which rule fired. Only a refusal on SECURITY grounds is worth a

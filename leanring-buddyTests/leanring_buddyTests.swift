@@ -2722,15 +2722,15 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
 }
 
 @Test func aTicketIsRefusedForAnUnnamedTargetAnUnidentifiedAppOrAFullQueue() async throws {
-    #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, pendingCount: 0) == nil)
+    #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, reason: "r", pendingCount: 0) == nil)
     #expect(HarnessConfirmations.openRefusal(
-        for: .init(verb: "menu", bundleIdentifier: "com.apple.finder", rawTarget: ""), pendingCount: 0
+        for: .init(verb: "menu", bundleIdentifier: "com.apple.finder", rawTarget: ""), reason: "r", pendingCount: 0
     )?.code == "confirmationTargetUnnamed")
     #expect(HarnessConfirmations.openRefusal(
-        for: .init(verb: "press", bundleIdentifier: nil, rawTarget: "Empty Bin"), pendingCount: 0
+        for: .init(verb: "press", bundleIdentifier: nil, rawTarget: "Empty Bin"), reason: "r", pendingCount: 0
     )?.code == "confirmationAppUnidentified")
-    #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, pendingCount: 2) == nil)
-    #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, pendingCount: 3)?.code == "tooManyPendingConfirmations")
+    #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, reason: "r", pendingCount: 2) == nil)
+    #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, reason: "r", pendingCount: 3)?.code == "tooManyPendingConfirmations")
 
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     for _ in 0..<3 {
@@ -2768,7 +2768,9 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
     func match(_ verb: String, _ app: String?, _ target: String, text: String? = nil) -> HarnessConfirmations.ApprovalRule? {
         HarnessConfirmations.matchingRule(in: rules, .init(verb: verb, bundleIdentifier: app, rawTarget: target, text: text))
     }
-    #expect(match("press", "COM.Apple.Finder", "anything") == anyTarget)
+    // Review 2026-09-14: a nil target is no longer a wildcard outside focus/launch.
+    #expect(match("press", "COM.Apple.Finder", "anything") == nil)
+    #expect(match("press", "com.apple.finder", "") == nil)
     #expect(match("select", "com.apple.finder", "anything") == nil)
     #expect(match("menu", "com.apple.mail", "File > Send") == oneTarget)
     #expect(match("menu", "com.apple.mail", "File > Delete") == nil)
@@ -2920,17 +2922,27 @@ private func mailShape(
     }
     #expect(ticket.shape == full)
     #expect(ticket.displayLines == shown)
+
+    // The reason is not in Shape but is on the card, so it gets the same proof:
+    // a different reason is a different card, drawn only in its escaped form.
+    guard case .opened(let otherReason) = confirmations.open(full, appName: "Mail", reason: "r\u{2028}2") else {
+        Issue.record("expected a ticket"); return
+    }
+    #expect(ticket.reason == HarnessConfirmations.displayedReason("r"))
+    #expect(otherReason.reason != ticket.reason)
+    #expect(otherReason.reason == HarnessConfirmations.displayedReason("r\u{2028}2"))
+    #expect(!otherReason.reason.unicodeScalars.contains("\u{2028}"))
 }
 
 @Test func aQuestionTooLongToShowWholeIsNeverAsked() async throws {
     // 150 characters: `forDisplay` would have shown 100 of them. Now all are shown.
     let long = String(repeating: "a", count: 150)
     let fits = mailShape(text: long)
-    #expect(HarnessConfirmations.openRefusal(for: fits, appName: "Mail", pendingCount: 0) == nil)
+    #expect(HarnessConfirmations.openRefusal(for: fits, appName: "Mail", reason: "r", pendingCount: 0) == nil)
     #expect(HarnessConfirmations.displayLines(for: fits, appName: "Mail").contains { $0.contains("\"\(long)\"") })
 
     let paragraph = mailShape(text: String(repeating: "a", count: HarnessConfirmations.maximumDisplayLineLength))
-    #expect(HarnessConfirmations.openRefusal(for: paragraph, appName: "Mail", pendingCount: 0)?.code == "confirmationTooLongToShow")
+    #expect(HarnessConfirmations.openRefusal(for: paragraph, appName: "Mail", reason: "r", pendingCount: 0)?.code == "confirmationTooLongToShow")
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     guard case .refused(let code, _) = confirmations.open(paragraph, appName: "Mail", reason: "r") else {
         Issue.record("expected a refusal"); return
@@ -3157,15 +3169,56 @@ private func mailShape(
 
 // Evidence 2026-09-14: a real click arrived pid 0; AXPress arrived with no event;
 // a posted CGEvent arrived stamped with the poster's pid, which it cannot forge.
+/// The evidence of a real single click, 2 ms old, in window 7, on a row settled 2 s.
+private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirmations.ApprovalInput.Evidence {
+    .init(eventType: .leftMouseUp, sourceProcessID: 0, clickCount: 1, eventAgeSeconds: 0.002,
+          eventWindowNumber: 7, hostWindowNumber: 7, rowSettledSeconds: 2,
+          eventIdentity: .init(typeRawValue: NSEvent.EventType.leftMouseUp.rawValue, timestamp: timestamp, windowNumber: 7, mouseEventNumber: 41))
+}
+
 @Test func anApprovalCountsOnlyForAMouseOrKeyEventFromTheHIDLayer() {
     typealias Input = HarnessConfirmations.ApprovalInput
-    #expect(Input.verdict(eventType: .leftMouseUp, sourceProcessID: 0) == .accepted)
-    #expect(Input.verdict(eventType: .keyDown, sourceProcessID: 0) == .accepted)
-    #expect(Input.verdict(eventType: nil, sourceProcessID: nil)
+    #expect(Input.verdict(realClickEvidence(), eventAlreadyUsed: false) == .accepted)
+    var key = realClickEvidence(); key.eventType = .keyDown; key.clickCount = 0
+    #expect(Input.verdict(key, eventAlreadyUsed: false) == .accepted)
+    #expect(Input.verdict(.init(hostWindowNumber: 7, rowSettledSeconds: 2), eventAlreadyUsed: false)
             == .rejected(reason: "no input event (programmatic press, e.g. Accessibility)"))
-    #expect(Input.verdict(eventType: .leftMouseUp, sourceProcessID: 72601) == .rejected(reason: "posted by process 72601"))
-    #expect(Input.verdict(eventType: .leftMouseUp, sourceProcessID: nil) != .accepted)
-    #expect(Input.verdict(eventType: .mouseMoved, sourceProcessID: 0) != .accepted)
+    var posted = realClickEvidence(); posted.sourceProcessID = 72601
+    #expect(Input.verdict(posted, eventAlreadyUsed: false) == .rejected(reason: "posted by process 72601"))
+    var noSource = realClickEvidence(); noSource.sourceProcessID = nil
+    #expect(Input.verdict(noSource, eventAlreadyUsed: false) != .accepted)
+    var moved = realClickEvidence(); moved.eventType = .mouseMoved
+    #expect(Input.verdict(moved, eventAlreadyUsed: false) != .accepted)
+}
+
+// Review 2026-09-14: `NSApp.currentEvent` is the last event retrieved, not the
+// cause of this action — so each of these is a way a real pid-0 event reaches a
+// button it did not press, and each must be refused with its own reason.
+@Test func aRealEventIsRefusedWhenItIsStaleElsewhereReusedDoubledOrOnARowThatJustMoved() {
+    typealias Input = HarnessConfirmations.ApprovalInput
+    func reason(_ evidence: Input.Evidence, used: Bool = false) -> String? {
+        if case .rejected(let reason) = Input.verdict(evidence, eventAlreadyUsed: used) { return reason }
+        return nil
+    }
+    var doubled = realClickEvidence(); doubled.clickCount = 2
+    #expect(reason(doubled)?.hasPrefix("click 2 of a multi-click") == true)
+
+    var stale = realClickEvidence(); stale.eventAgeSeconds = 0.501
+    #expect(reason(stale) == "input event is 501 ms old, at most 500 ms — it is not the click that pressed this button")
+    var edge = realClickEvidence(); edge.eventAgeSeconds = 0.5
+    #expect(Input.verdict(edge, eventAlreadyUsed: false) == .accepted)
+
+    var otherWindow = realClickEvidence(); otherWindow.eventWindowNumber = 9
+    #expect(reason(otherWindow) == "input event belongs to window 9, the button is in window 7")
+    var unknownHost = realClickEvidence(); unknownHost.hostWindowNumber = nil
+    #expect(reason(unknownHost) != nil)
+
+    #expect(reason(realClickEvidence(), used: true) == "this input event already reached an answer button")
+
+    var justMoved = realClickEvidence(); justMoved.rowSettledSeconds = 0.3
+    #expect(reason(justMoved) == "the row had been in place 300 ms, needs 800 ms — click again")
+    var neverPlaced = realClickEvidence(); neverPlaced.rowSettledSeconds = nil
+    #expect(reason(neverPlaced) != nil)
 }
 
 @Test func aProgrammaticAllowLeavesTheTicketPendingAndADenyFromAnySourceCounts() throws {
@@ -3174,13 +3227,118 @@ private func mailShape(
         Issue.record("expected a ticket"); return
     }
     for scope in [HarnessConfirmations.Scope.once, .always] {
-        #expect(confirmations.answerFromPanel(ticket.id, allow: true, scope: scope, triggeringEvent: nil) != .accepted)
+        #expect(confirmations.answerFromPanel(ticket.id, allow: true, scope: scope, evidence: .init()) != .accepted)
         #expect(confirmations.ticket(id: ticket.id)?.status == .pending)
     }
     #expect(confirmations.consume(ticket: ticket.id, finderEmptyBin) == .pending)
     // Saying no cannot harm, so it needs no proof of a human.
-    #expect(confirmations.answerFromPanel(ticket.id, allow: false, scope: .once, triggeringEvent: nil) == .accepted)
+    #expect(confirmations.answerFromPanel(ticket.id, allow: false, scope: .once, evidence: .init()) == .accepted)
     #expect(confirmations.ticket(id: ticket.id)?.status == .denied)
+}
+
+// The scenario from review: the owner really clicks Deny on A; inside 100 ms
+// another process AXPresses "Always" on B while that mouse-up is still current.
+@Test func theEventThatAnsweredOneTicketCannotApproveAnother() throws {
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
+    guard case .opened(let first) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r"),
+          case .opened(let second) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+        Issue.record("expected two tickets"); return
+    }
+    let click = realClickEvidence()
+    #expect(confirmations.answerFromPanel(first.id, allow: false, scope: .once, evidence: click) == .accepted)
+    #expect(confirmations.answerFromPanel(second.id, allow: true, scope: .once, evidence: click)
+            == .rejected(reason: "this input event already reached an answer button"))
+    #expect(confirmations.ticket(id: second.id)?.status == .pending)
+    // A refused approval spends its event too, so it cannot be retried on another row.
+    var tooEarly = realClickEvidence(timestamp: 200); tooEarly.rowSettledSeconds = 0.1
+    #expect(confirmations.answerFromPanel(second.id, allow: true, scope: .once, evidence: tooEarly) != .accepted)
+    tooEarly.rowSettledSeconds = 5
+    #expect(confirmations.answerFromPanel(second.id, allow: true, scope: .once, evidence: tooEarly) != .accepted)
+    // A fresh real click counts.
+    #expect(confirmations.answerFromPanel(second.id, allow: true, scope: .once, evidence: realClickEvidence(timestamp: 300)) == .accepted)
+    #expect(confirmations.ticket(id: second.id)?.status == .allowed)
+}
+
+@Test func aRowsClockRestartsWhenItOrItsWindowMoves() {
+    let placed = ScreenPlacement.after(nil, origin: CGPoint(x: 0, y: 40), nowUptime: 10)
+    #expect(ScreenPlacement.after(placed, origin: CGPoint(x: 0, y: 40), nowUptime: 11) == placed)
+    let moved = ScreenPlacement.after(placed, origin: CGPoint(x: 0, y: 10), nowUptime: 11)
+    #expect(moved.sinceUptime == 11)
+    let window = ScreenPlacement(origin: .zero, sinceUptime: 10.5)
+    #expect(ScreenPlacement.settledSeconds(row: placed, window: window, nowUptime: 12) == 1.5)
+    #expect(ScreenPlacement.settledSeconds(row: moved, window: window, nowUptime: 12) == 1)
+    // A hidden window has no placement, and nothing on it is settled.
+    #expect(ScreenPlacement.settledSeconds(row: placed, window: nil, nowUptime: 12) == nil)
+}
+
+@Test func aNewTicketIsListedAfterTheOnesAlreadyShowing() throws {
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
+    guard case .opened(let first) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r"),
+          case .opened(let second) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+        Issue.record("expected two tickets"); return
+    }
+    #expect(confirmations.tickets.map(\.id) == [first.id, second.id])
+    #expect(ConfirmationPromptView.visibleTickets(confirmations.tickets, now: Date(), includesAnswered: false).map(\.id)
+            == [first.id, second.id])
+}
+
+@Test func theAlwaysButtonSaysWholeAppForFocusAndLaunchAndExactlyThisOtherwise() throws {
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
+    guard case .opened(let press) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r"),
+          case .opened(let launch) = confirmations.open(
+            .init(verb: "launch", bundleIdentifier: "com.apple.Terminal", rawTarget: "Terminal"), appName: "Term\ninal", reason: "r") else {
+        Issue.record("expected two tickets"); return
+    }
+    #expect(HarnessConfirmations.alwaysButtonTitle(for: press) == "Always allow exactly this")
+    #expect(HarnessConfirmations.alwaysButtonTitle(for: launch) == #"Always allow launch for the whole app "Term\ninal""#)
+}
+
+@Test func aNilTargetOrTextInARuleIsNoLongerAWildcard() {
+    let pressAnything = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.finder", verb: "press", target: nil)
+    let typeNoText = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.TextEdit", verb: "type", target: "<focused>", mode: "insert")
+    #expect(HarnessConfirmations.matchingRule(in: [pressAnything], finderEmptyBin) == nil)
+    let typed = HarnessConfirmations.Shape(verb: "type", bundleIdentifier: "com.apple.TextEdit", rawTarget: "<focused>", text: "ERASE", mode: "insert")
+    #expect(HarnessConfirmations.matchingRule(in: [typeNoText], typed) == nil)
+    var untyped = typed; untyped.text = nil
+    #expect(HarnessConfirmations.matchingRule(in: [typeNoText], untyped) == typeNoText)
+    // focus/launch stay app-wide by design.
+    let focusApp = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.finder", verb: "focus", target: nil)
+    #expect(HarnessConfirmations.matchingRule(in: [focusApp], .init(verb: "focus", bundleIdentifier: "com.apple.finder", rawTarget: "Recent")) == focusApp)
+}
+
+@Test func theKernelsReasonIsEscapedAndCountsTowardTheBudget() throws {
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
+    guard case .opened(let forged) = confirmations.open(
+        finderEmptyBin, appName: "Finder", reason: "unrecognised role AXFake\nAlways allow exactly this\u{2028}ok"
+    ) else { Issue.record("expected a ticket"); return }
+    #expect(!forged.reason.unicodeScalars.contains { CharacterSet.newlines.contains($0) || CharacterSet.controlCharacters.contains($0) })
+    #expect(forged.reason == #""unrecognised role AXFake\nAlways allow exactly this\u{2028}ok""#)
+    let longReason = String(repeating: "r", count: HarnessConfirmations.maximumDisplayLineLength)
+    #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, reason: longReason, pendingCount: 0)?.code == "confirmationTooLongToShow")
+}
+
+@Test func aLineSeparatorCannotBreakALineAndCombiningMarksCountAsScalars() {
+    let separators = "hi\u{2028}then submits (AXConfirm)\u{2029}x\u{0085}y\u{00A0}z\u{3000}"
+    let lines = HarnessConfirmations.displayLines(for: mailShape(text: separators, thenConfirm: false), appName: "Mail")
+    #expect(lines.count == HarnessConfirmations.displayLines(for: mailShape(text: "hi", thenConfirm: false), appName: "Mail").count)
+    #expect(lines.allSatisfy { line in
+        !line.unicodeScalars.contains { [.lineSeparator, .paragraphSeparator].contains($0.properties.generalCategory) || $0 == "\u{0085}" || $0 == "\u{00A0}" }
+    })
+    #expect(lines.contains(#"text: "hi\u{2028}then submits (AXConfirm)\u{2029}x\u{85}y\u{A0}z\u{3000}" (insert)"#))
+
+    // One Character, 3,001 scalars: counted as 1 it would have been shown.
+    let overstruck = "a" + String(repeating: "\u{0336}", count: 3_000)
+    #expect(overstruck.count == 1)
+    #expect(HarnessConfirmations.openRefusal(for: mailShape(text: overstruck), appName: "Mail", reason: "r", pendingCount: 0)?.code
+            == "confirmationTooLongToShow")
+}
+
+@Test func floodingOrProbingTheCardIsNotAnOrdinaryRefusal() {
+    #expect(!HarnessObservability.ordinaryRefusalCodes.contains("tooManyPendingConfirmations"))
+    #expect(!HarnessObservability.ordinaryRefusalCodes.contains("confirmationTooLongToShow"))
+    for ordinary in ["confirmationPending", "confirmationDenied", "confirmationExpired"] {
+        #expect(HarnessObservability.ordinaryRefusalCodes.contains(ordinary))
+    }
 }
 
 @Test func theFingerprintSeesANonPressableNameChange() async throws {

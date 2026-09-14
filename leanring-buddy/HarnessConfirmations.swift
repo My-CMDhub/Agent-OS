@@ -40,6 +40,14 @@ final class HarnessConfirmations: ObservableObject {
     /// The limit, stated so nobody reads more into it: pid 0 means "came through
     /// the HID layer", not "a human". A virtual HID driver (Karabiner) and remote
     /// screen control arrive pid 0 too. The highest-risk tier needs Touch ID.
+    ///
+    /// Review 2026-09-14: pid 0 alone is not enough, because `NSApp.currentEvent`
+    /// is documented as the last event the app RETRIEVED, not the one that caused
+    /// this action. An `AXPress` on "Always" landing while the owner's real
+    /// mouse-up on another button is still current would inherit that event. So
+    /// an approval also needs the event to be fresh, to belong to the window the
+    /// button is in, never to have reached an answer button before, to be a single
+    /// click, and to land on a row that has not just moved under the pointer.
     enum ApprovalInput {
         enum Verdict: Equatable {
             case accepted
@@ -50,25 +58,100 @@ final class HarnessConfirmations: ObservableObject {
             .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
             .otherMouseDown, .otherMouseUp, .keyDown, .keyUp
         ]
+        /// `NSEvent.clickCount` raises for any other type, so it is read only for these.
+        static let mouseButtonEventTypes: Set<NSEvent.EventType> = [
+            .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp
+        ]
 
-        static func verdict(eventType: NSEvent.EventType?, sourceProcessID: Int64?) -> Verdict {
-            guard let eventType else {
+        /// Measured 2026-09-14: the owner's real clicks were 1.0-3.4 ms old when
+        /// the Button action ran. 500 ms is two orders of magnitude of headroom
+        /// for a busy main thread while staying far shorter than the gap between a
+        /// real click and a scripted press that waits to reuse it. A click that
+        /// queued behind a multi-second harness request is refused and the owner
+        /// clicks again — cheaper than widening the window a stale event can ride.
+        static let maximumEventAgeSeconds: TimeInterval = 0.5
+        /// A row must sit still this long before its buttons count. Above the
+        /// default double-click interval (0.5 s), so the second click of a slow
+        /// double-click cannot approve a row that slid in under the first; and
+        /// below the time it takes to read a card's lines and aim, so a human who
+        /// actually read the question never meets it.
+        static let minimumRowSettledSeconds: TimeInterval = 0.8
+
+        /// What makes one `NSEvent` itself and not another. Every field is safe to
+        /// read on any event type; the mouse event number is a CG field, 0 for keys.
+        struct EventIdentity: Hashable {
+            let typeRawValue: UInt
+            let timestamp: TimeInterval
+            let windowNumber: Int
+            let mouseEventNumber: Int64
+        }
+
+        /// Everything the verdict looks at, gathered at the moment of the press.
+        /// Pure data, so every rejection is testable without a real event.
+        struct Evidence: Equatable {
+            var eventType: NSEvent.EventType? = nil
+            var sourceProcessID: Int64? = nil
+            /// 0 for a key event.
+            var clickCount: Int = 0
+            var eventAgeSeconds: TimeInterval? = nil
+            var eventWindowNumber: Int? = nil
+            /// The window the pressed button is drawn in (the card or the panel).
+            var hostWindowNumber: Int? = nil
+            /// How long the row AND its window have been in their current place.
+            var rowSettledSeconds: TimeInterval? = nil
+            var eventIdentity: EventIdentity? = nil
+
+            /// Reads a live event. Both clocks are seconds since boot:
+            /// `NSEvent.timestamp` and `ProcessInfo.systemUptime`.
+            static func gathered(from event: NSEvent?, hostWindowNumber: Int?, rowSettledSeconds: TimeInterval?,
+                                 nowUptime: TimeInterval) -> Evidence {
+                var evidence = Evidence(hostWindowNumber: hostWindowNumber, rowSettledSeconds: rowSettledSeconds)
+                guard let event else { return evidence }
+                let cgEvent = event.cgEvent
+                evidence.eventType = event.type
+                evidence.sourceProcessID = cgEvent?.getIntegerValueField(.eventSourceUnixProcessID)
+                evidence.clickCount = mouseButtonEventTypes.contains(event.type) ? event.clickCount : 0
+                evidence.eventAgeSeconds = nowUptime - event.timestamp
+                evidence.eventWindowNumber = event.windowNumber
+                evidence.eventIdentity = EventIdentity(
+                    typeRawValue: event.type.rawValue, timestamp: event.timestamp, windowNumber: event.windowNumber,
+                    mouseEventNumber: cgEvent?.getIntegerValueField(.mouseEventNumber) ?? 0
+                )
+                return evidence
+            }
+        }
+
+        static func verdict(_ evidence: Evidence, eventAlreadyUsed: Bool) -> Verdict {
+            guard let eventType = evidence.eventType else {
                 return .rejected(reason: "no input event (programmatic press, e.g. Accessibility)")
             }
             guard humanInputEventTypes.contains(eventType) else {
                 return .rejected(reason: "event type \(eventType.rawValue) is not a mouse button or key")
             }
-            guard let sourceProcessID else {
+            guard let sourceProcessID = evidence.sourceProcessID else {
                 return .rejected(reason: "event carries no source process")
             }
             guard sourceProcessID == 0 else {
                 return .rejected(reason: "posted by process \(sourceProcessID)")
             }
+            guard evidence.clickCount <= 1 else {
+                return .rejected(reason: "click \(evidence.clickCount) of a multi-click — it may have landed on a row that moved under the first")
+            }
+            guard let age = evidence.eventAgeSeconds, age <= maximumEventAgeSeconds else {
+                let shown = evidence.eventAgeSeconds.map { "\(Int($0 * 1000)) ms" } ?? "of unknown age"
+                return .rejected(reason: "input event is \(shown) old, at most \(Int(maximumEventAgeSeconds * 1000)) ms — it is not the click that pressed this button")
+            }
+            guard let host = evidence.hostWindowNumber, evidence.eventWindowNumber == host else {
+                return .rejected(reason: "input event belongs to window \(evidence.eventWindowNumber.map(String.init) ?? "none"), the button is in window \(evidence.hostWindowNumber.map(String.init) ?? "unknown")")
+            }
+            guard !eventAlreadyUsed else {
+                return .rejected(reason: "this input event already reached an answer button")
+            }
+            guard let settled = evidence.rowSettledSeconds, settled >= minimumRowSettledSeconds else {
+                let shown = evidence.rowSettledSeconds.map { "\(Int($0 * 1000)) ms" } ?? "an unknown time"
+                return .rejected(reason: "the row had been in place \(shown), needs \(Int(minimumRowSettledSeconds * 1000)) ms — click again")
+            }
             return .accepted
-        }
-
-        static func verdict(for event: NSEvent?) -> Verdict {
-            verdict(eventType: event?.type, sourceProcessID: event?.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID))
         }
     }
 
@@ -92,6 +175,9 @@ final class HarnessConfirmations: ObservableObject {
         var thenConfirm: Bool = false
         let appName: String?
         let bundleIdentifier: String
+        /// `displayedReason(_:)` of the kernel's reason, escaped at `open`. The
+        /// kernel's reasons embed app-written strings (`unrecognised role <role>`),
+        /// so the raw reason could forge a line under the question like any name.
         let reason: String
         var status: Status
         var answeredAt: Date?
@@ -140,9 +226,9 @@ final class HarnessConfirmations: ObservableObject {
         case refused(code: String, message: String)
     }
 
-    /// nil target = any target for that verb in that app; nil text = any text.
-    /// The panel only ever creates a nil target for `focus`/`launch`; the
-    /// wildcards remain for matching. The qualifiers below
+    /// nil target is app-wide for `focus`/`launch` — the only rules the panel
+    /// creates without one — and matches nothing for any other verb; nil text
+    /// means "the approved request had no text". The qualifiers below
     /// are NOT wildcards: nil means "the approved request had none". Before
     /// 2026-09-14 a rule kept only app+verb+target+text, so "Always press Delete
     /// within Drafts" allowed Delete within any container — the defect the
@@ -178,7 +264,18 @@ final class HarnessConfirmations: ObservableObject {
     /// the owner will approve without reading.
     static let maximumDisplayLineLength = 300
 
-    @Published private(set) var tickets: [Ticket] = []   // newest first
+    /// Oldest first. Review 2026-09-14: newest-first inserted every new ticket
+    /// at the top, so a ticket opened while the owner was mid-click pushed the
+    /// row under the pointer down and put a different ticket's button there.
+    /// Appending never moves an existing row.
+    @Published private(set) var tickets: [Ticket] = []
+    /// Identities of every input event that reached an answer button, whatever
+    /// the verdict. An event is spent the first time it arrives: a real click on
+    /// Deny, or on an Allow refused as too early, must not stay current for a
+    /// scripted press on another ticket to reuse. Only events younger than
+    /// `maximumEventAgeSeconds` can pass anyway, so a short list is the whole set.
+    private var inputEventsThatReachedAnAnswerButton: [ApprovalInput.EventIdentity] = []
+    private static let rememberedInputEventCount = 64
     /// The rules as last read from the keychain, for the panel's "Always rules"
     /// list. The gate never uses this copy — `rule(for:)` re-reads every time.
     @Published private(set) var alwaysRules: [ApprovalRule] = []
@@ -279,17 +376,34 @@ final class HarnessConfirmations: ObservableObject {
         }
     }
 
+    /// The reason line exactly as the card draws it.
+    static func displayedReason(_ reason: String) -> String {
+        UntrustedText(reason).forDisplayInFull
+    }
+
+    /// The "Always" button's words. For `focus`/`launch` the rule `rule(for:)`
+    /// creates covers the whole app, so calling it "exactly this" would be the
+    /// one line on the card that is not true. `ticket.appName` is already escaped.
+    static func alwaysButtonTitle(for ticket: Ticket) -> String {
+        guard appWideRuleVerbs.contains(ticket.verb) else { return "Always allow exactly this" }
+        return "Always allow \(ticket.verb) for the whole app \(ticket.appName ?? "(unnamed app)")"
+    }
+
     /// Why a ticket may not be opened for this shape, or nil.
-    static func openRefusal(for shape: Shape, appName: String? = nil, pendingCount: Int) -> (code: String, message: String)? {
+    static func openRefusal(for shape: Shape, appName: String? = nil, reason: String, pendingCount: Int) -> (code: String, message: String)? {
         if shape.rawTarget.isEmpty {
             return ("confirmationTargetUnnamed", "the request names no target, so a ticket for it would authorise anything")
         }
         if (shape.bundleIdentifier ?? "").isEmpty {
             return ("confirmationAppUnidentified", "the application has no bundle identifier, so a ticket could not be scoped to it")
         }
-        if let longest = displayLines(for: shape, appName: appName).map(\.count).max(), longest > maximumDisplayLineLength {
+        // Unicode scalars, not Characters (review 2026-09-14): "a" followed by
+        // 3,000 combining marks is ONE Character, yet draws a column of marks over
+        // the lines around it. Scalars bound what is actually drawn.
+        let shownLines = displayLines(for: shape, appName: appName) + [displayedReason(reason)]
+        if let longest = shownLines.map(\.unicodeScalars.count).max(), longest > maximumDisplayLineLength {
             return ("confirmationTooLongToShow",
-                    "a line of the question is \(longest) characters and the panel shows at most \(maximumDisplayLineLength) in full — the owner cannot approve what they cannot read")
+                    "a line of the question is \(longest) unicode scalars and the panel shows at most \(maximumDisplayLineLength) in full — the owner cannot approve what they cannot read")
         }
         if pendingCount >= maximumPendingTickets {
             return ("tooManyPendingConfirmations",
@@ -298,17 +412,23 @@ final class HarnessConfirmations: ObservableObject {
         return nil
     }
 
-    /// Bundle id case-insensitive, verb exact, target and text exact when the
-    /// rule has them, and every qualifier exact — through the same
+    /// Bundle id case-insensitive, everything else exact — through the same
     /// `mismatchedField` a ticket uses. `focus`/`launch` stay app-wide.
+    ///
+    /// Review 2026-09-14: a nil `target` or `text` used to mean "anything", a
+    /// wildcard the panel no longer creates but still honoured. Now nil text
+    /// matches only a request with no text, and a nil target matches nothing: a
+    /// request's target is never nil, and an empty one is the unnamed target a
+    /// ticket is refused for (`confirmationTargetUnnamed`).
     static func matchingRule(in rules: [ApprovalRule], _ shape: Shape) -> ApprovalRule? {
         rules.first { rule in
             if appWideRuleVerbs.contains(rule.verb), rule.target == nil {
                 return rule.verb == shape.verb && sameBundleIdentifier(rule.bundleIdentifier, shape.bundleIdentifier)
             }
+            guard let target = rule.target else { return false }
             let approved = Shape(
                 verb: rule.verb, bundleIdentifier: rule.bundleIdentifier,
-                rawTarget: rule.target ?? shape.rawTarget, text: rule.text ?? shape.text, mode: rule.mode,
+                rawTarget: target, text: rule.text, mode: rule.mode,
                 withinNamed: rule.withinNamed, nearPoint: rule.nearPoint, role: rule.role,
                 thenConfirm: rule.thenConfirm ?? false
             )
@@ -354,7 +474,7 @@ final class HarnessConfirmations: ObservableObject {
     func open(_ shape: Shape, appName: String?, reason: String) -> OpenResult {
         let now = Date()
         let pending = pendingCount(now: now)
-        if let refusal = Self.openRefusal(for: shape, appName: appName, pendingCount: pending) {
+        if let refusal = Self.openRefusal(for: shape, appName: appName, reason: reason, pendingCount: pending) {
             return .refused(code: refusal.code, message: refusal.message)
         }
         let ticket = Ticket(
@@ -363,13 +483,13 @@ final class HarnessConfirmations: ObservableObject {
             text: shape.text, mode: shape.mode,
             withinNamed: shape.withinNamed, nearPoint: shape.nearPoint, role: shape.role, thenConfirm: shape.thenConfirm,
             appName: appName.map { UntrustedText($0).forDisplay },
-            bundleIdentifier: shape.bundleIdentifier ?? "", reason: reason, status: .pending,
+            bundleIdentifier: shape.bundleIdentifier ?? "", reason: Self.displayedReason(reason), status: .pending,
             displayLines: Self.displayLines(for: shape, appName: appName)
         )
-        tickets.insert(ticket, at: 0)
+        tickets.append(ticket)
         // At most 20: evict the oldest answered/expired first, never a pending one.
         while tickets.count > 20,
-              let index = tickets.lastIndex(where: { Self.status(of: $0, now: now) != .pending }) {
+              let index = tickets.firstIndex(where: { Self.status(of: $0, now: now) != .pending }) {
             tickets.remove(at: index)
         }
         // Nothing is shown from here: `ConfirmationCardWindowManager` watches
@@ -378,12 +498,19 @@ final class HarnessConfirmations: ObservableObject {
     }
 
     /// The ONE entry point for a button the owner pressed in Clicky's UI. An
-    /// approval counts only when the triggering event came through the HID
-    /// layer (`ApprovalInput`); anything else leaves the ticket pending. Deny is
-    /// accepted from any source — saying no cannot harm.
+    /// approval counts only when `ApprovalInput.verdict` accepts the evidence;
+    /// anything else leaves the ticket pending. Deny is accepted from any source
+    /// — saying no cannot harm — but still spends the event it arrived with.
     @discardableResult
-    func answerFromPanel(_ id: String, allow: Bool, scope: Scope, triggeringEvent: NSEvent?) -> ApprovalInput.Verdict {
-        let verdict: ApprovalInput.Verdict = allow ? ApprovalInput.verdict(for: triggeringEvent) : .accepted
+    func answerFromPanel(_ id: String, allow: Bool, scope: Scope, evidence: ApprovalInput.Evidence) -> ApprovalInput.Verdict {
+        let eventAlreadyUsed = evidence.eventIdentity.map { inputEventsThatReachedAnAnswerButton.contains($0) } ?? false
+        if let identity = evidence.eventIdentity, !eventAlreadyUsed {
+            inputEventsThatReachedAnAnswerButton.append(identity)
+            if inputEventsThatReachedAnAnswerButton.count > Self.rememberedInputEventCount {
+                inputEventsThatReachedAnAnswerButton.removeFirst()
+            }
+        }
+        let verdict: ApprovalInput.Verdict = allow ? ApprovalInput.verdict(evidence, eventAlreadyUsed: eventAlreadyUsed) : .accepted
         if verdict == .accepted { answer(id, allow: allow, scope: scope) }
         return verdict
     }

@@ -85,7 +85,18 @@ struct UntrustedText: Equatable, Hashable, CustomStringConvertible {
             case "\r": result += "\\r"
             case "\t": result += "\\t"
             default:
-                if CharacterSet.controlCharacters.contains(scalar) {
+                // Review 2026-09-14: a newline is not the only line break a text
+                // view honours. U+2028 (Zl) and U+2029 (Zp) end a line in SwiftUI
+                // `Text` exactly like "\n" and are not control characters, so an
+                // app-written name could still forge a second displayed line.
+                // U+0085 (NEL) is a Cc and already caught by `controlCharacters`.
+                // Non-space Zs (U+00A0, U+2000-200A, U+3000...) draw as a blank
+                // indistinguishable from " " — escaping them keeps two different
+                // raw strings from looking identical in a confirmation.
+                let category = scalar.properties.generalCategory
+                if CharacterSet.controlCharacters.contains(scalar)
+                    || category == .lineSeparator || category == .paragraphSeparator
+                    || (category == .spaceSeparator && scalar != " ") {
                     result += String(format: "\\u{%02X}", scalar.value)
                 } else {
                     result.unicodeScalars.append(scalar)
