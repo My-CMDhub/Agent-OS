@@ -69,20 +69,26 @@ final class CompanionManager: ObservableObject {
     // streamingResponseText, so no separate response overlay manager is needed.
 
     /// Base URL for the Cloudflare Worker proxy. All API requests route
-    /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
+    /// through this so keys never ship in the app binary. Read from
+    /// UserDefaults (`WorkerConfiguration`), falling back to the placeholder.
+    static var workerBaseURL: String { WorkerConfiguration.baseURL }
 
-    private lazy var claudeAPI: ClaudeAPI = {
+    // Readable (not settable) so `--voice-latency-probe` measures these exact
+    // instances rather than a second configuration that could drift.
+    private(set) lazy var claudeAPI: ClaudeAPI = {
         return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
     }()
 
-    private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
+    private(set) lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
         return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
     }()
 
     /// Conversation history so Claude remembers prior exchanges within a session.
     /// Each entry is the user's transcript and Claude's response.
     private var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
+
+    /// Measurement only: one voice-latency.log line per utterance, timings and counts, never words.
+    private let voiceLatencyRecorder = VoiceLatencyRecorder()
 
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
@@ -477,6 +483,13 @@ final class CompanionManager: ObservableObject {
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
 
+            voiceLatencyRecorder.beginUtterance(
+                source: "live",
+                transcriptionProvider: buddyDictationManager.transcriptionProviderDisplayName,
+                model: selectedModel
+            )
+            voiceLatencyRecorder.mark(.shortcutPressed)
+
             // Cancel any pending transient hide so the overlay stays visible
             transientHideTask?.cancel()
             transientHideTask = nil
@@ -518,6 +531,10 @@ final class CompanionManager: ObservableObject {
                         // Partial transcripts are hidden (waveform-only UI)
                     },
                     submitDraftText: { [weak self] finalTranscript in
+                        self?.voiceLatencyRecorder.update { utterance in
+                            utterance.mark(.finalTranscriptReceived)
+                            utterance.countTranscript(finalTranscript)
+                        }
                         self?.lastTranscript = finalTranscript
                         print("🗣️ Companion received transcript: \(finalTranscript)")
                         ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
@@ -531,6 +548,7 @@ final class CompanionManager: ObservableObject {
             // Without this, a quick press-and-release drops the release event and
             // leaves the waveform overlay stuck on screen indefinitely.
             ClickyAnalytics.trackPushToTalkReleased()
+            voiceLatencyRecorder.mark(.shortcutReleased)
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
@@ -541,7 +559,8 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Companion Prompt
 
-    private static let companionVoiceResponseSystemPrompt = """
+    /// Not private so `--voice-latency-probe` sends the same prompt the voice path does.
+    static let companionVoiceResponseSystemPrompt = """
     you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     rules:
@@ -586,6 +605,9 @@ final class CompanionManager: ObservableObject {
     private func sendTranscriptToClaudeWithScreenshot(transcript: String) {
         currentResponseTask?.cancel()
         elevenLabsTTSClient.stopPlayback()
+        // Captured now, so a cancelled task unwinding after the next press
+        // cannot write into that press's utterance.
+        let latencyUtteranceID = voiceLatencyRecorder.openUtteranceID
 
         currentResponseTask = Task {
             // Stay in processing (spinner) state — no streaming text displayed
@@ -593,7 +615,13 @@ final class CompanionManager: ObservableObject {
 
             do {
                 // Capture all connected screens so the AI has full context
+                voiceLatencyRecorder.mark(.screenCaptureStarted, utteranceID: latencyUtteranceID)
                 let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                voiceLatencyRecorder.update(utteranceID: latencyUtteranceID) { utterance in
+                    utterance.mark(.screenCaptureFinished)
+                    utterance.imageCount = screenCaptures.count
+                    utterance.totalImageBytes = screenCaptures.reduce(0) { $0 + $1.imageData.count }
+                }
 
                 guard !Task.isCancelled else { return }
 
@@ -610,21 +638,28 @@ final class CompanionManager: ObservableObject {
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
+                voiceLatencyRecorder.mark(.claudeRequestStarted, utteranceID: latencyUtteranceID)
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: labeledImages,
                     systemPrompt: Self.companionVoiceResponseSystemPrompt,
                     conversationHistory: historyForAPI,
                     userPrompt: transcript,
-                    onTextChunk: { _ in
+                    onTextChunk: { [voiceLatencyRecorder] _ in
                         // No streaming text display — spinner stays until TTS plays
+                        voiceLatencyRecorder.mark(.firstClaudeTextChunk, utteranceID: latencyUtteranceID)
                     }
                 )
+                voiceLatencyRecorder.update(utteranceID: latencyUtteranceID) { utterance in
+                    utterance.mark(.claudeResponseFinished)
+                    utterance.countResponse(fullResponseText)
+                }
 
                 guard !Task.isCancelled else { return }
 
                 // Parse the [POINT:...] tag from Claude's response
                 let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
                 let spokenText = parseResult.spokenText
+                voiceLatencyRecorder.update(utteranceID: latencyUtteranceID) { $0.countSpokenText(spokenText) }
 
                 // Handle element pointing if Claude returned coordinates.
                 // Switch to idle BEFORE setting the location so the triangle
@@ -701,18 +736,25 @@ final class CompanionManager: ObservableObject {
                 // until the audio actually starts playing, then switch to responding.
                 if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     do {
+                        voiceLatencyRecorder.mark(.ttsRequestStarted, utteranceID: latencyUtteranceID)
                         try await elevenLabsTTSClient.speakText(spokenText)
                         // speakText returns after player.play() — audio is now playing
+                        voiceLatencyRecorder.mark(.playbackStarted, utteranceID: latencyUtteranceID)
                         voiceState = .responding
                     } catch {
+                        voiceLatencyRecorder.finish(latencyUtteranceID, outcome: .error(kind: "tts " + VoiceLatencyRecorder.errorKind(for: error)))
                         ClickyAnalytics.trackTTSError(error: error.localizedDescription)
                         print("⚠️ ElevenLabs TTS error: \(error)")
                         speakCreditsErrorFallback()
                     }
                 }
+                // A no-op if the TTS failure above already finished it.
+                voiceLatencyRecorder.finish(latencyUtteranceID, outcome: .completed)
             } catch is CancellationError {
                 // User spoke again — response was interrupted
+                voiceLatencyRecorder.finish(latencyUtteranceID, outcome: .cancelled)
             } catch {
+                voiceLatencyRecorder.finish(latencyUtteranceID, outcome: .error(kind: VoiceLatencyRecorder.errorKind(for: error)))
                 ClickyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
                 speakCreditsErrorFallback()

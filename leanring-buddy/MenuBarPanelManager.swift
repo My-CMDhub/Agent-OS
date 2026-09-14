@@ -16,7 +16,6 @@ import SwiftUI
 
 extension Notification.Name {
     static let clickyDismissPanel = Notification.Name("clickyDismissPanel")
-    // `clickyShowPanel` is declared beside `HarnessConfirmations`, its only poster.
 }
 
 /// Custom NSPanel subclass that can become the key window even with
@@ -31,7 +30,6 @@ final class MenuBarPanelManager: NSObject {
     private var panel: NSPanel?
     private var clickOutsideMonitor: Any?
     private var dismissPanelObserver: NSObjectProtocol?
-    private var showPanelObserver: NSObjectProtocol?
 
     private let companionManager: CompanionManager
     private let confirmations: HarnessConfirmations
@@ -44,17 +42,9 @@ final class MenuBarPanelManager: NSObject {
         super.init()
         createStatusItem()
 
-        // A harness ticket was opened: bring the question up where the owner is.
-        showPanelObserver = NotificationCenter.default.addObserver(
-            forName: .clickyShowPanel,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            // Front, not key: a key panel makes Clicky the focused application
-            // and the harness then reads its own panel as "frontmost".
-            self?.showPanel(makeKey: false)
-        }
-
+        // Harness tickets no longer open this panel: `ConfirmationCardWindowManager`
+        // asks on whatever Space the owner is on, and one surface asks. This panel
+        // still lists tickets (and their answers) when the owner opens it.
         dismissPanelObserver = NotificationCenter.default.addObserver(
             forName: .clickyDismissPanel,
             object: nil,
@@ -69,9 +59,6 @@ final class MenuBarPanelManager: NSObject {
             NSEvent.removeMonitor(monitor)
         }
         if let observer = dismissPanelObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        if let observer = showPanelObserver {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -144,14 +131,14 @@ final class MenuBarPanelManager: NSObject {
 
     // MARK: - Panel Lifecycle
 
-    private func showPanel(makeKey: Bool = true) {
+    private func showPanel() {
         if panel == nil {
             createPanel()
         }
 
         positionPanelBelowStatusItem()
 
-        if makeKey { panel?.makeKeyAndOrderFront(nil) }
+        panel?.makeKeyAndOrderFront(nil)
         panel?.orderFrontRegardless()
         installClickOutsideMonitor()
     }

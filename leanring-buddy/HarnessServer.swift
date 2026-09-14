@@ -546,6 +546,12 @@ enum HarnessObservability {
     /// a thing it will not do.
     static let ordinaryRefusalCodes: Set<String> = [
         "killSwitch", "confirmationRequired", "notFound", "ambiguous",
+        // A caller re-asking before the owner answered, or after a no, is the
+        // ticket flow working — measured 2026-09-14, each re-issue wrote a dump.
+        // `confirmationTicketInvalid` stays OUT: a ticket re-aimed at another
+        // action is exactly the moment worth twenty requests of context.
+        "confirmationPending", "confirmationDenied", "confirmationExpired",
+        "tooManyPendingConfirmations", "confirmationTooLongToShow",
         "dryRun", "unknownVerb", "malformedJSON", "missingField", "invalidField",
         // A kernel refusal is the policy working, and the audit line already
         // says which rule fired. Only a refusal on SECURITY grounds is worth a
@@ -892,6 +898,10 @@ final class HarnessServer {
     }
 
     private func respond(toLine line: String) -> String {
+        // Names the verb holding the main thread, for MainThreadStallRecorder.
+        // "?" until decoded; cleared on the way out so a later stall is not blamed on this request.
+        MainThreadStallRecorder.noteHarnessVerb("?")
+        defer { MainThreadStallRecorder.noteHarnessVerb(nil) }
         let startedAt = Date()
         let object = handle(line: line, startedAt: startedAt)
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
@@ -913,6 +923,7 @@ final class HarnessServer {
             )
 
         case .success(let request):
+            MainThreadStallRecorder.noteHarnessVerb(request.verb.rawValue)
             var response = execute(request, startedAt: startedAt)
             response["id"] = request.id
             response["provenance"] = Self.provenanceNote
@@ -1368,7 +1379,12 @@ final class HarnessServer {
                     confirmation["rule"] = [
                         "bundleIdentifier": rule.bundleIdentifier, "verb": rule.verb,
                         "target": (rule.target ?? NSNull()) as Any,
-                        "text": (rule.text ?? NSNull()) as Any
+                        "text": (rule.text ?? NSNull()) as Any,
+                        "mode": (rule.mode ?? NSNull()) as Any,
+                        "withinNamed": (rule.withinNamed ?? NSNull()) as Any,
+                        "nearPoint": (rule.nearPoint.map { [$0.x, $0.y] } ?? NSNull()) as Any,
+                        "role": (rule.role ?? NSNull()) as Any,
+                        "thenConfirm": rule.thenConfirm ?? false
                     ]
                 } else {
                     switch confirmations.open(shape, appName: appName, reason: reason) {

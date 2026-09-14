@@ -63,6 +63,14 @@ struct UntrustedText: Equatable, Hashable, CustomStringConvertible {
         return "\"\(head)…\" (\(raw.count) chars)"
     }
 
+    /// Quoted and escaped like `forDisplay`, but never truncated. For a place
+    /// where showing a prefix is itself the defect: a confirmation question the
+    /// owner approves must show everything the approval binds. Such a caller
+    /// bounds the length itself, by refusing, not by cutting.
+    var forDisplayInFull: String {
+        "\"\(Self.escaped(raw))\""
+    }
+
     /// Interpolating this type anywhere gives the escaped form, so the unsafe
     /// thing is the one you have to ask for by name.
     var description: String { forDisplay }

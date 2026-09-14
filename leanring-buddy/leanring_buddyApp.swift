@@ -31,6 +31,8 @@ struct leanring_buddyApp: App {
 @MainActor
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
+    /// Pending harness tickets, asked on whatever Space the owner is on.
+    private var confirmationCardWindowManager: ConfirmationCardWindowManager?
     private let companionManager = CompanionManager()
     /// One object, two owners: the harness opens tickets, the panel answers them.
     private let confirmations = HarnessConfirmations(approvalsURL: HarnessServer.approvalsURL)
@@ -40,6 +42,25 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--capture-smoke-test") {
             runCaptureSmokeTest()
+            return
+        }
+
+        // Spends API credit: capture -> Claude -> TTS download, five times, then quits.
+        if CommandLine.arguments.contains("--voice-latency-probe") {
+            Task { @MainActor in
+                await VoiceLatencyProbe.run(companionManager: companionManager)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
+        // Spends API credit on four providers: 20 pipeline runs and 20 speech-to-speech
+        // runs against the worker, one JSON line each, then quits. Plays nothing aloud.
+        if CommandLine.arguments.contains("--voice-bench") {
+            Task { @MainActor in
+                await VoiceStackBenchmark.run()
+                NSApplication.shared.terminate(nil)
+            }
             return
         }
 
@@ -73,6 +94,11 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Started before the harness so its first request is already covered.
+        if CommandLine.arguments.contains("--main-thread-stall-log") {
+            MainThreadStallRecorder.start()
+        }
+
         // Unlike every other --ax-* entry point, this one does NOT terminate:
         // the harness is a server, so the app carries on being a menu-bar app
         // with a socket open beside it.
@@ -94,6 +120,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         ClickyAnalytics.trackAppOpened()
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager, confirmations: confirmations)
+        confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
         companionManager.start()
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.

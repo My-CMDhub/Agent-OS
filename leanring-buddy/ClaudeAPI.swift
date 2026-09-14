@@ -41,6 +41,7 @@ class ClaudeAPI {
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        WorkerConfiguration.attachClientKey(to: &request)
         return request
     }
 
@@ -103,6 +104,8 @@ class ClaudeAPI {
         systemPrompt: String,
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         userPrompt: String,
+        // `--voice-bench` caps a spoken answer at 150; the voice path keeps its 1024.
+        maxTokens: Int = 1024,
         onTextChunk: @MainActor @Sendable (String) -> Void
     ) async throws -> (text: String, duration: TimeInterval) {
         let startTime = Date()
@@ -141,7 +144,7 @@ class ClaudeAPI {
 
         let body: [String: Any] = [
             "model": model,
-            "max_tokens": 1024,
+            "max_tokens": maxTokens,
             "stream": true,
             "system": systemPrompt,
             "messages": messages

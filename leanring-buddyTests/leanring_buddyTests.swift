@@ -6,6 +6,7 @@
 //
 
 import Testing
+import AppKit
 import CoreGraphics
 import ApplicationServices
 @testable import Clicky
@@ -2782,7 +2783,7 @@ private func temporaryApprovalsURL(contents: String?) throws -> URL {
     #expect(HarnessConfirmations.rule(for: makeTicket())
         == .init(bundleIdentifier: "com.apple.finder", verb: "press", target: "Empty Bin", text: nil))
     #expect(HarnessConfirmations.rule(for: makeTicket(verb: "type", target: "<focused>", text: "hello", mode: "insert"))
-        == .init(bundleIdentifier: "com.apple.finder", verb: "type", target: "<focused>", text: "hello"))
+        == .init(bundleIdentifier: "com.apple.finder", verb: "type", target: "<focused>", text: "hello", mode: "insert"))
     #expect(HarnessConfirmations.rule(for: makeTicket(verb: "focus", target: "Finder"))
         == .init(bundleIdentifier: "com.apple.finder", verb: "focus", target: nil, text: nil))
     #expect(HarnessConfirmations.rule(for: makeTicket(verb: "launch", target: "Finder"))
@@ -2833,6 +2834,110 @@ private func temporaryApprovalsURL(contents: String?) throws -> URL {
     }
     broken.answer(ticket.id, allow: true, scope: .always)
     #expect(try String(contentsOf: brokenURL, encoding: .utf8) == "{not json")
+}
+
+private func mailShape(
+    verb: String = "type", bundleIdentifier: String? = "com.apple.mail", rawTarget: String = "Body",
+    text: String? = "hello", mode: String? = "insert", withinNamed: String? = "Drafts",
+    nearPoint: CGPoint? = CGPoint(x: 10, y: 20), role: String? = "AXTextArea", thenConfirm: Bool = true
+) -> HarnessConfirmations.Shape {
+    .init(verb: verb, bundleIdentifier: bundleIdentifier, rawTarget: rawTarget, text: text, mode: mode,
+          withinNamed: withinNamed, nearPoint: nearPoint, role: role, thenConfirm: thenConfirm)
+}
+
+@Test func everyFieldAConfirmationBindsIsAFieldThePanelShows() async throws {
+    let full = mailShape()
+    let variants: [String: HarnessConfirmations.Shape] = [
+        "verb": mailShape(verb: "press"),
+        "bundleIdentifier": mailShape(bundleIdentifier: "com.apple.finder"),
+        "rawTarget": mailShape(rawTarget: "Subject"),
+        "text": mailShape(text: "goodbye"),
+        "mode": mailShape(mode: "replace"),
+        "withinNamed": mailShape(withinNamed: "Bank"),
+        "nearPoint": mailShape(nearPoint: CGPoint(x: 10, y: 21)),
+        "role": mailShape(role: "AXTextField"),
+        "thenConfirm": mailShape(thenConfirm: false)
+    ]
+    // A field added to Shape without a variant here fails first — and a variant
+    // is only accepted if changing that field alone changes what the owner sees.
+    #expect(Set(Mirror(reflecting: full).children.compactMap(\.label)) == Set(variants.keys))
+    let shown = HarnessConfirmations.displayLines(for: full, appName: "Mail")
+    for (field, variant) in variants {
+        #expect(variant != full, "\(field) variant is not a change")
+        #expect(HarnessConfirmations.displayLines(for: variant, appName: "Mail") != shown, "\(field) is bound but not shown")
+    }
+    #expect(shown.contains("then submits (AXConfirm)"))
+
+    // And the ticket binds exactly the shape whose lines it carries.
+    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    guard case .opened(let ticket) = confirmations.open(full, appName: "Mail", reason: "r") else {
+        Issue.record("expected a ticket"); return
+    }
+    #expect(ticket.shape == full)
+    #expect(ticket.displayLines == shown)
+}
+
+@Test func aQuestionTooLongToShowWholeIsNeverAsked() async throws {
+    // 150 characters: `forDisplay` would have shown 100 of them. Now all are shown.
+    let long = String(repeating: "a", count: 150)
+    let fits = mailShape(text: long)
+    #expect(HarnessConfirmations.openRefusal(for: fits, appName: "Mail", pendingCount: 0) == nil)
+    #expect(HarnessConfirmations.displayLines(for: fits, appName: "Mail").contains { $0.contains("\"\(long)\"") })
+
+    let paragraph = mailShape(text: String(repeating: "a", count: HarnessConfirmations.maximumDisplayLineLength))
+    #expect(HarnessConfirmations.openRefusal(for: paragraph, appName: "Mail", pendingCount: 0)?.code == "confirmationTooLongToShow")
+    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    guard case .refused(let code, _) = confirmations.open(paragraph, appName: "Mail", reason: "r") else {
+        Issue.record("expected a refusal"); return
+    }
+    #expect(code == "confirmationTooLongToShow")
+    #expect(confirmations.tickets.isEmpty)
+}
+
+@Test func typedTextCannotForgeASecondLineInThePanel() async throws {
+    let plain = HarnessConfirmations.displayLines(for: mailShape(text: "hi", thenConfirm: false), appName: "Mail")
+    let forged = HarnessConfirmations.displayLines(
+        for: mailShape(text: "hi\nthen submits (AXConfirm)\u{7}", thenConfirm: false), appName: "Mail\nBank"
+    )
+    #expect(forged.count == plain.count)
+    #expect(!forged.contains("then submits (AXConfirm)"))
+    #expect(forged.allSatisfy { !$0.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } })
+    #expect(forged.contains(#"text: "hi\nthen submits (AXConfirm)\u{07}" (insert)"#))
+}
+
+@Test func anAlwaysRuleIsForTheWholeShapeItWasApprovedFor() async throws {
+    let drafts = HarnessConfirmations.Shape(verb: "press", bundleIdentifier: "com.apple.mail", rawTarget: "Delete", withinNamed: "Drafts")
+    let bank = HarnessConfirmations.Shape(verb: "press", bundleIdentifier: "com.apple.mail", rawTarget: "Delete", withinNamed: "Bank")
+    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    guard case .opened(let ticket) = confirmations.open(drafts, appName: "Mail", reason: "r") else {
+        Issue.record("expected a ticket"); return
+    }
+    confirmations.answer(ticket.id, allow: true, scope: .always)
+    #expect(confirmations.rule(for: drafts).rule != nil)
+    #expect(confirmations.rule(for: bank).rule == nil)
+    var unqualified = drafts; unqualified.withinNamed = nil
+    #expect(confirmations.rule(for: unqualified).rule == nil)
+    var submitting = drafts; submitting.thenConfirm = true
+    #expect(confirmations.rule(for: submitting).rule == nil)
+
+    // A rule written before the qualifiers existed decodes them as nil, so it
+    // matches only an unqualified request: narrower, never broader.
+    let old = try HarnessConfirmations.parseApprovals(
+        Data(#"[{"bundleIdentifier":"com.apple.mail","verb":"press","target":"Delete"}]"#.utf8)
+    ).get()
+    #expect(HarnessConfirmations.matchingRule(in: old, unqualified) != nil)
+    #expect(HarnessConfirmations.matchingRule(in: old, bank) == nil)
+    var pointed = unqualified; pointed.nearPoint = CGPoint(x: 1, y: 1)
+    #expect(HarnessConfirmations.matchingRule(in: old, pointed) == nil)
+
+    // focus and launch stay app-wide: their action is the app.
+    for verb in ["focus", "launch"] {
+        let rule = HarnessConfirmations.rule(for: makeTicket(verb: verb, target: "Finder"))
+        let qualified = HarnessConfirmations.Shape(
+            verb: verb, bundleIdentifier: "com.apple.finder", rawTarget: "Recent", nearPoint: CGPoint(x: 5, y: 5)
+        )
+        #expect(HarnessConfirmations.matchingRule(in: [rule], qualified) == rule)
+    }
 }
 
 @Test func theAuditMirrorIsNamedByUTCDay() async throws {
@@ -3003,33 +3108,32 @@ private func temporaryApprovalsURL(contents: String?) throws -> URL {
     #expect(confirmations.consume(ticket: ticket.id, finderEmptyBin, spend: false) == .consumed)
 }
 
-@Test func openingATicketDoesNotShowThePanelInsideTheRequest() async throws {
-    final class Counter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value = 0
-        var posts: Int { lock.withLock { value } }
-        func increment() { lock.withLock { value += 1 } }
-    }
-    let counter = Counter()
-    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
-    // Scoped to THIS instance: another test's `open` posting concurrently must not count.
-    let observer = NotificationCenter.default.addObserver(forName: .clickyShowPanel, object: confirmations, queue: nil) { _ in
-        counter.increment()
-    }
-    defer { NotificationCenter.default.removeObserver(observer) }
+// Evidence 2026-09-14: a real click arrived pid 0; AXPress arrived with no event;
+// a posted CGEvent arrived stamped with the poster's pid, which it cannot forge.
+@Test func anApprovalCountsOnlyForAMouseOrKeyEventFromTheHIDLayer() {
+    typealias Input = HarnessConfirmations.ApprovalInput
+    #expect(Input.verdict(eventType: .leftMouseUp, sourceProcessID: 0) == .accepted)
+    #expect(Input.verdict(eventType: .keyDown, sourceProcessID: 0) == .accepted)
+    #expect(Input.verdict(eventType: nil, sourceProcessID: nil)
+            == .rejected(reason: "no input event (programmatic press, e.g. Accessibility)"))
+    #expect(Input.verdict(eventType: .leftMouseUp, sourceProcessID: 72601) == .rejected(reason: "posted by process 72601"))
+    #expect(Input.verdict(eventType: .leftMouseUp, sourceProcessID: nil) != .accepted)
+    #expect(Input.verdict(eventType: .mouseMoved, sourceProcessID: 0) != .accepted)
+}
 
-    guard case .opened = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+@Test func aProgrammaticAllowLeavesTheTicketPendingAndADenyFromAnySourceCounts() throws {
+    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
         Issue.record("expected a ticket"); return
     }
-    // Inside the request nothing may pump the run loop: the post is deferred.
-    #expect(counter.posts == 0)
-    // The next main-queue turn delivers it — FIFO behind the block `open` enqueued.
-    // At least one, not exactly one: other tests in this process open tickets
-    // too, and their deferred posts drain on the same turn (measured: 4).
-    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-        DispatchQueue.main.async { continuation.resume() }
+    for scope in [HarnessConfirmations.Scope.once, .always] {
+        #expect(confirmations.answerFromPanel(ticket.id, allow: true, scope: scope, triggeringEvent: nil) != .accepted)
+        #expect(confirmations.ticket(id: ticket.id)?.status == .pending)
     }
-    #expect(counter.posts >= 1)
+    #expect(confirmations.consume(ticket: ticket.id, finderEmptyBin) == .pending)
+    // Saying no cannot harm, so it needs no proof of a human.
+    #expect(confirmations.answerFromPanel(ticket.id, allow: false, scope: .once, triggeringEvent: nil) == .accepted)
+    #expect(confirmations.ticket(id: ticket.id)?.status == .denied)
 }
 
 @Test func theFingerprintSeesANonPressableNameChange() async throws {
@@ -3067,4 +3171,98 @@ private func temporaryApprovalsURL(contents: String?) throws -> URL {
     #expect(JSONSerialization.isValidJSONObject(bad.point))
     let good = HarnessServer.pointJSON(CGPoint(x: 1, y: 2))
     #expect(!good.invalid && good.point.count == 2)
+}
+
+// MARK: - Measurement instrumentation (pure logic; the live numbers come from the logs, not from here)
+
+@Test func aVoiceStageWithAMissingMarkIsNullNotZero() async throws {
+    var utterance = VoiceLatencyUtterance(source: "probe", transcriptionProvider: nil, model: nil)
+    utterance.mark(.screenCaptureStarted, atUptime: 100.0)
+    utterance.mark(.screenCaptureFinished, atUptime: 100.25)
+    utterance.mark(.claudeRequestStarted, atUptime: 100.5)
+    #expect(utterance.durationMilliseconds(from: .screenCaptureStarted, to: .screenCaptureFinished) == 250)
+    #expect(utterance.durationMilliseconds(from: .claudeRequestStarted, to: .firstClaudeTextChunk) == nil)
+    let stages = try #require(utterance.jsonObject()["stagesMs"] as? [String: Any])
+    #expect(stages["captureMs"] as? Int == 250)
+    // A zero would read as "instant"; a stage that never happened was not instant.
+    #expect(stages["claudeTimeToFirstChunkMs"] is NSNull)
+    #expect(stages["releaseToFirstAudioMs"] is NSNull)
+    #expect(utterance.lastMarkReached == .claudeRequestStarted)
+}
+
+@Test func onlyTheFirstStreamedChunkSetsTimeToFirstChunk() async throws {
+    var utterance = VoiceLatencyUtterance(source: "live", transcriptionProvider: "AssemblyAI", model: nil)
+    utterance.mark(.claudeRequestStarted, atUptime: 10.0)
+    utterance.mark(.firstClaudeTextChunk, atUptime: 10.8)
+    utterance.mark(.firstClaudeTextChunk, atUptime: 12.0)
+    #expect(utterance.durationMilliseconds(from: .claudeRequestStarted, to: .firstClaudeTextChunk) == 800)
+}
+
+@Test func aVoiceLatencyLineCarriesCountsAndNeverTheWords() async throws {
+    let transcript = "open my quarterly bank statement"
+    let response = "it is in the downloads folder [POINT:10,20:downloads]"
+    var utterance = VoiceLatencyUtterance(source: "live", transcriptionProvider: "AssemblyAI", model: "claude-sonnet-4-6")
+    utterance.countTranscript(transcript)
+    utterance.countResponse(response)
+    utterance.countSpokenText("it is in the downloads folder")
+    utterance.finish(.error(kind: "NSURLErrorDomain#-1003"))
+    utterance.finish(.completed)   // a second finish does not overwrite the first
+    let line = try #require(MeasurementLogFile.jsonLine(utterance.jsonObject()))
+    #expect(!line.contains("quarterly") && !line.contains("bank") && !line.contains("downloads"))
+    #expect(line.contains("\"transcriptCharacters\":\(transcript.count)"))
+    #expect(line.contains("\"outcome\":\"error\"") && line.contains("NSURLErrorDomain#-1003"))
+}
+
+@Test func theProbeSummaryIsMedianAndMaxOverTheUtterancesThatReachedEachStage() async throws {
+    func utterance(captureSeconds: TimeInterval, reachedClaude: Bool) -> VoiceLatencyUtterance {
+        var result = VoiceLatencyUtterance(source: "probe", transcriptionProvider: nil, model: nil)
+        result.mark(.screenCaptureStarted, atUptime: 0)
+        result.mark(.screenCaptureFinished, atUptime: captureSeconds)
+        if reachedClaude {
+            result.mark(.claudeRequestStarted, atUptime: 1)
+            result.mark(.claudeResponseFinished, atUptime: 3)
+            result.finish(.completed)
+        } else {
+            result.finish(.error(kind: "NSURLErrorDomain#-1003"))
+        }
+        return result
+    }
+    let summary = VoiceLatencyUtterance.summaryJSONObject(for: [
+        utterance(captureSeconds: 0.1, reachedClaude: true),
+        utterance(captureSeconds: 0.3, reachedClaude: false),
+        utterance(captureSeconds: 0.2, reachedClaude: true)
+    ], source: "probe")
+    let stages = try #require(summary["stagesMs"] as? [String: Any])
+    let capture = try #require(stages["captureMs"] as? [String: Int])
+    #expect(capture == ["n": 3, "medianMs": 200, "maxMs": 300])
+    let claude = try #require(stages["claudeTotalMs"] as? [String: Int])
+    #expect(claude == ["n": 2, "medianMs": 2000, "maxMs": 2000])
+    #expect(stages["ttsMs"] is NSNull)
+    #expect(summary["outcomes"] as? [String: Int] == ["completed": 2, "error": 1])
+}
+
+@Test func mainThreadDelaysAreBucketedIntoLateAndStalled() async throws {
+    var window = MainThreadStallRecorder.SummaryWindow(startedAtUptime: 0)
+    for delay in [0.001, 0.010, 0.017, 0.049, 0.051, 0.300] {
+        window.record(delaySeconds: delay)
+    }
+    #expect(window.pings == 6)
+    #expect(window.lateOverSixteenMilliseconds == 4)
+    #expect(window.stallsOverFiftyMilliseconds == 2)
+    #expect(window.maximumDelaySeconds == 0.300)
+    #expect(abs(window.blockedSecondsInStalls - 0.351) < 1e-9)
+
+    #expect(MainThreadStallRecorder.stallJSONObject(startedAtUptime: 5, delaySeconds: 0.049, harnessVerbs: []) == nil)
+    let attributed = try #require(MainThreadStallRecorder.stallJSONObject(startedAtUptime: 5, delaySeconds: 0.12, harnessVerbs: ["snapshot"]))
+    #expect(attributed["durationMs"] as? Double == 120 && attributed["harnessVerb"] as? String == "snapshot")
+    let unattributed = try #require(MainThreadStallRecorder.stallJSONObject(startedAtUptime: 5, delaySeconds: 0.2, harnessVerbs: []))
+    #expect(unattributed["harnessVerb"] is NSNull)
+}
+
+@Test func hotkeyTapDelayIsNullForAnUnstampedOrFutureEvent() async throws {
+    #expect(GlobalPushToTalkShortcutMonitor.tapDelayMilliseconds(eventTimestamp: 1_000_000_000, callbackUptimeNanoseconds: 1_012_500_000) == 12.5)
+    // Synthetic CGEvents carry timestamp 0 until posted.
+    #expect(GlobalPushToTalkShortcutMonitor.tapDelayMilliseconds(eventTimestamp: 0, callbackUptimeNanoseconds: 5) == nil)
+    // A timestamp ahead of the callback means the clocks are not the same; say nothing rather than something negative.
+    #expect(GlobalPushToTalkShortcutMonitor.tapDelayMilliseconds(eventTimestamp: 9, callbackUptimeNanoseconds: 5) == nil)
 }
