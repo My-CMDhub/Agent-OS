@@ -137,3 +137,51 @@ struct ConfirmationPromptView: View {
             .stroke(status == .pending ? DS.Colors.warning : DS.Colors.borderSubtle, lineWidth: 1))
     }
 }
+
+/// The rules an "Always" answer created. They live in the data-protection
+/// keychain, which the `security` CLI cannot reach, so this list is the only
+/// way to revoke one. Remove needs no hardware click: it only narrows.
+struct AlwaysRulesListView: View {
+    @ObservedObject var confirmations: HarnessConfirmations
+
+    var body: some View {
+        Group {
+            if !confirmations.alwaysRules.isEmpty || confirmations.alwaysRulesProblem != nil {
+                VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+                    Text("Always rules")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(DS.Colors.textPrimary)
+                    if let problem = confirmations.alwaysRulesProblem {
+                        Text(problem)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(DS.Colors.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    ForEach(Array(confirmations.alwaysRules.enumerated()), id: \.offset) { _, rule in
+                        HStack(alignment: .top, spacing: DS.Spacing.sm) {
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(Array(HarnessConfirmations.displayLines(for: rule).enumerated()), id: \.offset) { _, line in
+                                    Text(line)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(DS.Colors.codeText)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                            Button("Remove") { confirmations.removeAlwaysRule(rule) }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
+                    }
+                }
+                .padding(DS.Spacing.md)
+                .background(DS.Colors.surface2)
+                .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.medium))
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+            }
+        }
+        // The panel outlives many requests; re-read when it is shown.
+        .onAppear { confirmations.refreshAlwaysRules() }
+    }
+}

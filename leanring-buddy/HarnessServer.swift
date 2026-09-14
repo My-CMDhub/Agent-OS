@@ -625,7 +625,9 @@ final class HarnessServer {
     static var socketURL: URL { supportDirectory.appendingPathComponent("harness.sock") }
     static var killSwitchURL: URL { supportDirectory.appendingPathComponent("HARNESS_DISABLED") }
     static var policyURL: URL { supportDirectory.appendingPathComponent("harness-policy.json") }
-    static var approvalsURL: URL { supportDirectory.appendingPathComponent("harness-approvals.json") }
+    /// Rules used to live here. Never read as rules now (any process running as
+    /// the owner can write it) — only reported when present. See `ApprovalRulesKeychainStore`.
+    static var ignoredLegacyApprovalsFileURL: URL { supportDirectory.appendingPathComponent("harness-approvals.json") }
     static var auditLogURL: URL { supportDirectory.appendingPathComponent("harness-audit.log") }
     static var rotatedAuditLogURL: URL { supportDirectory.appendingPathComponent("harness-audit.log.1") }
 
@@ -1371,9 +1373,12 @@ final class HarnessServer {
                 }
             } else {
                 let consulted = confirmations.rule(for: shape)
-                if let unreadable = consulted.unreadable {
-                    response["approvals"] = ["unreadable": unreadable]
-                }
+                var approvalsReport: [String: Any] = [:]
+                if let unreadable = consulted.unreadable { approvalsReport["unreadable"] = unreadable }
+                // A planted rules file is an attack or a leftover; either way the
+                // caller sees that it exists and was not honoured.
+                if let ignoredFile = consulted.ignoredFile { approvalsReport["ignoredFile"] = ignoredFile }
+                if !approvalsReport.isEmpty { response["approvals"] = approvalsReport }
                 if let rule = consulted.rule {
                     confirmedBy = "approvalRule"
                     confirmation["rule"] = [

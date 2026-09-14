@@ -21,6 +21,7 @@
 import AppKit
 import Combine
 import Foundation
+import Security
 
 final class HarnessConfirmations: ObservableObject {
 
@@ -140,14 +141,16 @@ final class HarnessConfirmations: ObservableObject {
     }
 
     /// nil target = any target for that verb in that app; nil text = any text.
-    /// Those two wildcards exist for hand-written rules. The qualifiers below
+    /// The panel only ever creates a nil target for `focus`/`launch`; the
+    /// wildcards remain for matching. The qualifiers below
     /// are NOT wildcards: nil means "the approved request had none". Before
     /// 2026-09-14 a rule kept only app+verb+target+text, so "Always press Delete
     /// within Drafts" allowed Delete within any container — the defect the
-    /// ticket had before review. A rule on disk from before then decodes these
+    /// ticket had before review. A rule from before then decodes these
     /// as nil and so matches only an unqualified request: narrower, never
     /// broader. (An old `type` rule has no `mode` and so matches no `type`
-    /// request at all until re-approved.)
+    /// request at all until re-approved.) Stored in the keychain — see
+    /// `ApprovalRulesKeychainStore`.
     struct ApprovalRule: Codable, Equatable {
         let bundleIdentifier: String
         let verb: String
@@ -176,11 +179,23 @@ final class HarnessConfirmations: ObservableObject {
     static let maximumDisplayLineLength = 300
 
     @Published private(set) var tickets: [Ticket] = []   // newest first
+    /// The rules as last read from the keychain, for the panel's "Always rules"
+    /// list. The gate never uses this copy — `rule(for:)` re-reads every time.
+    @Published private(set) var alwaysRules: [ApprovalRule] = []
+    /// Why the rules could not be read or saved, shown beside the list. An
+    /// "always" that failed to save is a "once" the owner thinks is permanent.
+    @Published private(set) var alwaysRulesProblem: String?
 
-    private let approvalsURL: URL
+    private let rulesStore: ApprovalRulesKeychainStore
+    /// The pre-2026-09-14 rules file. Never read as rules — any process running
+    /// as the owner can write it — but its existence is reported on every
+    /// consult, so an attempt to plant a rule there is visible, not silently honoured.
+    private let ignoredApprovalsFileURL: URL?
 
-    init(approvalsURL: URL) {
-        self.approvalsURL = approvalsURL
+    init(rulesStore: ApprovalRulesKeychainStore, ignoredApprovalsFileURL: URL? = nil) {
+        self.rulesStore = rulesStore
+        self.ignoredApprovalsFileURL = ignoredApprovalsFileURL
+        refreshAlwaysRules()
     }
 
     // MARK: Pure
@@ -235,6 +250,21 @@ final class HarnessConfirmations: ObservableObject {
         let app = appName.map { UntrustedText($0).forDisplayInFull } ?? "unnamed app"
         let bundle = shape.bundleIdentifier.map { UntrustedText($0).forDisplayInFull } ?? "no bundle identifier"
         lines.append("in \(app) (\(bundle))")
+        return lines
+    }
+
+    /// A stored rule in the same words a ticket uses, for the panel's revoke list.
+    /// The app name comes from the local install, not from the rule.
+    static func displayLines(for rule: ApprovalRule) -> [String] {
+        let shape = Shape(
+            verb: rule.verb, bundleIdentifier: rule.bundleIdentifier, rawTarget: rule.target ?? "",
+            text: rule.text, mode: rule.mode, withinNamed: rule.withinNamed, nearPoint: rule.nearPoint,
+            role: rule.role, thenConfirm: rule.thenConfirm ?? false
+        )
+        let appName = NSWorkspace.shared.urlForApplication(withBundleIdentifier: rule.bundleIdentifier)
+            .map { FileManager.default.displayName(atPath: $0.path) }
+        var lines = displayLines(for: shape, appName: appName)
+        if rule.target == nil { lines[0] = "\(rule.verb) (any target)" }
         return lines
     }
 
@@ -308,21 +338,6 @@ final class HarnessConfirmations: ObservableObject {
         }
     }
 
-    /// Missing file = no rules. Anything else that is not a clean parse is a reason.
-    static func loadApprovals(from url: URL) -> Result<[ApprovalRule], HarnessAppPolicy.ParseFailure> {
-        do {
-            _ = try FileManager.default.attributesOfItem(atPath: url.path)
-        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {
-            return .success([])
-        } catch {
-            return .failure(.init(reason: "\(url.path): \(error.localizedDescription)"))
-        }
-        guard let data = try? Data(contentsOf: url) else {
-            return .failure(.init(reason: "\(url.path): unreadable"))
-        }
-        return parseApprovals(data).mapError { .init(reason: "\(url.path): \($0.reason)") }
-    }
-
     private static func sameBundleIdentifier(_ a: String, _ b: String?) -> Bool {
         guard let b else { return false }
         return a.caseInsensitiveCompare(b) == .orderedSame
@@ -388,17 +403,38 @@ final class HarnessConfirmations: ObservableObject {
             DispatchQueue.main.async { NotificationCenter.default.post(name: .clickyDismissPanel, object: nil) }
         }
         guard allow, scope == .always else { return }
-        // Read, append, write: the file is the store, so a hand-edit made after
-        // launch survives. A file we cannot read is not one we overwrite — the
-        // ticket still allows this once, and every consult keeps reporting it.
-        guard case .success(let rules) = Self.loadApprovals(from: approvalsURL) else { return }
+        // Read, append, write. A keychain item we cannot read is not one we
+        // overwrite — the ticket still allows this once, and every consult keeps
+        // reporting the read failure.
+        guard case .success(let rules) = rulesStore.load() else { refreshAlwaysRules(); return }
         let rule = Self.rule(for: tickets[index])
-        guard !rules.contains(rule), let data = try? JSONEncoder().encode(rules + [rule]) else { return }
-        try? FileManager.default.createDirectory(
-            at: approvalsURL.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        try? data.write(to: approvalsURL, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: approvalsURL.path)
+        guard !rules.contains(rule) else { return }
+        let status = rulesStore.save(rules + [rule])
+        refreshAlwaysRules()
+        if status != errSecSuccess {
+            alwaysRulesProblem = "\"Always\" was not saved (keychain OSStatus \(status)) — it allowed this once only"
+        }
+    }
+
+    /// Removing a rule only narrows what runs without asking, so unlike an
+    /// approval it needs no proof that a human pressed the button.
+    func removeAlwaysRule(_ rule: ApprovalRule) {
+        let status = rulesStore.remove(rule)
+        refreshAlwaysRules()
+        if status != errSecSuccess {
+            alwaysRulesProblem = "rule not removed (keychain OSStatus \(status))"
+        }
+    }
+
+    func refreshAlwaysRules() {
+        switch rulesStore.load() {
+        case .success(let rules):
+            if alwaysRules != rules { alwaysRules = rules }
+            if alwaysRulesProblem != nil { alwaysRulesProblem = nil }
+        case .failure(let failure):
+            if !alwaysRules.isEmpty { alwaysRules = [] }
+            if alwaysRulesProblem != failure.reason { alwaysRulesProblem = failure.reason }
+        }
     }
 
     /// `spend: false` answers what the gate would decide without marking the
@@ -410,13 +446,20 @@ final class HarnessConfirmations: ObservableObject {
         return result
     }
 
-    /// Consults the file every time, like the policy layer: a hand-edit applies
-    /// to the next request. `unreadable` is set when the file exists and could
-    /// not be read or parsed — no rules then, and the caller must say so.
-    func rule(for shape: Shape) -> (rule: ApprovalRule?, unreadable: String?) {
-        switch Self.loadApprovals(from: approvalsURL) {
-        case .success(let rules): return (Self.matchingRule(in: rules, shape), nil)
-        case .failure(let failure): return (nil, failure.reason)
+    /// Consults the keychain every time, like the policy layer: a rule removed
+    /// in the panel stops applying on the next request. `unreadable` is set when
+    /// the item exists and could not be read or decoded — no rules then, and the
+    /// caller must say so. `ignoredFile` is the path of a legacy rules file that
+    /// exists and was NOT read.
+    func rule(for shape: Shape) -> (rule: ApprovalRule?, unreadable: String?, ignoredFile: String?) {
+        // `attributesOfItem` does not follow a final symlink, so a dangling link
+        // planted there is reported too.
+        let ignoredFile = ignoredApprovalsFileURL.flatMap {
+            (try? FileManager.default.attributesOfItem(atPath: $0.path)) != nil ? $0.path : nil
+        }
+        switch rulesStore.load() {
+        case .success(let rules): return (Self.matchingRule(in: rules, shape), nil, ignoredFile)
+        case .failure(let failure): return (nil, failure.reason, ignoredFile)
         }
     }
 }

@@ -9,6 +9,7 @@ import Testing
 import AppKit
 import CoreGraphics
 import ApplicationServices
+import Security
 @testable import Clicky
 
 struct leanring_buddyTests {
@@ -2652,13 +2653,10 @@ private func makeTicket(
     )
 }
 
-private func temporaryApprovalsURL(contents: String?) throws -> URL {
-    let url = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("clicky-test-\(UUID().uuidString)", isDirectory: true)
-        .appendingPathComponent("harness-approvals.json")
-    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    if let contents { try Data(contents.utf8).write(to: url) }
-    return url
+/// A store under a unique service, so a test never reads or writes the real
+/// rules. A test that writes deletes the item with `deleteItem()` in a `defer`.
+private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
+    ApprovalRulesKeychainStore(serviceName: "\(ApprovalRulesKeychainStore.productionServiceName).test-\(UUID().uuidString)")
 }
 
 @Test func aPendingTicketExpiresSixtySecondsAfterItWasOpened() async throws {
@@ -2714,7 +2712,7 @@ private func temporaryApprovalsURL(contents: String?) throws -> URL {
     #expect(consume(makeTicket(verb: "select", status: .allowed, consumed: true)) == .mismatch(field: "verb"))
 
     // And the mutating wrapper flips the flag on the way through.
-    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     guard case .opened(let opened) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "irreversible") else {
         Issue.record("expected a ticket"); return
     }
@@ -2734,7 +2732,7 @@ private func temporaryApprovalsURL(contents: String?) throws -> URL {
     #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, pendingCount: 2) == nil)
     #expect(HarnessConfirmations.openRefusal(for: finderEmptyBin, pendingCount: 3)?.code == "tooManyPendingConfirmations")
 
-    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     for _ in 0..<3 {
         guard case .opened = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
             Issue.record("expected a ticket"); return
@@ -2790,10 +2788,14 @@ private func temporaryApprovalsURL(contents: String?) throws -> URL {
         == .init(bundleIdentifier: "com.apple.finder", verb: "launch", target: nil, text: nil))
 }
 
-@Test func anAlwaysAnswerAppendsToTheFileOnDiskAndTheNextConsultReadsIt() async throws {
+@Test func anAlwaysAnswerAppendsToTheKeychainAndTheNextConsultReadsIt() async throws {
+    let store = temporaryRulesStore()
+    defer { _ = store.deleteItem() }
     let existing = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.mail", verb: "menu", target: "File > Send")
-    let url = try temporaryApprovalsURL(contents: String(decoding: try JSONEncoder().encode([existing]), as: UTF8.self))
-    let confirmations = HarnessConfirmations(approvalsURL: url)
+    // errSecMissingEntitlement (-34018) here means the app host has no keychain access group.
+    #expect(store.save([existing]) == errSecSuccess)
+    let confirmations = HarnessConfirmations(rulesStore: store)
+    #expect(confirmations.alwaysRules == [existing])
     #expect(confirmations.rule(for: finderEmptyBin).rule == nil)
 
     guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
@@ -2801,12 +2803,10 @@ private func temporaryApprovalsURL(contents: String?) throws -> URL {
     }
     confirmations.answer(ticket.id, allow: true, scope: .always)
 
-    // Read-append-write: the hand-written rule survives beside the new one.
-    let onDisk = try HarnessConfirmations.loadApprovals(from: url).get()
-    #expect(onDisk == [existing, HarnessConfirmations.rule(for: ticket)])
+    // Read-append-write: the earlier rule survives beside the new one.
+    #expect(try store.load().get() == [existing, HarnessConfirmations.rule(for: ticket)])
     #expect(confirmations.rule(for: finderEmptyBin).rule == HarnessConfirmations.rule(for: ticket))
-    let permissions = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int
-    #expect(permissions == 0o600)
+    #expect(confirmations.alwaysRules == [existing, HarnessConfirmations.rule(for: ticket)])
 }
 
 @Test func aMalformedApprovalsFileIsNoRulesPlusAReason() async throws {
@@ -2821,19 +2821,64 @@ private func temporaryApprovalsURL(contents: String?) throws -> URL {
     }
     #expect(!failure.reason.isEmpty)
 
-    // A missing file is legitimately "no rules"; a malformed one is reported on
-    // every consult, and an "always" answer does not overwrite it.
-    #expect(HarnessConfirmations.loadApprovals(from: try temporaryApprovalsURL(contents: nil)) == .success([]))
-    let brokenURL = try temporaryApprovalsURL(contents: "{not json")
-    let broken = HarnessConfirmations(approvalsURL: brokenURL)
+    // A missing item is legitimately "no rules"; undecodable bytes are reported
+    // on every consult, and an "always" answer does not overwrite them.
+    #expect(temporaryRulesStore().load() == .success([]))
+    let store = temporaryRulesStore()
+    defer { _ = store.deleteItem() }
+    #expect(store.write(Data("{not json".utf8)) == errSecSuccess)
+    let broken = HarnessConfirmations(rulesStore: store)
     let consulted = broken.rule(for: finderEmptyBin)
     #expect(consulted.rule == nil)
-    #expect(consulted.unreadable?.contains("harness-approvals.json") == true)
+    #expect(consulted.unreadable?.contains(store.serviceName) == true)
+    #expect(broken.alwaysRules.isEmpty && broken.alwaysRulesProblem != nil)
     guard case .opened(let ticket) = broken.open(finderEmptyBin, appName: "Finder", reason: "r") else {
         Issue.record("expected a ticket"); return
     }
     broken.answer(ticket.id, allow: true, scope: .always)
-    #expect(try String(contentsOf: brokenURL, encoding: .utf8) == "{not json")
+    let rule = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.finder", verb: "press", target: nil)
+    #expect(store.remove(rule) != errSecSuccess)
+    guard case .failure = store.load() else { Issue.record("undecodable bytes were overwritten"); return }
+}
+
+@Test func approvalRulesRoundTripThroughTheKeychainAndRemoveNarrowsThem() async throws {
+    let store = temporaryRulesStore()
+    defer { _ = store.deleteItem() }
+    let send = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.mail", verb: "menu", target: "File > Send")
+    let launch = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.Terminal", verb: "launch", target: nil)
+    #expect(store.save([send, launch]) == errSecSuccess)
+    #expect(try store.load().get() == [send, launch])
+    // A second save updates the one item rather than failing as a duplicate.
+    #expect(store.save([launch, send]) == errSecSuccess)
+    #expect(try store.load().get() == [launch, send])
+
+    let confirmations = HarnessConfirmations(rulesStore: store)
+    confirmations.removeAlwaysRule(launch)
+    #expect(try store.load().get() == [send])
+    #expect(confirmations.alwaysRules == [send])
+    #expect(confirmations.rule(for: .init(verb: "launch", bundleIdentifier: "com.apple.Terminal", rawTarget: "Terminal")).rule == nil)
+}
+
+@Test func aRuleSavedUnderOneServiceIsInvisibleUnderAnother() async throws {
+    let store = temporaryRulesStore()
+    defer { _ = store.deleteItem() }
+    let launch = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.Terminal", verb: "launch", target: nil)
+    #expect(store.save([launch]) == errSecSuccess)
+    #expect(temporaryRulesStore().load() == .success([]))
+}
+
+@Test func aLegacyApprovalsFileIsReportedAndNeverHonoured() async throws {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("clicky-test-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let file = directory.appendingPathComponent("harness-approvals.json")
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore(), ignoredApprovalsFileURL: file)
+    #expect(confirmations.rule(for: finderEmptyBin).ignoredFile == nil)
+
+    try Data(#"[{"bundleIdentifier":"com.apple.finder","verb":"press","target":null}]"#.utf8).write(to: file)
+    let consulted = confirmations.rule(for: finderEmptyBin)
+    #expect(consulted.rule == nil)
+    #expect(consulted.ignoredFile == file.path)
 }
 
 private func mailShape(
@@ -2869,7 +2914,7 @@ private func mailShape(
     #expect(shown.contains("then submits (AXConfirm)"))
 
     // And the ticket binds exactly the shape whose lines it carries.
-    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     guard case .opened(let ticket) = confirmations.open(full, appName: "Mail", reason: "r") else {
         Issue.record("expected a ticket"); return
     }
@@ -2886,7 +2931,7 @@ private func mailShape(
 
     let paragraph = mailShape(text: String(repeating: "a", count: HarnessConfirmations.maximumDisplayLineLength))
     #expect(HarnessConfirmations.openRefusal(for: paragraph, appName: "Mail", pendingCount: 0)?.code == "confirmationTooLongToShow")
-    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     guard case .refused(let code, _) = confirmations.open(paragraph, appName: "Mail", reason: "r") else {
         Issue.record("expected a refusal"); return
     }
@@ -2908,7 +2953,9 @@ private func mailShape(
 @Test func anAlwaysRuleIsForTheWholeShapeItWasApprovedFor() async throws {
     let drafts = HarnessConfirmations.Shape(verb: "press", bundleIdentifier: "com.apple.mail", rawTarget: "Delete", withinNamed: "Drafts")
     let bank = HarnessConfirmations.Shape(verb: "press", bundleIdentifier: "com.apple.mail", rawTarget: "Delete", withinNamed: "Bank")
-    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    let store = temporaryRulesStore()
+    defer { _ = store.deleteItem() }
+    let confirmations = HarnessConfirmations(rulesStore: store)
     guard case .opened(let ticket) = confirmations.open(drafts, appName: "Mail", reason: "r") else {
         Issue.record("expected a ticket"); return
     }
@@ -3011,7 +3058,7 @@ private func mailShape(
     ) else { Issue.record("expected a decoded request"); return }
     let decoded = HarnessServer.confirmationShape(for: request, bundleIdentifier: "com.apple.mail")
     #expect(decoded.withinNamed == "Drafts" && decoded.role == "AXButton" && decoded.nearPoint == CGPoint(x: 3, y: 4))
-    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     guard case .opened(let ticket) = confirmations.open(decoded, appName: "Mail", reason: "r") else {
         Issue.record("expected a ticket"); return
     }
@@ -3096,7 +3143,7 @@ private func mailShape(
 }
 
 @Test func aDryRunReportsTheGatesAnswerWithoutSpendingTheTicket() async throws {
-    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
         Issue.record("expected a ticket"); return
     }
@@ -3122,7 +3169,7 @@ private func mailShape(
 }
 
 @Test func aProgrammaticAllowLeavesTheTicketPendingAndADenyFromAnySourceCounts() throws {
-    let confirmations = HarnessConfirmations(approvalsURL: try temporaryApprovalsURL(contents: nil))
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
         Issue.record("expected a ticket"); return
     }

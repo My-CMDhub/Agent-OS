@@ -35,7 +35,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var confirmationCardWindowManager: ConfirmationCardWindowManager?
     private let companionManager = CompanionManager()
     /// One object, two owners: the harness opens tickets, the panel answers them.
-    private let confirmations = HarnessConfirmations(approvalsURL: HarnessServer.approvalsURL)
+    private let confirmations = HarnessConfirmations(
+        rulesStore: ApprovalRulesKeychainStore(),
+        ignoredApprovalsFileURL: HarnessServer.ignoredLegacyApprovalsFileURL
+    )
     private var sparkleUpdaterController: SPUStandardUpdaterController?
     private var harnessServer: HarnessServer?
 

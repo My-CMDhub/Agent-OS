@@ -20,6 +20,8 @@ struct CompanionPanelView: View {
             // Harness confirmations first: a pending question is the one thing
             // on this panel that something else is waiting on.
             ConfirmationPromptView(confirmations: confirmations)
+            // Only here, not on the floating card: revoking is a panel chore.
+            AlwaysRulesListView(confirmations: confirmations)
 
             panelHeader
             Divider()
