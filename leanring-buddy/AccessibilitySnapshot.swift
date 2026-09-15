@@ -479,6 +479,15 @@ enum AccessibilityTreeWalker {
         maximumDepth: Int = 120,
         maximumNodeCount: Int = 25_000
     ) throws -> AccessibilityWindowSnapshot {
+        try snapshotFocusedWindow(focusedWindowTarget(), maximumDepth: maximumDepth, maximumNodeCount: maximumNodeCount)
+    }
+
+    typealias FocusedWindowTarget = (window: AXUIElement, application: NSRunningApplication, frontmostSource: FrontmostSource)
+
+    /// Everything `snapshotFocusedWindow` does before the walk, throwing exactly
+    /// what it would throw. Split out so `menu` can read a window count between
+    /// the two (see `ActionVerifier.pollCountingWindowsFirst`).
+    static func focusedWindowTarget() throws -> FocusedWindowTarget {
         guard AXIsProcessTrusted() else {
             throw AccessibilitySnapshotError.accessibilityPermissionNotGranted
         }
@@ -571,14 +580,22 @@ enum AccessibilityTreeWalker {
         guard let focusedWindowElement else {
             throw AccessibilitySnapshotError.noFocusedWindow
         }
+        return (focusedWindowElement, frontmostApplication, frontmostRead.source)
+    }
 
+    /// The walk half of `snapshotFocusedWindow`.
+    static func snapshotFocusedWindow(
+        _ target: FocusedWindowTarget,
+        maximumDepth: Int = 120,
+        maximumNodeCount: Int = 25_000
+    ) throws -> AccessibilityWindowSnapshot {
         var snapshot = try snapshotWindow(
-            focusedWindowElement,
-            of: frontmostApplication,
+            target.window,
+            of: target.application,
             maximumDepth: maximumDepth,
             maximumNodeCount: maximumNodeCount
         )
-        snapshot.frontmostSource = frontmostRead.source
+        snapshot.frontmostSource = target.frontmostSource
         return snapshot
     }
 

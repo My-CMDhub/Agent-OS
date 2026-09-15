@@ -2442,6 +2442,41 @@ private func expectEverySuggestionResolvesToItsOwnCandidate(
     #expect(closed.confirmingSnapshot == nil)
 }
 
+@Test func aMenuPollConfirmsAMovedWindowCountWithoutWalking() async throws {
+    // 2026-09-15: `File > New Finder Window` verified at a 388 ms median on one
+    // walk the window count had already made unnecessary.
+    var walked = 0
+    let moved = ActionVerifier.pollCountingWindowsFirst(
+        locate: { 1 }, windowCountMoved: { true }, walk: { (t: Int) -> Int in walked += 1; return t },
+        hadFocusedWindowBefore: true, expectation: { _ in false }, timeoutInSeconds: 1, pollIntervalInSeconds: 0
+    )
+    guard case .confirmed = moved.outcome else { Issue.record("expected confirmed"); return }
+    #expect(moved.walks == 0)
+    #expect(walked == 0)
+
+    // Count held: the walk runs once per poll and the caller's check decides.
+    var polls = 0
+    let held = ActionVerifier.pollCountingWindowsFirst(
+        locate: { 1 }, windowCountMoved: { false }, walk: { (t: Int) -> Int in walked += 1; polls += 1; return polls },
+        hadFocusedWindowBefore: true, expectation: { $0 == 2 }, timeoutInSeconds: 1, pollIntervalInSeconds: 0
+    )
+    guard case .confirmed = held.outcome else { Issue.record("expected confirmed"); return }
+    #expect(held.walks == 2)
+    #expect(walked == 2)
+
+    // A precondition throw reaches the gap rule as before: no count read, no walk.
+    var counted = 0
+    let closed = ActionVerifier.pollCountingWindowsFirst(
+        locate: { () throws -> Int in throw AccessibilitySnapshotError.noFocusedWindow },
+        windowCountMoved: { counted += 1; return true }, walk: { (t: Int) -> Int in walked += 1; return t },
+        hadFocusedWindowBefore: true, expectation: { _ in true }, timeoutInSeconds: 1, pollIntervalInSeconds: 0
+    )
+    guard case .windowGone = closed.outcome else { Issue.record("expected windowGone"); return }
+    #expect(closed.walks == 2)
+    #expect(counted == 0)
+    #expect(walked == 2)
+}
+
 @Test func onlyAFirstLookConfirmationIsReusedToDescribeTheChange() async throws {
     // T3-1, 2026-09-15: a 2-walk confirmation caught System Settings' Displays
     // pane still filling in, and its `appeared` list differed from the settled walk.

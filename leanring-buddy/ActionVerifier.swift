@@ -95,6 +95,37 @@ enum ActionVerifier {
         walks == 1 ? confirming : walkAgain()
     }
 
+    /// `poll` for `menu`, reading the pressed app's window count BEFORE each walk
+    /// and confirming on a moved count without walking. Measured 2026-09-15: menu
+    /// confirmations cost exactly one walk, and `File > New Finder Window` verified
+    /// at a 388 ms median (326-672, n=16) — the walk described a window the count
+    /// had already answered for. The walk's preconditions (`locate`) still run
+    /// first, so a press that moved focus to another app or closed the last window
+    /// throws exactly what the walk would have, and the gap rule sees it unchanged.
+    /// When the count held, `expectation` runs on the walk exactly as before.
+    static func pollCountingWindowsFirst<Target, Snapshot>(
+        locate: () throws -> Target,
+        windowCountMoved: () -> Bool,
+        walk: (Target) throws -> Snapshot,
+        hadFocusedWindowBefore: Bool,
+        expectation: (Snapshot) -> Bool,
+        timeoutInSeconds: Double = 3.0,
+        pollIntervalInSeconds: Double = 0.15
+    ) -> (outcome: VerificationOutcome, walks: Int) {
+        let (outcome, polls, confirming) = poll(
+            walk: { () throws -> Snapshot? in
+                let target = try locate()
+                if windowCountMoved() { return nil }   // nil: confirmed by the count, not walked
+                return try walk(target)
+            },
+            hadFocusedWindowBefore: hadFocusedWindowBefore,
+            expectation: { $0.map(expectation) ?? true },
+            timeoutInSeconds: timeoutInSeconds, pollIntervalInSeconds: pollIntervalInSeconds
+        )
+        if case .some(.none) = confirming { return (outcome, polls - 1) }
+        return (outcome, polls)
+    }
+
     /// The loop, generic over what a walk returns so a test can drive it
     /// without a cross-process read.
     static func poll<Snapshot>(

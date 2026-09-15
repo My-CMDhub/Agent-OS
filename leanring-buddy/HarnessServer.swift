@@ -2195,9 +2195,18 @@ final class HarnessServer {
 
         // A menu works with no window open, and then "no focused window" after
         // the press is not a window that closed. See `ActionVerifier.verify`.
-        let (verification, verifyWalks, _) = ActionVerifier.verifyCountingWalks(hadFocusedWindowBefore: namesBefore != nil) { laterSnapshot in
-            if let windowsBefore,
-               AccessibilityMenu.windowCount(for: application) != windowsBefore { return true }
+        // Count before walking — see `ActionVerifier.pollCountingWindowsFirst`.
+        let windowCountMoved = {
+            if let windowsBefore, AccessibilityMenu.windowCount(for: application) != windowsBefore { return true }
+            return false
+        }
+        let (verification, verifyWalks) = ActionVerifier.pollCountingWindowsFirst(
+            locate: AccessibilityTreeWalker.focusedWindowTarget,
+            windowCountMoved: windowCountMoved,
+            walk: { try AccessibilityTreeWalker.snapshotFocusedWindow($0) },
+            hadFocusedWindowBefore: namesBefore != nil
+        ) { laterSnapshot in
+            if windowCountMoved() { return true }
             guard let laterRoot = laterSnapshot.rootNode, let namesBefore else { return false }
             return AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot) != namesBefore
         }
