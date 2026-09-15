@@ -3984,3 +3984,46 @@ private func binding(target: pid_t? = 800, selection chosen: ActionBinding.Selec
     #expect(HarnessPolicy.killSwitchRefusal(verb: .highlight, killSwitchPresent: true) == nil)
     #expect(HarnessPolicy.decode(line: #"{"id":"h","verb":"highlight"}"#) == .failure(.missingField("title")))
 }
+
+/// `ping` must answer while another client's request holds the queue — measured
+/// 2026-09-11 at 2,949 ms behind a 3 s verify. Writes one real audit line, id "unit-test-ping".
+@Test func pingAnswersWhileTheRequestQueueIsBusy() {
+    let server = HarnessServer(globalDryRun: true, confirmations: HarnessConfirmations(rulesStore: temporaryRulesStore()))
+    let queueIsBusy = DispatchSemaphore(value: 0)
+    HarnessServer.requestQueue.async {
+        queueIsBusy.signal()
+        Thread.sleep(forTimeInterval: 1.0)
+    }
+    queueIsBusy.wait()
+    let startedAt = Date()
+    let line = server.answer(line: #"{"id":"unit-test-ping","verb":"ping"}"#)
+    let seconds = Date().timeIntervalSince(startedAt)
+    #expect(line.contains(#""ok":true"#))
+    #expect(seconds < 0.5, "ping took \(seconds) s behind a 1 s request")
+}
+
+/// Off main, Clicky's own main thread answers the harness's AX calls, so the
+/// panel's "Remove" and quit control became reachable (review 2026-09-15).
+@Test func theHarnessRefusesToTargetItself() {
+    #expect(Bundle.main.bundleIdentifier == "com.dhruvpatel.jarvis")
+    #expect(HarnessServer.isHarnessItself(bundleIdentifier: "com.dhruvpatel.jarvis"))
+    #expect(HarnessServer.isHarnessItself(bundleIdentifier: "COM.DHRUVPATEL.JARVIS"))
+    #expect(!HarnessServer.isHarnessItself(bundleIdentifier: "com.apple.finder"))
+    #expect(!HarnessServer.isHarnessItself(bundleIdentifier: nil))
+    // Not an ordinary refusal: it keeps the twenty requests before it.
+    #expect(HarnessObservability.anomaly(
+        kernelDecision: nil, verificationStatus: nil, errorCode: "targetIsHarnessItself",
+        walkMilliseconds: nil, recentWalkMilliseconds: []
+    ) == .unexpectedError)
+}
+
+/// The two AppKit reads the request path replaced, checked against AppKit itself
+/// on main: a flip against the wrong height, or a missed flip, is off by hundreds.
+@MainActor @Test func requestPathCoordinateReadsMatchAppKit() {
+    #expect(CGDisplayBounds(CGMainDisplayID()).height == NSScreen.screens.first?.frame.height)
+    guard let cursor = HarnessServer.cursorLocationInAppKitCoordinates() else {
+        Issue.record("CGEvent(source: nil) returned nil"); return
+    }
+    let appKit = NSEvent.mouseLocation
+    #expect(abs(cursor.x - appKit.x) <= 1 && abs(cursor.y - appKit.y) <= 1, "CG \(cursor) vs AppKit \(appKit)")
+}

@@ -158,7 +158,7 @@ enum AccessibilityStatusItems {
     static func readAll() -> ReadAll {
         let startedAt = Date()
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), messagingTimeoutInSeconds)
-        let primaryDisplayHeight = NSScreen.screens.first?.frame.height ?? 0
+        let primaryDisplayHeight = CGDisplayBounds(CGMainDisplayID()).height
 
         var items: [Item] = []
         var asked = 0

@@ -2,9 +2,9 @@
 //  MainThreadStallRecorder.swift
 //  leanring-buddy
 //
-//  Measurement only, started by `--main-thread-stall-log`. Harness requests run
-//  inside `DispatchQueue.main.sync` (owner's ruling 2026-09-11), and the same
-//  main thread runs the push-to-talk CGEvent tap and the overlay's animation
+//  Measurement only, started by `--main-thread-stall-log`. Harness requests ran
+//  inside `DispatchQueue.main.sync` until 2026-09-15 (now their own queue), and
+//  the main thread runs the push-to-talk CGEvent tap and the overlay's animation
 //  timers. A request's latency is what a socket client feels; a main-thread
 //  stall is what the hotkey and the cursor feel. This records the second.
 //
@@ -25,8 +25,9 @@ nonisolated enum MainThreadStallRecorder {
     static let stallThresholdSeconds: TimeInterval = 0.050
     static let summaryIntervalSeconds: TimeInterval = 10
 
-    /// The harness verb executing on the main thread right now, or nil.
-    /// Written by `HarnessServer.respond(toLine:)` on main; read by the pinging
+    /// The harness verb in flight on the request queue, or nil — a stall that
+    /// names one happened during it, not necessarily because of it.
+    /// Written by `HarnessServer.respond(toLine:)`; read by the pinging
     /// thread while main is not answering — the only moment the answer is
     /// interesting, and the one moment main cannot tell us itself.
     static let currentHarnessVerb = OSAllocatedUnfairLock<String?>(initialState: nil)

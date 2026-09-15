@@ -159,7 +159,7 @@ enum ApplicationLauncher {
         var error: Error?
     }
 
-    /// Blocks the calling thread (the main thread, inside `DispatchQueue.main.sync`)
+    /// Blocks the calling thread (`HarnessServer.requestQueue`)
     /// for up to the deadline plus one poll's reads.
     ///
     /// The completion handler is called on a background queue, so waiting on a

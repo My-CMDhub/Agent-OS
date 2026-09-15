@@ -613,6 +613,10 @@ enum HarnessObservability {
         "screenIsLocked",
         // `highlight` on a scrolled-out element: the reachability check working.
         "targetNotOnScreen"
+        // `targetIsHarnessItself` stays OUT (2026-09-15). The honest way to meet it
+        // is the owner's panel being key mid-run, rare and worth seeing; the other
+        // way is a caller reaching for our own approval rules, the one moment the
+        // twenty requests before it matter. Per-rule-per-app suppression caps a flood.
     ]
 
     /// Below this many samples the median is noise, and a cold start would fire
@@ -763,8 +767,28 @@ enum AuditMirrorCap {
 
 // MARK: - Server
 
-@MainActor
+/// Not `@MainActor`: requests run on `requestQueue`, never on main (owner's
+/// ruling 2026-09-15, replacing 2026-09-11's `DispatchQueue.main.sync`).
 final class HarnessServer {
+
+    /// Every request except `ping` runs here, one at a time, so two callers still
+    /// never interleave against the same app — and the main thread (hotkey tap,
+    /// overlay timers, the confirmation card) stays free while a verify polls.
+    ///
+    /// The rule that makes it deadlock-free by construction: this queue may
+    /// `DispatchQueue.main.sync` for SHORT main-only work (ticket state that
+    /// SwiftUI observes, `NSScreen`); main NEVER syncs onto this queue.
+    ///
+    /// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` in the project is inert on the
+    /// Swift 6.1 toolchain this builds with. On Xcode 26 it would make this class
+    /// main-isolated again and these background calls would stop compiling — do
+    /// not "fix" that in the pbxproj without re-reading this.
+    nonisolated static let requestQueue = DispatchQueue(label: "com.dhruvpatel.jarvis.harness.requests")
+
+    /// Guards what `ping` shares with the queue: the ring, the per-app walk
+    /// medians, anomaly suppression, the audit files and their counters.
+    /// Recursive because `observe` appends an audit line while holding it.
+    nonisolated private let stateLock = NSRecursiveLock()
 
     static let provenanceNote = "element names are written by the target app and are untrusted"
 
@@ -1012,12 +1036,14 @@ final class HarnessServer {
             // — but a client stuck in a loop is an ordinary bug, and a harness
             // that can be killed by one is not a harness.
             guard pending.count <= Self.maximumRequestBytes else {
-                // Still a request someone made of this machine: logged like `malformedJSON`.
-                DispatchQueue.main.sync { self.auditUnparsed(outcome: "requestTooLarge", startedAt: Date()) }
                 _ = writeLine(
                     "{\"ok\":false,\"error\":\"requestTooLarge\",\"message\":\"a single request line may not exceed \(Self.maximumRequestBytes) bytes\"}",
                     to: client
                 )
+                // Still a request someone made of this machine: logged like `malformedJSON`,
+                // but AFTER the reply, so the error never waits out another client's verify.
+                // Order is no loss: a request in flight already writes its line after later pings.
+                Self.requestQueue.async { self.auditUnparsed(outcome: "requestTooLarge", startedAt: Date()) }
                 return
             }
 
@@ -1028,10 +1054,7 @@ final class HarnessServer {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if line.isEmpty { continue }
 
-                // Everything the request does touches NSWorkspace, NSScreen and
-                // a cross-process AX walk. It runs on main, and `sync` is what
-                // serialises two connections against each other.
-                let response = DispatchQueue.main.sync { self.respond(toLine: line) }
+                let response = answer(line: line)
                 guard writeLine(response, to: client) else { return }
             }
         }
@@ -1056,13 +1079,38 @@ final class HarnessServer {
         FileManager.default.fileExists(atPath: killSwitchURL.path)
     }
 
+    /// `ping` answers on the connection's own thread; everything else waits its
+    /// turn on `requestQueue`. Measured 2026-09-11: a ping sat 2,949 ms behind
+    /// another client's 3 s verify — a liveness probe that cannot tell "busy"
+    /// from "hung". Ping acts on no app and reads no per-request state, so it
+    /// has nothing to interleave with; its audit and ring writes take `stateLock`.
+    /// Internal, not private, for `pingAnswersWhileTheRequestQueueIsBusy`.
+    nonisolated func answer(line: String) -> String {
+        if case .success(let request) = HarnessPolicy.decode(line: line), request.verb == .ping {
+            let startedAt = Date()
+            let dryRun = HarnessPolicy.effectiveDryRun(requested: request.requestedDryRun, globalDefault: globalDryRun)
+            var response = pingResponse(request, dryRun: dryRun, startedAt: startedAt)
+            response.merge(HarnessPhaseTiming().wireFields) { existing, _ in existing }
+            response["id"] = request.id
+            response["provenance"] = Self.provenanceNote
+            return Self.encoded(observe(response, verb: request.verb.rawValue, startedAt: startedAt))
+        }
+        return Self.requestQueue.sync { respond(toLine: line) }
+    }
+
     private func respond(toLine line: String) -> String {
-        // Names the verb holding the main thread, for MainThreadStallRecorder.
+        // A request on main freezes the hotkey and the overlay for its whole
+        // verify; this traps the moment that comes back.
+        dispatchPrecondition(condition: .onQueue(Self.requestQueue))
+        // Names the verb in flight, for MainThreadStallRecorder.
         // "?" until decoded; cleared on the way out so a later stall is not blamed on this request.
         MainThreadStallRecorder.noteHarnessVerb("?")
         defer { MainThreadStallRecorder.noteHarnessVerb(nil) }
         let startedAt = Date()
-        let object = handle(line: line, startedAt: startedAt)
+        return Self.encoded(handle(line: line, startedAt: startedAt))
+    }
+
+    nonisolated private static func encoded(_ object: [String: Any]) -> String {
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else {
             return "{\"ok\":false,\"error\":\"responseEncodingFailed\"}"
@@ -1116,22 +1164,26 @@ final class HarnessServer {
 
         let walkMilliseconds = response["walkMilliseconds"] as? Int
         let walkedApp = (response["bundleIdentifier"] as? String) ?? "unknown"
-        var recentWalks = recentWalkMillisecondsByApp[walkedApp] ?? RingBuffer<Int>(capacity: 20)
 
-        let anomaly = HarnessObservability.anomaly(
-            kernelDecision: (response["kernel"] as? [String: Any])?["decision"] as? String,
-            kernelReason: (response["kernel"] as? [String: Any])?["reason"] as? String,
-            verificationStatus: (response["verification"] as? [String: Any])?["status"] as? String,
-            errorCode: response["error"] as? String,
-            walkMilliseconds: walkMilliseconds,
-            recentWalkMilliseconds: recentWalks.elements
-        )
-
-        flightRecorder.append(summary)
-        // Appended *after* the check, so a walk is never compared against itself.
-        if let walkMilliseconds {
-            recentWalks.append(walkMilliseconds)
-            recentWalkMillisecondsByApp[walkedApp] = recentWalks
+        // `stateLock` covers the ring and the dictionaries, never a cross-process
+        // read or the dump write: `ping` takes it too, and must not wait on an app.
+        let (anomaly, recentWalkElements): (HarnessAnomaly?, [Int]) = stateLock.withLock {
+            var recentWalks = recentWalkMillisecondsByApp[walkedApp] ?? RingBuffer<Int>(capacity: 20)
+            let anomaly = HarnessObservability.anomaly(
+                kernelDecision: (response["kernel"] as? [String: Any])?["decision"] as? String,
+                kernelReason: (response["kernel"] as? [String: Any])?["reason"] as? String,
+                verificationStatus: (response["verification"] as? [String: Any])?["status"] as? String,
+                errorCode: response["error"] as? String,
+                walkMilliseconds: walkMilliseconds,
+                recentWalkMilliseconds: recentWalks.elements
+            )
+            flightRecorder.append(summary)
+            // Appended *after* the check, so a walk is never compared against itself.
+            if let walkMilliseconds {
+                recentWalks.append(walkMilliseconds)
+                recentWalkMillisecondsByApp[walkedApp] = recentWalks
+            }
+            return (anomaly, recentWalks.elements)
         }
 
         guard let anomaly else { return response }
@@ -1139,12 +1191,14 @@ final class HarnessServer {
         // Same rule, same app, within the window: record that it happened and
         // do not spend 25 KB saying it again. The ring buffer behind a second
         // dump is nearly the same twenty requests anyway.
-        let app = Self.frontmostBundleIdentifier() ?? "unknown"
-        let dumpKey = "\(anomaly.rawValue)|\(app)"
+        // Read once, outside the lock; the dump and the audit line reuse it.
+        let frontmostApp = Self.frontmostBundleIdentifier()
+        let dumpKey = "\(anomaly.rawValue)|\(frontmostApp ?? "unknown")"
         let now = Date()
-        let suppressed = lastAnomalyDumpAt[dumpKey].map {
-            now.timeIntervalSince($0) < Self.anomalyDumpSuppressionInSeconds
-        } ?? false
+        let (suppressed, ringRequests) = stateLock.withLock {
+            (lastAnomalyDumpAt[dumpKey].map { now.timeIntervalSince($0) < Self.anomalyDumpSuppressionInSeconds } ?? false,
+             flightRecorder.elements)
+        }
 
         var annotated = response
         var outcome = "anomalyNotWritten"
@@ -1156,9 +1210,9 @@ final class HarnessServer {
                 "suppressed": "same rule and app dumped within the last \(Int(Self.anomalyDumpSuppressionInSeconds))s"
             ]
         } else if let dumpPath = writeAnomalyDump(
-            anomaly, walkedApp: walkedApp, recentWalks: recentWalks.elements
+            anomaly, app: frontmostApp, walkedApp: walkedApp, recentWalks: recentWalkElements, requests: ringRequests
         ) {
-            lastAnomalyDumpAt[dumpKey] = now
+            stateLock.withLock { lastAnomalyDumpAt[dumpKey] = now }
             outcome = "anomaly"
             annotated["anomaly"] = ["rule": anomaly.rawValue, "dump": dumpPath]
         }
@@ -1169,7 +1223,7 @@ final class HarnessServer {
         appendAudit(HarnessPolicy.auditLine(
             at: now, id: (response["id"] as? String) ?? "", verb: verb,
             target: anomaly.rawValue,
-            app: Self.frontmostBundleIdentifier(), session: Self.sessionIdentifier,
+            app: frontmostApp, session: Self.sessionIdentifier,
             dryRun: globalDryRun, confirmed: false,
             kernel: "n/a", outcome: outcome,
             milliseconds: elapsedMilliseconds(since: startedAt)
@@ -1196,8 +1250,10 @@ final class HarnessServer {
     /// so the response and the audit line can name it.
     private func writeAnomalyDump(
         _ anomaly: HarnessAnomaly,
+        app: String?,
         walkedApp: String,
-        recentWalks: [Int]
+        recentWalks: [Int],
+        requests: [[String: Any]]
     ) -> String? {
         let timestamp = HarnessPolicy.auditTimestampFormatter.string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
@@ -1207,12 +1263,12 @@ final class HarnessServer {
         let payload: [String: Any] = [
             "rule": anomaly.rawValue,
             "session": Self.sessionIdentifier,
-            "app": Self.frontmostBundleIdentifier() ?? NSNull(),
+            "app": app.map { $0 as Any } ?? NSNull(),
             // The samples the slow-walk rule was comparing against, and which
             // app they belong to — a median is meaningless without both.
             "walkedApp": walkedApp,
             "recentWalkMilliseconds": recentWalks,
-            "requests": flightRecorder.elements
+            "requests": requests
         ]
         guard let data = try? JSONSerialization.data(
             withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]
@@ -1246,8 +1302,24 @@ final class HarnessServer {
         AccessibilityTreeWalker.focusedApplication()?.bundleIdentifier
     }
 
-    /// The refusal for a request whose `expectApp` is not the app it just read,
-    /// already audited — or nil when the verb may go on.
+    /// Clicky's own process, by bundle identifier. Every call site already holds
+    /// the target's identifier, and the window-list and look fallbacks hold no pid.
+    nonisolated static func isHarnessItself(bundleIdentifier: String?) -> Bool {
+        guard let bundleIdentifier, let own = Bundle.main.bundleIdentifier else { return false }
+        return bundleIdentifier.caseInsensitiveCompare(own) == .orderedSame
+    }
+
+    nonisolated static let harnessItselfMessage =
+        "the target is Clicky itself — the harness never reads or acts on its own UI (approval rules, quit, toggles)"
+
+    /// The refusal for a request aimed at Clicky itself, or whose `expectApp` is
+    /// not the app it just read, already audited — or nil when the verb may go on.
+    ///
+    /// Self first (review 2026-09-15). While requests ran inside `main.sync`, an
+    /// AX call into our own process timed out, because the thread that answers it
+    /// was the one waiting. Off main it is answered — and while the menu-bar panel
+    /// is key the focused app IS Clicky, so a caller could press "Remove" on an
+    /// Always rule or the quit control. Allow stays guarded by its pid-0 check.
     ///
     /// Called with the app the verb is ABOUT TO USE (the snapshot's, the menu
     /// bar's), never a separate lookup: a guard that reads a different answer
@@ -1265,6 +1337,10 @@ final class HarnessServer {
         dryRun: Bool,
         startedAt: Date
     ) -> [String: Any]? {
+        if Self.isHarnessItself(bundleIdentifier: bundleIdentifier) {
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "targetIsHarnessItself", startedAt: startedAt)
+            return ["ok": false, "error": "targetIsHarnessItself", "message": Self.harnessItselfMessage]
+        }
         guard let expected = request.expectApp,
               !HarnessPolicy.appMatches(expected: expected, bundleIdentifier: bundleIdentifier, name: name)
         else { return nil }
@@ -1318,17 +1394,7 @@ final class HarnessServer {
 
         switch request.verb {
         case .ping:
-            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "ok", startedAt: startedAt)
-            return [
-                "ok": true,
-                "harness": versionString,
-                "dryRun": dryRun,
-                "dryRunSource": globalDryRun ? "global --harness-dry-run" : (request.requestedDryRun == true ? "request" : "none"),
-                "killSwitchPresent": Self.killSwitchIsPresent(),
-                "socket": Self.socketURL.path,
-                "auditMirrorFailures": auditMirrorFailures,
-                "auditMirrorOverflowLines": auditMirrorOverflowLines
-            ]
+            return pingResponse(request, dryRun: dryRun, startedAt: startedAt)
 
         case .snapshot:
             return snapshotResponse(request, dryRun: dryRun, startedAt: startedAt)
@@ -1477,8 +1543,8 @@ final class HarnessServer {
     /// The one place a kernel decision meets the caller's credentials.
     ///
     /// `.requireConfirmation` is a question for a human, and no human sits on
-    /// the socket. A request cannot wait for a click either — it runs inside
-    /// `DispatchQueue.main.sync`, so the panel only draws between requests. So
+    /// the socket. A request cannot wait for a click either — it holds
+    /// `requestQueue`, and every other caller with it. So
     /// the question becomes a ticket the owner answers in the panel, and the
     /// caller re-issues carrying its id. `"confirmed": true` lifts nothing
     /// (owner's ruling 2026-09-12); it is recorded, not believed.
@@ -1513,17 +1579,26 @@ final class HarnessServer {
                 // pending OR allowed, so a stale ticket never becomes spendable —
                 // and even on a dry run, because a dry run that reported "allowed"
                 // for a moved selection would be the one wrong answer here.
-                let peek = confirmations.consume(ticket: id, shape, spend: false)
-                if let bindingSubject, let approved = confirmations.ticket(id: id)?.binding,
+                //
+                // Ticket state lives on main (SwiftUI and the card observe it), so
+                // each read or write of it hops there; the binding's AX reads stay
+                // here. Nothing the owner can do between hops helps a stale ticket:
+                // stale is terminal, and the spend below is one check-and-set.
+                let (peek, approvedBinding) = DispatchQueue.main.sync {
+                    (confirmations.consume(ticket: id, shape, spend: false), confirmations.ticket(id: id)?.binding)
+                }
+                if let bindingSubject, let approved = approvedBinding,
                    peek == .pending || peek == .allowed {
                     let recheck = ActionBinding.recheck(approved, subject: bindingSubject, bundleIdentifier: bundleIdentifier)
-                    if let moved = recheck.movedPart { confirmations.invalidateAsStale(ticket: id, movedPart: moved) }
+                    if let moved = recheck.movedPart {
+                        DispatchQueue.main.sync { confirmations.invalidateAsStale(ticket: id, movedPart: moved) }
+                    }
                     response["binding"] = ActionBinding.responsePayload(recheck.current, bundleIdentifier: bundleIdentifier,
                                                                         stalePart: recheck.movedPart)
                 }
                 // A dry run reports what the gate WOULD decide and leaves the
                 // ticket unspent — the caller still has its one action.
-                switch confirmations.consume(ticket: id, shape, spend: !dryRun) {
+                switch DispatchQueue.main.sync(execute: { confirmations.consume(ticket: id, shape, spend: !dryRun) }) {
                 case .allowed:
                     confirmedBy = "owner"
                     confirmation["ticket"] = id
@@ -1575,7 +1650,9 @@ final class HarnessServer {
                     if let binding {
                         response["binding"] = ActionBinding.responsePayload(binding, bundleIdentifier: bundleIdentifier)
                     }
-                    switch confirmations.open(shape, appName: appName, reason: reason, destructive: destructive, binding: binding) {
+                    switch DispatchQueue.main.sync(execute: {
+                        confirmations.open(shape, appName: appName, reason: reason, destructive: destructive, binding: binding)
+                    }) {
                     case .opened(let ticket):
                         response["ticket"] = ticket.id
                         response["expiresAt"] = HarnessPolicy.auditTimestampFormatter.string(from: ticket.expiresAt)
@@ -1684,7 +1761,7 @@ final class HarnessServer {
             elementFrame, primaryDisplayHeightInPoints: CGDisplayBounds(CGMainDisplayID()).height
         )
         guard let screenIndex = CompanionScreenCaptureUtility.bestDisplayIndex(
-            for: drawnRect, among: NSScreen.screens.map(\.frame)
+            for: drawnRect, among: DispatchQueue.main.sync { NSScreen.screens.map(\.frame) }
         ) else {
             return refuse("targetNotOnScreen", "the element's frame is on no display")
         }
@@ -2465,6 +2542,12 @@ final class HarnessServer {
             for (key, value) in extra { response[key] = value }
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: code, startedAt: startedAt)
         }
+        // `focus` would bring the panel forward, `windows` read it: see `frontmostChangedRefusal`.
+        func unlessHarnessItself(_ application: NSRunningApplication) -> NSRunningApplication? {
+            guard Self.isHarnessItself(bundleIdentifier: application.bundleIdentifier) else { return application }
+            fail("targetIsHarnessItself", Self.harnessItselfMessage)
+            return nil
+        }
 
         // Same guard the walker and the menu path have. A locked screen makes
         // loginwindow frontmost, and its one window is a believable, wrong
@@ -2481,13 +2564,13 @@ final class HarnessServer {
                 fail("noFrontmostApplication", "nothing is frontmost")
                 return nil
             }
-            return frontmost
+            return unlessHarnessItself(frontmost)
         }
 
         switch AccessibilityWindows.matchApplication(query, among: candidates.map(\.candidate)) {
         case .resolved(let index, let tier):
             response["applicationMatchedOn"] = tier.rawValue
-            return candidates[index].application
+            return unlessHarnessItself(candidates[index].application)
         case .notFound(let available):
             fail(
                 "notFound",
@@ -2819,6 +2902,9 @@ final class HarnessServer {
             response["candidates"] = candidates.map(\.path)
             return fail("ambiguous", "\(candidates.count) installed applications match \(UntrustedText(query).forDisplay)")
         }
+        guard !Self.isHarnessItself(bundleIdentifier: bundleIdentifier) else {
+            return fail("targetIsHarnessItself", Self.harnessItselfMessage)
+        }
         response["application"] = url.deletingPathExtension().lastPathComponent
         response["bundleIdentifier"] = bundleIdentifier
         response["path"] = url.path
@@ -2839,9 +2925,7 @@ final class HarnessServer {
             return response
         }
 
-        // Read BEFORE launching. Inside a request NSWorkspace's caches are frozen
-        // (we are inside `DispatchQueue.main.sync`), but this one was refreshed by
-        // the run loop before the request arrived — and it is not read again.
+        // Read BEFORE launching, and not read again.
         response["alreadyRunning"] = !NSRunningApplication
             .runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty
 
@@ -2948,9 +3032,17 @@ final class HarnessServer {
            let display = EscalationLadder.display(holding: windowFrame, among: displays) {
             return display.appKitFrame
         }
-        let cursor = NSEvent.mouseLocation
-        return displays.first(where: { $0.appKitFrame.contains(cursor) })?.appKitFrame
+        let cursor = cursorLocationInAppKitCoordinates()
+        return displays.first(where: { display in cursor.map { display.appKitFrame.contains($0) } ?? false })?.appKitFrame
             ?? displays.first?.appKitFrame
+    }
+
+    /// `NSEvent.mouseLocation` without AppKit, which wants main: a null-source
+    /// `CGEvent` reads the same cursor in CG's TOP-left space, flipped here
+    /// against the display at (0, 0) into AppKit's bottom-left.
+    nonisolated static func cursorLocationInAppKitCoordinates() -> CGPoint? {
+        guard let topLeft = CGEvent(source: nil)?.location else { return nil }
+        return CGPoint(x: topLeft.x, y: CGDisplayBounds(CGMainDisplayID()).height - topLeft.y)
     }
 
     private func escalationPlan(
@@ -3454,6 +3546,14 @@ final class HarnessServer {
         }
         let descriptor = item.descriptor
         response["item"] = Self.summariseStatusItem(descriptor)
+        // Our own status item opens our own panel — see `frontmostChangedRefusal`.
+        if Self.isHarnessItself(bundleIdentifier: descriptor.ownerBundleIdentifier) {
+            response["ok"] = false
+            response["error"] = "targetIsHarnessItself"
+            response["message"] = Self.harnessItselfMessage
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "targetIsHarnessItself", startedAt: startedAt)
+            return response
+        }
 
         // The "app" a status item belongs to is its owner, so that is what an
         // expectation is checked against — before anything is judged or pressed.
@@ -3610,6 +3710,21 @@ final class HarnessServer {
         outcome: String,
         startedAt: Date
     ) {
+        audit(request, dryRun: dryRun, kernel: kernel, outcome: outcome, startedAt: startedAt,
+              confirmedBy: currentConfirmedBy, phases: phaseTiming.wireFields)
+    }
+
+    /// Called off the request queue by `ping`, so it takes the per-request
+    /// fields as arguments instead of reading the in-flight request's.
+    private func audit(
+        _ request: HarnessRequest,
+        dryRun: Bool,
+        kernel: String,
+        outcome: String,
+        startedAt: Date,
+        confirmedBy: String?,
+        phases: [String: Any]
+    ) {
         let frontmost = AccessibilityTreeWalker.frontmost()
         appendAudit(HarnessPolicy.auditLine(
             at: startedAt,
@@ -3625,9 +3740,26 @@ final class HarnessServer {
             milliseconds: elapsedMilliseconds(since: startedAt),
             frontmostSource: frontmost.source.rawValue,
             frontmostSystemWideError: frontmost.systemWideErrorRawValue,
-            confirmedBy: currentConfirmedBy,
-            phases: phaseTiming.wireFields
+            confirmedBy: confirmedBy,
+            phases: phases
         ), at: startedAt)
+    }
+
+    /// Reads nothing a request in flight owns — see `answer(line:)`.
+    private func pingResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        audit(request, dryRun: dryRun, kernel: "n/a", outcome: "ok", startedAt: startedAt,
+              confirmedBy: nil, phases: HarnessPhaseTiming().wireFields)
+        let counters = stateLock.withLock { (failures: auditMirrorFailures, overflow: auditMirrorOverflowLines) }
+        return [
+            "ok": true,
+            "harness": versionString,
+            "dryRun": dryRun,
+            "dryRunSource": globalDryRun ? "global --harness-dry-run" : (request.requestedDryRun == true ? "request" : "none"),
+            "killSwitchPresent": Self.killSwitchIsPresent(),
+            "socket": Self.socketURL.path,
+            "auditMirrorFailures": counters.failures,
+            "auditMirrorOverflowLines": counters.overflow
+        ]
     }
 
     /// Append-only, and it rotates rather than truncates. The log is the only
@@ -3639,6 +3771,7 @@ final class HarnessServer {
     /// failure never fails the request; failures and capped lines are counted
     /// and `ping` reports both.
     private func appendAudit(_ line: String, at date: Date = Date()) {
+        stateLock.lock(); defer { stateLock.unlock() }
         let data = Data((line + "\n").utf8)
         rotateAuditLogIfLarge()
         _ = Self.append(data, to: Self.auditLogURL)

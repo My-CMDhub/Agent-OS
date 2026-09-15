@@ -287,9 +287,11 @@ enum EscalationLadder {
         let backingScaleFactor: CGFloat
     }
 
-    @MainActor
+    /// Hops to main when called off it: harness requests run on
+    /// `HarnessServer.requestQueue`, and that queue may `main.sync` briefly.
     static func displays() -> [DisplayInfo] {
-        NSScreen.screens.compactMap { screen in
+        guard Thread.isMainThread else { return DispatchQueue.main.sync { displays() } }
+        return NSScreen.screens.compactMap { screen in
             guard let identifier = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
                     as? CGDirectDisplayID else { return nil }
             return DisplayInfo(
@@ -303,7 +305,6 @@ enum EscalationLadder {
     /// The display holding most of the region, by intersection area — the same
     /// question `CompanionScreenCaptureUtility` already answers for the
     /// companion flow, so it is asked there rather than answered twice.
-    @MainActor
     static func display(holding region: CGRect, among displays: [DisplayInfo]) -> DisplayInfo? {
         if let index = CompanionScreenCaptureUtility.bestDisplayIndex(
             for: region, among: displays.map(\.appKitFrame)
@@ -505,11 +506,10 @@ enum EscalationLadder {
     }
 
     /// The synchronous face of an asynchronous API, because a harness request
-    /// is served synchronously on the main thread (`DispatchQueue.main.sync` in
-    /// `HarnessServer.serve`).
+    /// is served synchronously on `HarnessServer.requestQueue`.
     ///
     /// The work runs on a **detached** task, so nothing it awaits is scheduled
-    /// back onto the main actor we are blocking — ScreenCaptureKit answers on
+    /// back onto the queue we are blocking — ScreenCaptureKit answers on
     /// its own queue. The deadline exists because that reasoning is not
     /// something a unit test can prove: if some future SDK version does need
     /// the main run loop, this returns `timedOut` after 10 s instead of wedging
@@ -518,7 +518,6 @@ enum EscalationLadder {
     /// Pumping the run loop instead was considered and rejected for the reason
     /// `AccessibilityWindows.focus` records: it would let a second socket
     /// request land inside this one.
-    @MainActor
     static func captureSynchronously(
         region: CGRect,
         on display: DisplayInfo,
@@ -557,12 +556,10 @@ enum EscalationLadder {
     /// A caller on the far side of a network will need base64 instead, and that
     /// is deliberately deferred: the socket is a local file with mode 0600, so
     /// a local path is a capability the caller already has.
-    @MainActor
     static var imageDirectory: URL {
         HarnessServer.supportDirectory.appendingPathComponent("escalation", isDirectory: true)
     }
 
-    @MainActor
     static func writeImage(_ data: Data) -> URL? {
         let timestamp = HarnessPolicy.auditTimestampFormatter.string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
@@ -575,7 +572,6 @@ enum EscalationLadder {
 
     /// Newest ten, exactly like `pruneAnomalyDumps`: named by ISO timestamp, so
     /// lexicographic order is chronological.
-    @MainActor
     static func pruneImages() {
         let contents = (try? FileManager.default.contentsOfDirectory(
             at: imageDirectory, includingPropertiesForKeys: nil

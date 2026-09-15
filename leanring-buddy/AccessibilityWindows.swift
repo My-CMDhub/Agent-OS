@@ -278,7 +278,7 @@ enum AccessibilityWindows {
             let genuinelyEmpty = (error == .noValue || error == .attributeUnsupported)
             return WindowRead(windows: [], error: genuinelyEmpty ? .success : error)
         }
-        let primaryDisplayHeight = NSScreen.screens.first?.frame.height ?? 0
+        let primaryDisplayHeight = CGDisplayBounds(CGMainDisplayID()).height
 
         let candidates = windows.map { window in
             var accessibilityFrame = CGRect.zero
@@ -458,6 +458,8 @@ enum AccessibilityWindows {
         repeat {
             outcome.observationPolls += 1
             // Ask **Accessibility** who is focused, not `NSWorkspace`.
+            // (Requests left the main thread 2026-09-15, so the history below no
+            // longer freezes the cache; it still lags, and AX stays the live answer.)
             //
             // Measured 2026-09-10, and it is the run-loop trap this project
             // already documents for AX events, in a new place. Requests execute

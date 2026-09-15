@@ -375,6 +375,10 @@ enum AccessibilityTreeWalker {
     /// The application that has focus, asked of Accessibility — not of
     /// `NSWorkspace`, whose answer is a cache refreshed on the main run loop.
     ///
+    /// Since 2026-09-15 requests run on `HarnessServer.requestQueue`, not main, so
+    /// the cache no longer freezes for a whole request — but it still lags the
+    /// notification that refreshes it, and Accessibility is live. Keep asking AX.
+    ///
     /// Third time this trap has cost a result, measured 2026-09-11. Socket
     /// requests run inside `DispatchQueue.main.sync`, so the run loop cannot
     /// turn during one, and `NSWorkspace.shared.frontmostApplication` stays
@@ -623,9 +627,10 @@ enum AccessibilityTreeWalker {
         // would not cover.
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
 
-        // NSScreen.screens[0] is always the display whose origin is (0, 0) —
-        // the one AX measures every other display relative to.
-        let primaryDisplayHeightInPoints = NSScreen.screens.first?.frame.height ?? 0
+        // The main display is the one whose origin is (0, 0) — the one AX
+        // measures every other display relative to. CG, not NSScreen: this
+        // walk runs on the harness request queue, off main.
+        let primaryDisplayHeightInPoints = CGDisplayBounds(CGMainDisplayID()).height
         let frontmostAtStart = AccessibilityTreeWalker.focusedApplication()?.processIdentifier
 
         var budget = AccessibilityWalkBudget(

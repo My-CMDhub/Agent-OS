@@ -112,7 +112,7 @@ enum CompanionScreenCaptureUtility {
         return capturedScreens
     }
 
-    static func bestDisplayIndex(for windowFrame: CGRect, among displayFrames: [CGRect]) -> Int? {
+    nonisolated static func bestDisplayIndex(for windowFrame: CGRect, among displayFrames: [CGRect]) -> Int? {
         var bestIndex: Int?
         var bestIntersectionArea: CGFloat = 0
 

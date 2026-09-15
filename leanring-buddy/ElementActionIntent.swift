@@ -580,7 +580,7 @@ enum AccessibilityTypePerformer {
             return text
         }
 
-        let primaryDisplayHeight = NSScreen.screens.first?.frame.height ?? 0
+        let primaryDisplayHeight = CGDisplayBounds(CGMainDisplayID()).height
         let accessibilityFrame = frame(of: element) ?? .zero
 
         return AccessibilityElementNode(
@@ -1079,7 +1079,7 @@ enum AccessibilityMenu {
                 if AXValueGetValue(frameValue as! AXValue, .cgRect, &rect) { frame = rect }
             }
         }
-        let primaryDisplayHeight = NSScreen.screens.first?.frame.height ?? 0
+        let primaryDisplayHeight = CGDisplayBounds(CGMainDisplayID()).height
 
         return AccessibilityElementNode(
             role: node.role,

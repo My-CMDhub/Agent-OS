@@ -232,7 +232,7 @@ enum AccessibilityDumpRunner {
     /// elements and hundreds of files, because files are selected and
     /// double-clicked, never pressed. A fingerprint has to cover what the action
     /// can move.
-    static func namedElementFingerprint(in rootNode: AccessibilityElementNode) -> Set<String> {
+    nonisolated static func namedElementFingerprint(in rootNode: AccessibilityElementNode) -> Set<String> {
         Set(rootNode.flattenedDescendants().compactMap { $0.displayName?.forDisplay })
     }
 
@@ -388,7 +388,7 @@ enum AccessibilityDumpRunner {
     ///   standard tier (Sonnet 4.6 and earlier): long edge 1568, cap 1568 tokens
     ///   high-resolution tier (Claude 4.7 and later): long edge 2576, cap 4784
     /// CompanionManager defaults to claude-sonnet-4-6, which is standard tier.
-    static func estimatedVisualTokens(
+    nonisolated static func estimatedVisualTokens(
         width: Int,
         height: Int,
         usesHighResolutionTier: Bool

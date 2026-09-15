@@ -3,9 +3,9 @@
 //  leanring-buddy
 //
 //  The kernel's `requireConfirmation` is a question for a human. Harness
-//  requests run on the main thread inside `DispatchQueue.main.sync`, so a
-//  request cannot block waiting for a click — the panel only gets to draw
-//  *between* requests. So a confirmation is a TICKET: the request returns at
+//  requests run one at a time on `HarnessServer.requestQueue`, so a request
+//  that blocked waiting for a click would hold every other caller. So a
+//  confirmation is a TICKET: the request returns at
 //  once with a ticket id, the panel shows the question, the owner answers it
 //  in-process, and the caller re-issues the same request carrying the id.
 //
@@ -14,8 +14,8 @@
 //  ticket on a different action (a ticket matches one verb, one app, one
 //  target — and for `type`, one text — and is consumed by one execution).
 //
-//  Main-thread only, like everything the harness touches. Not annotated
-//  `@MainActor` because `HarnessServer` is not, and it is the one caller.
+//  Main-thread only: SwiftUI observes `tickets`. `HarnessServer` reaches it
+//  through short `DispatchQueue.main.sync` hops from its request queue.
 //
 
 import AppKit
