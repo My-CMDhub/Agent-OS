@@ -67,6 +67,16 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Walks Finder / System Settings / Cursor on main and on a background
+        // queue, writes ~/Library/Logs/Clicky/ax-thread-probe.log, then quits.
+        if CommandLine.arguments.contains("--ax-thread-probe") {
+            Task { @MainActor in
+                await AccessibilityThreadProbe.run()
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         if CommandLine.arguments.contains("--ax-probe") {
             Task { await AccessibilityDumpRunner.runProbe() }
             return
