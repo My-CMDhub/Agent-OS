@@ -299,7 +299,7 @@ struct leanring_buddyTests {
             visibleBounds: CGRect(x: 0, y: 0, width: 1440, height: 900)
         )
 
-        #expect(decision == .requireConfirmation(reason: "title suggests a destructive action: delete"))
+        #expect(decision == .requireConfirmation(reason: "title suggests a destructive action: delete", destructive: true))
     }
 
     @Test func safetyKernelAsksWhenItDoesNotRecogniseTheRole() async throws {
@@ -310,7 +310,7 @@ struct leanring_buddyTests {
             visibleBounds: CGRect(x: 0, y: 0, width: 1440, height: 900)
         )
 
-        #expect(decision == .requireConfirmation(reason: "unrecognised role AXDisclosureTriangle"))
+        #expect(decision == .requireConfirmation(reason: "unrecognised role AXDisclosureTriangle", destructive: false))
     }
 
     // MARK: - SettleClock
@@ -1034,7 +1034,7 @@ private let wholeScreen = CGRect(x: 0, y: 0, width: 1920, height: 1200)
     // document is the worst thing this verb can do, so the count is in the
     // reason — "4213 characters" is a sentence a human can answer.
     #expect(decide(currentValueLength: 4213)
-        == .requireConfirmation(reason: ActionSafetyKernel.replaceWouldDiscardReason(characterCount: 4213)))
+        == .requireConfirmation(reason: ActionSafetyKernel.replaceWouldDiscardReason(characterCount: 4213), destructive: true))
 
     // An empty field has nothing to discard, so there is nothing to ask.
     #expect(decide(currentValueLength: 0) == .allow)
@@ -1392,7 +1392,7 @@ private func fileMenuBarFixture() -> AccessibilityMenu.Node {
             resolvedNode: item, matchCount: 1, visibleBounds: .infinite,
             menuItemEnabled: true
         )
-        guard case .requireConfirmation(let reason) = decision else {
+        guard case .requireConfirmation(let reason, _) = decision else {
             Issue.record("\(label) should have asked, got \(decision)")
             continue
         }
@@ -2456,7 +2456,7 @@ private func expectEverySuggestionResolvesToItsOwnCandidate(
 }
 
 @Test func launchAsksBeforeATerminalAndAllowsACalculator() async throws {
-    guard case .requireConfirmation(let reason) = ActionSafetyKernel.evaluateLaunch(bundleIdentifier: "com.apple.Terminal") else {
+    guard case .requireConfirmation(let reason, _) = ActionSafetyKernel.evaluateLaunch(bundleIdentifier: "com.apple.Terminal") else {
         Issue.record("expected Terminal to require confirmation")
         return
     }
@@ -2566,7 +2566,7 @@ private func expectEverySuggestionResolvesToItsOwnCandidate(
 
 @Test func appPolicyComposesOverTheKernelAndARefuseAlwaysWins() async throws {
     let app = "com.apple.Terminal"
-    let kernelQuestion = SafetyDecision.requireConfirmation(reason: "title suggests a destructive action: delete")
+    let kernelQuestion = SafetyDecision.requireConfirmation(reason: "title suggests a destructive action: delete", destructive: true)
     let kernelRefusal = SafetyDecision.refuse(reason: ActionSafetyKernel.zeroAreaRefusalReason)
 
     // Policy refuse beats everything.
@@ -2581,7 +2581,7 @@ private func expectEverySuggestionResolvesToItsOwnCandidate(
     // Confirm over allow asks; confirm over a kernel question asks once, carrying both reasons.
     #expect(HarnessAppPolicy.compose(policy: .confirm, bundleIdentifier: app, kernel: .allow)
             == .requireConfirmation(reason: "app policy requires confirmation for \(app)"))
-    guard case .requireConfirmation(let reason) =
+    guard case .requireConfirmation(let reason, _) =
             HarnessAppPolicy.compose(policy: .confirm, bundleIdentifier: app, kernel: kernelQuestion) else {
         Issue.record("confirm over requireConfirmation must stay a question")
         return
@@ -2713,7 +2713,7 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
 
     // And the mutating wrapper flips the flag on the way through.
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
-    guard case .opened(let opened) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "irreversible") else {
+    guard case .opened(let opened) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "irreversible", destructive: false) else {
         Issue.record("expected a ticket"); return
     }
     confirmations.answer(opened.id, allow: true, scope: .once)
@@ -2734,11 +2734,11 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
 
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     for _ in 0..<3 {
-        guard case .opened = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+        guard case .opened = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false) else {
             Issue.record("expected a ticket"); return
         }
     }
-    #expect(confirmations.open(finderEmptyBin, appName: "Finder", reason: "r")
+    #expect(confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false)
         == .refused(code: "tooManyPendingConfirmations",
                     message: "3 tickets are already waiting in the Clicky panel — answer or let them expire first"))
 }
@@ -2798,16 +2798,16 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
     #expect(store.save([existing]) == errSecSuccess)
     let confirmations = HarnessConfirmations(rulesStore: store)
     #expect(confirmations.alwaysRules == [existing])
-    #expect(confirmations.rule(for: finderEmptyBin).rule == nil)
+    #expect(confirmations.rule(for: finderEmptyBin, destructive: false).rule == nil)
 
-    guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+    guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false) else {
         Issue.record("expected a ticket"); return
     }
     confirmations.answer(ticket.id, allow: true, scope: .always)
 
     // Read-append-write: the earlier rule survives beside the new one.
     #expect(try store.load().get() == [existing, HarnessConfirmations.rule(for: ticket)])
-    #expect(confirmations.rule(for: finderEmptyBin).rule == HarnessConfirmations.rule(for: ticket))
+    #expect(confirmations.rule(for: finderEmptyBin, destructive: false).rule == HarnessConfirmations.rule(for: ticket))
     #expect(confirmations.alwaysRules == [existing, HarnessConfirmations.rule(for: ticket)])
 }
 
@@ -2819,7 +2819,7 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
     let confirmations = HarnessConfirmations(rulesStore: store)
     let moveToBin = HarnessConfirmations.Shape(verb: "menu", bundleIdentifier: "com.apple.finder", rawTarget: "File > Move to Bin")
     let destructiveReason = ActionSafetyKernel.destructiveActionReasonPrefix + "move to bin"
-    guard case .opened(let ticket) = confirmations.open(moveToBin, appName: "Finder", reason: destructiveReason) else {
+    guard case .opened(let ticket) = confirmations.open(moveToBin, appName: "Finder", reason: destructiveReason, destructive: true) else {
         Issue.record("expected a ticket"); return
     }
     #expect(!HarnessConfirmations.offersAlwaysRule(for: ticket))
@@ -2829,12 +2829,22 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
     #expect(confirmations.ticket(id: ticket.id)?.status == .allowed)
     #expect(try store.load().get() == [])
 
-    #expect(ActionSafetyKernel.isDestructiveConfirmationReason(ActionSafetyKernel.replaceWouldDiscardReason(characterCount: 12)))
-    // The classification reads our own prefix, never text an app could embed later in the line.
-    #expect(!ActionSafetyKernel.isDestructiveConfirmationReason("unrecognised role \(ActionSafetyKernel.destructiveActionReasonPrefix)x"))
+    // Destructiveness is the kernel's typed flag, so app-written text that spells our
+    // own phrase (here a role) cannot make a question destructive.
+    let smuggled = ActionSafetyKernel.evaluate(
+        intent: ElementActionIntent(role: nil, title: "More", action: .press),
+        resolvedNode: AccessibilityElementNode(role: "\(ActionSafetyKernel.destructiveActionReasonPrefix)x", subrole: nil, title: "More",
+                                               value: nil, frameInAppKitCoordinates: CGRect(x: 0, y: 0, width: 10, height: 10),
+                                               depth: 0, children: [], publishedActionNames: ["AXPress"]),
+        matchCount: 1, visibleBounds: .infinite)
+    guard case .requireConfirmation(let smuggledReason, let smuggledDestructive) = smuggled else {
+        Issue.record("expected a question, got \(smuggled)"); return
+    }
+    #expect(smuggledReason.hasPrefix("unrecognised role"))
+    #expect(!smuggledDestructive)
 
     let launch = HarnessConfirmations.Shape(verb: "launch", bundleIdentifier: "com.apple.Terminal", rawTarget: "Terminal")
-    guard case .opened(let launchTicket) = confirmations.open(launch, appName: "Terminal", reason: "launches an app that can run code") else {
+    guard case .opened(let launchTicket) = confirmations.open(launch, appName: "Terminal", reason: "launches an app that can run code", destructive: false) else {
         Issue.record("expected a ticket"); return
     }
     #expect(HarnessConfirmations.offersAlwaysRule(for: launchTicket))
@@ -2859,11 +2869,11 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
     defer { _ = store.deleteItem() }
     #expect(store.write(Data("{not json".utf8)) == errSecSuccess)
     let broken = HarnessConfirmations(rulesStore: store)
-    let consulted = broken.rule(for: finderEmptyBin)
+    let consulted = broken.rule(for: finderEmptyBin, destructive: false)
     #expect(consulted.rule == nil)
     #expect(consulted.unreadable?.contains(store.serviceName) == true)
     #expect(broken.alwaysRules.isEmpty && broken.alwaysRulesProblem != nil)
-    guard case .opened(let ticket) = broken.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+    guard case .opened(let ticket) = broken.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false) else {
         Issue.record("expected a ticket"); return
     }
     broken.answer(ticket.id, allow: true, scope: .always)
@@ -2887,7 +2897,7 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
     confirmations.removeAlwaysRule(launch)
     #expect(try store.load().get() == [send])
     #expect(confirmations.alwaysRules == [send])
-    #expect(confirmations.rule(for: .init(verb: "launch", bundleIdentifier: "com.apple.Terminal", rawTarget: "Terminal")).rule == nil)
+    #expect(confirmations.rule(for: .init(verb: "launch", bundleIdentifier: "com.apple.Terminal", rawTarget: "Terminal"), destructive: false).rule == nil)
 }
 
 @Test func aRuleSavedUnderOneServiceIsInvisibleUnderAnother() async throws {
@@ -2904,10 +2914,10 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
     defer { try? FileManager.default.removeItem(at: directory) }
     let file = directory.appendingPathComponent("harness-approvals.json")
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore(), ignoredApprovalsFileURL: file)
-    #expect(confirmations.rule(for: finderEmptyBin).ignoredFile == nil)
+    #expect(confirmations.rule(for: finderEmptyBin, destructive: false).ignoredFile == nil)
 
     try Data(#"[{"bundleIdentifier":"com.apple.finder","verb":"press","target":null}]"#.utf8).write(to: file)
-    let consulted = confirmations.rule(for: finderEmptyBin)
+    let consulted = confirmations.rule(for: finderEmptyBin, destructive: false)
     #expect(consulted.rule == nil)
     #expect(consulted.ignoredFile == file.path)
 }
@@ -2946,7 +2956,7 @@ private func mailShape(
 
     // And the ticket binds exactly the shape whose lines it carries.
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
-    guard case .opened(let ticket) = confirmations.open(full, appName: "Mail", reason: "r") else {
+    guard case .opened(let ticket) = confirmations.open(full, appName: "Mail", reason: "r", destructive: false) else {
         Issue.record("expected a ticket"); return
     }
     #expect(ticket.shape == full)
@@ -2954,7 +2964,7 @@ private func mailShape(
 
     // The reason is not in Shape but is on the card, so it gets the same proof:
     // a different reason is a different card, drawn only in its escaped form.
-    guard case .opened(let otherReason) = confirmations.open(full, appName: "Mail", reason: "r\u{2028}2") else {
+    guard case .opened(let otherReason) = confirmations.open(full, appName: "Mail", reason: "r\u{2028}2", destructive: false) else {
         Issue.record("expected a ticket"); return
     }
     #expect(ticket.reason == HarnessConfirmations.displayedReason("r"))
@@ -2973,7 +2983,7 @@ private func mailShape(
     let paragraph = mailShape(text: String(repeating: "a", count: HarnessConfirmations.maximumDisplayLineLength))
     #expect(HarnessConfirmations.openRefusal(for: paragraph, appName: "Mail", reason: "r", pendingCount: 0)?.code == "confirmationTooLongToShow")
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
-    guard case .refused(let code, _) = confirmations.open(paragraph, appName: "Mail", reason: "r") else {
+    guard case .refused(let code, _) = confirmations.open(paragraph, appName: "Mail", reason: "r", destructive: false) else {
         Issue.record("expected a refusal"); return
     }
     #expect(code == "confirmationTooLongToShow")
@@ -2997,16 +3007,16 @@ private func mailShape(
     let store = temporaryRulesStore()
     defer { _ = store.deleteItem() }
     let confirmations = HarnessConfirmations(rulesStore: store)
-    guard case .opened(let ticket) = confirmations.open(drafts, appName: "Mail", reason: "r") else {
+    guard case .opened(let ticket) = confirmations.open(drafts, appName: "Mail", reason: "r", destructive: false) else {
         Issue.record("expected a ticket"); return
     }
     confirmations.answer(ticket.id, allow: true, scope: .always)
-    #expect(confirmations.rule(for: drafts).rule != nil)
-    #expect(confirmations.rule(for: bank).rule == nil)
+    #expect(confirmations.rule(for: drafts, destructive: false).rule != nil)
+    #expect(confirmations.rule(for: bank, destructive: false).rule == nil)
     var unqualified = drafts; unqualified.withinNamed = nil
-    #expect(confirmations.rule(for: unqualified).rule == nil)
+    #expect(confirmations.rule(for: unqualified, destructive: false).rule == nil)
     var submitting = drafts; submitting.thenConfirm = true
-    #expect(confirmations.rule(for: submitting).rule == nil)
+    #expect(confirmations.rule(for: submitting, destructive: false).rule == nil)
 
     // A rule written before the qualifiers existed decodes them as nil, so it
     // matches only an unqualified request: narrower, never broader.
@@ -3100,7 +3110,7 @@ private func mailShape(
     let decoded = HarnessServer.confirmationShape(for: request, bundleIdentifier: "com.apple.mail")
     #expect(decoded.withinNamed == "Drafts" && decoded.role == "AXButton" && decoded.nearPoint == CGPoint(x: 3, y: 4))
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
-    guard case .opened(let ticket) = confirmations.open(decoded, appName: "Mail", reason: "r") else {
+    guard case .opened(let ticket) = confirmations.open(decoded, appName: "Mail", reason: "r", destructive: false) else {
         Issue.record("expected a ticket"); return
     }
     #expect(ticket.withinNamed == "Drafts" && ticket.role == "AXButton" && ticket.nearPoint == CGPoint(x: 3, y: 4))
@@ -3185,7 +3195,7 @@ private func mailShape(
 
 @Test func aDryRunReportsTheGatesAnswerWithoutSpendingTheTicket() async throws {
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
-    guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+    guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false) else {
         Issue.record("expected a ticket"); return
     }
     confirmations.answer(ticket.id, allow: true, scope: .once)
@@ -3209,11 +3219,24 @@ private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirma
           pressedButtonFrame: CGRect(x: 20, y: 150, width: 80, height: 22))
 }
 
-@Test func anApprovalCountsOnlyForAMouseOrKeyEventFromTheHIDLayer() {
+// Review 2026-09-15: only a left mouse-up inside the button approves. A keyDown in the
+// key menu-bar panel, a right click, or the mouse-down a press-and-drag-off leaves
+// behind are all pid 0, fresh and unused — and each is borrowable by a scripted AXPress.
+@Test func anApprovalCountsOnlyForALeftMouseUpFromTheHIDLayer() {
     typealias Input = HarnessConfirmations.ApprovalInput
     #expect(Input.verdict(realClickEvidence(), eventAlreadyUsed: false) == .accepted)
-    var key = realClickEvidence(); key.eventType = .keyDown; key.clickCount = 0
-    #expect(Input.verdict(key, eventAlreadyUsed: false) == .accepted)
+    var key = realClickEvidence(); key.eventType = .keyDown; key.clickCount = 0; key.clickLocationInWindow = nil
+    #expect(Input.verdict(key, eventAlreadyUsed: false) != .accepted)
+    // Even a key event that somehow carried the button's location.
+    var keyWithLocation = realClickEvidence(); keyWithLocation.eventType = .keyDown
+    #expect(Input.verdict(keyWithLocation, eventAlreadyUsed: false) != .accepted)
+    var rightClick = realClickEvidence(); rightClick.eventType = .rightMouseUp
+    #expect(Input.verdict(rightClick, eventAlreadyUsed: false) != .accepted)
+    var pressedThenDraggedOff = realClickEvidence(); pressedThenDraggedOff.eventType = .leftMouseDown
+    #expect(Input.verdict(pressedThenDraggedOff, eventAlreadyUsed: false) != .accepted)
+    var releasedBesideTheButton = realClickEvidence(); releasedBesideTheButton.clickLocationInWindow = CGPoint(x: 150, y: 39)
+    #expect(Input.verdict(releasedBesideTheButton, eventAlreadyUsed: false)
+            == .rejected(reason: "the click did not land inside the pressed button"))
     #expect(Input.verdict(.init(hostWindowNumber: 7, rowSettledSeconds: 2), eventAlreadyUsed: false)
             == .rejected(reason: "no input event (programmatic press, e.g. Accessibility)"))
     var posted = realClickEvidence(); posted.sourceProcessID = 72601
@@ -3256,7 +3279,7 @@ private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirma
 
 @Test func aProgrammaticAllowLeavesTheTicketPendingAndADenyFromAnySourceCounts() throws {
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
-    guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+    guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false) else {
         Issue.record("expected a ticket"); return
     }
     for scope in [HarnessConfirmations.Scope.once, .always] {
@@ -3273,8 +3296,8 @@ private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirma
 // another process AXPresses "Always" on B while that mouse-up is still current.
 @Test func theEventThatAnsweredOneTicketCannotApproveAnother() throws {
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
-    guard case .opened(let first) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r"),
-          case .opened(let second) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+    guard case .opened(let first) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false),
+          case .opened(let second) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false) else {
         Issue.record("expected two tickets"); return
     }
     let click = realClickEvidence()
@@ -3306,8 +3329,8 @@ private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirma
 
 @Test func aNewTicketIsListedAfterTheOnesAlreadyShowing() throws {
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
-    guard case .opened(let first) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r"),
-          case .opened(let second) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r") else {
+    guard case .opened(let first) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false),
+          case .opened(let second) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false) else {
         Issue.record("expected two tickets"); return
     }
     #expect(confirmations.tickets.map(\.id) == [first.id, second.id])
@@ -3317,9 +3340,9 @@ private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirma
 
 @Test func theAlwaysButtonSaysWholeAppForFocusAndLaunchAndExactlyThisOtherwise() throws {
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
-    guard case .opened(let press) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r"),
+    guard case .opened(let press) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false),
           case .opened(let launch) = confirmations.open(
-            .init(verb: "launch", bundleIdentifier: "com.apple.Terminal", rawTarget: "Terminal"), appName: "Term\ninal", reason: "r") else {
+            .init(verb: "launch", bundleIdentifier: "com.apple.Terminal", rawTarget: "Terminal"), appName: "Term\ninal", reason: "r", destructive: false) else {
         Issue.record("expected two tickets"); return
     }
     #expect(HarnessConfirmations.alwaysButtonTitle(for: press) == "Always allow exactly this")
@@ -3342,7 +3365,7 @@ private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirma
 @Test func theKernelsReasonIsEscapedAndCountsTowardTheBudget() throws {
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     guard case .opened(let forged) = confirmations.open(
-        finderEmptyBin, appName: "Finder", reason: "unrecognised role AXFake\nAlways allow exactly this\u{2028}ok"
+        finderEmptyBin, appName: "Finder", reason: "unrecognised role AXFake\nAlways allow exactly this\u{2028}ok", destructive: false
     ) else { Issue.record("expected a ticket"); return }
     #expect(!forged.reason.unicodeScalars.contains { CharacterSet.newlines.contains($0) || CharacterSet.controlCharacters.contains($0) })
     #expect(forged.reason == #""unrecognised role AXFake\nAlways allow exactly this\u{2028}ok""#)
@@ -3531,9 +3554,9 @@ private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirma
     #expect(Input.verdict(emptyFrame, eventAlreadyUsed: false) != .accepted)
     var noHeight = realClickEvidence(); noHeight.hostContentHeight = nil
     #expect(Input.verdict(noHeight, eventAlreadyUsed: false) != .accepted)
-    // A key press has no location and is judged without one.
+    // A key press has no location, so it never approves (review 2026-09-15).
     var key = realClickEvidence(); key.eventType = .keyDown; key.clickCount = 0; key.clickLocationInWindow = nil
-    #expect(Input.verdict(key, eventAlreadyUsed: false) == .accepted)
+    #expect(Input.verdict(key, eventAlreadyUsed: false) != .accepted)
 }
 
 // MARK: - Part 1 (2026-09-14): a ticket binds the thing, not only the words
@@ -3542,7 +3565,7 @@ private func element(_ pid: pid_t) -> AccessibilityElementKey { AccessibilityEle
 
 private func selection(container: pid_t = 900, items: [pid_t] = [901], texts: [[String]] = [["AppKit.framework", "Folder"]],
                        names: [String]? = ["AppKit.framework"]) -> ActionBinding.Selection {
-    .published(.init(containerKey: element(container), selectionAttribute: "AXSelectedRows",
+    .published(.init(containerKey: element(container),
                      selectedItemKeys: Set(items.map(element)), namesFingerprint: ActionBinding.namesFingerprint(itemTexts: texts),
                      count: items.count, displayNames: names))
 }
@@ -3591,10 +3614,74 @@ private func binding(target: pid_t? = 800, selection chosen: ActionBinding.Selec
     #expect(ActionBinding.movedPart(approved: blind, currentTargetKey: element(801), currentSelection: blind.selection) == "target")
 }
 
+// Review 2026-09-15: Finder window A had harmless.txt selected; `focus` (no ticket)
+// brought window B forward; A's selection was unchanged, so a re-read of A's stored
+// container approved "Move to Bin" for B's selection. The recheck searches from
+// focus again, and a different or unfindable container is stale.
+@Test func aRecheckSearchesFromFocusAgainAndADifferentOrUnreadableContainerIsStale() {
+    let approved = binding(target: nil)
+    let subject = ActionBinding.Subject(targetElement: nil, processIdentifier: 1)
+    var searches = 0
+    func movedPart(when now: ActionBinding.Selection) -> String? {
+        ActionBinding.recheck(approved, subject: subject, bundleIdentifier: "com.apple.finder",
+                              readSelection: { _, _ in searches += 1; return now }).movedPart
+    }
+    #expect(movedPart(when: selection()) == nil)
+    #expect(movedPart(when: selection(container: 902)) == "selection")
+    #expect(movedPart(when: .unavailable(reason: "the application reports no focused element")) == "selection")
+    // Every recheck asked the live search — not the container stored at open.
+    #expect(searches == 3)
+}
+
+// Review 2026-09-15: a rule saved when `type replace` discarded nothing matched when
+// it would discard 500 characters, and pre-ruling destructive-press rules still sit
+// in the keychain. A destructive question consults no rule; it opens a ticket.
+@Test func aDestructiveQuestionNeverMatchesAStoredRule() async throws {
+    let store = temporaryRulesStore()
+    defer { _ = store.deleteItem() }
+    let preRuling = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.finder", verb: "press", target: "Empty Bin")
+    #expect(store.save([preRuling]) == errSecSuccess)
+    let confirmations = HarnessConfirmations(rulesStore: store)
+    #expect(confirmations.rule(for: finderEmptyBin, destructive: false).rule == preRuling)
+    #expect(confirmations.rule(for: finderEmptyBin, destructive: true).rule == nil)
+}
+
+// Review 2026-09-15: `compose` rewrites the reason, so a prefix check called Move to Bin
+// in a `confirm`-policy app non-destructive and the card offered "Always".
+@Test func aDestructiveQuestionStaysDestructiveThroughAConfirmPolicyAndOffersNoAlways() {
+    let item = AccessibilityElementNode(
+        role: "AXMenuItem", subrole: nil, title: "Move to Bin", value: nil,
+        frameInAppKitCoordinates: .zero, depth: 0, children: [], publishedActionNames: ["AXPress"]
+    )
+    let kernel = ActionSafetyKernel.evaluate(
+        intent: ElementActionIntent(role: nil, title: "Move to Bin", action: .menu),
+        resolvedNode: item, matchCount: 1, visibleBounds: .infinite, menuItemEnabled: true
+    )
+    let composed = HarnessAppPolicy.compose(policy: .confirm, bundleIdentifier: "com.apple.finder", kernel: kernel)
+    guard case .requireConfirmation(let reason, let destructive) = composed else {
+        Issue.record("expected a question, got \(composed)"); return
+    }
+    #expect(reason.hasPrefix("app policy requires confirmation for com.apple.finder"))
+    #expect(destructive)
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
+    guard case .opened(let ticket) = confirmations.open(
+        .init(verb: "menu", bundleIdentifier: "com.apple.finder", rawTarget: "File > Move to Bin"),
+        appName: "Finder", reason: reason, destructive: destructive) else {
+        Issue.record("expected a ticket"); return
+    }
+    #expect(!HarnessConfirmations.offersAlwaysRule(for: ticket))
+    // Confirm over a non-destructive kernel answer stays non-destructive.
+    guard case .requireConfirmation(_, let plain) = HarnessAppPolicy.compose(
+        policy: .confirm, bundleIdentifier: "com.apple.finder", kernel: .allow) else {
+        Issue.record("expected a question"); return
+    }
+    #expect(!plain)
+}
+
 @Test func aStaleTicketIsRefusedFromPendingOrAllowedAndNeverBecomesSpendable() {
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     for startAllowed in [false, true] {
-        guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", binding: binding()) else {
+        guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false, binding: binding()) else {
             Issue.record("expected a ticket"); return
         }
         #expect(ticket.binding == binding())
@@ -3607,7 +3694,7 @@ private func binding(target: pid_t? = 800, selection chosen: ActionBinding.Selec
         #expect(confirmations.ticket(id: ticket.id)?.status == .stale)
     }
     // A spent ticket stays spent — staleness does not rewrite history.
-    guard case .opened(let spent) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", binding: binding()) else {
+    guard case .opened(let spent) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false, binding: binding()) else {
         Issue.record("expected a ticket"); return
     }
     confirmations.answer(spent.id, allow: true, scope: .once)
@@ -3660,7 +3747,7 @@ private func binding(target: pid_t? = 800, selection chosen: ActionBinding.Selec
 @Test func everyFieldOfABindingIsEitherShownOrDeclaredAnIdentityTheOwnerCannotRead() {
     // Adding a field to PublishedSelection fails here until it is put in one set,
     // and a field in `shown` must change the card when it alone changes.
-    let identityOnly: Set<String> = ["containerKey", "selectionAttribute", "selectedItemKeys", "namesFingerprint"]
+    let identityOnly: Set<String> = ["containerKey", "selectedItemKeys", "namesFingerprint"]
     let shown: Set<String> = ["count", "displayNames"]
     guard case .published(let full) = selection() else { Issue.record("expected published"); return }
     #expect(Set(Mirror(reflecting: full).children.compactMap(\.label)) == identityOnly.union(shown))
@@ -3676,7 +3763,7 @@ private func binding(target: pid_t? = 800, selection chosen: ActionBinding.Selec
 
     // And the ticket carries exactly the lines of its shape plus its binding.
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
-    guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", binding: binding()) else {
+    guard case .opened(let ticket) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false, binding: binding()) else {
         Issue.record("expected a ticket"); return
     }
     #expect(ticket.displayLines == HarnessConfirmations.displayLines(for: finderEmptyBin, appName: "Finder", binding: binding()))

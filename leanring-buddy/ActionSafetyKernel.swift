@@ -14,7 +14,13 @@ import Foundation
 
 enum SafetyDecision: Equatable {
     case allow
-    case requireConfirmation(reason: String)
+    /// `destructive` is set by the kernel itself, where it decides a question is
+    /// about destroying something — never recovered from `reason` afterwards.
+    /// Review 2026-09-15: a prefix check on the reason was blind to any layer that
+    /// rewrites it (`HarnessAppPolicy.compose` prepends "app policy requires
+    /// confirmation for …"), so in a `confirm`-policy app a destructive question
+    /// offered "Always" and matched stored rules. A flag travels through a rewrite.
+    case requireConfirmation(reason: String, destructive: Bool = false)
     case refuse(reason: String)
 }
 
@@ -125,16 +131,12 @@ enum ActionSafetyKernel {
         "\(replaceWouldDiscardReasonPrefix)\(characterCount) characters already in the field"
     }
 
+    /// The two questions about destroying something carry `destructive: true`
+    /// (see `SafetyDecision`). Owner's ruling 2026-09-14: such a question may be
+    /// answered once, never "always" — a rule cannot carry what is selected, so
+    /// "always press Delete in Mail" would delete whatever is selected next, forever.
     static let destructiveActionReasonPrefix = "title suggests a destructive action: "
     static let replaceWouldDiscardReasonPrefix = "replace would discard "
-
-    /// A question about destroying something. Owner's ruling 2026-09-14: such a
-    /// question may be answered once, never "always" — a rule cannot carry what is
-    /// selected, so "always press Delete in Mail" would delete whatever is selected
-    /// next, forever. Both reasons start with our own constant text, never an app's.
-    static func isDestructiveConfirmationReason(_ reason: String) -> Bool {
-        reason.hasPrefix(destructiveActionReasonPrefix) || reason.hasPrefix(replaceWouldDiscardReasonPrefix)
-    }
 
     /// Refusal reasons as constants, so the probe can classify a decision by
     /// identity rather than by re-typing the sentence and silently missing.
@@ -452,7 +454,7 @@ enum ActionSafetyKernel {
             let lowercasedTitle = name.raw.lowercased()
 
             if let matchedKeyword = destructiveTitleKeywords.first(where: { lowercasedTitle.contains($0) }) {
-                return .requireConfirmation(reason: "\(destructiveActionReasonPrefix)\(matchedKeyword)")
+                return .requireConfirmation(reason: "\(destructiveActionReasonPrefix)\(matchedKeyword)", destructive: true)
             }
         }
 
@@ -461,7 +463,8 @@ enum ActionSafetyKernel {
         // not destruction, so it is not asked about.
         if let typing, typing.mode == .replace, typing.currentValueLength > 0 {
             return .requireConfirmation(
-                reason: replaceWouldDiscardReason(characterCount: typing.currentValueLength)
+                reason: replaceWouldDiscardReason(characterCount: typing.currentValueLength),
+                destructive: true
             )
         }
 

@@ -410,7 +410,7 @@ enum HarnessPolicy {
     static func describe(_ decision: SafetyDecision) -> (decision: String, reason: String?) {
         switch decision {
         case .allow: return ("allow", nil)
-        case .requireConfirmation(let reason): return ("requireConfirmation", reason)
+        case .requireConfirmation(let reason, _): return ("requireConfirmation", reason)
         case .refuse(let reason): return ("refuse", reason)
         }
     }
@@ -556,9 +556,10 @@ enum HarnessObservability {
         // probing what the card will draw. Neither happens to an honest planner.
         // `confirmationStale` stays OUT too (2026-09-14): it is the same re-aiming
         // as a mismatched ticket, done with the selection instead of the words —
-        // an approval for one item spent while another is selected. Nothing the
-        // harness does moves a selection between open and re-issue, so the
-        // twenty requests before it show whether a caller moved it.
+        // an approval for one item spent while another is selected. The harness
+        // itself can move it: `focus` brings another window of the same app forward
+        // with no ticket, and a menu action follows the front window (review
+        // 2026-09-15) — so the twenty requests before it show which one did.
         "confirmationPending", "confirmationDenied", "confirmationExpired",
         "dryRun", "unknownVerb", "malformedJSON", "missingField", "invalidField",
         // A kernel refusal is the policy working, and the audit line already
@@ -1347,7 +1348,7 @@ final class HarnessServer {
             result = GateResult(executable: false, decision: described.decision,
                                 outcome: "kernelRefused", note: "refused: \(reason)")
 
-        case .requireConfirmation(let reason):
+        case .requireConfirmation(let reason, let destructive):
             let shape = Self.confirmationShape(for: request, bundleIdentifier: bundleIdentifier)
             var confirmedBy: String?
             var confirmation: [String: Any] = [:]
@@ -1396,7 +1397,7 @@ final class HarnessServer {
                                "ticket \(id) is stale: the \(field) it was approved for has changed — re-issue without it to ask again")
                 }
             } else {
-                let consulted = confirmations.rule(for: shape)
+                let consulted = confirmations.rule(for: shape, destructive: destructive)
                 var approvalsReport: [String: Any] = [:]
                 if let unreadable = consulted.unreadable { approvalsReport["unreadable"] = unreadable }
                 // A planted rules file is an attack or a leftover; either way the
@@ -1420,7 +1421,7 @@ final class HarnessServer {
                     if let binding {
                         response["binding"] = ActionBinding.responsePayload(binding, bundleIdentifier: bundleIdentifier)
                     }
-                    switch confirmations.open(shape, appName: appName, reason: reason, binding: binding) {
+                    switch confirmations.open(shape, appName: appName, reason: reason, destructive: destructive, binding: binding) {
                     case .opened(let ticket):
                         response["ticket"] = ticket.id
                         response["expiresAt"] = HarnessPolicy.auditTimestampFormatter.string(from: ticket.expiresAt)

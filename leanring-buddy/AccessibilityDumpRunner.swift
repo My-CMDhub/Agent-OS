@@ -158,7 +158,7 @@ enum AccessibilityDumpRunner {
                 switch decision {
                 case .refuse(let reason):
                     report.append("\(intent.title): REFUSED — \(reason)")
-                case .requireConfirmation(let reason):
+                case .requireConfirmation(let reason, _):
                     report.append("\(intent.title): WOULD ASK FIRST — \(reason)")
                 case .allow:
                     report.append("\(intent.title): ALLOWED")
@@ -815,7 +815,7 @@ enum AccessibilityDumpRunner {
             report.append("kernel: REFUSED — \(reason)")
             finishSelect(report)
             return
-        case .requireConfirmation(let reason):
+        case .requireConfirmation(let reason, _):
             report.append("kernel: would ask a human — \(reason). Proceeding: this is an instrumented run.")
         case .allow:
             report.append("kernel: allow")
@@ -1123,7 +1123,7 @@ enum AccessibilityDumpRunner {
         case .refuse(let reason):
             report.append("  \(intent.title): REFUSED — \(reason)")
             return false
-        case .requireConfirmation(let reason):
+        case .requireConfirmation(let reason, _):
             report.append("  \(intent.title): WOULD ASK FIRST — \(reason)")
             return false
         case .allow:
@@ -1178,7 +1178,7 @@ enum AccessibilityDumpRunner {
         switch decision {
         case .allow:
             return "ALLOW"
-        case .requireConfirmation(let reason):
+        case .requireConfirmation(let reason, _):
             return "WOULD ASK FIRST — \(reason)"
         case .refuse(let reason):
             return "REFUSED — \(reason)"

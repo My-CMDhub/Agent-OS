@@ -50,16 +50,24 @@ final class HarnessConfirmations: ObservableObject {
     /// an approval also needs the event to be fresh, to belong to the window the
     /// button is in, never to have reached an answer button before, to be a single
     /// click, and to land on a row that has not just moved under the pointer.
+    ///
+    /// Review 2026-09-15: an approval counts ONLY from a left mouse-up that lands
+    /// inside the pressed button. A key event carries no location, and the
+    /// menu-bar panel that also hosts these buttons IS key (it has a text field),
+    /// so a scripted `AXPress` on "Always" could inherit the owner's keystroke. A
+    /// mouse-down, or a right/other click, is not an approval either: press and
+    /// drag off the button — the macOS way to cancel a click — leaves exactly a
+    /// fresh pid-0 mouse-down for a scripted press to borrow. So keyboard-only
+    /// approval is deliberately unsupported for now: an accessibility cost the
+    /// owner has yet to rule on. Deny still counts from anything.
     enum ApprovalInput {
         enum Verdict: Equatable {
             case accepted
             case rejected(reason: String)
         }
 
-        static let humanInputEventTypes: Set<NSEvent.EventType> = [
-            .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
-            .otherMouseDown, .otherMouseUp, .keyDown, .keyUp
-        ]
+        /// The one event type an approval counts from — see above.
+        static let approvalEventType: NSEvent.EventType = .leftMouseUp
         /// `NSEvent.clickCount` raises for any other type, so it is read only for these.
         static let mouseButtonEventTypes: Set<NSEvent.EventType> = [
             .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp
@@ -153,8 +161,8 @@ final class HarnessConfirmations: ObservableObject {
             guard let eventType = evidence.eventType else {
                 return .rejected(reason: "no input event (programmatic press, e.g. Accessibility)")
             }
-            guard humanInputEventTypes.contains(eventType) else {
-                return .rejected(reason: "event type \(eventType.rawValue) is not a mouse button or key")
+            guard eventType == approvalEventType else {
+                return .rejected(reason: "event type \(eventType.rawValue) is not a left mouse-up — an approval counts only from a click released on the button")
             }
             guard let sourceProcessID = evidence.sourceProcessID else {
                 return .rejected(reason: "event carries no source process")
@@ -172,9 +180,7 @@ final class HarnessConfirmations: ObservableObject {
             guard let host = evidence.hostWindowNumber, evidence.eventWindowNumber == host else {
                 return .rejected(reason: "input event belongs to window \(evidence.eventWindowNumber.map(String.init) ?? "none"), the button is in window \(evidence.hostWindowNumber.map(String.init) ?? "unknown")")
             }
-            // A key press has no location; it reaches a button only through focus,
-            // which the card can never have (it never becomes key).
-            if mouseButtonEventTypes.contains(eventType), !clickLandsInsidePressedButton(evidence) {
+            guard clickLandsInsidePressedButton(evidence) else {
                 return .rejected(reason: "the click did not land inside the pressed button")
             }
             guard !eventAlreadyUsed else {
@@ -226,9 +232,9 @@ final class HarnessConfirmations: ObservableObject {
         var binding: ActionBinding? = nil
         /// "target" or "selection" once the ticket went stale.
         var staleField: String? = nil
-        /// Decided from the kernel's RAW reason when the ticket opens — the stored
-        /// `reason` is the quoted display form, which a prefix check never matches
-        /// (caught by `aDestructiveQuestionCanBeAllowedOnceButNeverAlways`).
+        /// The kernel decision's typed `destructive` flag, copied at `open`. Never
+        /// read back from a reason: the stored one is quoted, and a composed one
+        /// starts with the app policy's words (review 2026-09-15).
         var isDestructive = false
 
         /// The shape this ticket answers — what `mismatchedField` compares.
@@ -435,7 +441,7 @@ final class HarnessConfirmations: ObservableObject {
     /// creates covers the whole app, so calling it "exactly this" would be the
     /// one line on the card that is not true. `ticket.appName` is already escaped.
     /// Destructive questions get Allow once and Deny only — see
-    /// `ActionSafetyKernel.isDestructiveConfirmationReason`. The card hides the
+    /// `SafetyDecision.requireConfirmation(destructive:)`. The card hides the
     /// button AND `answer` refuses to save the rule, so no caller can get one.
     static func offersAlwaysRule(for ticket: Ticket) -> Bool {
         !ticket.isDestructive
@@ -528,7 +534,7 @@ final class HarnessConfirmations: ObservableObject {
 
     func ticket(id: String) -> Ticket? { tickets.first { $0.id == id } }
 
-    func open(_ shape: Shape, appName: String?, reason: String, binding: ActionBinding? = nil) -> OpenResult {
+    func open(_ shape: Shape, appName: String?, reason: String, destructive: Bool, binding: ActionBinding? = nil) -> OpenResult {
         let now = Date()
         let pending = pendingCount(now: now)
         if let refusal = Self.openRefusal(for: shape, appName: appName, binding: binding, reason: reason, pendingCount: pending) {
@@ -544,7 +550,7 @@ final class HarnessConfirmations: ObservableObject {
             displayLines: Self.displayLines(for: shape, appName: appName, binding: binding),
             binding: binding
         )
-        ticket.isDestructive = ActionSafetyKernel.isDestructiveConfirmationReason(reason)
+        ticket.isDestructive = destructive
         tickets.append(ticket)
         // At most 20: evict the oldest answered/expired first, never a pending one.
         while tickets.count > 20,
@@ -648,14 +654,19 @@ final class HarnessConfirmations: ObservableObject {
     /// the item exists and could not be read or decoded — no rules then, and the
     /// caller must say so. `ignoredFile` is the path of a legacy rules file that
     /// exists and was NOT read.
-    func rule(for shape: Shape) -> (rule: ApprovalRule?, unreadable: String?, ignoredFile: String?) {
+    ///
+    /// A destructive question matches no rule, ever (review 2026-09-15): a rule
+    /// saved when a `type replace` discarded nothing would otherwise match when it
+    /// discards 500 characters, and destructive-press rules saved before the
+    /// 2026-09-14 ruling are still in the keychain. Such a request opens a ticket.
+    func rule(for shape: Shape, destructive: Bool) -> (rule: ApprovalRule?, unreadable: String?, ignoredFile: String?) {
         // `attributesOfItem` does not follow a final symlink, so a dangling link
         // planted there is reported too.
         let ignoredFile = ignoredApprovalsFileURL.flatMap {
             (try? FileManager.default.attributesOfItem(atPath: $0.path)) != nil ? $0.path : nil
         }
         switch rulesStore.load() {
-        case .success(let rules): return (Self.matchingRule(in: rules, shape), nil, ignoredFile)
+        case .success(let rules): return (destructive ? nil : Self.matchingRule(in: rules, shape), nil, ignoredFile)
         case .failure(let failure): return (nil, failure.reason, ignoredFile)
         }
     }

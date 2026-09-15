@@ -36,9 +36,6 @@ struct ActionBinding: Equatable {
 
     struct PublishedSelection: Equatable {
         let containerKey: AccessibilityElementKey
-        /// How to read the container again: `AXSelectedRows`, `AXSelectedChildren`,
-        /// or `AXBrowser` for "the last non-empty column".
-        let selectionAttribute: String
         let selectedItemKeys: Set<AccessibilityElementKey>
         /// SHA-256 over every selected item's texts, in order. Identity alone is not
         /// enough when an app reuses a row element for different content.
@@ -233,7 +230,6 @@ struct ActionBinding: Equatable {
         let itemTexts = try items.map(texts(of:))
         return PublishedSelection(
             containerKey: AccessibilityElementKey(element: container),
-            selectionAttribute: attribute,
             selectedItemKeys: Set(items.map(AccessibilityElementKey.init)),
             namesFingerprint: namesFingerprint(itemTexts: itemTexts),
             count: items.count,
@@ -306,42 +302,41 @@ struct ActionBinding: Equatable {
         return (selection, Int(Date().timeIntervalSince(startedAt) * 1000))
     }
 
-    /// Read when a ticket is opened.
-    static func capture(_ subject: Subject, bundleIdentifier: String?) -> ActionBinding {
-        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), messagingTimeoutInSeconds)
-        let (selection, milliseconds) = timed {
-            guard let processIdentifier = subject.processIdentifier else {
-                return .unavailable(reason: "no application process to ask")
-            }
-            do {
-                return .published(try findSelection(processIdentifier: processIdentifier, bundleIdentifier: bundleIdentifier))
-            } catch let failure as ReadFailure {
-                return .unavailable(reason: failure.reason)
-            } catch {
-                return .unavailable(reason: String(describing: error))
-            }
+    /// The selection the action would affect NOW: a search from the app's focus.
+    static func liveSelection(_ subject: Subject, bundleIdentifier: String?) -> Selection {
+        guard let processIdentifier = subject.processIdentifier else {
+            return .unavailable(reason: "no application process to ask")
         }
+        do {
+            return .published(try findSelection(processIdentifier: processIdentifier, bundleIdentifier: bundleIdentifier))
+        } catch let failure as ReadFailure {
+            return .unavailable(reason: failure.reason)
+        } catch {
+            return .unavailable(reason: String(describing: error))
+        }
+    }
+
+    /// Read when a ticket is opened.
+    static func capture(_ subject: Subject, bundleIdentifier: String?,
+                        readSelection read: (Subject, String?) -> Selection = liveSelection) -> ActionBinding {
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), messagingTimeoutInSeconds)
+        let (selection, milliseconds) = timed { read(subject, bundleIdentifier) }
         return ActionBinding(targetElementKey: subject.targetElement.map(AccessibilityElementKey.init),
                              selection: selection, readMilliseconds: milliseconds)
     }
 
-    /// Read when a ticket is used: the SAME container, by the key stored at open —
-    /// never a fresh search, which would follow focus to whatever is selected now.
-    static func recheck(_ approved: ActionBinding, subject: Subject, bundleIdentifier: String?) -> (current: ActionBinding, movedPart: String?) {
-        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), messagingTimeoutInSeconds)
-        let (selection, milliseconds) = timed {
-            guard case .published(let then) = approved.selection else { return approved.selection }
-            do {
-                return .published(try readSelection(container: then.containerKey.element,
-                                                     attribute: then.selectionAttribute, bundleIdentifier: bundleIdentifier))
-            } catch let failure as ReadFailure {
-                return .unavailable(reason: failure.reason)
-            } catch {
-                return .unavailable(reason: String(describing: error))
-            }
-        }
-        let current = ActionBinding(targetElementKey: subject.targetElement.map(AccessibilityElementKey.init),
-                                    selection: selection, readMilliseconds: milliseconds)
-        return (current, movedPart(approved: approved, currentTargetKey: current.targetElementKey, currentSelection: selection))
+    /// Read when a ticket is used: the SAME search as at open, from the app's focus
+    /// now, and `movedPart` refuses a different container by identity.
+    ///
+    /// Review 2026-09-15: this used to re-read the container stored at open. But a
+    /// menu action ("File > Move to Bin") acts on whichever window is front WHEN it
+    /// runs, and `focus` brings another Finder window forward without a ticket — so
+    /// window A's unchanged selection approved binning window B's. Searching again
+    /// follows focus, and a followed focus that lands elsewhere is exactly the change
+    /// to refuse; a search that finds nothing is `unavailable`, also stale.
+    static func recheck(_ approved: ActionBinding, subject: Subject, bundleIdentifier: String?,
+                        readSelection read: (Subject, String?) -> Selection = liveSelection) -> (current: ActionBinding, movedPart: String?) {
+        let current = capture(subject, bundleIdentifier: bundleIdentifier, readSelection: read)
+        return (current, movedPart(approved: approved, currentTargetKey: current.targetElementKey, currentSelection: current.selection))
     }
 }

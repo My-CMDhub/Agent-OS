@@ -117,8 +117,10 @@ enum HarnessAppPolicy {
             return .refuse(reason: "app policy refuses \(app)")
         case (.confirm, .refuse):
             return kernel
-        case (.confirm, .requireConfirmation(let kernelReason)):
-            return .requireConfirmation(reason: "app policy requires confirmation for \(app); \(kernelReason)")
+        case (.confirm, .requireConfirmation(let kernelReason, let destructive)):
+            // The reason is rewritten; what the kernel decided about destruction is not.
+            return .requireConfirmation(reason: "app policy requires confirmation for \(app); \(kernelReason)",
+                                        destructive: destructive)
         case (.confirm, .allow):
             return .requireConfirmation(reason: "app policy requires confirmation for \(app)")
         case (.allow, _):
