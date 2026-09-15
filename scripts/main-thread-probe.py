@@ -59,6 +59,12 @@ def bring_forward(app):
     time.sleep(1.5)
 
 
+class ScreenLocked(Exception):
+    """Measured 2026-09-13: the screen locked mid-run and two rows became 10,000
+    2 ms screenIsLocked refusals — and 12,881 audit lines — about nothing.
+    The first lock refusal ends the run; every later request would be the same."""
+
+
 def run_scenario(name, request, seconds):
     latencies_ms, refusals = [], {}
     started = uptime()
@@ -69,6 +75,8 @@ def run_scenario(name, request, seconds):
             sent = uptime()
             response = send(dict(request, id=f"main-thread-probe-{len(latencies_ms)}"))
             latencies_ms.append((uptime() - sent) * 1000)
+            if response.get("error") == "screenIsLocked":
+                raise ScreenLocked(f"{name}: aborted after {len(latencies_ms)} request(s) because the screen locked")
             if not response.get("ok"):
                 error = response.get("error") or "notOk"
                 refusals[error] = refusals.get(error, 0) + 1
@@ -107,17 +115,23 @@ def main():
     offset = os.path.getsize(STALL_LOG_PATH)
     scenarios, notes = [], []
 
-    scenarios.append(run_scenario("idle", None, seconds))
-    bring_forward("Finder")
-    scenarios.append(run_scenario("snapshot Finder", {"verb": "snapshot", "expectApp": "Finder"}, seconds))
-    scenarios.append(run_scenario("menus Finder", {"verb": "menus", "expectApp": "Finder"}, seconds))
-    if app_running("Mail"):
-        bring_forward("Mail")
-        scenarios.append(run_scenario("snapshot Mail", {"verb": "snapshot", "expectApp": "Mail"}, seconds))
-    else:
-        notes.append("snapshot Mail skipped: Mail is not running")
-    bring_forward("Finder")
-    scenarios.append(run_scenario("windows Finder", {"verb": "windows", "app": "Finder", "expectApp": "Finder"}, seconds))
+    try:
+        scenarios.append(run_scenario("idle", None, seconds))
+        bring_forward("Finder")
+        scenarios.append(run_scenario("snapshot Finder", {"verb": "snapshot", "expectApp": "Finder"}, seconds))
+        scenarios.append(run_scenario("menus Finder", {"verb": "menus", "expectApp": "Finder"}, seconds))
+        if app_running("Mail"):
+            bring_forward("Mail")
+            scenarios.append(run_scenario("snapshot Mail", {"verb": "snapshot", "expectApp": "Mail"}, seconds))
+        else:
+            notes.append("snapshot Mail skipped: Mail is not running")
+        bring_forward("Finder")
+        scenarios.append(run_scenario("windows Finder", {"verb": "windows", "app": "Finder", "expectApp": "Finder"}, seconds))
+    except ScreenLocked as locked:
+        print(f"ABORTED: {locked}; the rows below are only the scenarios that finished before it")
+        notes.append(f"ABORTED: {locked}")
+    if not scenarios:
+        sys.exit("\n".join(notes))
 
     time.sleep(0.5)  # the app appends on a background queue
     lines = read_log_lines(offset)

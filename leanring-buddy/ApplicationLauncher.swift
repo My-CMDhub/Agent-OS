@@ -149,6 +149,8 @@ enum ApplicationLauncher {
         var lastFrontmostError: Int32?
         var lastWindowError: Int32?
         var status: LaunchStatus = .notReady
+        /// Readiness samples taken after the process came back — the harness's `verifyWalks`.
+        var readinessPolls = 0
     }
 
     /// Box for the completion handler's result across the blocking wait.
@@ -197,6 +199,7 @@ enum ApplicationLauncher {
         AXUIElementSetMessagingTimeout(applicationElement, messagingTimeoutInSeconds)
 
         while true {
+            outcome.readinessPolls += 1
             let sample = readSample(
                 applicationElement,
                 readFrontmost: outcome.frontmostMilliseconds == nil,

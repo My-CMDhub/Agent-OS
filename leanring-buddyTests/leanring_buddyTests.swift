@@ -3771,3 +3771,85 @@ private func binding(target: pid_t? = 800, selection chosen: ActionBinding.Selec
     #expect(HarnessConfirmations.rule(for: ticket) == HarnessConfirmations.ApprovalRule(
         bundleIdentifier: "com.apple.finder", verb: "press", target: "Empty Bin"))
 }
+
+// MARK: - Phase timing and log hygiene (2026-09-15)
+//
+// The clock readings themselves are live-only; what a unit test can prove is
+// the arithmetic and the wire shape once someone hands it instants.
+
+@Test func aPhaseThatNeverRanIsAbsentFromTheWireNotZero() throws {
+    // A refusal acted on nothing: no phase fields at all, so a median over the
+    // audit log is never dragged toward 0 by requests that had no act.
+    #expect(HarnessPhaseTiming(requestStartedAt: 0).wireFields.isEmpty)
+
+    // performFailed: resolved and acted, never verified.
+    var failed = HarnessPhaseTiming(requestStartedAt: 0)
+    failed.actionStarting(at: 40_000_000)
+    failed.actionReturned(at: 45_000_000)
+    #expect(Set(failed.wireFields.keys) == ["resolveMs", "actMs"])
+    #expect(failed.wireFields["resolveMs"] as? Int == 40)
+    #expect(failed.wireFields["actMs"] as? Int == 5)
+
+    // A verifier that cannot say how it concluded leaves the path out, not "unknown".
+    var launched = HarnessPhaseTiming(requestStartedAt: 0)
+    launched.actionStarting(at: 10_000_000)
+    launched.actedThenVerified(actMilliseconds: 300, walks: 7, path: nil, at: 1_010_000_000)
+    #expect(Set(launched.wireFields.keys) == ["resolveMs", "actMs", "verifyMs", "verifyWalks"])
+    #expect(launched.wireFields["verifyMs"] as? Int == 700)
+
+    // And the audit line carries exactly those fields beside `ms`.
+    let line = HarnessPolicy.auditLine(
+        at: Date(timeIntervalSince1970: 0), id: "p", verb: "launch", target: "TextEdit",
+        app: nil, session: "A1B2C3D4", dryRun: false, confirmed: false,
+        kernel: "allow", outcome: "ready", milliseconds: 1_010, phases: launched.wireFields
+    )
+    let parsed = try #require(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+    #expect(parsed["verifyWalks"] as? Int == 7)
+    #expect(parsed["verifyPath"] == nil)
+    #expect(parsed["ms"] as? Int == 1_010)
+}
+
+@Test func phasesNeverSumPastTheRequestTheyDivide() {
+    // Boundaries just under a millisecond each truncate down; truncating three
+    // pieces can only lose time against truncating their sum, never invent it.
+    var instants: UInt64 = 12_345
+    for step in 0..<500 {
+        let start = instants
+        let a = start + UInt64(step * 7_919 % 3_000_000)
+        let b = a + UInt64(step * 104_729 % 5_000_000)
+        let c = b + UInt64(step * 1_299_709 % 9_000_000)
+        var timing = HarnessPhaseTiming(requestStartedAt: start)
+        timing.actionStarting(at: a)
+        timing.actionReturned(at: b)
+        timing.verified(walks: 1, path: "poll", at: c)
+        let sum = (timing.resolveMilliseconds ?? 0) + (timing.actMilliseconds ?? 0) + (timing.verifyMilliseconds ?? 0)
+        #expect(sum <= HarnessPhaseTiming.milliseconds(from: start, to: c))
+        instants = c
+    }
+
+    // A helper's own act figure comes off a different clock; it is clamped to the call.
+    var focus = HarnessPhaseTiming(requestStartedAt: 0)
+    focus.actionStarting(at: 0)
+    focus.actedThenVerified(actMilliseconds: 900, walks: 3, path: "systemWide", at: 500_000_000)
+    #expect(focus.actMilliseconds == 500)
+    #expect(focus.verifyMilliseconds == 0)
+}
+
+@Test func aLockedScreenRefusalIsTheGuardWorkingNotASurprise() {
+    #expect(HarnessObservability.anomaly(
+        kernelDecision: "n/a", verificationStatus: nil,
+        errorCode: "screenIsLocked", walkMilliseconds: nil, recentWalkMilliseconds: []
+    ) == nil)
+}
+
+@Test func theDailyMirrorStopsAtItsCapWithOneMarkerAndCountsTheRest() {
+    let cap = AuditMirrorCap.dailyBytes
+    // The worst day measured (2026-09-13, 11,499,814 bytes) is still kept whole.
+    #expect(AuditMirrorCap.decision(currentBytes: 11_499_814, lineBytes: 273, markerWritten: false) == .append)
+    #expect(AuditMirrorCap.decision(currentBytes: cap - 273, lineBytes: 273, markerWritten: false) == .append)
+    // The first line that does not fit is dropped and the marker goes in its place…
+    #expect(AuditMirrorCap.decision(currentBytes: cap - 272, lineBytes: 273, markerWritten: false) == .dropAndWriteMarker)
+    // …and every line after it is only counted, even one small enough to fit.
+    #expect(AuditMirrorCap.decision(currentBytes: cap - 272, lineBytes: 10, markerWritten: true) == .drop)
+    #expect(AuditMirrorCap.decision(currentBytes: cap + 300, lineBytes: 273, markerWritten: true) == .drop)
+}

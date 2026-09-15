@@ -53,6 +53,23 @@ enum ActionVerifier {
         timeoutInSeconds: Double = 3.0,
         pollIntervalInSeconds: Double = 0.15
     ) -> VerificationOutcome {
+        verifyCountingWalks(
+            hadFocusedWindowBefore: hadFocusedWindowBefore, expectation: expectation,
+            timeoutInSeconds: timeoutInSeconds, pollIntervalInSeconds: pollIntervalInSeconds
+        ).outcome
+    }
+
+    /// `verify`, plus how many window walks it spent. The harness reports the
+    /// count beside `verifyMs` (2026-09-15): `menu` confirmed at p50 648 ms in
+    /// the audit log, and one ms figure cannot say whether that is one slow
+    /// walk or four fast ones 150 ms apart — which is the whole question of
+    /// whether to speed the walk up or stop polling on a timer.
+    static func verifyCountingWalks(
+        hadFocusedWindowBefore: Bool = true,
+        expectation: (AccessibilityWindowSnapshot) -> Bool,
+        timeoutInSeconds: Double = 3.0,
+        pollIntervalInSeconds: Double = 0.15
+    ) -> (outcome: VerificationOutcome, walks: Int) {
         let startedAt = Date()
         var sawAnyWindow = false
         var pollErrors: [Error?] = []
@@ -65,7 +82,7 @@ enum ActionVerifier {
                 sawAnyWindow = true
                 pollErrors.append(nil)
                 if expectation(snapshot) {
-                    return .confirmed(afterMilliseconds: elapsedMilliseconds())
+                    return (.confirmed(afterMilliseconds: elapsedMilliseconds()), pollErrors.count)
                 }
             } catch {
                 pollErrors.append(error)
@@ -73,13 +90,15 @@ enum ActionVerifier {
                     afterPolls: pollErrors, elapsedMilliseconds: elapsedMilliseconds(),
                     hadFocusedWindowBefore: hadFocusedWindowBefore
                 ) {
-                    return gone
+                    return (gone, pollErrors.count)
                 }
             }
             Thread.sleep(forTimeInterval: pollIntervalInSeconds)
         }
 
-        return sawAnyWindow ? .notObserved(afterMilliseconds: elapsedMilliseconds()) : .couldNotReadWindow
+        // One entry per walk attempt, failed or not — so its count is the walk count.
+        return (sawAnyWindow ? .notObserved(afterMilliseconds: elapsedMilliseconds()) : .couldNotReadWindow,
+                pollErrors.count)
     }
 
     /// The gap decision, pure so it can be tested without a cross-process read.

@@ -454,7 +454,9 @@ enum HarnessPolicy {
         frontmostSource: String? = nil,
         frontmostSystemWideError: Int32? = nil,
         /// Who lifted a `requireConfirmation`: `caller` / `owner` / `approvalRule`.
-        confirmedBy: String? = nil
+        confirmedBy: String? = nil,
+        /// `HarnessPhaseTiming.wireFields` — empty for a request that never acted.
+        phases: [String: Any] = [:]
     ) -> String {
         var fields: [String: Any] = [
             "timestamp": auditTimestampFormatter.string(from: timestamp),
@@ -474,6 +476,7 @@ enum HarnessPolicy {
         if let frontmostSource { fields["frontmostSource"] = frontmostSource }
         if let frontmostSystemWideError { fields["frontmostSystemWideError"] = Int(frontmostSystemWideError) }
         if let confirmedBy { fields["confirmedBy"] = confirmedBy }
+        fields.merge(phases) { existing, _ in existing }
         guard let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else {
             return "{\"timestamp\":\"\(auditTimestampFormatter.string(from: timestamp))\",\"outcome\":\"auditEncodingFailed\"}"
@@ -572,7 +575,12 @@ enum HarnessObservability {
         // Finder showing only its desktop — is not listed by ScreenCaptureKit,
         // so the one-app capture refuses. Explained and safe; three dumps of it
         // in one session were a recorder filing the expected as a surprise.
-        "applicationNotCapturable"
+        "applicationNotCapturable",
+        // `LockScreenGuard` doing its job. Measured 2026-09-13: a probe left
+        // running against a locked screen wrote 12,881 `anomalySuppressed`
+        // audit lines naming this rule — one per refusal, each also a line of
+        // its own. The first refusal is still in the audit log as `screenIsLocked`.
+        "screenIsLocked"
     ]
 
     /// Below this many samples the median is noise, and a cold start would fire
@@ -617,6 +625,107 @@ enum HarnessObservability {
             return .walkFarSlowerThanRecentMedian
         }
         return nil
+    }
+}
+
+/// Where a mutating request's time went — resolve, act, verify — for the
+/// response and the audit line.
+///
+/// Why (2026-09-15): 29,708 audit lines put 24% of all harness time in `menu`
+/// confirmed (p50 648 / p95 1,700 ms), `launch` ready 1,045, `select` 554 — and
+/// every line carried one `ms`, so none of it said whether the cost is finding
+/// the target, the AX call, or the verifier's re-walks. Nothing gets optimised
+/// until it does.
+///
+/// Monotonic (`DispatchTime`, uptime), not `Date`: a wall clock can step under
+/// NTP mid-request, and a phase is a duration. Each phase truncates to whole ms,
+/// so the three can only sum to less than `ms`, never more. A phase that did
+/// not run is ABSENT, never 0 — a refusal has none, a `performFailed` has no
+/// verify — or a median over the log would be a median of refusals.
+struct HarnessPhaseTiming {
+    typealias Nanoseconds = UInt64
+    static func now() -> Nanoseconds { DispatchTime.now().uptimeNanoseconds }
+
+    private let requestStartedAt: Nanoseconds
+    /// The start of whichever phase is running; nil before the action starts and after verification.
+    private var phaseStartedAt: Nanoseconds?
+    private(set) var resolveMilliseconds: Int?
+    private(set) var actMilliseconds: Int?
+    private(set) var verifyMilliseconds: Int?
+    private(set) var verifyWalks: Int?
+    private(set) var verifyPath: String?
+
+    init(requestStartedAt: Nanoseconds = HarnessPhaseTiming.now()) {
+        self.requestStartedAt = requestStartedAt
+    }
+
+    static func milliseconds(from start: Nanoseconds, to end: Nanoseconds) -> Int {
+        end > start ? Int((end - start) / 1_000_000) : 0
+    }
+
+    /// Everything until now was resolving: policy, frontmost, walk, kernel, ticket gate, baselines.
+    mutating func actionStarting(at instant: Nanoseconds = HarnessPhaseTiming.now()) {
+        resolveMilliseconds = Self.milliseconds(from: requestStartedAt, to: instant)
+        phaseStartedAt = instant
+    }
+
+    mutating func actionReturned(at instant: Nanoseconds = HarnessPhaseTiming.now()) {
+        guard let started = phaseStartedAt, actMilliseconds == nil else { return }
+        actMilliseconds = Self.milliseconds(from: started, to: instant)
+        phaseStartedAt = instant
+    }
+
+    mutating func verified(walks: Int, path: String?, at instant: Nanoseconds = HarnessPhaseTiming.now()) {
+        guard let started = phaseStartedAt, actMilliseconds != nil else { return }
+        verifyMilliseconds = Self.milliseconds(from: started, to: instant)
+        verifyWalks = walks
+        verifyPath = path
+        phaseStartedAt = nil
+    }
+
+    /// For a helper that acts and then waits inside one call (`focus`, `launch`)
+    /// and reports where its own boundary fell. Its figure is off its own `Date`
+    /// clock, so it is clamped to the call — act + verify is exactly the call.
+    mutating func actedThenVerified(actMilliseconds reported: Int, walks: Int, path: String?,
+                                    at instant: Nanoseconds = HarnessPhaseTiming.now()) {
+        guard let started = phaseStartedAt, actMilliseconds == nil else { return }
+        let call = Self.milliseconds(from: started, to: instant)
+        actMilliseconds = min(max(reported, 0), call)
+        verifyMilliseconds = call - (actMilliseconds ?? 0)
+        verifyWalks = walks
+        verifyPath = path
+        phaseStartedAt = nil
+    }
+
+    var wireFields: [String: Any] {
+        var fields: [String: Any] = [:]
+        if let resolveMilliseconds { fields["resolveMs"] = resolveMilliseconds }
+        if let actMilliseconds { fields["actMs"] = actMilliseconds }
+        if let verifyMilliseconds { fields["verifyMs"] = verifyMilliseconds }
+        if let verifyWalks { fields["verifyWalks"] = verifyWalks }
+        if let verifyPath { fields["verifyPath"] = verifyPath }
+        return fields
+    }
+}
+
+/// The per-day cap on the `~/Library/Logs/Clicky` audit mirror.
+///
+/// Measured 2026-09-13: one probe against a locked screen grew that day's
+/// mirror to 11,499,814 bytes — 42,031 lines at ~273 bytes — while the main log
+/// rotated at 5 MB as designed; nothing bounded the mirror. 20 MB is ~75,000
+/// lines at that size: the worst day on record still fits whole with 1.7x
+/// headroom, and a runaway client costs at most 20 MB a day, not the disk.
+/// Past it the main `harness-audit.log` still gets every line.
+enum AuditMirrorCap {
+    static let dailyBytes = 20 * 1024 * 1024
+
+    enum Decision: Equatable { case append, dropAndWriteMarker, drop }
+
+    /// Once the marker is in, the day's mirror takes nothing more — even a line
+    /// small enough to fit, or the file would say "dropping" and then not.
+    static func decision(currentBytes: Int, lineBytes: Int, markerWritten: Bool, limit: Int = dailyBytes) -> Decision {
+        if markerWritten { return .drop }
+        return currentBytes + lineBytes <= limit ? .append : .dropAndWriteMarker
     }
 }
 
@@ -698,6 +807,13 @@ final class HarnessServer {
 
     /// Mirror writes that failed. Not fatal to a request; counted so `ping` can say so.
     private(set) var auditMirrorFailures = 0
+    /// Lines kept out of the day's mirror by `AuditMirrorCap`, marker line excluded.
+    private(set) var auditMirrorOverflowLines = 0
+    /// Mirror files that already carry this session's cap marker.
+    /// ponytail: in memory, so a relaunch on a capped day writes one more marker; read the file's tail if that ever matters.
+    private var auditMirrorFilesMarkedAsCapped: Set<String> = []
+    /// Resolve / act / verify for the request in flight. Reset per request, like `currentConfirmedBy`.
+    private var phaseTiming = HarnessPhaseTiming()
 
     /// The per-app policy read once by `execute` for the request in flight.
     /// Requests serialise on the main thread, so one slot is enough; nil means
@@ -936,6 +1052,7 @@ final class HarnessServer {
         case .success(let request):
             MainThreadStallRecorder.noteHarnessVerb(request.verb.rawValue)
             var response = execute(request, startedAt: startedAt)
+            response.merge(phaseTiming.wireFields) { existing, _ in existing }
             response["id"] = request.id
             response["provenance"] = Self.provenanceNote
             return observe(response, verb: request.verb.rawValue, startedAt: startedAt)
@@ -1135,6 +1252,7 @@ final class HarnessServer {
     }
 
     private func execute(_ request: HarnessRequest, startedAt: Date) -> [String: Any] {
+        phaseTiming = HarnessPhaseTiming()
         let dryRun = HarnessPolicy.effectiveDryRun(
             requested: request.requestedDryRun,
             globalDefault: globalDryRun
@@ -1176,7 +1294,8 @@ final class HarnessServer {
                 "dryRunSource": globalDryRun ? "global --harness-dry-run" : (request.requestedDryRun == true ? "request" : "none"),
                 "killSwitchPresent": Self.killSwitchIsPresent(),
                 "socket": Self.socketURL.path,
-                "auditMirrorFailures": auditMirrorFailures
+                "auditMirrorFailures": auditMirrorFailures,
+                "auditMirrorOverflowLines": auditMirrorOverflowLines
             ]
 
         case .snapshot:
@@ -1659,6 +1778,7 @@ final class HarnessServer {
                 audit(request, dryRun: dryRun, kernel: described.decision, outcome: "noLiveElement", startedAt: startedAt)
                 return response
             }
+            phaseTiming.actionStarting()
             let result = AccessibilityActionPerformer.perform(
                 action.accessibilityActionName ?? kAXPressAction, on: element
             )
@@ -1679,6 +1799,7 @@ final class HarnessServer {
                 audit(request, dryRun: dryRun, kernel: described.decision, outcome: "noAncestorChain", startedAt: startedAt)
                 return response
             }
+            phaseTiming.actionStarting()
             let outcome = AccessibilitySelectionPerformer.select(chainFromRoot: chain)
             switch outcome {
             case .selected(let path, let levelsUp, let milliseconds, let readBackTrue):
@@ -1705,6 +1826,8 @@ final class HarnessServer {
                     "reason": "the container's selection already is exactly this row — nothing was written, so there is nothing to verify"
                 ]
                 response["ok"] = true
+                // The performer ran (it read the container's selection), so act is real; nothing to verify.
+                phaseTiming.actionReturned()
                 audit(request, dryRun: dryRun, kernel: described.decision, outcome: "alreadySelected", startedAt: startedAt)
                 return response
             case .writeFailed(let error, let levelsUp, let milliseconds):
@@ -1731,6 +1854,7 @@ final class HarnessServer {
                 return response
             }
 
+            phaseTiming.actionStarting()
             let outcome = AccessibilityTypePerformer.type(request.text, mode: request.mode, into: element)
 
             // For typing, the read-back IS the evidence — the text is the
@@ -1772,6 +1896,8 @@ final class HarnessServer {
             }
         }
 
+        // Includes `thenConfirm`'s AXConfirm and the type performer's own read-back.
+        phaseTiming.actionReturned()
         guard performedOK else {
             response["ok"] = false
             response["error"] = "performFailed"
@@ -1782,10 +1908,14 @@ final class HarnessServer {
         // .success only means the message was delivered. Three separate writes
         // in this repo returned .success and moved nothing, so the second walk
         // is the only tier that gets to say "it worked".
-        let verification = ActionVerifier.verify { laterSnapshot in
+        let (verification, verifyWalks) = ActionVerifier.verifyCountingWalks { laterSnapshot in
             guard let laterRoot = laterSnapshot.rootNode else { return false }
             return AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot) != namesBefore
         }
+        // "poll" is the only honest path: this verifier re-walks on a 150 ms
+        // timer and subscribes to no AX event. The `appeared` walk below is
+        // after the verdict and stays outside `verifyMs`.
+        phaseTiming.verified(walks: verifyWalks, path: "poll")
 
         switch verification {
         case .confirmed(let milliseconds):
@@ -2044,7 +2174,9 @@ final class HarnessServer {
         // returned AXError 0 and took Finder from 2 AX windows to 3, and
         // `AXSelected` on all eight of Finder's menu bar items read false both
         // before and after — no menu was opened, so none had to be dismissed.
+        phaseTiming.actionStarting()
         let result = AccessibilityActionPerformer.perform(kAXPressAction, on: element)
+        phaseTiming.actionReturned()
         response["performed"] = [
             "status": result.error == .success ? "sent" : "failed",
             "axErrorRawValue": result.error.rawValue,
@@ -2060,12 +2192,13 @@ final class HarnessServer {
 
         // A menu works with no window open, and then "no focused window" after
         // the press is not a window that closed. See `ActionVerifier.verify`.
-        let verification = ActionVerifier.verify(hadFocusedWindowBefore: namesBefore != nil) { laterSnapshot in
+        let (verification, verifyWalks) = ActionVerifier.verifyCountingWalks(hadFocusedWindowBefore: namesBefore != nil) { laterSnapshot in
             if let windowsBefore,
                AccessibilityMenu.windowCount(for: application) != windowsBefore { return true }
             guard let laterRoot = laterSnapshot.rootNode, let namesBefore else { return false }
             return AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot) != namesBefore
         }
+        phaseTiming.verified(walks: verifyWalks, path: "poll")
 
         switch verification {
         case .confirmed(let milliseconds):
@@ -2476,7 +2609,12 @@ final class HarnessServer {
             return response
         }
 
+        phaseTiming.actionStarting()
         let outcome = AccessibilityWindows.focus(application: application, window: resolvedWindow)
+        // A title focus on another Space already activated the app to READ its
+        // windows (`activatedToReadWindows`), and that sits in resolveMs.
+        phaseTiming.actedThenVerified(actMilliseconds: outcome.actMilliseconds,
+                                      walks: outcome.observationPolls, path: outcome.observedVia)
 
         // Every step separately. A raise that was never published, a raise that
         // returned 0, and a window that actually came forward are three
@@ -2582,7 +2720,16 @@ final class HarnessServer {
             return response
         }
 
+        phaseTiming.actionStarting()
         let outcome = ApplicationLauncher.launchAndWait(url)
+        // Act is `openApplication` until its callback hands back a process; verify
+        // is the AXFrontmost + window wait. No callback means verification never began.
+        if let processMilliseconds = outcome.processMilliseconds {
+            phaseTiming.actedThenVerified(actMilliseconds: processMilliseconds,
+                                          walks: outcome.readinessPolls, path: nil)
+        } else {
+            phaseTiming.actionReturned()
+        }
         response["launchMilliseconds"] = elapsedMilliseconds(since: startedAt)
         response["launch"] = [
             "processMilliseconds": (outcome.processMilliseconds ?? NSNull()) as Any,
@@ -3266,11 +3413,13 @@ final class HarnessServer {
         // 507 ms on Cursor with the menu plainly open. The performer's 5 s would
         // only hold this thread five times longer. A short timeout, and -25204
         // is "sent, unconfirmed" — the verification decides, not the code.
+        phaseTiming.actionStarting()
         let result = AccessibilityActionPerformer.perform(
             kAXPressAction, on: item.element,
             timeoutInSeconds: descriptor.hasMenu ? Self.statusMenuPressTimeoutInSeconds
                 : AccessibilityActionPerformer.actionTimeoutInSeconds
         )
+        phaseTiming.actionReturned()
         let sentUnconfirmed = result.error == .cannotComplete && descriptor.hasMenu
         response["performed"] = [
             "status": result.error == .success ? "sent" : (sentUnconfirmed ? "sentUnconfirmed" : "failed"),
@@ -3286,8 +3435,10 @@ final class HarnessServer {
 
         let verifyStartedAt = Date()
         var evidence: String?
+        var verifyPolls = 0
         while evidence == nil,
               Date().timeIntervalSince(verifyStartedAt) < Self.statusItemVerificationDeadlineInSeconds {
+            verifyPolls += 1
             if let windowsBefore, let owner, AccessibilityMenu.windowCount(for: owner) != windowsBefore {
                 evidence = "the owner's window count changed"
             } else if AccessibilityStatusItems.childCount(of: item.element) != childrenBefore {
@@ -3302,6 +3453,7 @@ final class HarnessServer {
             }
         }
         let verifyMilliseconds = Int(Date().timeIntervalSince(verifyStartedAt) * 1000)
+        phaseTiming.verified(walks: verifyPolls, path: "poll")
         response["windowsAfter"] = (owner.flatMap(AccessibilityMenu.windowCount) ?? NSNull()) as Any
 
         if let evidence {
@@ -3341,7 +3493,8 @@ final class HarnessServer {
             milliseconds: elapsedMilliseconds(since: startedAt),
             frontmostSource: frontmost.source.rawValue,
             frontmostSystemWideError: frontmost.systemWideErrorRawValue,
-            confirmedBy: currentConfirmedBy
+            confirmedBy: currentConfirmedBy,
+            phases: phaseTiming.wireFields
         ), at: startedAt)
     }
 
@@ -3350,13 +3503,34 @@ final class HarnessServer {
     /// else behind — so history is kept, just bounded.
     ///
     /// The same line also goes to the day-split mirror under `~/Library/Logs`,
-    /// which nothing rotates. A mirror failure never fails the request; it is
-    /// counted and `ping` reports the count.
+    /// which nothing rotates but `AuditMirrorCap` bounds per day. A mirror
+    /// failure never fails the request; failures and capped lines are counted
+    /// and `ping` reports both.
     private func appendAudit(_ line: String, at date: Date = Date()) {
         let data = Data((line + "\n").utf8)
         rotateAuditLogIfLarge()
         _ = Self.append(data, to: Self.auditLogURL)
-        if !Self.append(data, to: Self.auditMirrorURL(for: date)) { auditMirrorFailures += 1 }
+
+        let mirrorURL = Self.auditMirrorURL(for: date)
+        let mirrorBytes = ((try? FileManager.default.attributesOfItem(atPath: mirrorURL.path))?[.size] as? Int) ?? 0
+        switch AuditMirrorCap.decision(
+            currentBytes: mirrorBytes, lineBytes: data.count,
+            markerWritten: auditMirrorFilesMarkedAsCapped.contains(mirrorURL.lastPathComponent)
+        ) {
+        case .append:
+            if !Self.append(data, to: mirrorURL) { auditMirrorFailures += 1 }
+        case .dropAndWriteMarker:
+            // One line saying the silence that follows is the cap, not a harness that stopped.
+            auditMirrorFilesMarkedAsCapped.insert(mirrorURL.lastPathComponent)
+            auditMirrorOverflowLines += 1
+            let marker = "{\"timestamp\":\"\(HarnessPolicy.auditTimestampFormatter.string(from: date))\","
+                + "\"session\":\"\(Self.sessionIdentifier)\",\"outcome\":\"auditMirrorCapReached\","
+                + "\"message\":\"this mirror reached its \(AuditMirrorCap.dailyBytes)-byte daily cap; later lines today "
+                + "are dropped here, still written to harness-audit.log, and counted by ping as auditMirrorOverflowLines\"}\n"
+            if !Self.append(Data(marker.utf8), to: mirrorURL) { auditMirrorFailures += 1 }
+        case .drop:
+            auditMirrorOverflowLines += 1
+        }
     }
 
     private static func append(_ data: Data, to url: URL) -> Bool {

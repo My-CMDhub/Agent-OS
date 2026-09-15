@@ -368,6 +368,9 @@ enum AccessibilityWindows {
         var raiseMilliseconds: Int?
 
         var activated = false
+        /// Unminimize + raise + activate, from entry to `activate()` returning —
+        /// the act half of this call, so the harness can split it from the wait.
+        var actMilliseconds = 0
 
         // Tier 2 and 3.
         var readBackMain: Bool?
@@ -378,6 +381,8 @@ enum AccessibilityWindows {
         /// "applicationFrontmost". Nil when neither did.
         var observedVia: String?
         var observedWindowTitle: UntrustedText?
+        /// Iterations of the tier-3 poll — the harness's `verifyWalks` for `focus`.
+        var observationPolls = 0
     }
 
     /// The frontmost app before anything moves — how the human undoes this.
@@ -398,6 +403,7 @@ enum AccessibilityWindows {
         window: (element: AXUIElement, candidate: WindowCandidate)?
     ) -> FocusOutcome {
         var outcome = FocusOutcome()
+        let actStartedAt = Date()
 
         if let window {
             if window.candidate.isMinimized {
@@ -426,6 +432,7 @@ enum AccessibilityWindows {
         // Not `activate(options: .activateIgnoringOtherApps)` — deprecated on
         // the macOS 14 target, and the plain call is what the OS wants now.
         outcome.activated = application.activate()
+        outcome.actMilliseconds = Int(Date().timeIntervalSince(actStartedAt) * 1000)
 
         // Tier 2: ask the window about itself.
         if let window {
@@ -449,6 +456,7 @@ enum AccessibilityWindows {
         let deadline = startedAt.addingTimeInterval(observationDeadlineInSeconds)
 
         repeat {
+            outcome.observationPolls += 1
             // Ask **Accessibility** who is focused, not `NSWorkspace`.
             //
             // Measured 2026-09-10, and it is the run-loop trap this project
