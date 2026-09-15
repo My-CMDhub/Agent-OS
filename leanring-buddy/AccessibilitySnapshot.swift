@@ -1112,7 +1112,7 @@ enum AccessibilityTreeWalker {
     /// fired), or the element genuinely publishes no position — plenty of
     /// AXGroups do. Reporting both as one number would make a healthy app look
     /// unreliable, so the caller gets to tell them apart.
-    private static func copyFrame(from element: AXUIElement) -> (frame: CGRect?, didTimeOut: Bool) {
+    static func copyFrame(from element: AXUIElement) -> (frame: CGRect?, didTimeOut: Bool) {
         var positionValue: AnyObject?
         var sizeValue: AnyObject?
 

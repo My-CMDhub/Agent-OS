@@ -66,6 +66,10 @@ struct HarnessRawRequest: Decodable {
     /// press / select / open / type: on a `notFound` or `ambiguous`, come back
     /// with the picture rather than only the offer of one.
     let escalate: Bool?
+
+    /// highlight only: how long the outline stays, and a short caption for it.
+    let seconds: Double?
+    let label: String?
 }
 
 struct HarnessPoint: Decodable {
@@ -110,12 +114,17 @@ enum HarnessVerb: String, CaseIterable {
     /// processes (1.6 s), not a read of the frontmost app.
     case status
 
+    /// Outline a resolved element on the overlay for a few seconds. Read-only:
+    /// it draws on Clicky's own click-through window and sends the target app
+    /// nothing, so like `snapshot` it survives the kill switch.
+    case highlight
+
     /// Whether this verb can change the world. The kill switch stops these and
     /// leaves the read-only pair working, so an operator who tripped it can
     /// still look at the machine and find out why.
     var isMutating: Bool {
         switch self {
-        case .ping, .snapshot, .menus, .windows, .look, .status: return false
+        case .ping, .snapshot, .menus, .windows, .look, .status, .highlight: return false
         case .press, .select, .type, .open, .menu, .focus, .launch: return true
         }
     }
@@ -138,7 +147,8 @@ enum HarnessVerb: String, CaseIterable {
         // `look` is nil for a third reason: it does not act at all. It resolves
         // a name only to find out how many things carry it.
         // `launch` targets an application, not an element: `evaluateLaunch`.
-        case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status: return nil
+        // `highlight` resolves exactly like a press but performs nothing — see `highlightResponse`.
+        case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight: return nil
         }
     }
 }
@@ -219,6 +229,10 @@ struct HarnessRequest: Equatable {
     var tier: EscalationLadder.Tier? = nil
     /// Acting verbs only: whether a failed resolution should pay for a capture.
     var escalate: Bool = false
+
+    /// highlight only, already clamped and validated by `decode`.
+    var highlightSeconds: Double = HarnessPolicy.defaultHighlightSeconds
+    var label: String? = nil
 }
 
 // MARK: - Pure decision logic
@@ -260,7 +274,7 @@ enum HarnessPolicy {
 
         // A name is what an acting verb aims with — unless it is aiming by focus,
         // which is the whole point of the focus target.
-        if verb.elementAction != nil, !aimAtFocus, (raw.title ?? "").isEmpty {
+        if verb.elementAction != nil || verb == .highlight, !aimAtFocus, (raw.title ?? "").isEmpty {
             return .failure(.missingField("title"))
         }
 
@@ -325,6 +339,12 @@ enum HarnessPolicy {
             return .failure(.invalidField(field: "ticket", value: ""))
         }
 
+        // A caption goes on screen, so it follows the rule for any name we show:
+        // an empty, document-length or control-character label is refused, not drawn.
+        if let label = raw.label, !UntrustedText(label).isPlausibleControlLabel {
+            return .failure(.invalidField(field: "label", value: UntrustedText(label).forDisplay))
+        }
+
         var mode = TypeMode.insert
         if verb == .type {
             guard !(raw.text ?? "").isEmpty else {
@@ -362,8 +382,18 @@ enum HarnessPolicy {
             app: (raw.app?.isEmpty == false) ? raw.app : nil,
             expectApp: raw.expectApp,
             tier: tier,
-            escalate: raw.escalate ?? false
+            escalate: raw.escalate ?? false,
+            highlightSeconds: clampedHighlightSeconds(raw.seconds),
+            label: raw.label
         ))
+    }
+
+    static let defaultHighlightSeconds = 2.0
+
+    /// Long enough to see, short enough that a forgotten outline cannot sit over
+    /// the owner's work: 0.5-10 s, default 2.
+    static func clampedHighlightSeconds(_ requested: Double?) -> Double {
+        min(max(requested ?? defaultHighlightSeconds, 0.5), 10)
     }
 
     /// Whether the app a verb actually read is the one the caller expected.
@@ -580,7 +610,9 @@ enum HarnessObservability {
         // running against a locked screen wrote 12,881 `anomalySuppressed`
         // audit lines naming this rule — one per refusal, each also a line of
         // its own. The first refusal is still in the audit log as `screenIsLocked`.
-        "screenIsLocked"
+        "screenIsLocked",
+        // `highlight` on a scrolled-out element: the reachability check working.
+        "targetNotOnScreen"
     ]
 
     /// Below this many samples the median is noise, and a cold start would fire
@@ -1326,6 +1358,9 @@ final class HarnessServer {
 
         case .launch:
             return launchResponse(request, dryRun: dryRun, startedAt: startedAt)
+
+        case .highlight:
+            return highlightResponse(request, dryRun: dryRun, startedAt: startedAt)
         }
     }
 
@@ -1604,13 +1639,82 @@ final class HarnessServer {
         return request.app
     }
 
-    private func actResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
-        guard let action = request.verb.elementAction else {
-            return ["ok": false, "error": "unknownVerb", "message": "not an acting verb"]
+    // MARK: highlight
+
+    /// Outline the element a press with the same fields would resolve, for
+    /// `seconds`, and change nothing else.
+    ///
+    /// Why no per-app policy, ticket or kill switch: it sends the target app no
+    /// action and no write — the only window it touches is Clicky's own
+    /// click-through overlay, which can never become key or main — so it is the
+    /// class of `snapshot`, not of `press`. It still writes its audit line.
+    private func highlightResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        var response: [String: Any] = ["dryRun": dryRun]
+        // `.press` only fills the intent's slot: the resolver matches on name, role,
+        // container and point and never reads the action.
+        guard let target = resolveTarget(request, action: .press, dryRun: dryRun, startedAt: startedAt, into: &response)
+        else { return response }
+        response["resolved"] = Self.summarise(target.node)
+
+        func refuse(_ code: String, _ message: String) -> [String: Any] {
+            response["ok"] = false
+            response["error"] = code
+            response["message"] = message
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: code, startedAt: startedAt)
+            return response
         }
 
-        var response: [String: Any] = ["dryRun": dryRun, "confirmed": request.confirmed]
+        // Press's check, on press's input (the walk's frame), and BEFORE the live
+        // read: measured 2026-09-15, scrolled-out System Settings rows fail a live
+        // AXPosition/AXSize read outright, so reading first turned 7 off-screen rows
+        // into `frameUnreadable` instead of `targetNotOnScreen`.
+        if let reason = ActionSafetyKernel.unreachableFrameReason(
+            target.node.frameInAppKitCoordinates, visibleBounds: target.rootNode.frameInAppKitCoordinates
+        ) {
+            return refuse("targetNotOnScreen", reason)
+        }
+        // The frame straight from AX, not the walk's AppKit copy converted back:
+        // a value run back through the conversion that produced it can only agree
+        // with itself, and then a mirrored outline would report a perfect round trip.
+        guard let element = target.node.accessibilityElement,
+              let elementFrame = AccessibilityTreeWalker.copyFrame(from: element).frame else {
+            return refuse("frameUnreadable", "the element's AXPosition/AXSize could not be read")
+        }
+        let drawnRect = AccessibilityTreeWalker.convertAccessibilityFrameToAppKitFrame(
+            elementFrame, primaryDisplayHeightInPoints: CGDisplayBounds(CGMainDisplayID()).height
+        )
+        guard let screenIndex = CompanionScreenCaptureUtility.bestDisplayIndex(
+            for: drawnRect, among: NSScreen.screens.map(\.frame)
+        ) else {
+            return refuse("targetNotOnScreen", "the element's frame is on no display")
+        }
 
+        phaseTiming.actionStarting()
+        // Never inside the request: a synchronous show pumps the run loop and lets
+        // a second socket request land inside this one.
+        let seconds = request.highlightSeconds, label = request.label
+        DispatchQueue.main.async {
+            ElementHighlightOverlay.show(drawnRect, label: label, onScreenAt: screenIndex, seconds: seconds)
+        }
+
+        response["ok"] = true
+        Self.attachFrame(elementFrame, to: &response, key: "elementFrame")
+        Self.attachFrame(drawnRect, to: &response, key: "drawnRect")
+        response["screen"] = screenIndex
+        response["seconds"] = seconds
+        audit(request, dryRun: dryRun, kernel: "n/a", outcome: "highlighted", startedAt: startedAt)
+        return response
+    }
+
+    /// Walk, check `expectApp`, and resolve the request's element — or write the
+    /// refusal into `response`, audit it, and return nil. Shared by the acting
+    /// verbs and `highlight`, so an outline is always round exactly the element a
+    /// press with the same fields would have pressed.
+    private func resolveTarget(
+        _ request: HarnessRequest, action: ElementAction, dryRun: Bool, startedAt: Date,
+        into response: inout [String: Any]
+    ) -> (snapshot: AccessibilityWindowSnapshot, rootNode: AccessibilityElementNode,
+          intent: ElementActionIntent, node: AccessibilityElementNode)? {
         let snapshot: AccessibilityWindowSnapshot
         do {
             snapshot = try AccessibilityTreeWalker.snapshotFocusedWindow()
@@ -1620,7 +1724,7 @@ final class HarnessServer {
             response["ok"] = false
             response["error"] = code
             response["message"] = String(describing: error)
-            return response
+            return nil
         }
 
         // Before the intent is resolved, so a moved focus never gets as far as
@@ -1628,13 +1732,16 @@ final class HarnessServer {
         if let refusal = frontmostChangedRefusal(
             request, name: snapshot.applicationName, bundleIdentifier: snapshot.bundleIdentifier,
             dryRun: dryRun, startedAt: startedAt
-        ) { return response.merging(refusal) { _, new in new } }
+        ) {
+            response.merge(refusal) { _, new in new }
+            return nil
+        }
 
         guard let rootNode = snapshot.rootNode else {
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: "noRootNode", startedAt: startedAt)
             response["ok"] = false
             response["error"] = "noRootNode"
-            return response
+            return nil
         }
         response["application"] = snapshot.applicationName
         response["bundleIdentifier"] = snapshot.bundleIdentifier
@@ -1660,7 +1767,7 @@ final class HarnessServer {
                 response["ok"] = false
                 response["error"] = "noFocusedElement"
                 audit(request, dryRun: dryRun, kernel: "n/a", outcome: "noFocusedElement", startedAt: startedAt)
-                return response
+                return nil
             }
             resolvedNode = focusedNode
             response["resolution"] = ["status": "focused", "matchCount": 1]
@@ -1678,7 +1785,7 @@ final class HarnessServer {
                 // decision the harness already made.
                 attachEscalation(to: &response, request: request, rootNode: rootNode, application: snapshot.application)
                 audit(request, dryRun: dryRun, kernel: "n/a", outcome: "notFound", startedAt: startedAt)
-                return response
+                return nil
             case .ambiguous(let matchCount):
                 response["resolution"] = ["status": "ambiguous", "matchCount": matchCount]
                 response["ok"] = false
@@ -1705,9 +1812,22 @@ final class HarnessServer {
                 }
                 attachEscalation(to: &response, request: request, rootNode: rootNode, application: snapshot.application)
                 audit(request, dryRun: dryRun, kernel: "n/a", outcome: "ambiguous", startedAt: startedAt)
-                return response
+                return nil
             }
         }
+        return (snapshot, rootNode, intent, resolvedNode)
+    }
+
+    private func actResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        guard let action = request.verb.elementAction else {
+            return ["ok": false, "error": "unknownVerb", "message": "not an acting verb"]
+        }
+
+        var response: [String: Any] = ["dryRun": dryRun, "confirmed": request.confirmed]
+
+        guard let target = resolveTarget(request, action: action, dryRun: dryRun, startedAt: startedAt, into: &response)
+        else { return response }
+        let (snapshot, rootNode, intent, resolvedNode) = target
         response["resolved"] = Self.summarise(resolvedNode)
 
         // What the element itself says about being typed into. Four reads on

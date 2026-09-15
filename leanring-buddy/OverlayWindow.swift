@@ -880,6 +880,64 @@ private class AVPlayerNSView: NSView {
     }
 }
 
+/// The harness's `highlight`: one outline at a time, on its own `OverlayWindow`
+/// (click-through, never key or main), so the cursor overlay's shown or hidden
+/// state is never touched and there is nothing to restore. A second highlight
+/// REPLACES the first — two outlines would not say which request drew which.
+enum ElementHighlightOverlay {
+    private static var window: OverlayWindow?
+    private static var generation = 0
+
+    static func show(_ rectInAppKitCoordinates: CGRect, label: String?, onScreenAt screenIndex: Int, seconds: Double) {
+        window?.orderOut(nil)
+        window = nil
+        generation += 1
+        guard NSScreen.screens.indices.contains(screenIndex) else { return }
+        let screen = NSScreen.screens[screenIndex]
+        let overlay = OverlayWindow(screen: screen)
+        overlay.contentView = NSHostingView(rootView: ElementHighlightView(
+            rect: rectInAppKitCoordinates, screenFrame: screen.frame, label: label
+        ))
+        overlay.orderFrontRegardless()
+        window = overlay
+        let shown = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+            guard generation == shown else { return }
+            window?.orderOut(nil)
+            window = nil
+        }
+    }
+}
+
+private struct ElementHighlightView: View {
+    let rect: CGRect
+    let screenFrame: CGRect
+    let label: String?
+
+    var body: some View {
+        // SwiftUI's y grows downward, so the AppKit rect is flipped within the screen.
+        let top = screenFrame.height - (rect.maxY - screenFrame.origin.y)
+        ZStack(alignment: .topLeading) {
+            Rectangle()
+                .stroke(Color.cyan, lineWidth: 3)
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX - screenFrame.origin.x, y: top + rect.height / 2)
+            if let label {
+                Text(label)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.cyan)
+                    .fixedSize()
+                    .position(x: rect.midX - screenFrame.origin.x, y: max(top - 12, 12))
+            }
+        }
+        .frame(width: screenFrame.width, height: screenFrame.height, alignment: .topLeading)
+        .allowsHitTesting(false)
+    }
+}
+
 /// Draws one outline per accessibility element, in AppKit coordinates.
 /// A box that appears vertically mirrored means the coordinate conversion
 /// in AccessibilityTreeWalker was skipped somewhere.

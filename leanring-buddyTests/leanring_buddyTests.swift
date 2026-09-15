@@ -3929,3 +3929,58 @@ private func binding(target: pid_t? = 800, selection chosen: ActionBinding.Selec
     #expect(AuditMirrorCap.decision(currentBytes: cap - 272, lineBytes: 10, markerWritten: true) == .drop)
     #expect(AuditMirrorCap.decision(currentBytes: cap + 300, lineBytes: 273, markerWritten: true) == .drop)
 }
+
+// MARK: - highlight
+
+@Test func aHighlightRectFlipsOnThePrimaryDisplayAndRoundTripsBackToAX() {
+    // The conversion `highlight` draws with. A mirrored outline is the symptom of skipping it.
+    let accessibilityFrame = CGRect(x: 40, y: 120, width: 180, height: 22)
+    let drawn = AccessibilityTreeWalker.convertAccessibilityFrameToAppKitFrame(
+        accessibilityFrame, primaryDisplayHeightInPoints: 900
+    )
+    #expect(drawn == CGRect(x: 40, y: 758, width: 180, height: 22))
+    // The flip is its own inverse, so the same call takes the drawn rect back to AX.
+    #expect(AccessibilityTreeWalker.convertAccessibilityFrameToAppKitFrame(
+        drawn, primaryDisplayHeightInPoints: 900
+    ) == accessibilityFrame)
+}
+
+@Test func highlightSecondsDefaultToTwoAndClampToHalfASecondThroughTen() {
+    #expect(HarnessPolicy.clampedHighlightSeconds(nil) == 2)
+    #expect(HarnessPolicy.clampedHighlightSeconds(0.1) == 0.5)
+    #expect(HarnessPolicy.clampedHighlightSeconds(3) == 3)
+    #expect(HarnessPolicy.clampedHighlightSeconds(600) == 10)
+    guard case .success(let request) = HarnessPolicy.decode(
+        line: #"{"id":"h","verb":"highlight","title":"Recent","seconds":60}"#
+    ) else { Issue.record("should have decoded"); return }
+    #expect(request.highlightSeconds == 10)
+}
+
+@Test func aHighlightLabelThatIsNotAPlainLabelIsRefused() {
+    // JSON-escaped: the decoder turns backslash-n into a real newline inside the label.
+    for label in ["", "two\\nlines", String(repeating: "x", count: 129)] {
+        let line = #"{"id":"h","verb":"highlight","title":"Recent","label":""# + label + #""}"#
+        guard case .failure(.invalidField(let field, _)) = HarnessPolicy.decode(line: line) else {
+            Issue.record("label \(label.debugDescription) should have been refused")
+            continue
+        }
+        #expect(field == "label")
+    }
+    guard case .success(let request) = HarnessPolicy.decode(
+        line: #"{"id":"h","verb":"highlight","title":"Wi‑Fi","label":"click here"}"#
+    ) else { Issue.record("a plain label should decode"); return }
+    #expect(request.label == "click here")
+}
+
+@Test func highlightNeedsATargetAndIsReadOnlyLikeSnapshot() {
+    guard case .success(let request) = HarnessPolicy.decode(
+        line: #"{"id":"h","verb":"highlight","title":"Recent","withinNamed":"sidebar","expectApp":"Finder"}"#
+    ) else { Issue.record("should have decoded"); return }
+    #expect(request.verb == .highlight)
+    #expect(request.withinNamed == "sidebar")
+    #expect(request.expectApp == "Finder")
+    // Not mutating: the kill switch passes it, and `execute` loads no per-app policy for it.
+    #expect(request.verb.isMutating == false)
+    #expect(HarnessPolicy.killSwitchRefusal(verb: .highlight, killSwitchPresent: true) == nil)
+    #expect(HarnessPolicy.decode(line: #"{"id":"h","verb":"highlight"}"#) == .failure(.missingField("title")))
+}

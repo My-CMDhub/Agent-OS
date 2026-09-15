@@ -143,6 +143,20 @@ enum ActionSafetyKernel {
     static let zeroAreaRefusalReason = "listed but not reachable: element has a zero-area frame"
     static let outsideBoundsRefusalReason = "listed but not reachable: element lies outside the visible bounds"
 
+    /// Whether a frame is drawn where a human could reach it — nil when it is.
+    /// Shared by the press path and `highlight`, so an outline can never be drawn
+    /// round something a press would have refused as off-screen.
+    static func unreachableFrameReason(_ frame: CGRect, visibleBounds: CGRect) -> String? {
+        guard frame.width > 0, frame.height > 0 else { return zeroAreaRefusalReason }
+        // Zero area is only the first disguise. Measured 2026-09-08:
+        // AXButton desc="Transfer or Reset" (354, -66, 459, 38) [AXPress] is
+        // named, correctly sized and pressable, and scrolled out of its pane.
+        // Reachability is the relationship between the frame and what is on
+        // screen, not a property of the frame alone.
+        guard frame.intersects(visibleBounds) else { return outsideBoundsRefusalReason }
+        return nil
+    }
+
     /// The name is the whole identity we act on, and the app wrote it. A label
     /// that is empty, document-length, or carries a newline is not a control's
     /// name — it is content that arrived in a name-shaped field, and letting it
@@ -383,19 +397,9 @@ enum ActionSafetyKernel {
         // destructive-word escalation applies harder: a menu bar is where
         // "Empty Trash" and "Quit" live.
         let frame = resolvedNode.frameInAppKitCoordinates
-        if intent.action.targetHasAnOnScreenFrame {
-            guard frame.width > 0, frame.height > 0 else {
-                return .refuse(reason: zeroAreaRefusalReason)
-            }
-
-            // Zero area is only the first disguise. Measured 2026-09-08:
-            // AXButton desc="Transfer or Reset" (354, -66, 459, 38) [AXPress] is
-            // named, correctly sized and pressable, and scrolled out of its pane.
-            // Reachability is the relationship between the frame and what is on
-            // screen, not a property of the frame alone.
-            guard frame.intersects(visibleBounds) else {
-                return .refuse(reason: outsideBoundsRefusalReason)
-            }
+        if intent.action.targetHasAnOnScreenFrame,
+           let reason = unreachableFrameReason(frame, visibleBounds: visibleBounds) {
+            return .refuse(reason: reason)
         }
 
         // Only an action has an action name. A property write has no entry in
