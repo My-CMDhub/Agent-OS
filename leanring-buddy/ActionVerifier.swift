@@ -64,12 +64,46 @@ enum ActionVerifier {
     /// the audit log, and one ms figure cannot say whether that is one slow
     /// walk or four fast ones 150 ms apart — which is the whole question of
     /// whether to speed the walk up or stop polling on a timer.
+    ///
+    /// `confirmingSnapshot` is the walk that satisfied the expectation — nil for
+    /// every other outcome. A caller that wants to describe the change reads it
+    /// instead of walking again: measured 2026-09-15, that second walk was 143 ms
+    /// of a 599 ms `select` and 172 ms of a 526 ms `type`, outside every phase.
     static func verifyCountingWalks(
         hadFocusedWindowBefore: Bool = true,
         expectation: (AccessibilityWindowSnapshot) -> Bool,
         timeoutInSeconds: Double = 3.0,
         pollIntervalInSeconds: Double = 0.15
-    ) -> (outcome: VerificationOutcome, walks: Int) {
+    ) -> (outcome: VerificationOutcome, walks: Int, confirmingSnapshot: AccessibilityWindowSnapshot?) {
+        poll(
+            walk: { try AccessibilityTreeWalker.snapshotFocusedWindow() },
+            hadFocusedWindowBefore: hadFocusedWindowBefore, expectation: expectation,
+            timeoutInSeconds: timeoutInSeconds, pollIntervalInSeconds: pollIntervalInSeconds
+        )
+    }
+
+    /// Which walk to describe a confirmed change from. Only a first-look
+    /// confirmation is reused: the app had already settled when we first looked.
+    /// On a later walk the app was still moving, so walk again as before.
+    /// Measured 2026-09-15: T3-1 (`select` Displays) confirmed on 2 walks in all
+    /// four planner runs, and reusing that 2-walk snapshot once listed
+    /// "Colour profile" where the settled walk listed "Colour LCD" — the pane
+    /// was still filling in. A speedup that changes the answer is a bug.
+    static func snapshotToDescribe<Snapshot>(
+        confirming: Snapshot?, walks: Int, walkAgain: () -> Snapshot?
+    ) -> Snapshot? {
+        walks == 1 ? confirming : walkAgain()
+    }
+
+    /// The loop, generic over what a walk returns so a test can drive it
+    /// without a cross-process read.
+    static func poll<Snapshot>(
+        walk: () throws -> Snapshot,
+        hadFocusedWindowBefore: Bool,
+        expectation: (Snapshot) -> Bool,
+        timeoutInSeconds: Double,
+        pollIntervalInSeconds: Double
+    ) -> (outcome: VerificationOutcome, walks: Int, confirmingSnapshot: Snapshot?) {
         let startedAt = Date()
         var sawAnyWindow = false
         var pollErrors: [Error?] = []
@@ -78,11 +112,11 @@ enum ActionVerifier {
 
         while Date().timeIntervalSince(startedAt) < timeoutInSeconds {
             do {
-                let snapshot = try AccessibilityTreeWalker.snapshotFocusedWindow()
+                let snapshot = try walk()
                 sawAnyWindow = true
                 pollErrors.append(nil)
                 if expectation(snapshot) {
-                    return (.confirmed(afterMilliseconds: elapsedMilliseconds()), pollErrors.count)
+                    return (.confirmed(afterMilliseconds: elapsedMilliseconds()), pollErrors.count, snapshot)
                 }
             } catch {
                 pollErrors.append(error)
@@ -90,7 +124,7 @@ enum ActionVerifier {
                     afterPolls: pollErrors, elapsedMilliseconds: elapsedMilliseconds(),
                     hadFocusedWindowBefore: hadFocusedWindowBefore
                 ) {
-                    return (gone, pollErrors.count)
+                    return (gone, pollErrors.count, nil)
                 }
             }
             Thread.sleep(forTimeInterval: pollIntervalInSeconds)
@@ -98,7 +132,7 @@ enum ActionVerifier {
 
         // One entry per walk attempt, failed or not — so its count is the walk count.
         return (sawAnyWindow ? .notObserved(afterMilliseconds: elapsedMilliseconds()) : .couldNotReadWindow,
-                pollErrors.count)
+                pollErrors.count, nil)
     }
 
     /// The gap decision, pure so it can be tested without a cross-process read.

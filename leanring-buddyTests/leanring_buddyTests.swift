@@ -2414,6 +2414,47 @@ private func expectEverySuggestionResolvesToItsOwnCandidate(
         == .windowGone(afterMilliseconds: 300))
 }
 
+@Test func theVerifierHandsBackTheWalkThatConfirmedAndNothingElse() async throws {
+    // `appeared` is built from this snapshot instead of a second walk (2026-09-15),
+    // so it must be the satisfying walk — never an earlier one — and nil otherwise.
+    var walks = [1, 2, 3].makeIterator()
+    let confirmed = ActionVerifier.poll(
+        walk: { walks.next() ?? 99 }, hadFocusedWindowBefore: true,
+        expectation: { $0 >= 2 }, timeoutInSeconds: 1, pollIntervalInSeconds: 0
+    )
+    #expect(confirmed.walks == 2)
+    #expect(confirmed.confirmingSnapshot == 2)
+
+    let unmoved = ActionVerifier.poll(
+        walk: { 1 }, hadFocusedWindowBefore: true,
+        expectation: { $0 == 2 }, timeoutInSeconds: 0.05, pollIntervalInSeconds: 0.01
+    )
+    guard case .notObserved = unmoved.outcome else { Issue.record("expected notObserved"); return }
+    #expect(unmoved.confirmingSnapshot == nil)
+
+    let closed = ActionVerifier.poll(
+        walk: { () throws -> Int in throw AccessibilitySnapshotError.noFocusedWindow },
+        hadFocusedWindowBefore: true, expectation: { _ in true },
+        timeoutInSeconds: 1, pollIntervalInSeconds: 0
+    )
+    guard case .windowGone = closed.outcome else { Issue.record("expected windowGone"); return }
+    #expect(closed.walks == 2)
+    #expect(closed.confirmingSnapshot == nil)
+}
+
+@Test func onlyAFirstLookConfirmationIsReusedToDescribeTheChange() async throws {
+    // T3-1, 2026-09-15: a 2-walk confirmation caught System Settings' Displays
+    // pane still filling in, and its `appeared` list differed from the settled walk.
+    var walkedAgain = 0
+    let firstLook = ActionVerifier.snapshotToDescribe(confirming: 1, walks: 1) { walkedAgain += 1; return 9 }
+    #expect(firstLook == 1)
+    #expect(walkedAgain == 0)
+
+    let stillMoving = ActionVerifier.snapshotToDescribe(confirming: 2, walks: 2) { walkedAgain += 1; return 9 }
+    #expect(stillMoving == 9)
+    #expect(walkedAgain == 1)
+}
+
 // MARK: - launch
 
 @Test func launchNeedsAnAppAndRefusesAPath() async throws {

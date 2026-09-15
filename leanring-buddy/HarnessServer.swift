@@ -1908,20 +1908,23 @@ final class HarnessServer {
         // .success only means the message was delivered. Three separate writes
         // in this repo returned .success and moved nothing, so the second walk
         // is the only tier that gets to say "it worked".
-        let (verification, verifyWalks) = ActionVerifier.verifyCountingWalks { laterSnapshot in
+        let (verification, verifyWalks, confirmingSnapshot) = ActionVerifier.verifyCountingWalks { laterSnapshot in
             guard let laterRoot = laterSnapshot.rootNode else { return false }
             return AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot) != namesBefore
         }
         // "poll" is the only honest path: this verifier re-walks on a 150 ms
-        // timer and subscribes to no AX event. The `appeared` walk below is
-        // after the verdict and stays outside `verifyMs`.
+        // timer and subscribes to no AX event.
         phaseTiming.verified(walks: verifyWalks, path: "poll")
 
         switch verification {
         case .confirmed(let milliseconds):
+            // A first-look confirmation is reused; anything later walks again.
+            // See `ActionVerifier.snapshotToDescribe` for the T3-1 evidence.
             var appeared: [String] = []
-            if let laterSnapshot = try? AccessibilityTreeWalker.snapshotFocusedWindow(),
-               let laterRoot = laterSnapshot.rootNode {
+            if let laterRoot = ActionVerifier.snapshotToDescribe(
+                confirming: confirmingSnapshot, walks: verifyWalks,
+                walkAgain: { try? AccessibilityTreeWalker.snapshotFocusedWindow() }
+            )?.rootNode {
                 appeared = Array(
                     AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot)
                         .subtracting(namesBefore).sorted().prefix(12)
@@ -2192,7 +2195,7 @@ final class HarnessServer {
 
         // A menu works with no window open, and then "no focused window" after
         // the press is not a window that closed. See `ActionVerifier.verify`.
-        let (verification, verifyWalks) = ActionVerifier.verifyCountingWalks(hadFocusedWindowBefore: namesBefore != nil) { laterSnapshot in
+        let (verification, verifyWalks, _) = ActionVerifier.verifyCountingWalks(hadFocusedWindowBefore: namesBefore != nil) { laterSnapshot in
             if let windowsBefore,
                AccessibilityMenu.windowCount(for: application) != windowsBefore { return true }
             guard let laterRoot = laterSnapshot.rootNode, let namesBefore else { return false }
