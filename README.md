@@ -4,7 +4,7 @@ A macOS accessibility harness for a model to operate the computer through, built
 
 I forked [`farzaa/clicky`](https://github.com/farzaa/clicky), an on-screen AI buddy that looks at a screenshot and points at things, and replaced how it senses and acts. Instead of guessing pixels, it reads the accessibility tree: the named, positioned controls macOS already publishes for screen readers. Every action goes through local code that can allow it, ask me, or refuse it. An action only counts as done when a second read of the app shows it happened.
 
-Start with [What this does not claim](#what-this-does-not-claim). It's the part I most want people to read which i got wrong initially
+Start with [What this does not claim](#what-this-does-not-claim). It's the part I most want people to read, and the part I got wrong at first.
 
 ## What I got wrong on the way
 
