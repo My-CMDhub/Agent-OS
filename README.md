@@ -1,162 +1,198 @@
-Update: April 27, 2026.
+# Agent-OS
 
-Hi there! I'm Farza, the guy that made Clicky.
+A macOS accessibility harness built for a model to operate the computer through — and to **refuse** when it should.
 
-The existing codebase remains open source. Tinker with it, make it yours, start a company out of it, do whatever you want I don't mind. But, for all the new stuff I'm hacking on, gonna keep it private. To get the latest Clicky, you can go [here](https://www.heyclicky.com/).
+Built on top of [`farzaa/clicky`](https://github.com/farzaa/clicky) (MIT). Clicky is an on-screen AI
+buddy that can see your screen and point at things. This fork keeps its app shell and adds the part that
+has to exist before anything like it belongs near a real machine: a sensor that reads the accessibility
+tree instead of guessing at pixels, a safety kernel that asks or refuses before anything moves, an
+approval ticket bound to the exact action, and a verifier that re-reads the screen rather than trusting a
+success code.
 
-I also tweeted about this [here](https://x.com/FarzaTV/status/2043402737828962489).
+Every capability below comes with the limit that ships with it. What has not been measured is in
+[What this does not claim](#what-this-does-not-claim) — the section worth reading first.
 
-Go crazy with this repo!! It's an MIT license.
+---
 
-# Hi, this is Clicky.
-It's an AI teacher that lives as a buddy next to your cursor. It can see your screen, talk to you, and even point at stuff. Kinda like having a real teacher next to you.
+## What this fork adds
 
-Download it [here](https://www.clicky.so/) for free.
+| Subsystem | File | What it does |
+|---|---|---|
+| **Sensor** | `AccessibilitySnapshot.swift` | Batched attribute reads, off-screen subtree skip, visible-rows window for huge lists, dedupe by element identity, a walk budget that names which limit stopped it |
+| **Safety kernel** | `ActionSafetyKernel.swift` | Allows plain navigation, **asks** before destructive actions, **refuses** irreversible ones and password fields outright |
+| **Approval** | `HarnessConfirmations.swift`, `ActionBinding.swift`, `ApprovalRulesKeychainStore.swift` | One-time ticket bound to the whole request and to what is selected; only a hardware click can approve; "Always" rules live in the Keychain |
+| **Verifier** | `ActionVerifier.swift` | An action counts only when the app is seen to react — never on the API's success code |
+| **Trust boundary** | `UntrustedText.swift` | Applied at `AccessibilityElementNode.init`, the one place an app's strings enter our types |
+| **Reachability** | `ElementReachability.swift` | Rejects zero-area and off-screen frames; AX scroll verb with a `CGEvent` fallback |
+| **Settle detection** | `WindowSettleObserver.swift` | AXObserver subscribed before acting, debounce, poll floor |
+| **Escalation** | `EscalationLadder.swift` | Structure → targeted crop → full capture, with a point proven to lie inside exactly one candidate |
+| **Callable interface** | `HarnessServer.swift` | Owner-only Unix socket, 14 verbs, requests on their own queue off the main thread, per-app policy, audit log, per-request timing of resolve / act / verify |
+| **Measurement modes** | `MainThreadStallRecorder.swift`, `VoiceStackBenchmark.swift` | Launch-argument instrumentation: main-thread stall log, voice-stack benchmark |
 
-Here's the [original tweet](https://x.com/FarzaTV/status/2041314633978659092) that kinda blew up for a demo for more context.
+**59 of the 79 commits** and **27 of the 52 Swift files** are this fork's (24 app sources, 2 test files,
+1 benchmark script). The other 25 are Clicky's app shell, voice plumbing, UI and tests.
 
-![Clicky — an ai buddy that lives on your mac](clicky-demo.gif)
+---
 
-This is the open-source version of Clicky for those that want to hack on it, build their own features, or just see how it works under the hood.
+## The four decisions this repo exists to show
 
-## Get started with Claude Code
+### 1. Read the screen's structure, not its pixels — for the right reason
 
-The fastest way to get this running is with [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+The sensor walks the macOS accessibility tree for named, positioned controls rather than having a model
+guess coordinates from a screenshot.
 
-Once you get Claude running, paste this:
+The original reason was token cost, and **it was wrong**. On System Settings (2026-09-07, standard-tier
+model) the tree cost ~1,966 tokens and the screenshot 1,519. The picture was cheaper.
 
-```
-Hi Claude.
+The decision stayed, for a different reason: on that screen the tree offered **165 elements** that can
+be pressed, verified and waited on, and a screenshot offers none. The tree is meant to stay a local index
+that the model never sees, so its token cost drops out.
 
-Clone https://github.com/farzaa/clicky.git into my current directory.
+### 2. The model proposes; local code decides — and order matters
 
-Then read the CLAUDE.md. I want to get Clicky running locally on my Mac.
+A caller only describes an action. Deterministic local code decides whether it happens: plain
+navigation goes through, destructive titles (delete, send, quit, move to bin…) ask a human, and
+irreversible ones (empty bin, erase, delete permanently, buy, pay, purchase) are refused with no way past.
 
-Help me set up everything — the Cloudflare Worker with my own API keys, the proxy URLs, and getting it building in Xcode. Walk me through it.
-```
+The order of the checks turned out to matter as much as the rules. Finder's **Empty Bin…** is disabled
+while the bin is empty, so with the "enabled" check first the answer was *try again later* — when it
+should have been *never*. The never-list now runs ahead of the reachability and enabled checks (only the
+password-field refusal runs earlier). The ask-list and never-list are unit-tested to share no words.
 
-That's it. It'll clone the repo, read the docs, and walk you through the whole setup. Once you're running you can just keep talking to it — build features, fix bugs, whatever. Go crazy.
+### 3. Approval is a ticket bound to the exact action
 
-## Manual setup
+It took four designs, each broken by a test of the one before:
 
-If you want to do it yourself, here's the deal.
+1. A `confirmed: true` field could be written by any caller → approval became a one-time ticket answered on a card.
+2. Another process pressed Allow through the accessibility API in **~10 ms** (2026-09-14) → Allow now counts only from a hardware input event; a posted click, even one forging its source, was rejected.
+3. "Always" rules lived in a file any process running as the user could edit → they moved to the data-protection Keychain; a separate process got `-25300` reading and `-34018` writing (2026-09-14).
+4. The selection could change between approval and action → the ticket records what was selected, and a re-issue after the selection changed was refused as stale in **3 ms** (Finder list view, dry run, n=1).
 
-### Prerequisites
+Destructive actions are **Allow once, never Always** — a rule cannot remember *which* file.
 
-- macOS 14.2+ (for ScreenCaptureKit)
-- Xcode 15+
-- Node.js 18+ (for the Cloudflare Worker)
-- A [Cloudflare](https://cloudflare.com) account (free tier works)
-- API keys for: [Anthropic](https://console.anthropic.com), [AssemblyAI](https://www.assemblyai.com), [ElevenLabs](https://elevenlabs.io)
+### 4. A write is not done until the screen agrees
 
-### 1. Set up the Cloudflare Worker
+`AXError` returned success on **every** write we measured, including ones that changed nothing, and
+reading the value straight back was wrong in both directions (2026-09-10, System Settings and Finder).
+Only a second look at the app tracked reality — so the verifier's contract is "the app was seen to react",
+never "the call returned success".
 
-The Worker is a tiny proxy that holds your API keys. The app talks to the Worker, the Worker talks to the APIs. This way your keys never ship in the app binary.
+The planner tests are graded by a separate checker that reads the screen itself, and assert **which step
+actually ran**, not just how things ended up.
 
-```bash
-cd worker
-npm install
-```
+---
 
-Now add your secrets. Wrangler will prompt you to paste each one:
+## Measured
 
-```bash
-npx wrangler secret put ANTHROPIC_API_KEY
-npx wrangler secret put ASSEMBLYAI_API_KEY
-npx wrangler secret put ELEVENLABS_API_KEY
-```
+Dated, from this machine, with sample sizes where the source recorded them.
 
-For the ElevenLabs voice ID, open `wrangler.toml` and set it there (it's not sensitive):
+**Harness requests off the main thread** (`dda6804`, 2026-09-15)
 
-```toml
-[vars]
-ELEVENLABS_VOICE_ID = "your-voice-id-here"
-```
+| | before | after | sample |
+|---|---|---|---|
+| Main-thread stalls over a planner run | 8,520 ms (21 stalls > 50 ms) | max delay 2.8 ms | 1 planner run |
+| Ping issued behind a 3 s action | 2,864 ms | 5 ms | median of 5 |
 
-Deploy it:
+Freeing the main thread **removed a guard nobody had designed**. Before, anything pressing buttons
+inside the harness's own panel timed out, because the thread that would answer was busy. Afterwards a
+caller could have pressed "Remove" on an Always rule, so an explicit `targetIsHarnessItself` refusal
+shipped in the same commit.
 
-```bash
-npx wrangler deploy
-```
+**Reusing the walk that confirmed an action** (`c3f7f3f`): request median `select` 599 → 456 ms,
+`type` 526 → 450 ms, over 2 + 2 planner runs.
 
-It'll give you a URL like `https://your-worker-name.your-subdomain.workers.dev`. Copy that.
+**Sensor** (2026-09-09)
 
-### 2. Run the Worker locally (for development)
+- Mail's message list is one table with 18,004 rows that reports 11 visible. Walking the visible run plus
+  a screenful either side took Mail from **18,496 nodes to 525**, with actionable / pressable /
+  actionable-now unchanged at 99 / 42 / 23 (`306f7f1`).
+- Chrome publishes its tab strip under more than one parent, so a depth-first walk read the same button
+  four times. Deduplicating by element identity: 511 → 434 nodes, shared-name groups 21 → 5, share of
+  pressable elements addressable by a unique name 15% → 66% (`6488e06`).
+- That same round-trip probe (unique name → element, **no model involved**): Cursor and Finder 100%,
+  Chrome 66%, Mail 57%.
 
-If you want to test changes to the Worker without deploying:
+**Tests.** 217 unit tests (Swift Testing). Planner tests 6/6 on two consecutive runs, last run
+2026-09-15 — six tasks, Finder and System Settings only.
 
-```bash
-cd worker
-npx wrangler dev
-```
+**Voice stack benchmark** (2026-09-15, 20 + 20 runs, 0 errors). First audio, median (p95): Gemini 3.1
+Flash Live 1,620 ms (2,517); Deepgram Nova-3 → Claude Haiku 4.5 → gpt-4o-mini-tts 3,451 ms (4,209).
 
-This starts a local server (usually `http://localhost:8787`) that behaves exactly like the deployed Worker. You'll need to create a `.dev.vars` file in the `worker/` directory with your keys:
+---
 
-```
-ANTHROPIC_API_KEY=sk-ant-...
-ASSEMBLYAI_API_KEY=...
-ELEVENLABS_API_KEY=...
-ELEVENLABS_VOICE_ID=...
-```
+## A finding worth knowing if you build anything like this
 
-Then update the proxy URLs in the Swift code to point to `http://localhost:8787` instead of the deployed Worker URL while developing. Grep for `clicky-proxy` to find them all.
+`kAXWindows` lists windows on the **active Space only**, and otherwise returns `AXError 0` with an empty
+list — a silent undercount, not an error. Backgrounded → frontmost (2026-09-10): Xcode 0 → 2, Cursor
+0 → 1, Chrome 0 → 3. TextEdit 0 → 0 is the control that genuinely had no window.
+`CGWindowListCopyWindowInfo(.optionOnScreenOnly)` agreed: 2 windows for the frontmost app, 0 for all
+seven others.
 
-### 3. Update the proxy URLs in the app
+**You cannot enumerate the machine's windows** — only the active Space's, plus whatever is minimised. So
+`focus` activates first and reads second.
 
-The app has the Worker URL hardcoded in a few places. Search for `your-worker-name.your-subdomain.workers.dev` and replace it with your Worker URL:
+---
 
-```bash
-grep -r "clicky-proxy" leanring-buddy/
-```
+## What this does not claim
 
-You'll find it in:
-- `CompanionManager.swift` — Claude chat + ElevenLabs TTS
-- `AssemblyAIStreamingTranscriptionProvider.swift` — AssemblyAI token endpoint
+**Who is in control**
+- **No model drives this harness yet.** The planner's intents are hand-written; they prove a plan executes, not that anything planned it. The companion app inherited from Clicky still sends a screenshot and parses pixel coordinates.
+- **"The tree never enters a prompt" is a design rule, not an enforced one.** `snapshot` returns the actionable elements to any socket client.
 
-### 4. Open in Xcode and run
+**Safety**
+- **A hardware click proves a device, not a person.** Virtual-HID drivers and remote screen control arrive the same way. A Touch ID tier for money and credentials is designed but not built.
+- **Destructive and irreversible actions are recognised by English words in the title the app wrote.** A checkout button labelled "Place order", "Checkout" or "Transfer" matches nothing and is allowed as an ordinary press. Non-English titles are never matched.
+- **Without a policy file, every app is allowed.** Plain button presses do not ask.
+- **Password protection is by accessibility subrole.** A credential shown as ordinary text is not caught. The `type` refusal is unit-tested; the capture refusal was verified live once, on a local Safari page.
+- **"Always" rules depend on a free personal-team signing profile** that renews every 7 days. The app is not sandboxed.
 
-```bash
-open leanring-buddy.xcodeproj
-```
+**What the verifier knows**
+- **"The app reacted" is not "the right thing happened".** Verification polls for a change; it does not check intent.
+- **There is no rollback.** Nothing reverses a click.
 
-In Xcode:
-1. Select the `leanring-buddy` scheme (yes, the typo is intentional, long story)
-2. Set your signing team under Signing & Capabilities
-3. Hit **Cmd + R** to build and run
+**Coverage**
+- **Element identity is name-based.** Across Chrome, Mail and Claude Desktop, 15 names were shared by more than one pressable element, and one of those groups is separated by nothing we read. *(An earlier "76 of Chrome's 158 share a name" was mostly our own duplicated walk — retracted in `6488e06`.)*
+- **Only 26 of 176 System Settings nodes publish `AXPress`** (2026-09-10). Everything else needs a property write or a lower tier.
+- **Verbs act on the frontmost app.** `focus` switches Spaces and has no dry-run form.
+- **The visible-rows window drops items beyond one screenful.** Finder lost 3 actionable items; no workflow that needed them has been tried.
+- **The walk deadline bounds a slow app, not a hung one.**
+- **Selection is verified live on outline rows only.** Tables, collection views and Mail's message list are untried.
+- **`CGEvent` fallback is measured against AppKit apps only.** Chromium's and Secure Event Input's behaviour is from research, not runs here.
+- **Two clients racing mutating requests is unmeasured.** Requests serialise on one queue by construction.
+- **Nothing has been tested on a second display.**
 
-The app will appear in your menu bar (not the dock). Click the icon to open the panel, grant the permissions it asks for, and you're good.
+**Voice**
+- **There is no voice loop yet.** The worker is deployed and both candidate stacks are benchmarked; neither met its latency target, and answer quality is unmeasured.
 
-### Permissions the app needs
+---
 
-- **Microphone** — for push-to-talk voice capture
-- **Accessibility** — for the global keyboard shortcut (Control + Option)
-- **Screen Recording** — for taking screenshots when you use the hotkey
-- **Screen Content** — for ScreenCaptureKit access
+## Build
 
-## Architecture
+Swift / SwiftUI, one Xcode project, macOS 14.2+. The product is named `Clicky`; the source folder is
+`leanring-buddy` (an upstream typo — renaming it is a large diff with no benefit).
 
-If you want the full technical breakdown, read `CLAUDE.md`. But here's the short version:
+    scripts/run-tests.sh              # unit tests, driven through Xcode
+    scripts/control-probe.sh Finder 3 # sensor control run
+    python3 scripts/planner-tests.py  # six live tasks, harness running
+    python3 scripts/main-thread-probe.py
 
-**Menu bar app** (no dock icon) with two `NSPanel` windows — one for the control panel dropdown, one for the full-screen transparent cursor overlay. Push-to-talk streams audio over a websocket to AssemblyAI, sends the transcript + screenshot to Claude via streaming SSE, and plays the response through ElevenLabs TTS. Claude can embed `[POINT:x,y:label:screenN]` tags in its responses to make the cursor fly to specific UI elements across multiple monitors. All three APIs are proxied through a Cloudflare Worker.
+**Permissions.** The app needs Accessibility, Screen Recording and Microphone. Build from Xcode:
+`xcodebuild` from a terminal invalidated those grants here, and re-granting them is slow.
 
-## Project structure
+**Keys.** All API keys live in the Cloudflare worker under `worker/`. No key ships in the binary.
 
-```
-leanring-buddy/          # Swift source (yes, the typo stays)
-  CompanionManager.swift    # Central state machine
-  CompanionPanelView.swift  # Menu bar panel UI
-  ClaudeAPI.swift           # Claude streaming client
-  ElevenLabsTTSClient.swift # Text-to-speech playback
-  OverlayWindow.swift       # Blue cursor overlay
-  AssemblyAI*.swift         # Real-time transcription
-  BuddyDictation*.swift     # Push-to-talk pipeline
-worker/                  # Cloudflare Worker proxy
-  src/index.ts              # Three routes: /chat, /tts, /transcribe-token
-CLAUDE.md                # Full architecture doc (agents read this)
-```
+---
 
-## Contributing
+## Attribution
 
-PRs welcome. If you're using Claude Code, it already knows the codebase — just tell it what you want to build and point it at `CLAUDE.md`.
+Forked from **[farzaa/clicky](https://github.com/farzaa/clicky)** by Farza Majeed, MIT licensed, and
+still MIT licensed here. The app shell, companion UI, voice plumbing and the original Clicky concept are
+his. The accessibility sensor, safety kernel, approval model, verifier, trust boundary, window handling,
+escalation ladder, harness server and all measurement in this README are this fork's additions.
 
-Got feedback? DM me on X [@farzatv](https://x.com/farzatv).
+Implementation was AI-assisted. The architecture, the measurements, the debugging and the retractions
+were not.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). Copyright notice retained from upstream.

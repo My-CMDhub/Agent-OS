@@ -12,3 +12,5 @@ ob-docs/
 CLAUDE.md
 AGENTS.md
 memory_bank/
+*.profraw
+.env
