@@ -120,6 +120,8 @@ All in `leanring-buddy/` (an upstream typo; the product is named `Clicky`). **61
 
 ## What this does not claim
 
+**Not yet:** <!-- not-yet -->a model driving it · its actions are hand-written for now<!-- /not-yet -->. (dhruvpatel.net shows this line.)
+
 **Who is in control**
 - **No model drives this harness yet.** The planner's intents are hand-written. They prove a plan executes, not that anything planned it. The companion app inherited from Clicky still sends a screenshot and parses pixel coordinates.
 - **"The tree never enters a prompt" is a design rule, not an enforced one.** `snapshot` returns the actionable elements to any socket client.
