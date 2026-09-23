@@ -240,3 +240,14 @@ struct VoiceStackBenchmarkTests {
     #expect(prompt.hasPrefix("you're clicky"))
     #expect(prompt.count < CompanionManager.companionVoiceResponseSystemPrompt.count)
 }
+
+/// A re-run of two stacks alternates who goes first; a typo refuses rather than shrinks the run.
+@Test func voiceBenchStackSubsetSelection() {
+    #expect(VoiceBenchStack.selected(fromArguments: ["Clicky", "--voice-bench"]) == VoiceBenchStack.allCases)
+    let pair = VoiceBenchStack.selected(fromArguments: ["--voice-bench-stacks=openAIRealtime,speechToSpeech"])
+    #expect(pair == [.speechToSpeech, .openAIRealtime])
+    #expect(VoiceBenchStack.selected(fromArguments: ["--voice-bench-stacks=openAIRealtime,gemini"]) == nil)
+    #expect(VoiceBenchStack.selected(fromArguments: ["--voice-bench-stacks="]) == nil)
+    #expect(VoiceBenchStack.order(forClipIndex: 0, among: [.speechToSpeech, .openAIRealtime]) == [.speechToSpeech, .openAIRealtime])
+    #expect(VoiceBenchStack.order(forClipIndex: 1, among: [.speechToSpeech, .openAIRealtime]) == [.openAIRealtime, .speechToSpeech])
+}

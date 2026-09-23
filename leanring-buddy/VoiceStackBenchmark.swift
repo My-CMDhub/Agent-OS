@@ -268,10 +268,22 @@ nonisolated enum VoiceBenchStack: String, CaseIterable, Sendable {
     /// Every stack's first figure after setup, in the order `allCases` rotates:
     /// clip N starts at stack N mod 3, so over a bench each goes first equally
     /// often and none systematically inherits a network path another just warmed.
-    static func order(forClipIndex clipIndex: Int) -> [VoiceBenchStack] {
-        let stacks = allCases
+    static func order(forClipIndex clipIndex: Int, among stacks: [VoiceBenchStack] = allCases) -> [VoiceBenchStack] {
         let firstIndex = clipIndex % stacks.count
         return Array(stacks[firstIndex...] + stacks[..<firstIndex])
+    }
+
+    /// `--voice-bench-stacks=speechToSpeech,openAIRealtime` runs a subset, so a re-run
+    /// need not pay for a stack already measured. `nil` for any unknown name: a typo
+    /// must refuse the run, not quietly measure fewer stacks than were asked for.
+    static func selected(fromArguments arguments: [String]) -> [VoiceBenchStack]? {
+        let prefix = "--voice-bench-stacks="
+        guard let argument = arguments.first(where: { $0.hasPrefix(prefix) }) else { return allCases }
+        let names = argument.dropFirst(prefix.count).split(separator: ",").map(String.init)
+        let stacks = names.compactMap(VoiceBenchStack.init(rawValue:))
+        guard !stacks.isEmpty, stacks.count == names.count else { return nil }
+        // allCases order, so the rotation does not depend on how the list was typed.
+        return allCases.filter(stacks.contains)
     }
 
     /// Every duration is milliseconds. The two stacks share `sessionSetupMs`
@@ -603,6 +615,12 @@ enum VoiceStackBenchmark {
             return
         }
 
+        guard let selectedStacks = VoiceBenchStack.selected(fromArguments: CommandLine.arguments) else {
+            appendLine(["kind": "unknownStack", "benchId": benchID, "known": VoiceBenchStack.allCases.map(\.rawValue)])
+            print("🧪 voice bench: unknown name in --voice-bench-stacks, nothing measured -> \(logPath)")
+            return
+        }
+
         var clips: [(name: String, clip: VoiceBenchPCMClip, clip24k: VoiceBenchPCMClip)] = []
         let fixtureURLs = ((try? FileManager.default.contentsOfDirectory(at: fixtureDirectoryURL, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.pathExtension == "wav" }
@@ -653,6 +671,7 @@ enum VoiceStackBenchmark {
         appendLine([
             "kind": "start",
             "benchId": benchID,
+            "stacks": selectedStacks.map(\.rawValue),
             "clips": clips.map { ["name": $0.name, "seconds": ($0.clip.durationSeconds * 1000).rounded() / 1000] },
             "repetitions": repetitionCount,
             "imageBytes": screenshot.imageData.count,
@@ -674,7 +693,7 @@ enum VoiceStackBenchmark {
         var clipIndex = 0
         for repetition in 1...repetitionCount {
             for (clipName, clip, clip24k) in clips {
-                let stackOrder = VoiceBenchStack.order(forClipIndex: clipIndex)
+                let stackOrder = VoiceBenchStack.order(forClipIndex: clipIndex, among: selectedStacks)
                 clipIndex += 1
 
                 for stack in stackOrder {
@@ -719,7 +738,7 @@ enum VoiceStackBenchmark {
             }
         }
 
-        for stack in VoiceBenchStack.allCases {
+        for stack in selectedStacks {
             appendLine(VoiceBenchRun.summaryJSONObject(for: finishedRuns.filter { $0.stack == stack }, stack: stack, benchID: benchID))
         }
         print("🧪 voice bench: finished (OpenAI Realtime estimated US$\(costGuard.totalUSD))")
