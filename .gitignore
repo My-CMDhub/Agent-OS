@@ -14,3 +14,4 @@ AGENTS.md
 memory_bank/
 *.profraw
 .env
+Signing.local.xcconfig

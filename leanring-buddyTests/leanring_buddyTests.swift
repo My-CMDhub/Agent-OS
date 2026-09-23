@@ -4005,9 +4005,11 @@ private func binding(target: pid_t? = 800, selection chosen: ActionBinding.Selec
 /// Off main, Clicky's own main thread answers the harness's AX calls, so the
 /// panel's "Remove" and quit control became reachable (review 2026-09-15).
 @Test func theHarnessRefusesToTargetItself() {
-    #expect(Bundle.main.bundleIdentifier == "com.dhruvpatel.jarvis")
-    #expect(HarnessServer.isHarnessItself(bundleIdentifier: "com.dhruvpatel.jarvis"))
-    #expect(HarnessServer.isHarnessItself(bundleIdentifier: "COM.DHRUVPATEL.JARVIS"))
+    // The identifier comes from Signing.xcconfig, so the test reads it rather than naming it.
+    let ownIdentifier = Bundle.main.bundleIdentifier ?? ""
+    #expect(!ownIdentifier.isEmpty)
+    #expect(HarnessServer.isHarnessItself(bundleIdentifier: ownIdentifier))
+    #expect(HarnessServer.isHarnessItself(bundleIdentifier: ownIdentifier.uppercased()))
     #expect(!HarnessServer.isHarnessItself(bundleIdentifier: "com.apple.finder"))
     #expect(!HarnessServer.isHarnessItself(bundleIdentifier: nil))
     // Not an ordinary refusal: it keeps the twenty requests before it.

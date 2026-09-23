@@ -1,0 +1,14 @@
+// The app's bundle identifier, kept out of the public project file.
+//
+// A free (Personal Team) registration of an identifier lapses about a week after
+// the last build, and then any team may claim it. com.dhruvpatel.jarvis was in this
+// public repo and was claimed by another team (2026-09-23), so Xcode could no
+// longer sign the app at all. Put your own identifier in the git-ignored
+// Signing.local.xcconfig next to this file:
+//
+//     JARVIS_BUNDLE_ID = com.yourname.jarvis
+//
+// Changing it makes macOS treat the app as new: Accessibility, Screen Recording and
+// Microphone must be granted again, and Keychain "Always" rules start empty.
+JARVIS_BUNDLE_ID = com.example.jarvis
+#include? "Signing.local.xcconfig"
