@@ -16,6 +16,7 @@
  *   /deepgram-token     → Deepgram short-lived JWT (ttl 60 s) for Nova-3 streaming
  *   /openai-tts         → OpenAI /v1/audio/speech, gpt-4o-mini-tts only, streamed through
  *   /gemini-live-token  → Gemini Live API ephemeral token, one use, model locked
+ *   /openai-realtime-token → OpenAI Realtime ephemeral client secret (60 s), gpt-realtime-mini locked
  *
  * Secrets:
  *   CLICKY_CLIENT_KEY, ANTHROPIC_API_KEY, ELEVENLABS_API_KEY, ASSEMBLYAI_API_KEY,
@@ -41,6 +42,8 @@ const OPENAI_TTS_MAX_INPUT_CHARACTERS = 4096;
 const OPENAI_TTS_PASSTHROUGH_FIELDS = ["voice", "instructions", "response_format", "stream_format"] as const;
 
 const GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview";
+
+const OPENAI_REALTIME_MODEL = "gpt-realtime-mini";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -71,6 +74,8 @@ export default {
           return await handleOpenAITTS(request, env);
         case "/gemini-live-token":
           return await handleGeminiLiveToken(env);
+        case "/openai-realtime-token":
+          return await handleOpenAIRealtimeToken(env);
       }
     } catch (error) {
       console.error(`[${url.pathname}] Unhandled error:`, error);
@@ -293,6 +298,39 @@ async function handleGeminiLiveToken(env: Env): Promise<Response> {
   }
   // The token only; nothing else from the upstream response leaves the worker.
   return jsonResponse({ token: createdToken.name }, 200);
+}
+
+async function handleOpenAIRealtimeToken(env: Env): Promise<Response> {
+  if (!env.OPENAI_API_KEY) return missingSecretResponse("OPENAI_API_KEY");
+
+  // https://developers.openai.com/api/reference/resources/realtime/subresources/client_secrets/methods/create
+  // The model is fixed here, not taken from the request body: the client gets a
+  // secret for this one model and nothing it sends can buy a pricier one. The
+  // rest of the session (instructions, formats, turn detection) is left to the
+  // client's own session.update, as the Gemini route leaves it to the setup.
+  // 60 s is enough to open the socket; an open session outlives its secret.
+  const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      expires_after: { anchor: "created_at", seconds: 60 },
+      session: { type: "realtime", model: OPENAI_REALTIME_MODEL },
+    }),
+  });
+
+  if (!response.ok) {
+    return upstreamErrorResponse("/openai-realtime-token", response);
+  }
+
+  const createdSecret = (await response.json()) as { value?: string };
+  if (!createdSecret.value) {
+    return jsonResponse({ error: "OpenAI returned no client secret" }, 502);
+  }
+  // The secret only; the echoed session config stays in the worker.
+  return jsonResponse({ token: createdSecret.value }, 200);
 }
 
 // MARK: - Parked routes (legacy Clicky voice path)
