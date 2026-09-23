@@ -18,13 +18,13 @@ struct VoiceStackBenchmarkTests {
     }
 
     /// Builds a WAV shaped like the committed fixtures: `fmt `, an optional extra chunk, then `data`.
-    private func makeWAV(pcm: Data, extraChunk: (identifier: String, body: Data)? = nil) -> Data {
+    private func makeWAV(pcm: Data, sampleRate: Int = 16_000, extraChunk: (identifier: String, body: Data)? = nil) -> Data {
         var riffBody = Data("WAVE".utf8)
         riffBody += Data("fmt ".utf8) + littleEndianBytes(16, byteCount: 4)
         riffBody += littleEndianBytes(1, byteCount: 2)          // integer PCM
         riffBody += littleEndianBytes(1, byteCount: 2)          // mono
-        riffBody += littleEndianBytes(16_000, byteCount: 4)     // sample rate
-        riffBody += littleEndianBytes(32_000, byteCount: 4)     // byte rate
+        riffBody += littleEndianBytes(sampleRate, byteCount: 4)     // sample rate
+        riffBody += littleEndianBytes(sampleRate * 2, byteCount: 4) // byte rate
         riffBody += littleEndianBytes(2, byteCount: 2)          // block align
         riffBody += littleEndianBytes(16, byteCount: 2)         // bits per sample
         if let extraChunk {
@@ -131,4 +131,112 @@ struct VoiceStackBenchmarkTests {
         #expect(line["errorKind"] as? String == "llm:http401")
         #expect(MeasurementLogFile.jsonLine(line) != nil)
     }
+
+    // MARK: 24 kHz twins
+
+    @Test func a24kTwinIsPairedOnlyWhenPresentMonoSixteenBitAndTheSameLength() throws {
+        let oneSecond16k = try #require(VoiceBenchPCMClip.parseWAV(makeWAV(pcm: Data(count: 32_000))))
+        let matchingTwin = makeWAV(pcm: Data(count: 48_000), sampleRate: 24_000)
+        #expect((try? VoiceBenchPCMClip.paired24kClip(fileData: matchingTwin, matching: oneSecond16k).get())?.sampleRate == 24_000)
+
+        func failureKind(_ fileData: Data?) -> String? {
+            if case .failure(let failure) = VoiceBenchPCMClip.paired24kClip(fileData: fileData, matching: oneSecond16k) { return failure.kind }
+            return nil
+        }
+        #expect(failureKind(nil) == "fixture24kMissing")
+        // A 16 kHz file where the twin should be — the mistake the rate check exists for.
+        #expect(failureKind(makeWAV(pcm: Data(count: 32_000))) == "fixture24kUnreadable")
+        #expect(failureKind(Data("not a wav".utf8)) == "fixture24kUnreadable")
+        // Half a second: a twin cut from some other utterance.
+        #expect(failureKind(makeWAV(pcm: Data(count: 24_000), sampleRate: 24_000)) == "fixture24kDurationMismatch")
+    }
+
+    // MARK: Three-way order
+
+    @Test func stackOrderRotatesSoEachStackGoesFirstEquallyOften() {
+        #expect(VoiceBenchStack.order(forClipIndex: 0) == [.pipeline, .speechToSpeech, .openAIRealtime])
+        #expect(VoiceBenchStack.order(forClipIndex: 1) == [.speechToSpeech, .openAIRealtime, .pipeline])
+        #expect(VoiceBenchStack.order(forClipIndex: 2) == [.openAIRealtime, .pipeline, .speechToSpeech])
+        #expect(VoiceBenchStack.order(forClipIndex: 3) == VoiceBenchStack.order(forClipIndex: 0))
+        var firstCounts: [VoiceBenchStack: Int] = [:]
+        for clipIndex in 0..<21 {
+            firstCounts[VoiceBenchStack.order(forClipIndex: clipIndex)[0], default: 0] += 1
+            #expect(Set(VoiceBenchStack.order(forClipIndex: clipIndex)).count == 3)
+        }
+        #expect(firstCounts == [.pipeline: 7, .speechToSpeech: 7, .openAIRealtime: 7])
+    }
+
+    // MARK: Realtime spend
+
+    @Test func usageIsFlattenedToIntegerCountsAndDropsEverythingElse() {
+        let flattened = VoiceBenchRealtimeCost.flattenedUsage([
+            "input_tokens": 100,
+            "input_token_details": ["audio_tokens": 40, "cached_tokens_details": ["text_tokens": 5]],
+            "note": "server text",
+            "flag": true
+        ])
+        #expect(flattened == [
+            "input_tokens": 100,
+            "input_token_details.audio_tokens": 40,
+            "input_token_details.cached_tokens_details.text_tokens": 5
+        ])
+    }
+
+    @Test func costEstimatePricesEachModalityAtItsOwnRate() throws {
+        let usage: [String: Int] = [
+            "input_tokens": 1_000_000 + 1_000_000 + 1_000_000,
+            "input_token_details.text_tokens": 1_000_000,
+            "input_token_details.audio_tokens": 1_000_000,
+            "input_token_details.image_tokens": 1_000_000,
+            "input_token_details.cached_tokens_details.text_tokens": 500_000,
+            "input_token_details.cached_tokens_details.audio_tokens": 500_000,
+            "output_tokens": 2_000_000,
+            "output_token_details.text_tokens": 1_000_000,
+            "output_token_details.audio_tokens": 1_000_000
+        ]
+        // text 0.5*0.60 + 0.5*0.06, audio 0.5*10 + 0.5*0.30, image 0.80, out 2.40 + 20.00
+        let expectedUSD = 0.30 + 0.03 + 5.00 + 0.15 + 0.80 + 2.40 + 20.00
+        let estimate = try #require(VoiceBenchRealtimeCost.estimatedUSD(flattenedUsage: usage))
+        #expect(abs(estimate - expectedUSD) < 1e-9)
+    }
+
+    @Test func tokensTheDetailsDoNotExplainArePricedAsAudio() throws {
+        let estimate = try #require(VoiceBenchRealtimeCost.estimatedUSD(flattenedUsage: ["input_tokens": 1_000_000, "output_tokens": 1_000_000]))
+        #expect(abs(estimate - (10.00 + 20.00)) < 1e-9)
+        #expect(VoiceBenchRealtimeCost.estimatedUSD(flattenedUsage: ["input_tokens": 10]) == nil)
+    }
+
+    @Test func costGuardChargesTheCeilingForMissingUsageAndTripsOnlyAboveTheCap() {
+        var costGuard = VoiceBenchCostGuard(capUSD: 0.10, missingUsageCeilingUSD: 0.05)
+        #expect(costGuard.record(flattenedUsage: [:]) == 0.05)
+        #expect(!costGuard.isCapReached)
+        _ = costGuard.record(flattenedUsage: [:])
+        // Exactly at the cap is not over it.
+        #expect(!costGuard.isCapReached)
+        // 1,000 audio output tokens = US$0.02.
+        let charged = costGuard.record(flattenedUsage: ["input_tokens": 0, "output_tokens": 1_000, "output_token_details.audio_tokens": 1_000])
+        #expect(abs(charged - 0.02) < 1e-12)
+        #expect(costGuard.isCapReached)
+        #expect(abs(costGuard.totalUSD - 0.12) < 1e-12)
+    }
+
+    @Test func summaryTotalsTheMetredSpendAndOmitsItForUnmetredStacks() {
+        var first = VoiceBenchRun(benchID: "bench", stack: .openAIRealtime, clipName: "01", repetition: 1)
+        first.estimatedCostUSD = 0.01
+        var second = VoiceBenchRun(benchID: "bench", stack: .openAIRealtime, clipName: "02", repetition: 1)
+        second.estimatedCostUSD = 0.05
+        let summary = VoiceBenchRun.summaryJSONObject(for: [first, second], stack: .openAIRealtime, benchID: "bench")
+        #expect(abs((summary["estimatedCostUSD"] as? Double ?? 0) - 0.06) < 1e-12)
+        let pipelineSummary = VoiceBenchRun.summaryJSONObject(for: [], stack: .pipeline, benchID: "bench")
+        #expect(pipelineSummary["estimatedCostUSD"] is NSNull)
+    }
+}
+
+/// A speech-to-speech stack would say the tag aloud; the cut must actually happen.
+@MainActor
+@Test func speechToSpeechPromptCarriesNoPointingProtocol() {
+    let prompt = VoiceStackBenchmark.speechToSpeechSystemPrompt
+    #expect(!prompt.contains("POINT"))
+    #expect(prompt.hasPrefix("you're clicky"))
+    #expect(prompt.count < CompanionManager.companionVoiceResponseSystemPrompt.count)
 }

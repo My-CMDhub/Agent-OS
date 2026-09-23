@@ -2,22 +2,25 @@
 //  VoiceStackBenchmark.swift
 //  leanring-buddy
 //
-//  Measurement only. `--voice-bench` times the two candidate voice stacks from
+//  Measurement only. `--voice-bench` times the three candidate voice stacks from
 //  this Mac, on the same audio and the same screenshot, so the step-B choice is
 //  made on numbers instead of vendor latency claims:
 //
 //    (P) pipeline:          Deepgram Nova-3 streaming STT -> Claude Haiku 4.5
 //                           (image + transcript) -> OpenAI gpt-4o-mini-tts
 //    (S) speech-to-speech:  Gemini Live API, gemini-3.1-flash-live-preview
+//    (R) speech-to-speech:  OpenAI Realtime API, gpt-realtime-mini
 //
-//  Both clocks start at the same instant — the last audio chunk leaving this
+//  Every clock start at the same instant — the last audio chunk leaving this
 //  machine, i.e. the moment a push-to-talk user lets go — and stop at the first
 //  byte of audio that could be played. Nothing is ever played: the bench never
 //  touches an audio device.
 //
 //  Spends API credit on four providers, so it is only ever run by hand. Every
 //  run appends one JSON line to ~/Library/Logs/Clicky/voice-bench.log carrying
-//  timings and counts, never the words spoken or answered.
+//  timings and counts, never the words spoken or answered. The words — what each
+//  stack heard and said, so the owner can judge quality as well as speed — go to
+//  a separate owner-only (0600) file per bench, voice-bench-answers-<benchId>.jsonl.
 //
 
 import Foundation
@@ -86,6 +89,22 @@ nonisolated struct VoiceBenchPCMClip: Equatable {
             chunkOffset = chunkBodyOffset + chunkSize + (chunkSize % 2)
         }
         return nil
+    }
+
+    /// The 24 kHz twin of a 16 kHz fixture, for the OpenAI Realtime stack, which
+    /// takes audio/pcm at 24 kHz only. `nil` file data is a missing twin. The
+    /// duration check catches a twin made from a different utterance: both rates
+    /// come from one source, so they agree to well under a chunk (worst pair
+    /// measured 2026-09-23: 21 µs apart).
+    static func paired24kClip(fileData: Data?, matching clip16k: VoiceBenchPCMClip) -> Result<VoiceBenchPCMClip, VoiceBenchFailure> {
+        guard let fileData else { return .failure(VoiceBenchFailure(kind: "fixture24kMissing")) }
+        guard let clip = parseWAV(fileData), clip.sampleRate == 24_000, clip.channelCount == 1, clip.bitsPerSample == 16 else {
+            return .failure(VoiceBenchFailure(kind: "fixture24kUnreadable"))
+        }
+        guard abs(clip.durationSeconds - clip16k.durationSeconds) < 0.02 else {
+            return .failure(VoiceBenchFailure(kind: "fixture24kDurationMismatch"))
+        }
+        return .success(clip)
     }
 
     static func bytesPerChunk(sampleRate: Int, channelCount: Int, bitsPerSample: Int, milliseconds: Int) -> Int {
@@ -163,11 +182,97 @@ nonisolated enum VoiceBenchStatistics {
     }
 }
 
+// MARK: - OpenAI Realtime spend
+
+/// The owner's OpenAI credit is under US$8, so the Realtime stack is metered
+/// from its own `response.done` usage and switched off before it can matter.
+nonisolated enum VoiceBenchRealtimeCost {
+    // gpt-realtime-mini, US$ per 1M tokens. Source, read 2026-09-23:
+    // https://developers.openai.com/api/docs/pricing ("Realtime and audio generation models").
+    // No cached-image price is published, so cached image tokens pay the full image rate.
+    static let textInputUSDPerMillion = 0.60
+    static let cachedTextInputUSDPerMillion = 0.06
+    static let audioInputUSDPerMillion = 10.00
+    static let cachedAudioInputUSDPerMillion = 0.30
+    static let imageInputUSDPerMillion = 0.80
+    static let textOutputUSDPerMillion = 2.40
+    static let audioOutputUSDPerMillion = 20.00
+
+    /// `response.usage` flattened to dotted integer keys ("input_token_details.audio_tokens").
+    /// Counts only: anything that is not an integer is dropped, so no text survives.
+    static func flattenedUsage(_ usage: [String: Any], keyPrefix: String = "") -> [String: Int] {
+        var flattened: [String: Int] = [:]
+        for (key, value) in usage {
+            let dottedKey = keyPrefix + key
+            if let nested = value as? [String: Any] {
+                flattened.merge(flattenedUsage(nested, keyPrefix: dottedKey + "."), uniquingKeysWith: { first, _ in first })
+            } else if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+                flattened[dottedKey] = number.intValue
+            }
+        }
+        return flattened
+    }
+
+    /// `nil` when the usage lacks even the two totals. Tokens the details do not
+    /// attribute to a modality are charged as audio, the dearest rate on each
+    /// side, so a changed usage shape can only over-estimate.
+    static func estimatedUSD(flattenedUsage usage: [String: Int]) -> Double? {
+        guard let inputTokens = usage["input_tokens"], let outputTokens = usage["output_tokens"] else { return nil }
+        func count(_ key: String) -> Int { usage[key] ?? 0 }
+        let inputText = count("input_token_details.text_tokens")
+        let inputAudio = count("input_token_details.audio_tokens")
+        let inputImage = count("input_token_details.image_tokens")
+        let cachedText = min(count("input_token_details.cached_tokens_details.text_tokens"), inputText)
+        let cachedAudio = min(count("input_token_details.cached_tokens_details.audio_tokens"), inputAudio)
+        let unattributedInput = max(inputTokens - inputText - inputAudio - inputImage, 0)
+        let outputText = count("output_token_details.text_tokens")
+        let outputAudio = count("output_token_details.audio_tokens")
+        let unattributedOutput = max(outputTokens - outputText - outputAudio, 0)
+
+        let microDollars = Double(inputText - cachedText) * textInputUSDPerMillion
+            + Double(cachedText) * cachedTextInputUSDPerMillion
+            + Double(inputAudio - cachedAudio + unattributedInput) * audioInputUSDPerMillion
+            + Double(cachedAudio) * cachedAudioInputUSDPerMillion
+            + Double(inputImage) * imageInputUSDPerMillion
+            + Double(outputText) * textOutputUSDPerMillion
+            + Double(outputAudio + unattributedOutput) * audioOutputUSDPerMillion
+        return microDollars / 1_000_000
+    }
+}
+
+/// Running total with a hard stop. A run with no usage (it failed, or
+/// `response.done` never came) is charged the ceiling, never 0: a response the
+/// server may have generated and billed is not free because we did not see the bill.
+nonisolated struct VoiceBenchCostGuard {
+    let capUSD: Double
+    let missingUsageCeilingUSD: Double
+    private(set) var totalUSD = 0.0
+
+    var isCapReached: Bool { totalUSD > capUSD }
+
+    /// Returns what this run was charged.
+    mutating func record(flattenedUsage usage: [String: Int]) -> Double {
+        let runUSD = VoiceBenchRealtimeCost.estimatedUSD(flattenedUsage: usage) ?? missingUsageCeilingUSD
+        totalUSD += runUSD
+        return runUSD
+    }
+}
+
 // MARK: - One run
 
 nonisolated enum VoiceBenchStack: String, CaseIterable, Sendable {
     case pipeline
     case speechToSpeech
+    case openAIRealtime
+
+    /// Every stack's first figure after setup, in the order `allCases` rotates:
+    /// clip N starts at stack N mod 3, so over a bench each goes first equally
+    /// often and none systematically inherits a network path another just warmed.
+    static func order(forClipIndex clipIndex: Int) -> [VoiceBenchStack] {
+        let stacks = allCases
+        let firstIndex = clipIndex % stacks.count
+        return Array(stacks[firstIndex...] + stacks[..<firstIndex])
+    }
 
     /// Every duration is milliseconds. The two stacks share `sessionSetupMs`
     /// (token + connect, before the user's audio — a product would do this at
@@ -190,6 +295,12 @@ nonisolated enum VoiceBenchStack: String, CaseIterable, Sendable {
                 "stsFirstAudioMs",        // last chunk sent -> first audio inlineData
                 "stsTurnCompleteMs"       // last chunk sent -> turnComplete
             ]
+        case .openAIRealtime:
+            return [
+                "sessionSetupMs",         // token + connect + session.updated + screenshot item acknowledged
+                "rtFirstAudioMs",         // last chunk sent -> first response.output_audio.delta
+                "rtResponseDoneMs"        // last chunk sent -> response.done
+            ]
         }
     }
 }
@@ -209,6 +320,7 @@ nonisolated struct VoiceBenchRun {
     var responseCharacters: Int?
     var responseAudioBytes: Int?
     var usageTokens: [String: Int] = [:]
+    var estimatedCostUSD: Double?
     var errorKind: String?
 
     func jsonObject() -> [String: Any] {
@@ -227,6 +339,7 @@ nonisolated struct VoiceBenchRun {
             "responseCharacters": responseCharacters ?? NSNull(),
             "responseAudioBytes": responseAudioBytes ?? NSNull(),
             "usageTokens": usageTokens.isEmpty ? NSNull() : usageTokens,
+            "estimatedCostUSD": estimatedCostUSD ?? NSNull(),
             "errorKind": errorKind ?? NSNull()
         ]
     }
@@ -246,6 +359,7 @@ nonisolated struct VoiceBenchRun {
                 errorKindCounts[errorKind, default: 0] += 1
             }
         }
+        let metredCosts = runs.compactMap(\.estimatedCostUSD)
         return [
             "kind": "summary",
             "benchId": benchID,
@@ -253,7 +367,8 @@ nonisolated struct VoiceBenchRun {
             "runs": runs.count,
             "errors": errorKindCounts.values.reduce(0, +),
             "errorKinds": errorKindCounts,
-            "marksMs": marks
+            "marksMs": marks,
+            "estimatedCostUSD": metredCosts.isEmpty ? NSNull() : metredCosts.reduce(0, +)
         ]
     }
 
@@ -278,6 +393,13 @@ nonisolated struct VoiceBenchRun {
         }
         return "\(stage):\(nsError.domain)#\(nsError.code)"
     }
+}
+
+/// What one run heard and said, kept apart from `VoiceBenchRun` so the counts-only
+/// log has no field that could hold words. Goes only to the 0600 answers file.
+nonisolated struct VoiceBenchAnswer {
+    var heardText: String?
+    var answerText: String?
 }
 
 // MARK: - Async plumbing
@@ -327,6 +449,8 @@ final class VoiceBenchLiveState {
     var ttsTask: Task<(requestStartUptime: TimeInterval, firstByteUptime: TimeInterval), Error>?
     var responseAudioBytes = 0
     var usageTokens: [String: Int] = [:]
+    var heardText = ""
+    var answerText = ""
 }
 
 @MainActor
@@ -407,6 +531,15 @@ enum VoiceStackBenchmark {
     static let openAITTSModel = "gpt-4o-mini-tts"
     static let openAITTSVoice = "alloy"
     static let geminiLiveModel = "gemini-3.1-flash-live-preview"
+    static let openAIRealtimeModel = "gpt-realtime-mini"
+    // "marin" is the voice OpenAI's own GA realtime examples use.
+    static let openAIRealtimeVoice = "marin"
+    // Cost guard, not a style choice: an audio answer is billed per output token at
+    // US$20/1M, so the cap bounds one runaway reply at under a cent. Output audio
+    // runs well under 400 tokens for the two short sentences the prompt asks for.
+    static let openAIRealtimeMaxOutputTokens = 400
+    static let openAIRealtimeCostCapUSD = 1.00
+    static let openAIRealtimeMissingUsageCeilingUSD = 0.05
     static let geminiLiveConstrainedURL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained"
 
     /// A debug entry point run from the DerivedData build on this machine, so the
@@ -416,6 +549,9 @@ enum VoiceStackBenchmark {
         .deletingLastPathComponent()
         .deletingLastPathComponent()
         .appendingPathComponent("scripts/voice-fixtures", isDirectory: true)
+    static let fixture24kDirectoryURL = fixtureDirectoryURL
+        .deletingLastPathComponent()
+        .appendingPathComponent("voice-fixtures-24k", isDirectory: true)
 
     private static let benchURLSession: URLSession = {
         let configuration = URLSessionConfiguration.default
@@ -428,6 +564,16 @@ enum VoiceStackBenchmark {
     /// Created on first use, after the configuration check, so an unconfigured
     /// run never fires ClaudeAPI's TLS warm-up at the placeholder host.
     private static let claudeAPI = ClaudeAPI(proxyURL: WorkerConfiguration.routeURL("/chat").absoluteString, model: claudeModel)
+
+    /// Speech-to-speech stacks speak their own text, so there is no step where the
+    /// `[POINT:...]` tag can be stripped the way the pipeline strips it before TTS —
+    /// measured 2026-09-23, gpt-realtime-mini said "[POINT:none]" aloud. They get the
+    /// same prompt with the pointing section cut, so answer quality is compared fairly.
+    static let speechToSpeechSystemPrompt: String = {
+        let fullPrompt = CompanionManager.companionVoiceResponseSystemPrompt
+        guard let pointingSection = fullPrompt.range(of: "\n\nelement pointing:") else { return fullPrompt }
+        return String(fullPrompt[..<pointingSection.lowerBound])
+    }()
 
     private static var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
@@ -457,7 +603,7 @@ enum VoiceStackBenchmark {
             return
         }
 
-        var clips: [(name: String, clip: VoiceBenchPCMClip)] = []
+        var clips: [(name: String, clip: VoiceBenchPCMClip, clip24k: VoiceBenchPCMClip)] = []
         let fixtureURLs = ((try? FileManager.default.contentsOfDirectory(at: fixtureDirectoryURL, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.pathExtension == "wav" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
@@ -470,7 +616,16 @@ enum VoiceStackBenchmark {
                 print("🧪 voice bench: \(clipName) is not 16 kHz mono linear16 -> \(logPath)")
                 return
             }
-            clips.append((name: clipName, clip: clip))
+            let twinData = try? Data(contentsOf: fixture24kDirectoryURL.appendingPathComponent(fixtureURL.lastPathComponent))
+            switch VoiceBenchPCMClip.paired24kClip(fileData: twinData, matching: clip) {
+            case .success(let clip24k):
+                clips.append((name: clipName, clip: clip, clip24k: clip24k))
+            case .failure(let failure):
+                // Refused, not skipped: a stack measured on fewer clips is not the same comparison.
+                appendLine(["kind": failure.kind, "benchId": benchID, "clip": clipName])
+                print("🧪 voice bench: \(clipName) has no usable 24 kHz twin (\(failure.kind)) -> \(logPath)")
+                return
+            }
         }
         guard !clips.isEmpty else {
             appendLine(["kind": "fixturesMissing", "benchId": benchID, "directory": fixtureDirectoryURL.path])
@@ -504,30 +659,60 @@ enum VoiceStackBenchmark {
             "imagePixels": "\(screenshot.screenshotWidthInPixels)x\(screenshot.screenshotHeightInPixels)",
             "claudeModel": claudeModel,
             "ttsModel": openAITTSModel,
-            "liveModel": geminiLiveModel
+            "liveModel": geminiLiveModel,
+            "realtimeModel": openAIRealtimeModel,
+            "realtimeCostCapUSD": openAIRealtimeCostCapUSD
         ])
         print("🧪 voice bench: \(clips.count) clips x \(repetitionCount) repetitions per stack -> \(logPath)")
 
+        let answersFileURL = MeasurementLogFile.directoryURL.appendingPathComponent("voice-bench-answers-\(benchID).jsonl")
+        let answersFileHandle = openOwnerOnlyAnswersFile(at: answersFileURL)
+        defer { try? answersFileHandle?.close() }
+
+        var costGuard = VoiceBenchCostGuard(capUSD: openAIRealtimeCostCapUSD, missingUsageCeilingUSD: openAIRealtimeMissingUsageCeilingUSD)
         var finishedRuns: [VoiceBenchRun] = []
-        var clipPairIndex = 0
+        var clipIndex = 0
         for repetition in 1...repetitionCount {
-            for (clipName, clip) in clips {
-                // Alternate which stack goes first, so neither systematically
-                // inherits a connection or a network path the other just warmed.
-                let stackOrder: [VoiceBenchStack] = clipPairIndex % 2 == 0
-                    ? [.pipeline, .speechToSpeech]
-                    : [.speechToSpeech, .pipeline]
-                clipPairIndex += 1
+            for (clipName, clip, clip24k) in clips {
+                let stackOrder = VoiceBenchStack.order(forClipIndex: clipIndex)
+                clipIndex += 1
 
                 for stack in stackOrder {
+                    // Checked before each run, so the cap stops the stack at the first
+                    // run after the total crosses it; the other two keep going.
+                    if stack == .openAIRealtime, costGuard.isCapReached { continue }
                     var run = VoiceBenchRun(benchID: benchID, stack: stack, clipName: clipName, repetition: repetition)
+                    let answer: VoiceBenchAnswer
                     switch stack {
                     case .pipeline:
-                        await measurePipeline(into: &run, clip: clip, screenshot: screenshot, imageLabel: imageLabel)
+                        answer = await measurePipeline(into: &run, clip: clip, screenshot: screenshot, imageLabel: imageLabel)
                     case .speechToSpeech:
-                        await measureSpeechToSpeech(into: &run, clip: clip, screenshot: screenshot)
+                        answer = await measureSpeechToSpeech(into: &run, clip: clip, screenshot: screenshot)
+                    case .openAIRealtime:
+                        answer = await measureOpenAIRealtime(into: &run, clip: clip24k, screenshot: screenshot)
+                        run.estimatedCostUSD = costGuard.record(flattenedUsage: run.usageTokens)
                     }
                     appendLine(run.jsonObject())
+                    // Once only: after this, the check above skips every Realtime run.
+                    if stack == .openAIRealtime, costGuard.isCapReached {
+                        appendLine([
+                            "kind": "costCapReached",
+                            "benchId": benchID,
+                            "stack": stack.rawValue,
+                            "capUSD": openAIRealtimeCostCapUSD,
+                            "estimatedTotalUSD": costGuard.totalUSD
+                        ])
+                    }
+                    if let answersFileHandle, let answerLine = MeasurementLogFile.jsonLine([
+                        "benchId": benchID,
+                        "stack": stack.rawValue,
+                        "clip": clipName,
+                        "repetition": repetition,
+                        "heard": answer.heardText ?? NSNull(),
+                        "answer": answer.answerText ?? NSNull()
+                    ]) {
+                        try? answersFileHandle.write(contentsOf: Data((answerLine + "\n").utf8))
+                    }
                     finishedRuns.append(run)
                     print("🧪 voice bench: \(stack.rawValue) \(clipName) #\(repetition) \(run.errorKind ?? "ok") \(run.marksMs)")
                 }
@@ -537,7 +722,20 @@ enum VoiceStackBenchmark {
         for stack in VoiceBenchStack.allCases {
             appendLine(VoiceBenchRun.summaryJSONObject(for: finishedRuns.filter { $0.stack == stack }, stack: stack, benchID: benchID))
         }
-        print("🧪 voice bench: finished")
+        print("🧪 voice bench: finished (OpenAI Realtime estimated US$\(costGuard.totalUSD))")
+    }
+
+    /// Created 0600 before the first word is written — not chmod-ed afterwards, which
+    /// would leave a window where the answers are readable by other local users.
+    /// A failure costs the quality record, never the timing run.
+    private static func openOwnerOnlyAnswersFile(at fileURL: URL) -> FileHandle? {
+        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let fileDescriptor = open(fileURL.path, O_WRONLY | O_CREAT | O_EXCL | O_APPEND, 0o600)
+        guard fileDescriptor >= 0 else {
+            print("🧪 voice bench: answers file not created (errno \(errno)), answers not recorded")
+            return nil
+        }
+        return FileHandle(fileDescriptor: fileDescriptor, closeOnDealloc: true)
     }
 
     // MARK: Shared steps
@@ -590,7 +788,8 @@ enum VoiceStackBenchmark {
         clip: VoiceBenchPCMClip,
         screenshot: CompanionScreenCapture,
         imageLabel: String
-    ) async {
+    ) async -> VoiceBenchAnswer {
+        var answer = VoiceBenchAnswer()
         var stage = "deepgramToken"
         var deepgramSocket: VoiceBenchWebSocket?
         let liveState = VoiceBenchLiveState()
@@ -658,6 +857,7 @@ enum VoiceStackBenchmark {
             deepgramSocket = nil
 
             let transcript = liveState.finalTranscriptSegments.joined(separator: " ")
+            answer.heardText = transcript
             run.transcriptCharacters = transcript.count
             guard !transcript.isEmpty else { throw VoiceBenchFailure(kind: "stt:emptyTranscript") }
 
@@ -685,6 +885,7 @@ enum VoiceStackBenchmark {
                 }
             )
             run.responseCharacters = fullResponseText.count
+            answer.answerText = fullResponseText
             if let firstTextUptime = liveState.firstTextUptime {
                 run.marksMs["llmFirstTokenMs"] = milliseconds(from: llmStartUptime, to: firstTextUptime)
             }
@@ -712,6 +913,7 @@ enum VoiceStackBenchmark {
             run.errorKind = deepgramSocket?.failureKind(for: error, stage: stage)
                 ?? VoiceBenchRun.errorKind(for: error, stage: stage)
         }
+        return answer
     }
 
     /// Asks for raw PCM streamed as bytes — the earliest-playable form the
@@ -743,7 +945,7 @@ enum VoiceStackBenchmark {
         into run: inout VoiceBenchRun,
         clip: VoiceBenchPCMClip,
         screenshot: CompanionScreenCapture
-    ) async {
+    ) async -> VoiceBenchAnswer {
         var stage = "geminiToken"
         var geminiSocket: VoiceBenchWebSocket?
         let liveState = VoiceBenchLiveState()
@@ -775,6 +977,12 @@ enum VoiceStackBenchmark {
                     setupCompleteWaiter.settle(.success(arrivalUptime))
                 }
                 guard let serverContent = message["serverContent"] as? [String: Any] else { return }
+                if let heardPiece = (serverContent["inputTranscription"] as? [String: Any])?["text"] as? String {
+                    liveState.heardText += heardPiece
+                }
+                if let answerPiece = (serverContent["outputTranscription"] as? [String: Any])?["text"] as? String {
+                    liveState.answerText += answerPiece
+                }
                 // Gemini 3.1 can put several parts in one event; every one is counted.
                 if let modelTurn = serverContent["modelTurn"] as? [String: Any],
                    let parts = modelTurn["parts"] as? [[String: Any]] {
@@ -804,10 +1012,16 @@ enum VoiceStackBenchmark {
                         // so a changed default cannot move the number silently.
                         "thinkingConfig": ["thinkingLevel": "MINIMAL"]
                     ],
-                    "systemInstruction": ["parts": [["text": CompanionManager.companionVoiceResponseSystemPrompt]]],
+                    "systemInstruction": ["parts": [["text": speechToSpeechSystemPrompt]]],
                     // Our end-of-turn, not the server's VAD: activityStart/activityEnd
                     // are push-to-talk press and release, as Finalize is for Deepgram.
-                    "realtimeInputConfig": ["automaticActivityDetection": ["disabled": true]]
+                    "realtimeInputConfig": ["automaticActivityDetection": ["disabled": true]],
+                    // Added 2026-09-23 for the answers file. Transcription is extra
+                    // server work in the same session and could itself move latency,
+                    // so the 2026-09-15 medians taken without it (first audio 1,620 ms;
+                    // pipeline 3,451 ms) are the control this change is judged against.
+                    "inputAudioTranscription": [String: Any](),
+                    "outputAudioTranscription": [String: Any]()
                 ]
             ])
             _ = try await setupCompleteWaiter.value(timeoutSeconds: 10, timeoutKind: "sts:setupTimeout")
@@ -835,5 +1049,168 @@ enum VoiceStackBenchmark {
         }
         run.responseAudioBytes = liveState.responseAudioBytes
         run.usageTokens = liveState.usageTokens
+        run.responseCharacters = liveState.answerText.isEmpty ? nil : liveState.answerText.count
+        return VoiceBenchAnswer(
+            heardText: liveState.heardText.isEmpty ? nil : liveState.heardText,
+            answerText: liveState.answerText.isEmpty ? nil : liveState.answerText
+        )
+    }
+
+    // MARK: (R) OpenAI Realtime
+
+    private static func measureOpenAIRealtime(
+        into run: inout VoiceBenchRun,
+        clip: VoiceBenchPCMClip,
+        screenshot: CompanionScreenCapture
+    ) async -> VoiceBenchAnswer {
+        var stage = "openAIToken"
+        var realtimeSocket: VoiceBenchWebSocket?
+        let liveState = VoiceBenchLiveState()
+        defer { realtimeSocket?.close() }
+        // Our own id, so the acknowledgement we wait for is provably the screenshot's.
+        let imageItemID = "bench_screenshot"
+
+        do {
+            let setupStartUptime = uptime
+            let tokenResponse = try await fetchWorkerJSON(routePath: "/openai-realtime-token", stage: stage)
+            guard let ephemeralKey = tokenResponse["token"] as? String else {
+                throw VoiceBenchFailure(kind: "\(stage):noToken")
+            }
+
+            stage = "rt"
+            var realtimeURLComponents = URLComponents(string: "wss://api.openai.com/v1/realtime")!
+            realtimeURLComponents.queryItems = [URLQueryItem(name: "model", value: openAIRealtimeModel)]
+            var realtimeRequest = URLRequest(url: realtimeURLComponents.url!)
+            // GA needs only the bearer; the beta's `OpenAI-Beta: realtime=v1` header is not sent.
+            realtimeRequest.setValue("Bearer \(ephemeralKey)", forHTTPHeaderField: "Authorization")
+            let socket = VoiceBenchWebSocket(request: realtimeRequest, session: benchURLSession)
+            realtimeSocket = socket
+
+            let sessionUpdatedWaiter = VoiceBenchWaiter<TimeInterval>()
+            let imageAcknowledgedWaiter = VoiceBenchWaiter<TimeInterval>()
+            let firstAudioWaiter = VoiceBenchWaiter<TimeInterval>()
+            let responseDoneWaiter = VoiceBenchWaiter<TimeInterval>()
+            let heardWaiter = VoiceBenchWaiter<TimeInterval>()
+            let allWaiters = [sessionUpdatedWaiter, imageAcknowledgedWaiter, firstAudioWaiter, responseDoneWaiter, heardWaiter]
+            socket.start(onMessage: { message, arrivalUptime in
+                switch message["type"] as? String {
+                case "session.updated":
+                    sessionUpdatedWaiter.settle(.success(arrivalUptime))
+                case "conversation.item.added", "conversation.item.done", "conversation.item.created":
+                    if (message["item"] as? [String: Any])?["id"] as? String == imageItemID {
+                        imageAcknowledgedWaiter.settle(.success(arrivalUptime))
+                    }
+                case "response.output_audio.delta":
+                    liveState.responseAudioBytes += Data(base64Encoded: message["delta"] as? String ?? "")?.count ?? 0
+                    firstAudioWaiter.settle(.success(arrivalUptime))
+                case "response.output_audio_transcript.delta":
+                    liveState.answerText += message["delta"] as? String ?? ""
+                case "response.output_audio_transcript.done":
+                    // The whole transcript, authoritative over the deltas if they disagree.
+                    if let fullTranscript = message["transcript"] as? String { liveState.answerText = fullTranscript }
+                case "conversation.item.input_audio_transcription.completed":
+                    liveState.heardText = message["transcript"] as? String ?? ""
+                    heardWaiter.settle(.success(arrivalUptime))
+                case "response.done":
+                    let response = message["response"] as? [String: Any]
+                    if let usage = response?["usage"] as? [String: Any] {
+                        liveState.usageTokens = VoiceBenchRealtimeCost.flattenedUsage(usage)
+                    }
+                    // A failed response still ends with response.done; it is not an answer.
+                    if let status = response?["status"] as? String, status == "failed" || status == "cancelled" {
+                        responseDoneWaiter.settle(.failure(VoiceBenchFailure(kind: "rtTurn:response\(status == "failed" ? "Failed" : "Cancelled")")))
+                    } else {
+                        responseDoneWaiter.settle(.success(arrivalUptime))
+                    }
+                case "error":
+                    // Console only, never the log: the message is the server's text.
+                    let serverError = message["error"] as? [String: Any]
+                    print("🧪 voice bench: realtime error \(serverError?["code"] ?? "-"): \(serverError?["message"] ?? "-")")
+                    for waiter in allWaiters { waiter.settle(.failure(VoiceBenchFailure(kind: "serverError"))) }
+                default:
+                    break
+                }
+            }, onEnd: { error in
+                for waiter in allWaiters { waiter.settle(.failure(error)) }
+            })
+
+            try await socket.sendJSON([
+                "type": "session.update",
+                "session": [
+                    "type": "realtime",
+                    "instructions": speechToSpeechSystemPrompt,
+                    "output_modalities": ["audio"],
+                    "max_output_tokens": openAIRealtimeMaxOutputTokens,
+                    "audio": [
+                        "input": [
+                            "format": ["type": "audio/pcm", "rate": 24_000],
+                            // Push-to-talk like the others (Deepgram Finalize, Gemini
+                            // activityEnd): we commit, the server's VAD does not decide.
+                            "turn_detection": NSNull(),
+                            // For the answers file. Runs beside the response, not in front
+                            // of it, and bills separately at a fraction of a cent per clip.
+                            "transcription": ["model": "gpt-4o-mini-transcribe"]
+                        ],
+                        "output": [
+                            // The rate is required here too, though 24 kHz is the only one
+                            // offered: without it session.update fails with
+                            // missing_required_parameter (probed 2026-09-23).
+                            "format": ["type": "audio/pcm", "rate": 24_000],
+                            "voice": openAIRealtimeVoice
+                        ]
+                    ]
+                ]
+            ])
+            _ = try await sessionUpdatedWaiter.value(timeoutSeconds: 10, timeoutKind: "rt:sessionUpdateTimeout")
+
+            // Before the audio and off the clock, as Gemini's video frame is. Waiting for
+            // the server's acknowledgement means a refused image fails the run here,
+            // loudly, instead of the model answering blind and looking faster for it.
+            try await socket.sendJSON([
+                "type": "conversation.item.create",
+                "item": [
+                    "id": imageItemID,
+                    "type": "message",
+                    "role": "user",
+                    "content": [[
+                        "type": "input_image",
+                        "image_url": "data:image/jpeg;base64," + screenshot.imageData.base64EncodedString()
+                    ]]
+                ]
+            ])
+            _ = try await imageAcknowledgedWaiter.value(timeoutSeconds: 10, timeoutKind: "rt:imageAckTimeout")
+            run.marksMs["sessionSetupMs"] = milliseconds(from: setupStartUptime, to: uptime)
+
+            let lastAudioSentUptime = try await streamInRealTime(clip.chunks(milliseconds: audioChunkMilliseconds)) { audioChunk in
+                try await socket.sendJSON(["type": "input_audio_buffer.append", "audio": audioChunk.base64EncodedString()])
+            }
+            try await socket.sendJSON(["type": "input_audio_buffer.commit"])
+            try await socket.sendJSON(["type": "response.create"])
+
+            let firstAudioUptime = try await firstAudioWaiter.value(timeoutSeconds: 15, timeoutKind: "rt:firstAudioTimeout")
+            run.marksMs["rtFirstAudioMs"] = milliseconds(from: lastAudioSentUptime, to: firstAudioUptime)
+
+            stage = "rtTurn"
+            let responseDoneUptime = try await responseDoneWaiter.value(timeoutSeconds: 30, timeoutKind: "rtTurn:responseDoneTimeout")
+            run.marksMs["rtResponseDoneMs"] = milliseconds(from: lastAudioSentUptime, to: responseDoneUptime)
+
+            // Off the clock: the transcript of what was heard may land after the answer.
+            _ = try? await heardWaiter.value(timeoutSeconds: 3, timeoutKind: "rt:heardTimeout")
+        } catch {
+            if let benchFailure = error as? VoiceBenchFailure, benchFailure.kind == "serverError" {
+                run.errorKind = "\(stage):serverError"
+            } else {
+                run.errorKind = realtimeSocket?.failureKind(for: error, stage: stage)
+                    ?? VoiceBenchRun.errorKind(for: error, stage: stage)
+            }
+        }
+        run.responseAudioBytes = liveState.responseAudioBytes
+        run.usageTokens = liveState.usageTokens
+        run.transcriptCharacters = liveState.heardText.isEmpty ? nil : liveState.heardText.count
+        run.responseCharacters = liveState.answerText.isEmpty ? nil : liveState.answerText.count
+        return VoiceBenchAnswer(
+            heardText: liveState.heardText.isEmpty ? nil : liveState.heardText,
+            answerText: liveState.answerText.isEmpty ? nil : liveState.answerText
+        )
     }
 }
