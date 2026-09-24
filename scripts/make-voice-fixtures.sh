@@ -49,6 +49,7 @@ questions=(
   "14-finder-hide-left-panel:hide the left panel in finder"
   "15-finder-rows:make finder show everything in rows"
   "16-finder-path-thing:put finder's toolbar path thing on"
+  "17-cursor-editor-new-window:open a new window in the cursor code editor"
 )
 
 for entry in $questions; do

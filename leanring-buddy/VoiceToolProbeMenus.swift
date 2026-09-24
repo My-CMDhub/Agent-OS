@@ -39,11 +39,25 @@ extension VoiceToolProbe {
         /// This item carries a checkmark after the run (`AXMenuItemMarkChar`).
         case marked(path: [String])
         /// This item exists after the run: a label that flips ("Hide Path Bar").
-        case itemPresent(path: [String], resetBy: [String])
+        case itemPresent(path: [String])
         /// The app has more windows than before; extras are closed by `closePath`.
         case windowCountRose(closePath: [String])
         /// The app is frontmost.
         case frontmost
+    }
+
+    /// A menu item's checkmark and title are refreshed by AppKit's menu
+    /// validation, which LAGS an AX press: measured 2026-09-25 (probe
+    /// 7D6CDDBB), read straight after pressing View > as Icons, "as List" still
+    /// carried its checkmark, and after Hide Path Bar the item still said
+    /// "Hide Path Bar" — so pressing it again toggled the bar back on. Every
+    /// start state is therefore pressed once and then POLLED until it reads
+    /// back, and a start that never reads back is recorded, not assumed.
+    enum StartState {
+        /// Press this view item, then wait until it carries the checkmark.
+        case marked([String])
+        /// Wait until `wanted` is listed; if `press` is listed instead, press it once and wait again.
+        case label(wanted: [String], press: [String])
     }
 
     struct MenuScenario {
@@ -55,8 +69,8 @@ extension VoiceToolProbe {
         let check: MenuCheck
         /// The menu path a correct run presses; nil when the right answer is a focus.
         let expectedPath: [String]?
-        /// Harness requests that set the start state, after focusing the app.
-        let prepare: [[String: Any]]
+        /// The start state, set after focusing the app; nil when any state will do.
+        let start: StartState?
         /// Launched first if not running (and quit at the end if the probe launched it).
         var launchIfNeeded = false
         /// The words spoken share no keyword with the item meant ("left panel" for
@@ -67,36 +81,39 @@ extension VoiceToolProbe {
     static let menuScenarios: [MenuScenario] = [
         MenuScenario(fixture: "06-finder-list-view.wav", appClass: "native", appName: "Finder", bundleIdentifier: finderBundleIdentifier,
                      check: .marked(path: ["View", "as List"]), expectedPath: ["View", "as List"],
-                     prepare: [["verb": "menu", "path": ["View", "as Icons"], "expectApp": "Finder"]]),
+                     start: .marked(["View", "as Icons"])),
         MenuScenario(fixture: "07-finder-icon-view.wav", appClass: "native", appName: "Finder", bundleIdentifier: finderBundleIdentifier,
                      check: .marked(path: ["View", "as Icons"]), expectedPath: ["View", "as Icons"],
-                     prepare: [["verb": "menu", "path": ["View", "as List"], "expectApp": "Finder"]]),
+                     start: .marked(["View", "as List"])),
         MenuScenario(fixture: "08-finder-path-bar.wav", appClass: "native", appName: "Finder", bundleIdentifier: finderBundleIdentifier,
-                     check: .itemPresent(path: ["View", "Hide Path Bar"], resetBy: ["View", "Hide Path Bar"]),
+                     check: .itemPresent(path: ["View", "Hide Path Bar"]),
                      expectedPath: ["View", "Show Path Bar"],
-                     prepare: [["verb": "menu", "path": ["View", "Hide Path Bar"], "expectApp": "Finder"]]),
+                     start: .label(wanted: ["View", "Show Path Bar"], press: ["View", "Hide Path Bar"])),
         MenuScenario(fixture: "09-finder-new-window.wav", appClass: "native", appName: "Finder", bundleIdentifier: finderBundleIdentifier,
-                     check: .windowCountRose(closePath: ["File", "Close Window"]), expectedPath: ["File", "New Finder Window"], prepare: []),
+                     check: .windowCountRose(closePath: ["File", "Close Window"]), expectedPath: ["File", "New Finder Window"], start: nil),
         MenuScenario(fixture: "10-textedit-bring-up.wav", appClass: "native", appName: "TextEdit", bundleIdentifier: "com.apple.TextEdit",
-                     check: .frontmost, expectedPath: nil, prepare: [], launchIfNeeded: true),
+                     check: .frontmost, expectedPath: nil, start: nil, launchIfNeeded: true),
         MenuScenario(fixture: "11-textedit-new-document.wav", appClass: "native", appName: "TextEdit", bundleIdentifier: "com.apple.TextEdit",
-                     check: .windowCountRose(closePath: ["File", "Close"]), expectedPath: ["File", "New"], prepare: [], launchIfNeeded: true),
+                     check: .windowCountRose(closePath: ["File", "Close"]), expectedPath: ["File", "New"], start: nil, launchIfNeeded: true),
         // Chrome spells it "New window" (read 2026-09-25); Cursor, like AppKit, "New Window".
         MenuScenario(fixture: "12-chrome-new-window.wav", appClass: "nonNative", appName: "Google Chrome", bundleIdentifier: "com.google.Chrome",
-                     check: .windowCountRose(closePath: ["File", "Close Window"]), expectedPath: ["File", "New window"], prepare: []),
+                     check: .windowCountRose(closePath: ["File", "Close Window"]), expectedPath: ["File", "New window"], start: nil),
         MenuScenario(fixture: "13-cursor-new-window.wav", appClass: "nonNative", appName: "Cursor", bundleIdentifier: "com.todesktop.230313mzl4w4u92",
-                     check: .windowCountRose(closePath: ["File", "Close Window"]), expectedPath: ["File", "New Window"], prepare: []),
+                     check: .windowCountRose(closePath: ["File", "Close Window"]), expectedPath: ["File", "New Window"], start: nil),
+        // "cursor" alone was heard as Calculator, Kasa, Terminal, VS Code in 6/10 runs (7D6CDDBB).
+        MenuScenario(fixture: "17-cursor-editor-new-window.wav", appClass: "nonNative", appName: "Cursor", bundleIdentifier: "com.todesktop.230313mzl4w4u92",
+                     check: .windowCountRose(closePath: ["File", "Close Window"]), expectedPath: ["File", "New Window"], start: nil),
         MenuScenario(fixture: "14-finder-hide-left-panel.wav", appClass: "native", appName: "Finder", bundleIdentifier: finderBundleIdentifier,
-                     check: .itemPresent(path: ["View", "Show Sidebar"], resetBy: ["View", "Show Sidebar"]),
+                     check: .itemPresent(path: ["View", "Show Sidebar"]),
                      expectedPath: ["View", "Hide Sidebar"],
-                     prepare: [["verb": "menu", "path": ["View", "Show Sidebar"], "expectApp": "Finder"]], adversarial: true),
+                     start: .label(wanted: ["View", "Hide Sidebar"], press: ["View", "Show Sidebar"]), adversarial: true),
         MenuScenario(fixture: "15-finder-rows.wav", appClass: "native", appName: "Finder", bundleIdentifier: finderBundleIdentifier,
                      check: .marked(path: ["View", "as List"]), expectedPath: ["View", "as List"],
-                     prepare: [["verb": "menu", "path": ["View", "as Icons"], "expectApp": "Finder"]], adversarial: true),
+                     start: .marked(["View", "as Icons"]), adversarial: true),
         MenuScenario(fixture: "16-finder-path-thing.wav", appClass: "native", appName: "Finder", bundleIdentifier: finderBundleIdentifier,
-                     check: .itemPresent(path: ["View", "Hide Path Bar"], resetBy: ["View", "Hide Path Bar"]),
+                     check: .itemPresent(path: ["View", "Hide Path Bar"]),
                      expectedPath: ["View", "Show Path Bar"],
-                     prepare: [["verb": "menu", "path": ["View", "Hide Path Bar"], "expectApp": "Finder"]], adversarial: true)
+                     start: .label(wanted: ["View", "Show Path Bar"], press: ["View", "Hide Path Bar"]), adversarial: true)
     ]
 
     // MARK: Harness helpers
@@ -126,9 +143,70 @@ extension VoiceToolProbe {
         return (response["items"] as? [[String: Any]] ?? [], refocused, response["ok"] as? Bool == true ? nil : outcome(response))
     }
 
-    private static func windowCount(app: String, _ harnessAnswer: @escaping @Sendable (String) -> String) async -> Int? {
-        let response = await ask(["verb": "windows", "app": app, "expectApp": app], harnessAnswer)
-        return response["ok"] as? Bool == true ? response["windowCount"] as? Int : nil
+    private static func item(_ path: [String], in items: [[String: Any]]) -> [String: Any]? {
+        items.first { ($0["path"] as? [String]) == path }
+    }
+
+    /// Re-reads `menus` under `prefix` until `holds` (at most `timeoutSeconds`),
+    /// because item state lags a press. The ms it took, or nil if it never held.
+    private static func waitForMenuState(app: String, prefix: [String], timeoutSeconds: Double = 5,
+                                         _ harnessAnswer: @escaping @Sendable (String) -> String,
+                                         holds: ([[String: Any]]) -> Bool) async -> Int? {
+        let started = uptime
+        repeat {
+            if holds(await menuItems(app: app, prefix: prefix, harnessAnswer).items) { return milliseconds(from: started, to: uptime) }
+            try? await Task.sleep(for: .milliseconds(100))
+        } while uptime - started < timeoutSeconds
+        return nil
+    }
+
+    /// Sets a start state and reads it back; the outcome names how, and how long.
+    private static func setStart(_ start: StartState, app: String, _ harnessAnswer: @escaping @Sendable (String) -> String) async -> String {
+        switch start {
+        case .marked(let path):
+            let pressed = outcome(await ask(["verb": "menu", "path": path, "expectApp": app], harnessAnswer))
+            let settled = await waitForMenuState(app: app, prefix: Array(path.dropLast()), harnessAnswer) { item(path, in: $0)?["marked"] as? Bool == true }
+            return "press:\(pressed),readBack:\(settled.map { "\($0)ms" } ?? "never")"
+        case .label(let wanted, let press):
+            // First let any earlier press's title settle, so a stale title is never pressed.
+            _ = await waitForMenuState(app: app, prefix: Array(wanted.dropLast()), timeoutSeconds: 2, harnessAnswer) { items in
+                item(wanted, in: items) != nil
+            }
+            if item(wanted, in: await menuItems(app: app, prefix: Array(wanted.dropLast()), harnessAnswer).items) != nil { return "alreadyThere" }
+            let pressed = outcome(await ask(["verb": "menu", "path": press, "expectApp": app], harnessAnswer))
+            let settled = await waitForMenuState(app: app, prefix: Array(wanted.dropLast()), harnessAnswer) { item(wanted, in: $0) != nil }
+            return "press:\(pressed),readBack:\(settled.map { "\($0)ms" } ?? "never")"
+        }
+    }
+
+    /// The app's normal-level windows as the WINDOW SERVER lists them, on every
+    /// Space. Not AX: `kAXWindows` is scoped to the active Space and read 0 for
+    /// Chrome straight after a focus in the first run (7D6CDDBB), so a count taken
+    /// that way "rose" 0 -> 1 on runs where nothing was pressed. Counts need no
+    /// Screen Recording; titles are never read.
+    static func windowServerCount(bundleIdentifier: String) -> Int? {
+        guard let processIdentifier = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first?.processIdentifier,
+              let windows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        return windows.filter { window in
+            guard (window[kCGWindowOwnerPID as String] as? Int).map(Int32.init) == processIdentifier,
+                  window[kCGWindowLayer as String] as? Int == 0,
+                  let bounds = window[kCGWindowBounds as String] as? [String: Any],
+                  let height = (bounds["Height"] as? NSNumber)?.doubleValue, height >= 100 else { return false }
+            return true
+        }.count
+    }
+
+    /// Polls the window server's count until `holds`, because a window opens or
+    /// closes a moment after the press returns.
+    private static func windowServerCount(bundleIdentifier: String, timeoutSeconds: Double,
+                                          until holds: (Int) -> Bool) async -> Int? {
+        let started = uptime
+        var count = windowServerCount(bundleIdentifier: bundleIdentifier)
+        while let current = count, !holds(current), uptime - started < timeoutSeconds {
+            try? await Task.sleep(for: .milliseconds(100))
+            count = windowServerCount(bundleIdentifier: bundleIdentifier)
+        }
+        return count
     }
 
     // MARK: The run
@@ -141,6 +219,9 @@ extension VoiceToolProbe {
         let fixtureFilter = CommandLine.arguments.first { $0.hasPrefix("--voice-tool-probe-fixtures=") }
             .map { Set($0.dropFirst("--voice-tool-probe-fixtures=".count).split(separator: ",").map { String($0) + ".wav" }) }
         let scenarios = menuScenarios.filter { fixtureFilter?.contains($0.fixture) ?? true }
+        // A lower cap for a re-run, so a session's total stays under its budget.
+        let openAICapUSD = CommandLine.arguments.first { $0.hasPrefix("--voice-tool-probe-cap-usd=") }
+            .flatMap { Double($0.dropFirst("--voice-tool-probe-cap-usd=".count)) }.map { min($0, menuProbeOpenAICostCapUSD) } ?? menuProbeOpenAICostCapUSD
 
         JarvisNotch.shared.frontmostWitness = { HarnessServer.frontmostBundleIdentifier() }
         defer { JarvisNotch.shared.frontmostWitness = nil }
@@ -157,7 +238,7 @@ extension VoiceToolProbe {
 
         appendLine([
             "kind": "start", "probeId": probeID, "mode": "menus", "fixtures": scenarios.map(\.fixture), "runsPerStack": runsPerStack,
-            "openAICostCapUSD": menuProbeOpenAICostCapUSD, "harnessSession": HarnessServer.sessionIdentifier,
+            "openAICostCapUSD": openAICapUSD, "harnessSession": HarnessServer.sessionIdentifier,
             "finderViewModeBefore": viewModeBefore ?? NSNull(), "finderPathBarShownBefore": pathBarShownBefore,
             "finderSidebarHiddenBefore": sidebarHiddenBefore
         ])
@@ -172,7 +253,7 @@ extension VoiceToolProbe {
             for runNumber in 1...runsPerStack {
                 let order: [VoiceStackChoice] = runNumber % 2 == 1 ? [.openAIRealtime, .geminiLive] : [.geminiLive, .openAIRealtime]
                 for stack in order where selectedStacks.contains(stack) {
-                    if stack == .openAIRealtime, openAISpentUSD > menuProbeOpenAICostCapUSD { continue }
+                    if stack == .openAIRealtime, openAISpentUSD > openAICapUSD { continue }
                     let (line, spentUSD) = await measureMenuRun(
                         scenario: scenario, stack: stack, runNumber: runNumber, probeID: probeID,
                         clip: stack == .openAIRealtime ? clip24k : clip16k, harnessAnswer: harnessAnswer)
@@ -186,9 +267,13 @@ extension VoiceToolProbe {
 
         // Put Finder back as it was, then quit what the probe launched.
         _ = await ask(["verb": "focus", "app": "Finder"], harnessAnswer)
-        if let viewModeBefore { _ = await ask(["verb": "menu", "path": viewModeBefore, "expectApp": "Finder"], harnessAnswer) }
-        if pathBarShownBefore { _ = await ask(["verb": "menu", "path": ["View", "Show Path Bar"], "expectApp": "Finder"], harnessAnswer) }
-        if sidebarHiddenBefore { _ = await ask(["verb": "menu", "path": ["View", "Hide Sidebar"], "expectApp": "Finder"], harnessAnswer) }
+        var restored: [String] = []
+        if let viewModeBefore { restored.append(await setStart(.marked(viewModeBefore), app: "Finder", harnessAnswer)) }
+        restored.append(await setStart(pathBarShownBefore ? .label(wanted: ["View", "Hide Path Bar"], press: ["View", "Show Path Bar"])
+                                                          : .label(wanted: ["View", "Show Path Bar"], press: ["View", "Hide Path Bar"]), app: "Finder", harnessAnswer))
+        restored.append(await setStart(sidebarHiddenBefore ? .label(wanted: ["View", "Show Sidebar"], press: ["View", "Hide Sidebar"])
+                                                           : .label(wanted: ["View", "Hide Sidebar"], press: ["View", "Show Sidebar"]), app: "Finder", harnessAnswer))
+        appendLine(["kind": "finderRestored", "probeId": probeID, "steps": restored])
         for bundleIdentifier in launchedByProbe {
             NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).forEach { $0.terminate() }
         }
@@ -213,14 +298,13 @@ extension VoiceToolProbe {
             setup.append("launch:" + outcome(await ask(["verb": "launch", "app": scenario.appName], harnessAnswer)))
         }
         setup.append("focus:" + outcome(await ask(["verb": "focus", "app": scenario.appName], harnessAnswer)))
-        for request in scenario.prepare { setup.append("prepare:" + outcome(await ask(request, harnessAnswer))) }
+        if let start = scenario.start { setup.append("start:" + (await setStart(start, app: scenario.appName, harnessAnswer))) }
         var windowsBefore: Int?
-        if case .windowCountRose = scenario.check { windowsBefore = await windowCount(app: scenario.appName, harnessAnswer) }
-        // The check's control: read BEFORE the model acts, it must fail. A mark or
-        // label that already reads "done" here means the check cannot tell (AppKit
-        // may only refresh item state when a menu opens) — never a pass.
+        if case .windowCountRose = scenario.check { windowsBefore = windowServerCount(bundleIdentifier: scenario.bundleIdentifier) }
+        // The check's control: read BEFORE the model acts (after the start state
+        // read back), it must fail. One that already reads "done" is never a pass.
         switch scenario.check {
-        case .marked(let path), .itemPresent(let path, _):
+        case .marked(let path), .itemPresent(let path):
             let read = await menuItems(app: scenario.appName, prefix: Array(path.dropLast()), harnessAnswer)
             let item = read.items.first { ($0["path"] as? [String]) == path }
             if case .marked = scenario.check {
@@ -280,33 +364,38 @@ extension VoiceToolProbe {
         var check: [String: Any]
         switch scenario.check {
         case .marked(let path):
+            // Polled, not read once: the mark lags the press (see `StartState`).
             let read = await menuItems(app: scenario.appName, prefix: Array(path.dropLast()), harnessAnswer)
-            let item = read.items.first { ($0["path"] as? [String]) == path }
-            check = ["kind": "menuMark", "path": path, "marked": item?["marked"] ?? NSNull(),
-                     "passed": item?["marked"] as? Bool == true, "refocused": read.refocused, "readError": read.error ?? NSNull()]
-        case .itemPresent(let path, let resetBy):
-            let read = await menuItems(app: scenario.appName, prefix: Array(path.dropLast()), harnessAnswer)
-            let present = read.items.contains { ($0["path"] as? [String]) == path }
-            check = ["kind": "menuLabel", "path": path, "passed": present, "refocused": read.refocused, "readError": read.error ?? NSNull()]
-            if present { check["reset"] = outcome(await ask(["verb": "menu", "path": resetBy, "expectApp": scenario.appName], harnessAnswer)) }
-        case .windowCountRose(let closePath):
-            var after = await windowCount(app: scenario.appName, harnessAnswer)
-            var refocused = false
-            if after == nil {
-                _ = await ask(["verb": "focus", "app": scenario.appName], harnessAnswer)
-                refocused = true
-                after = await windowCount(app: scenario.appName, harnessAnswer)
+            let settled = await waitForMenuState(app: scenario.appName, prefix: Array(path.dropLast()), timeoutSeconds: 3, harnessAnswer) {
+                item(path, in: $0)?["marked"] as? Bool == true
             }
+            check = ["kind": "menuMark", "path": path, "passed": settled != nil, "readBackMs": settled ?? NSNull(),
+                     "refocused": read.refocused, "readError": read.error ?? NSNull()]
+        case .itemPresent(let path):
+            let read = await menuItems(app: scenario.appName, prefix: Array(path.dropLast()), harnessAnswer)
+            let settled = await waitForMenuState(app: scenario.appName, prefix: Array(path.dropLast()), timeoutSeconds: 3, harnessAnswer) {
+                item(path, in: $0) != nil
+            }
+            check = ["kind": "menuLabel", "path": path, "passed": settled != nil, "readBackMs": settled ?? NSNull(),
+                     "refocused": read.refocused, "readError": read.error ?? NSNull()]
+        case .windowCountRose(let closePath):
+            let after = windowServerCount(bundleIdentifier: scenario.bundleIdentifier)
             let passed = { if let before = windowsBefore, let after { return after > before }; return false }()
-            check = ["kind": "windowCount", "before": windowsBefore ?? NSNull(), "after": after ?? NSNull(),
-                     "passed": passed, "refocused": refocused]
-            // Close only what the count proves this run created, newest (focused) first,
+            check = ["kind": "windowServerCount", "before": windowsBefore ?? NSNull(), "after": after ?? NSNull(), "passed": passed]
+            // Close only what the count proves this run created, newest (key) first,
             // re-counting after each so a close that did nothing stops the loop.
             var closed = 0
             if let before = windowsBefore, var current = after {
                 while current > before, closed < 3 {
-                    let response = await ask(["verb": "menu", "path": closePath, "expectApp": scenario.appName], harnessAnswer)
-                    guard response["ok"] as? Bool == true, let next = await windowCount(app: scenario.appName, harnessAnswer), next < current else {
+                    var response = await ask(["verb": "menu", "path": closePath, "expectApp": scenario.appName], harnessAnswer)
+                    if response["error"] as? String == "frontmostChanged" {
+                        _ = await ask(["verb": "focus", "app": scenario.appName], harnessAnswer)
+                        response = await ask(["verb": "menu", "path": closePath, "expectApp": scenario.appName], harnessAnswer)
+                    }
+                    let previous = current
+                    guard response["ok"] as? Bool == true,
+                          let next = await windowServerCount(bundleIdentifier: scenario.bundleIdentifier, timeoutSeconds: 2, until: { $0 < previous }),
+                          next < current else {
                         check["closeError"] = outcome(response)
                         break
                     }
