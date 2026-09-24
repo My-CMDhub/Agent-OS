@@ -40,7 +40,13 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         ignoredApprovalsFileURL: HarnessServer.ignoredLegacyApprovalsFileURL
     )
     private var sparkleUpdaterController: SPUStandardUpdaterController?
-    private var harnessServer: HarnessServer?
+    /// One harness per process, socket or not: the voice loop's `open_app` goes
+    /// through the same `answer(line:)` the socket does — same policy, kill
+    /// switch, kernel, tickets and audit. `--harness` only adds the socket.
+    private lazy var harnessServer = HarnessServer(
+        globalDryRun: CommandLine.arguments.contains("--harness-dry-run"),
+        confirmations: confirmations
+    )
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--capture-smoke-test") {
@@ -62,6 +68,18 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--voice-bench") {
             Task { @MainActor in
                 await VoiceStackBenchmark.run()
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
+        // Spends OpenAI credit (capped at US$0.50) and Gemini credit: five "open
+        // settings" turns per realtime stack through the harness, then quits.
+        // The card is up so a confirmation ticket can be answered by hand.
+        if CommandLine.arguments.contains("--voice-tool-probe") {
+            confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
+            Task { @MainActor in
+                await VoiceToolProbe.run(harness: self.harnessServer)
                 NSApplication.shared.terminate(nil)
             }
             return
@@ -116,12 +134,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         // the harness is a server, so the app carries on being a menu-bar app
         // with a socket open beside it.
         if CommandLine.arguments.contains("--harness") {
-            let server = HarnessServer(
-                globalDryRun: CommandLine.arguments.contains("--harness-dry-run"),
-                confirmations: confirmations
-            )
-            server.start()
-            harnessServer = server
+            harnessServer.start()
         }
 
         print("🎯 Clicky: Starting...")
@@ -134,6 +147,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager, confirmations: confirmations)
         confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
+        let sharedHarness = harnessServer
+        companionManager.realtimeVoiceSession = RealtimeVoiceSession(harnessAnswer: { line in sharedHarness.answer(line: line) })
         companionManager.start()
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.
