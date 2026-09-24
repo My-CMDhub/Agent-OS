@@ -81,8 +81,9 @@ extension VoiceToolProbe {
                      check: .frontmost, expectedPath: nil, prepare: [], launchIfNeeded: true),
         MenuScenario(fixture: "11-textedit-new-document.wav", appClass: "native", appName: "TextEdit", bundleIdentifier: "com.apple.TextEdit",
                      check: .windowCountRose(closePath: ["File", "Close"]), expectedPath: ["File", "New"], prepare: [], launchIfNeeded: true),
+        // Chrome spells it "New window" (read 2026-09-25); Cursor, like AppKit, "New Window".
         MenuScenario(fixture: "12-chrome-new-window.wav", appClass: "nonNative", appName: "Google Chrome", bundleIdentifier: "com.google.Chrome",
-                     check: .windowCountRose(closePath: ["File", "Close Window"]), expectedPath: ["File", "New Window"], prepare: []),
+                     check: .windowCountRose(closePath: ["File", "Close Window"]), expectedPath: ["File", "New window"], prepare: []),
         MenuScenario(fixture: "13-cursor-new-window.wav", appClass: "nonNative", appName: "Cursor", bundleIdentifier: "com.todesktop.230313mzl4w4u92",
                      check: .windowCountRose(closePath: ["File", "Close Window"]), expectedPath: ["File", "New Window"], prepare: []),
         MenuScenario(fixture: "14-finder-hide-left-panel.wav", appClass: "native", appName: "Finder", bundleIdentifier: finderBundleIdentifier,

@@ -128,8 +128,30 @@ nonisolated enum RealtimeVoiceVerbs {
     /// Open Recent, Recent Items, Recent Folders, Go > Recents: their children
     /// are the owner's file, folder and server names. Dropped before matching,
     /// before logging and before pressing — never offered, never recorded.
+    /// Same class, found in the first Chrome run (2026-09-25): History (page
+    /// titles), Bookmarks, Profiles (people), and the Apple menu (the account's
+    /// full name in "Log Out …"; system commands, not the app's, anyway).
+    static let privateTopLevelMenus: Set<String> = ["apple", "history", "bookmarks", "profiles"]
+
     static func isPrivateMenuPath(_ path: [String]) -> Bool {
-        path.contains { foldedTokens($0).contains { $0.hasPrefix("recent") } }
+        if let top = path.first, privateTopLevelMenus.contains(foldedTokens(top).joined(separator: " ")) { return true }
+        return path.contains { foldedTokens($0).contains { $0.hasPrefix("recent") } }
+    }
+
+    /// The Window menu ends with one item per open window, named by its title —
+    /// a Chrome tab's page title, a Cursor workspace. Nothing marks them, so a
+    /// Window item with no shortcut is offered only if it is a known command.
+    /// ponytail: English labels only; a localized command without a shortcut is
+    /// simply not offered. Widen the list if a replay misses one.
+    static let windowMenuCommandsWithoutShortcut: Set<String> = [
+        "zoom", "zoom all", "bring all to front", "arrange in front", "merge all windows", "show all tabs",
+        "show tab bar", "hide tab bar", "move tab to new window", "name window", "remove window from set"
+    ]
+
+    static func isPrivateMenuItem(path: [String], shortcut: String?) -> Bool {
+        if isPrivateMenuPath(path) { return true }
+        guard path.count == 2, foldedTokens(path[0]) == ["window"], shortcut == nil else { return false }
+        return !windowMenuCommandsWithoutShortcut.contains(foldedTokens(path[1]).joined(separator: " "))
     }
 
     /// The candidates for `words`, from a `menus` response's items. Leaves only
@@ -144,7 +166,7 @@ nonisolated enum RealtimeVoiceVerbs {
         for item in items where item["enabled"] as? Bool == true {
             enabledItemCount += 1
             guard let path = item["path"] as? [String], !path.isEmpty else { continue }
-            if isPrivateMenuPath(path) { privacyDroppedCount += 1; continue }
+            if isPrivateMenuItem(path: path, shortcut: item["shortcut"] as? String) { privacyDroppedCount += 1; continue }
             guard item["hasSubmenu"] as? Bool == false,
                   path.allSatisfy({ UntrustedText($0).isPlausibleControlLabel }) else { continue }
             leaves.append(RealtimeMenuCandidate(path: path, shortcut: item["shortcut"] as? String))
@@ -218,7 +240,7 @@ nonisolated struct RealtimeMenuOffer: Equatable, Sendable {
     let candidates: [RealtimeMenuCandidate]
     /// Enabled items in the harness's listing, before any filtering.
     let enabledItemCount: Int
-    /// Enabled items dropped as private (a Recent path). Counted, never listed.
+    /// Enabled items dropped as private (`isPrivateMenuItem`). Counted, never listed.
     let privacyDroppedCount: Int
     /// The harness's listing hit a limit, so a missing item may simply be unread.
     let listingIncomplete: Bool

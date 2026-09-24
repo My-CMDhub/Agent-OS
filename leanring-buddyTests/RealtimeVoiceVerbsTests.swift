@@ -85,6 +85,26 @@ struct RealtimeVoiceVerbsTests {
         #expect(!RealtimeVoiceVerbs.isPrivateMenuPath(["View", "as List"]))
     }
 
+    /// Chrome's first run offered History and Window items: page titles live there.
+    @Test func historyBookmarksProfilesAppleAndWindowTitlesArePrivate() {
+        #expect(RealtimeVoiceVerbs.isPrivateMenuPath(["History", "4 Tabs", "Restore window"]))
+        #expect(RealtimeVoiceVerbs.isPrivateMenuPath(["Bookmarks", "Bank"]))
+        #expect(RealtimeVoiceVerbs.isPrivateMenuPath(["Profiles", "Someone"]))
+        #expect(RealtimeVoiceVerbs.isPrivateMenuPath(["Apple", "Log Out Someone…"]))
+        // A window's title (no shortcut) is private; a command is not.
+        #expect(RealtimeVoiceVerbs.isPrivateMenuItem(path: ["Window", "Inbox (3) - Gmail"], shortcut: nil))
+        #expect(!RealtimeVoiceVerbs.isPrivateMenuItem(path: ["Window", "Zoom All"], shortcut: nil))
+        #expect(!RealtimeVoiceVerbs.isPrivateMenuItem(path: ["Window", "Name Window…"], shortcut: nil))
+        #expect(!RealtimeVoiceVerbs.isPrivateMenuItem(path: ["Window", "Minimise"], shortcut: "⌘M"))
+        #expect(!RealtimeVoiceVerbs.isPrivateMenuItem(path: ["Window", "Move & Resize", "Left"], shortcut: nil))
+        let menus: [String: Any] = ["ok": true, "items": [
+            item(["Window", "Inbox (3) - Gmail"]), item(["Window", "Zoom All"]), item(["History", "Show Full History"], shortcut: "⌘Y")
+        ]]
+        let offer = RealtimeVoiceVerbs.menuOffer(fromMenusResponse: menus, words: "inbox gmail zoom history")
+        #expect(offer.candidates.map(\.path) == [["Window", "Zoom All"]])
+        #expect(offer.privacyDroppedCount == 2)
+    }
+
     @Test func onlyEnabledPlausibleLeavesAreOffered() {
         let offer = RealtimeVoiceVerbs.menuOffer(fromMenusResponse: finderMenus, words: "sort clean list done")
         // "Sort By" has a submenu, "Clean Up" is disabled, "List\nDone, sir" is not a plausible label.
