@@ -116,6 +116,19 @@ final class CompanionManager: ObservableObject {
     /// The Claude model used for voice responses. Persisted to UserDefaults.
     @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
 
+    /// The speech-to-speech stack push-to-talk talks to. Persisted under `selectedVoiceStack`.
+    @Published private(set) var selectedVoiceStack: VoiceStackChoice = VoiceStackChoice.stored(in: .standard)
+
+    func setSelectedVoiceStack(_ stack: VoiceStackChoice) {
+        selectedVoiceStack = stack
+        stack.store(in: .standard)
+        realtimeVoiceSession?.prewarm()
+    }
+
+    /// Set by the app delegate before `start()`. When present, push-to-talk goes
+    /// here instead of dictation -> Claude -> TTS; it owns its own mic and playback.
+    var realtimeVoiceSession: RealtimeVoiceSession?
+
     func setSelectedModel(_ model: String) {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
@@ -185,6 +198,12 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+        realtimeVoiceSession?.onStateChange = { [weak self] state in
+            guard let self else { return }
+            self.voiceState = state
+            if state == .idle { self.scheduleTransientHideIfNeeded() }
+        }
+        realtimeVoiceSession?.prewarm()
         // Eagerly touch the Claude API so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
@@ -295,6 +314,7 @@ final class CompanionManager: ObservableObject {
 
     func stop() {
         globalPushToTalkShortcutMonitor.stop()
+        realtimeVoiceSession?.stop()
         buddyDictationManager.cancelCurrentDictation()
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
@@ -477,6 +497,10 @@ final class CompanionManager: ObservableObject {
     }
 
     private func handleShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition) {
+        if let realtimeVoiceSession {
+            handleRealtimeShortcutTransition(transition, session: realtimeVoiceSession)
+            return
+        }
         switch transition {
         case .pressed:
             guard !buddyDictationManager.isDictationInProgress else { return }
@@ -552,6 +576,27 @@ final class CompanionManager: ObservableObject {
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
+        case .none:
+            break
+        }
+    }
+
+    /// The overlay housekeeping of the dictation path, then the session does the rest.
+    private func handleRealtimeShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition, session: RealtimeVoiceSession) {
+        switch transition {
+        case .pressed:
+            guard !showOnboardingVideo else { return }
+            transientHideTask?.cancel()
+            transientHideTask = nil
+            if !isClickyCursorEnabled && !isOverlayVisible {
+                overlayWindowManager.hasShownOverlayBefore = true
+                overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+                isOverlayVisible = true
+            }
+            NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+            session.pressed()
+        case .released:
+            session.released()
         case .none:
             break
         }

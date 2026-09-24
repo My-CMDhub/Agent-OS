@@ -607,15 +607,16 @@ struct CompanionPanelView: View {
 
     private var modelPickerRow: some View {
         HStack {
-            Text("Model")
+            Text("Voice")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
 
             Spacer()
 
             HStack(spacing: 0) {
-                modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
-                modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
+                ForEach(VoiceStackChoice.allCases, id: \.self) { stack in
+                    voiceStackOptionButton(stack)
+                }
             }
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -629,12 +630,12 @@ struct CompanionPanelView: View {
         .padding(.vertical, 4)
     }
 
-    private func modelOptionButton(label: String, modelID: String) -> some View {
-        let isSelected = companionManager.selectedModel == modelID
+    private func voiceStackOptionButton(_ stack: VoiceStackChoice) -> some View {
+        let isSelected = companionManager.selectedVoiceStack == stack
         return Button(action: {
-            companionManager.setSelectedModel(modelID)
+            companionManager.setSelectedVoiceStack(stack)
         }) {
-            Text(label)
+            Text(stack.pickerLabel)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
                 .padding(.horizontal, 10)

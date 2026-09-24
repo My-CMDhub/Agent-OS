@@ -565,7 +565,7 @@ enum VoiceStackBenchmark {
         .deletingLastPathComponent()
         .appendingPathComponent("voice-fixtures-24k", isDirectory: true)
 
-    private static let benchURLSession: URLSession = {
+    static let benchURLSession: URLSession = {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 30
         configuration.urlCache = nil
@@ -747,7 +747,7 @@ enum VoiceStackBenchmark {
     /// Created 0600 before the first word is written — not chmod-ed afterwards, which
     /// would leave a window where the answers are readable by other local users.
     /// A failure costs the quality record, never the timing run.
-    private static func openOwnerOnlyAnswersFile(at fileURL: URL) -> FileHandle? {
+    static func openOwnerOnlyAnswersFile(at fileURL: URL) -> FileHandle? {
         try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let fileDescriptor = open(fileURL.path, O_WRONLY | O_CREAT | O_EXCL | O_APPEND, 0o600)
         guard fileDescriptor >= 0 else {
@@ -788,7 +788,7 @@ enum VoiceStackBenchmark {
         return (responseBytes, requestStartUptime)
     }
 
-    private static func fetchWorkerJSON(routePath: String, stage: String) async throws -> [String: Any] {
+    static func fetchWorkerJSON(routePath: String, stage: String) async throws -> [String: Any] {
         let (responseBytes, _) = try await postToWorker(routePath: routePath, jsonBody: [:], stage: stage)
         var responseData = Data()
         for try await byte in responseBytes {
