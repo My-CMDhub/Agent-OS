@@ -8,7 +8,10 @@
 //  the same `RealtimeVoiceConnection` the live loop uses and the same
 //  `HarnessServer.answer` the socket uses — every guard applies.
 //
-//  System Settings is quit before every run so each launch is real, and whether
+//  System Settings is quit before every run so each launch is real — or, with
+//  `--voice-tool-probe-preopen`, launched through the harness and left frontmost,
+//  the case where the model once claimed success without calling the tool
+//  (72985B9B). `--voice-tool-probe-runs=N` sets runs per stack. Whether
 //  it ended up frontmost is read from NSWorkspace, not from the verb's own
 //  AX-based verification: a verb that marks its own homework proves nothing.
 //
@@ -23,7 +26,7 @@ import Foundation
 @MainActor
 enum VoiceToolProbe {
     static let logFileName = "voice-tool-probe.log"
-    static let runsPerStack = 10
+    static let defaultRunsPerStack = 10
     static let openAICostCapUSD = 0.50
     static let fixtureFileName = "05-open-settings.wav"
     static let systemSettingsBundleIdentifier = "com.apple.systempreferences"
@@ -62,6 +65,13 @@ enum VoiceToolProbe {
             return
         }
 
+        let preOpen = CommandLine.arguments.contains("--voice-tool-probe-preopen")
+        let runsPerStack = CommandLine.arguments.first { $0.hasPrefix("--voice-tool-probe-runs=") }
+            .flatMap { Int($0.dropFirst("--voice-tool-probe-runs=".count)) }.map { max(1, $0) } ?? defaultRunsPerStack
+        let harnessAnswer: @Sendable (String) -> String = { line in harness.answer(line: line) }
+        // Pre-open mode: the one screenshot must show the app already open.
+        if preOpen { _ = await openSystemSettings(harnessAnswer: harnessAnswer) }
+
         // One screenshot for every run, as the bench does.
         guard let screenshot = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first(where: \.isCursorScreen) else {
             appendLine(["kind": "captureFailed", "probeId": probeID])
@@ -71,6 +81,7 @@ enum VoiceToolProbe {
 
         appendLine([
             "kind": "start", "probeId": probeID, "fixture": fixtureFileName, "runsPerStack": runsPerStack,
+            "mode": preOpen ? "preOpen" : "quitFirst",
             "openAICostCapUSD": openAICostCapUSD, "imageBytes": screenshot.imageData.count,
             "harnessSession": HarnessServer.sessionIdentifier
         ])
@@ -83,7 +94,6 @@ enum VoiceToolProbe {
         let selectedStacks = stacksArgument.map { argument in
             argument.dropFirst("--voice-tool-probe-stacks=".count).split(separator: ",").compactMap { VoiceStackChoice(rawValue: String($0)) }
         } ?? VoiceStackChoice.allCases
-        let harnessAnswer: @Sendable (String) -> String = { line in harness.answer(line: line) }
         var openAISpentUSD = 0.0
         var runLines: [VoiceStackChoice: [[String: Any]]] = [:]
         var answers: [VoiceStackChoice: [String]] = [:]
@@ -95,7 +105,7 @@ enum VoiceToolProbe {
                 if stack == .openAIRealtime, openAISpentUSD > openAICostCapUSD { continue }
                 let clip = stack == .openAIRealtime ? clip24k : clip16k
                 let (line, transcript, spentUSD) = await measureOneRun(
-                    stack: stack, runNumber: runNumber, probeID: probeID, clip: clip,
+                    stack: stack, runNumber: runNumber, probeID: probeID, clip: clip, preOpen: preOpen,
                     screenshotJPEG: screenshot.imageData, harnessAnswer: harnessAnswer)
                 if stack == .openAIRealtime { openAISpentUSD += spentUSD }
                 appendLine(line)
@@ -120,11 +130,15 @@ enum VoiceToolProbe {
     // MARK: One run
 
     private static func measureOneRun(
-        stack: VoiceStackChoice, runNumber: Int, probeID: String, clip: VoiceBenchPCMClip,
+        stack: VoiceStackChoice, runNumber: Int, probeID: String, clip: VoiceBenchPCMClip, preOpen: Bool,
         screenshotJPEG: Data, harnessAnswer: @escaping @Sendable (String) -> String
     ) async -> (line: [String: Any], transcript: String, spentUSD: Double) {
         var line: [String: Any] = ["kind": "run", "probeId": probeID, "stack": stack.rawValue, "run": runNumber]
-        line["systemSettingsQuit"] = await quitSystemSettings()
+        if preOpen {
+            line["systemSettingsPreOpened"] = await openSystemSettings(harnessAnswer: harnessAnswer)
+        } else {
+            line["systemSettingsQuit"] = await quitSystemSettings()
+        }
 
         let connection = RealtimeVoiceConnection(stack: stack, harnessAnswer: harnessAnswer)
         defer { connection.close() }
@@ -207,8 +221,10 @@ enum VoiceToolProbe {
         line["waitedForConfirmation"] = turn.dispatches.contains(where: \.waitedForConfirmation)
         line["frontmostBundleIdentifier"] = frontmostBundleIdentifier ?? NSNull()
         line["systemSettingsFrontmost"] = frontmostBundleIdentifier == systemSettingsBundleIdentifier
-        line["claimedSuccessWithoutConfirmation"] = RealtimeOpenAppTool.claimedSuccessWithoutConfirmation(
-            transcript: turn.transcript, harnessConfirmed: harnessConfirmed)
+        line["claimedSuccessWithoutReceipt"] = RealtimeOpenAppTool.claimedSuccessWithoutReceipt(
+            transcript: turn.transcript, hadOkToolResult: harnessConfirmed)
+        // The fixture is always an open request, so no call is a skipped tool.
+        line["toolSkipped"] = turn.toolCalls.isEmpty
         line["reusedExampleVerbatim"] = RealtimeOpenAppTool.reusesExampleVerbatim(turn.transcript)
         line["reusedExampleTemplate"] = RealtimeOpenAppTool.reusesExampleTemplate(turn.transcript)
         line["spokenCharacters"] = turn.transcript.count
@@ -218,6 +234,13 @@ enum VoiceToolProbe {
         let spentUSD = stack == .openAIRealtime ? connection.estimatedOpenAIUSD : 0
         if stack == .openAIRealtime { line["estimatedCostUSD"] = spentUSD }
         return (line, turn.transcript, spentUSD)
+    }
+
+    /// The harness's own `launch`, left frontmost: the "already open" start state.
+    private static func openSystemSettings(harnessAnswer: @escaping @Sendable (String) -> String) async -> [String: Any] {
+        let line = #"{"app":"System Settings","verb":"launch"}"#
+        let response = RealtimeOpenAppTool.harnessResponseObject(await Task.detached { harnessAnswer(line) }.value)
+        return ["ok": response["ok"] as? Bool ?? false, "status": response["status"] ?? NSNull(), "error": response["error"] ?? NSNull()]
     }
 
     /// Terminate and wait until gone (5 s), so every launch is a cold one.
@@ -268,7 +291,8 @@ enum VoiceToolProbe {
             "captionShownBeforeLaunchRequest": count("captionShownBeforeLaunchRequest"),
             "highlightFrameMatchesWindows": count("highlightFrameMatchesWindows"),
             "systemSettingsFrontmost": count("systemSettingsFrontmost"),
-            "claimedSuccessWithoutConfirmation": count("claimedSuccessWithoutConfirmation"),
+            "claimedSuccessWithoutReceipt": count("claimedSuccessWithoutReceipt"),
+            "toolSkipped": count("toolSkipped"),
             "verbatimExampleReuse": answers.filter(RealtimeOpenAppTool.reusesExampleVerbatim).count,
             "templateReuse": answers.filter(RealtimeOpenAppTool.reusesExampleTemplate).count,
             "answerVariety": Set(answers.map(RealtimeOpenAppTool.normalisedAnswer)).count,

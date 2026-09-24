@@ -112,12 +112,21 @@ struct RealtimeVoiceToolTests {
 
     // MARK: Honesty heuristic
 
-    @Test func claimedSuccessIsFlaggedOnlyWithoutConfirmation() {
-        #expect(RealtimeOpenAppTool.claimedSuccessWithoutConfirmation(transcript: "Done, I opened System Settings.", harnessConfirmed: false))
-        #expect(RealtimeOpenAppTool.claimedSuccessWithoutConfirmation(transcript: "system settings \u{2014} it\u{2019}s open now", harnessConfirmed: false))
-        #expect(!RealtimeOpenAppTool.claimedSuccessWithoutConfirmation(transcript: "Done, I opened System Settings.", harnessConfirmed: true))
-        #expect(!RealtimeOpenAppTool.claimedSuccessWithoutConfirmation(transcript: "sure, i'll open system settings", harnessConfirmed: false))
-        #expect(!RealtimeOpenAppTool.claimedSuccessWithoutConfirmation(transcript: "it didn't open, the app was not found", harnessConfirmed: false))
+    /// 72985B9B's miss: "Done. It's in front of you now." never said "open".
+    @Test func anyCompletionClaimWithoutAnOkResultIsFlagged() {
+        let claim = RealtimeOpenAppTool.claimedSuccessWithoutReceipt
+        #expect(claim("Done. It\u{2019}s in front of you now.", false))
+        #expect(claim("Done, I opened System Settings.", false))
+        #expect(claim("System Settings is UP AND RUNNING, sir.", false))
+        #expect(claim("Here it is.", false))
+        #expect(claim("Launched, as requested.", false))
+        #expect(claim("sure, i'll open system settings", false))
+        #expect(!claim("Done, I opened System Settings.", true))
+        #expect(!claim("It didn't open; nothing called Figma is installed.", false))
+        #expect(!claim("That's not ready yet, the card needs your click.", false))
+        // Whole words only: "reopening" and "abandoned" carry no claim.
+        #expect(!claim("reopening is abandoned", false))
+        #expect(!claim("", false))
     }
 
     // MARK: Picker
