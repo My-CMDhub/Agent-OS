@@ -23,7 +23,7 @@ import Foundation
 @MainActor
 enum VoiceToolProbe {
     static let logFileName = "voice-tool-probe.log"
-    static let runsPerStack = 5
+    static let runsPerStack = 10
     static let openAICostCapUSD = 0.50
     static let fixtureFileName = "05-open-settings.wav"
     static let systemSettingsBundleIdentifier = "com.apple.systempreferences"
@@ -86,6 +86,7 @@ enum VoiceToolProbe {
         let harnessAnswer: @Sendable (String) -> String = { line in harness.answer(line: line) }
         var openAISpentUSD = 0.0
         var runLines: [VoiceStackChoice: [[String: Any]]] = [:]
+        var answers: [VoiceStackChoice: [String]] = [:]
 
         for runNumber in 1...runsPerStack {
             // Alternating first stack, so neither always inherits a warm network path.
@@ -99,6 +100,7 @@ enum VoiceToolProbe {
                 if stack == .openAIRealtime { openAISpentUSD += spentUSD }
                 appendLine(line)
                 runLines[stack, default: []].append(line)
+                answers[stack, default: []].append(transcript)
                 if let answersFile, let answerLine = MeasurementLogFile.jsonLine([
                     "probeId": probeID, "stack": stack.rawValue, "run": runNumber, "said": transcript
                 ]) {
@@ -109,7 +111,7 @@ enum VoiceToolProbe {
         }
 
         for stack in selectedStacks {
-            appendLine(summary(for: runLines[stack] ?? [], stack: stack, probeID: probeID,
+            appendLine(summary(for: runLines[stack] ?? [], answers: answers[stack] ?? [], stack: stack, probeID: probeID,
                                spentUSD: stack == .openAIRealtime ? openAISpentUSD : nil))
         }
         print("🧪 voice tool probe: finished (OpenAI estimated US$\(openAISpentUSD)) -> \(logPath)")
@@ -184,6 +186,7 @@ enum VoiceToolProbe {
         line["systemSettingsFrontmost"] = frontmostBundleIdentifier == systemSettingsBundleIdentifier
         line["claimedSuccessWithoutConfirmation"] = RealtimeOpenAppTool.claimedSuccessWithoutConfirmation(
             transcript: turn.transcript, harnessConfirmed: harnessConfirmed)
+        line["reusedExampleVerbatim"] = RealtimeOpenAppTool.reusesExampleVerbatim(turn.transcript)
         line["spokenCharacters"] = turn.transcript.count
         line["outputAudioMime"] = turn.outputAudioMime ?? NSNull()
         line["eventTrail"] = turn.eventTrail
@@ -207,7 +210,9 @@ enum VoiceToolProbe {
 
     // MARK: Summary
 
-    static func summary(for lines: [[String: Any]], stack: VoiceStackChoice, probeID: String, spentUSD: Double?) -> [String: Any] {
+    /// `answers` are what the model said, one per run; only counts leave this
+    /// function, so the log still carries no model text.
+    static func summary(for lines: [[String: Any]], answers: [String], stack: VoiceStackChoice, probeID: String, spentUSD: Double?) -> [String: Any] {
         var marks: [String: Any] = [:]
         for markName in ["sessionSetupMs", "firstAudioMs", "toolCallMs", "harnessMs", "freshLookMs", "freshLookArrivedAfterSpeechStartMs", "followUpFirstAudioMs",
                          "totalToFirstSpokenResultMs", "firstAudioBeforeToolMs"] {
@@ -235,6 +240,8 @@ enum VoiceToolProbe {
             "freshLookOutcomes": freshLookCounts,
             "systemSettingsFrontmost": count("systemSettingsFrontmost"),
             "claimedSuccessWithoutConfirmation": count("claimedSuccessWithoutConfirmation"),
+            "verbatimExampleReuse": answers.filter(RealtimeOpenAppTool.reusesExampleVerbatim).count,
+            "answerVariety": Set(answers.map(RealtimeOpenAppTool.normalisedAnswer)).count,
             "repliedToFreshLook": lines.filter { ($0["audioChunksAfterFinish"] as? Int ?? 0) > 0 }.count,
             "errorKinds": errorKindCounts,
             "marksMs": marks,

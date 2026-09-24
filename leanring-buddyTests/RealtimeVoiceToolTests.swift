@@ -170,13 +170,28 @@ struct RealtimeVoiceToolTests {
         #expect(properties[kCGImagePropertyPixelHeight] as? Int == 512)
     }
 
-    /// The result no longer waits for the look, so the prompt must not promise a
-    /// view before it, nor name a field the result stopped carrying.
-    @MainActor @Test func promptConfirmsFirstAndDescribesOnlyAfterAView() {
-        let prompt = RealtimeOpenAppTool.systemPrompt
-        #expect(prompt.contains("report only the verified outcome"))
-        #expect(prompt.contains("do not describe the new screen until you have been given a view of it"))
-        #expect(!prompt.contains("freshView"))
+    /// The result no longer waits for the look, so the prompt must not name a
+    /// field the result stopped carrying.
+    @MainActor @Test func promptNamesNoFieldTheResultDoesNotCarry() {
+        #expect(!RealtimeOpenAppTool.systemPrompt.contains("freshView"))
+    }
+
+    /// Spec §3.1 minus the bin example: five replies, none about a verb the model
+    /// has no tool for.
+    @MainActor @Test func exampleRepliesAreReadFromThePrompt() {
+        let replies = RealtimeOpenAppTool.exampleReplies
+        #expect(replies.count == 5)
+        #expect(replies.first == "system settings is up, sir.")
+        #expect(!RealtimeOpenAppTool.systemPrompt.contains("empty the bin"))
+    }
+
+    @MainActor @Test func verbatimReuseIgnoresCasePunctuationAndSpacing() {
+        #expect(RealtimeOpenAppTool.reusesExampleVerbatim("System Settings is up, sir."))
+        #expect(RealtimeOpenAppTool.reusesExampleVerbatim("  system settings is UP sir "))
+        #expect(RealtimeOpenAppTool.reusesExampleVerbatim("I can\u{2019}t find Figma installed, sir. It may be under another name."))
+        #expect(!RealtimeOpenAppTool.reusesExampleVerbatim("System Settings is up and ready, sir."))
+        #expect(!RealtimeOpenAppTool.reusesExampleVerbatim(""))
+        #expect(RealtimeOpenAppTool.normalisedAnswer("Done, sir.") == RealtimeOpenAppTool.normalisedAnswer("done sir"))
     }
 
     /// The live persona is its own prompt; the bench's control must not drift with it.
@@ -184,7 +199,7 @@ struct RealtimeVoiceToolTests {
         let prompt = RealtimeOpenAppTool.systemPrompt
         #expect(prompt.hasPrefix("you are J.A.R.V.I.S."))
         #expect(prompt.contains("\"sir\""))
-        #expect(prompt.contains("never claim an action happened unless its tool result says ok true"))
+        #expect(prompt.contains("never say something happened unless its tool result says ok true"))
         #expect(!prompt.contains("clicky"))
         #expect(!prompt.contains("POINT"))
         #expect(VoiceStackBenchmark.speechToSpeechSystemPrompt.hasPrefix("you're clicky"))

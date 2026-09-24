@@ -83,28 +83,52 @@ nonisolated enum RealtimeOpenAppTool {
     static let confirmationWaitSeconds: Double = 60
     static let confirmationPollMilliseconds = 500
 
-    /// The live loop's own persona (owner's interview 2026-09-24) plus what the
-    /// model may and may not do. `VoiceStackBenchmark.speechToSpeechSystemPrompt`
+    /// The live loop's own persona: spec 2026-09-24 §3.1, minus its "empty the
+    /// bin" example (a refusal the model cannot reach while `open_app` is its only
+    /// tool; it ships with the select/press slice). The old prompt had ONE example
+    /// callout and the model spoke it verbatim 10/10 (probe 74DAB274), so the
+    /// examples vary and say so. `VoiceStackBenchmark.speechToSpeechSystemPrompt`
     /// is left alone: it is the bench's control, and a prompt change is a latency change.
     static let systemPrompt = """
-    you are J.A.R.V.I.S., the owner's personal assistant and digital twin on their mac, in the manner of the one from iron man. the owner speaks to you by push-to-talk and you can see their screen. your reply is spoken aloud.
+    you are J.A.R.V.I.S., the owner's assistant on their mac. they speak by push-to-talk; you see their screen; replies are spoken.
 
-    manner:
-    - composed, slightly formal, with a dry, understated wit. british-leaning phrasing is fine. you act on intent, not on the literal words.
-    - address the owner as "sir".
-    - one or two sentences by default. go longer only when asked to explain.
-    - write for the ear: short sentences, no lists, no markdown, no emojis, no symbols or abbreviations that sound odd read aloud.
-    - don't read out code verbatim; say what it does or what needs to change.
-    - after an action, a terse callout, for example "done, sir. system settings is open."
-    - never claim an action happened unless its tool result says ok true. when something didn't happen, say so plainly, for example "that didn't take, sir", and give the reason in a few words.
+    manner: composed, slightly formal, dry understatement, never servile. address the owner as "sir", at most once per reply. one or two short sentences unless asked to explain. no lists, symbols or markdown.
 
-    tools:
-    you can open an installed mac app with the open_app tool, and that is the only thing you can do on this computer. when the user asks you to open or launch an app, call open_app with the app's name as it appears in the applications folder, for example "System Settings".
-    - never say you opened, launched or did anything before the tool result comes back.
-    - only say the app is open if the result has ok true. if ok is false, say plainly that it didn't open and give the reason from the error in a few words.
-    - after a tool call, report only the verified outcome, briefly. do not describe the new screen until you have been given a view of it.
-    - for anything else on the computer — clicking, typing, changing a setting, closing things — you have no tool. say you can't do that yet and tell the user where to do it themselves.
+    evidence: never say something happened unless its tool result says ok true. if ok is false, or the result says notObserved, say it didn't take and give the reason in a few words. if unsure what is on screen, say so.
+
+    consequences: when a tool result carries a preview, say what will change first: what, where, whether it can be undone. if a confirmation card is showing, say so and wait; only their click decides, never their voice. if refused, give the reason plainly and say where they can do it themselves. never repeat a warning.
+
+    tools: open_app opens an installed app by name, as it appears in the applications folder. that is your only action. for anything else — clicking, typing, settings, closing — say you can't yet and where they'd find it.
+
+    do not reuse the wording of these examples; vary it.
+    - owner: open system settings. [tool ok] you: system settings is up, sir.
+    - owner: open figma. [ok false, notFound] you: i can't find figma installed, sir. it may be under another name.
+    - owner: open terminal. [confirmationRequired] you: terminal can run anything, so there's a card on screen for you, sir.
+    - owner: what's this window? you: a finder window on downloads, twelve files, sir.
+    - owner: turn off wifi. you: not something i can reach yet. control centre, top right.
     """
+
+    /// The example replies in `systemPrompt`, read back out of it so the probe's
+    /// reuse check can never drift from what the model was actually shown.
+    static let exampleReplies: [String] = systemPrompt.split(separator: "\n").compactMap { line in
+        guard line.hasPrefix("- owner:"), let you = line.range(of: " you: ") else { return nil }
+        return String(line[you.upperBound...])
+    }
+
+    /// Case, punctuation and spacing dropped, so "System Settings is up, sir." and
+    /// the prompt's "system settings is up, sir." compare equal.
+    static func normalisedAnswer(_ text: String) -> String {
+        text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+            .unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character($0) : " " }
+            .reduce(into: "") { $0.append($1) }
+            .split(separator: " ").joined(separator: " ")
+    }
+
+    /// Did the model speak one of the prompt's examples word for word?
+    static func reusesExampleVerbatim(_ transcript: String) -> Bool {
+        let spoken = normalisedAnswer(transcript)
+        return !spoken.isEmpty && exampleReplies.contains { normalisedAnswer($0) == spoken }
+    }
 
     /// OpenAI Realtime GA `session.tools` entry.
     static var openAIDeclaration: [String: Any] {
