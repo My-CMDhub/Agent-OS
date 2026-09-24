@@ -181,7 +181,26 @@ struct RealtimeVoiceToolTests {
     @MainActor @Test func exampleRepliesAreReadFromThePrompt() {
         let replies = RealtimeOpenAppTool.exampleReplies
         #expect(replies.count == 5)
-        #expect(replies.first == "system settings is up, sir.")
+        #expect(replies.first == "there it is, calendar.")
+        #expect(RealtimeOpenAppTool.examples.map(\.appName) == ["calendar", "figma", "terminal", nil, nil])
+        #expect(RealtimeOpenAppTool.systemPrompt.contains("do not reuse the wording of these examples; vary it."))
+        #expect(RealtimeOpenAppTool.systemPrompt.contains("report only the verified outcome, briefly; do not describe the new screen until you have been given a view of it."))
+    }
+
+    /// No example is another's template, so the model has no single shape to copy
+    /// (2B1985A5: "<app> is up, sir." 2/10); "sir" at most once and not in all.
+    @MainActor @Test func examplesShareNoTemplateAndSirIsNotASuffix() {
+        let examples = RealtimeOpenAppTool.examples
+        for example in examples {
+            let others = examples.filter { $0 != example }.map(\.reply)
+            #expect(!others.contains { RealtimeOpenAppTool.normalisedAnswer($0) == RealtimeOpenAppTool.normalisedAnswer(example.reply) })
+            let sirCount = RealtimeOpenAppTool.normalisedAnswer(example.reply).split(separator: " ").filter { $0 == "sir" }.count
+            #expect(sirCount <= 1)
+        }
+        let withSir = examples.filter { RealtimeOpenAppTool.normalisedAnswer($0.reply).split(separator: " ").contains("sir") }
+        #expect(withSir.count < examples.count)
+        #expect(!examples.contains { RealtimeOpenAppTool.normalisedAnswer($0.reply).hasSuffix(" sir") })
+        #expect(Set(examples.map { RealtimeOpenAppTool.normalisedAnswer($0.reply).split(separator: " ").first }).count == examples.count)
         #expect(!RealtimeOpenAppTool.systemPrompt.contains("empty the bin"))
     }
 
@@ -232,12 +251,28 @@ struct RealtimeVoiceToolTests {
     }
 
     @MainActor @Test func verbatimReuseIgnoresCasePunctuationAndSpacing() {
-        #expect(RealtimeOpenAppTool.reusesExampleVerbatim("System Settings is up, sir."))
-        #expect(RealtimeOpenAppTool.reusesExampleVerbatim("  system settings is UP sir "))
-        #expect(RealtimeOpenAppTool.reusesExampleVerbatim("I can\u{2019}t find Figma installed, sir. It may be under another name."))
-        #expect(!RealtimeOpenAppTool.reusesExampleVerbatim("System Settings is up and ready, sir."))
+        #expect(RealtimeOpenAppTool.reusesExampleVerbatim("There it is, Calendar."))
+        #expect(RealtimeOpenAppTool.reusesExampleVerbatim("  there IT is  calendar "))
+        #expect(RealtimeOpenAppTool.reusesExampleVerbatim("That didn\u{2019}t take; nothing called Figma is installed."))
+        #expect(!RealtimeOpenAppTool.reusesExampleVerbatim("There it is, System Settings."))
         #expect(!RealtimeOpenAppTool.reusesExampleVerbatim(""))
         #expect(RealtimeOpenAppTool.normalisedAnswer("Done, sir.") == RealtimeOpenAppTool.normalisedAnswer("done sir"))
+    }
+
+    /// The app swapped for another is still the example; a different sentence is not.
+    @MainActor @Test func templateReuseSwapsTheAppNameOnly() {
+        #expect(RealtimeOpenAppTool.reusesExampleTemplate("There it is, System Settings."))
+        #expect(RealtimeOpenAppTool.reusesExampleTemplate("There it is, System Settings is open."))
+        #expect(!RealtimeOpenAppTool.reusesExampleTemplate("There it is."))
+        #expect(RealtimeOpenAppTool.reusesExampleTemplate("That didn't take; nothing called System Settings is installed."))
+        #expect(RealtimeOpenAppTool.reusesExampleTemplate("Terminal can run anything, sir, so the card on screen needs your click first."))
+        #expect(RealtimeOpenAppTool.reusesExampleTemplate("Notes can run anything, sir, so the card on screen needs your click first."))
+        #expect(!RealtimeOpenAppTool.reusesExampleTemplate("That didn't take."))
+        #expect(!RealtimeOpenAppTool.reusesExampleTemplate("That didn't take; nothing called System Settings is installed, sadly."))
+        #expect(!RealtimeOpenAppTool.reusesExampleTemplate("That didn't take; nothing called a very long app name here is installed."))
+        #expect(!RealtimeOpenAppTool.reusesExampleTemplate("System Settings is up, sir."))
+        #expect(!RealtimeOpenAppTool.reusesExampleTemplate("Downloads, in Notes, twelve files. Looking for one in particular?"))
+        #expect(!RealtimeOpenAppTool.reusesExampleTemplate(""))
     }
 
     /// The live persona is its own prompt; the bench's control must not drift with it.

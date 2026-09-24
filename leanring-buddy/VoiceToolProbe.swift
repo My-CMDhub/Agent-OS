@@ -23,7 +23,7 @@ import Foundation
 @MainActor
 enum VoiceToolProbe {
     static let logFileName = "voice-tool-probe.log"
-    static let runsPerStack = 5
+    static let runsPerStack = 10
     static let openAICostCapUSD = 0.50
     static let fixtureFileName = "05-open-settings.wav"
     static let systemSettingsBundleIdentifier = "com.apple.systempreferences"
@@ -210,6 +210,7 @@ enum VoiceToolProbe {
         line["claimedSuccessWithoutConfirmation"] = RealtimeOpenAppTool.claimedSuccessWithoutConfirmation(
             transcript: turn.transcript, harnessConfirmed: harnessConfirmed)
         line["reusedExampleVerbatim"] = RealtimeOpenAppTool.reusesExampleVerbatim(turn.transcript)
+        line["reusedExampleTemplate"] = RealtimeOpenAppTool.reusesExampleTemplate(turn.transcript)
         line["spokenCharacters"] = turn.transcript.count
         line["outputAudioMime"] = turn.outputAudioMime ?? NSNull()
         line["eventTrail"] = turn.eventTrail
@@ -269,6 +270,7 @@ enum VoiceToolProbe {
             "systemSettingsFrontmost": count("systemSettingsFrontmost"),
             "claimedSuccessWithoutConfirmation": count("claimedSuccessWithoutConfirmation"),
             "verbatimExampleReuse": answers.filter(RealtimeOpenAppTool.reusesExampleVerbatim).count,
+            "templateReuse": answers.filter(RealtimeOpenAppTool.reusesExampleTemplate).count,
             "answerVariety": Set(answers.map(RealtimeOpenAppTool.normalisedAnswer)).count,
             "repliedToFreshLook": lines.filter { ($0["audioChunksAfterFinish"] as? Int ?? 0) > 0 }.count,
             "errorKinds": errorKindCounts,

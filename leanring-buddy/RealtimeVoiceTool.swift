@@ -86,34 +86,56 @@ nonisolated enum RealtimeOpenAppTool {
     /// The live loop's own persona: spec 2026-09-24 §3.1, minus its "empty the
     /// bin" example (a refusal the model cannot reach while `open_app` is its only
     /// tool; it ships with the select/press slice). The old prompt had ONE example
-    /// callout and the model spoke it verbatim 10/10 (probe 74DAB274), so the
-    /// examples vary and say so. `VoiceStackBenchmark.speechToSpeechSystemPrompt`
+    /// callout and the model spoke it verbatim 10/10 (probe 74DAB274). Then five
+    /// examples sharing "<app> is ..., sir." were copied as a template: "System
+    /// Settings is up, sir." 2/10 (2B1985A5), and moving the example to another app
+    /// only hid it (6B5F2859, "is up" 4/10). So no two examples share a shape, and
+    /// "sir" is in two of five, never a suffix to learn. Still copied with the app
+    /// swapped, "There it is, System Settings is open." 3/10 on OpenAI (4595CDB7);
+    /// "done. it's in front of you now." instead was spoken verbatim 2/10 and led
+    /// 6/10 with "Done." (E0506778), so this one stays. The "report only the
+    /// verified outcome" line is the confirm-first design's: the result no longer
+    /// waits for the fresh look. `VoiceStackBenchmark.speechToSpeechSystemPrompt`
     /// is left alone: it is the bench's control, and a prompt change is a latency change.
     static let systemPrompt = """
     you are J.A.R.V.I.S., the owner's assistant on their mac. they speak by push-to-talk; you see their screen; replies are spoken.
 
-    manner: composed, slightly formal, dry understatement, never servile. address the owner as "sir", at most once per reply. one or two short sentences unless asked to explain. no lists, symbols or markdown.
+    manner: composed, slightly formal, dry understatement, never servile. address the owner as "sir", at most once per reply and not in every reply. one or two short sentences unless asked to explain. no lists, symbols or markdown.
 
-    evidence: never say something happened unless its tool result says ok true. if ok is false, or the result says notObserved, say it didn't take and give the reason in a few words. if unsure what is on screen, say so.
+    evidence: never say something happened unless its tool result says ok true. if ok is false, or the result says notObserved, say it didn't take and give the reason in a few words. if unsure what is on screen, say so. after a tool call, report only the verified outcome, briefly; do not describe the new screen until you have been given a view of it.
 
     consequences: when a tool result carries a preview, say what will change first: what, where, whether it can be undone. if a confirmation card is showing, say so and wait; only their click decides, never their voice. if refused, give the reason plainly and say where they can do it themselves. never repeat a warning.
 
     tools: open_app opens an installed app by name, as it appears in the applications folder. that is your only action. for anything else — clicking, typing, settings, closing — say you can't yet and where they'd find it.
 
     do not reuse the wording of these examples; vary it.
-    - owner: open system settings. [tool ok] you: system settings is up, sir.
-    - owner: open figma. [ok false, notFound] you: i can't find figma installed, sir. it may be under another name.
-    - owner: open terminal. [confirmationRequired] you: terminal can run anything, so there's a card on screen for you, sir.
-    - owner: what's this window? you: a finder window on downloads, twelve files, sir.
-    - owner: turn off wifi. you: not something i can reach yet. control centre, top right.
+    - owner: open calendar. [tool ok] you: there it is, calendar.
+    - owner: open figma. [ok false, notFound] you: that didn't take; nothing called figma is installed.
+    - owner: open terminal. [confirmationRequired] you: terminal can run anything, sir, so the card on screen needs your click first.
+    - owner: what's this window? you: downloads, in finder, twelve files. looking for one in particular?
+    - owner: turn off wifi. you: beyond my reach for now, i'm afraid, sir. control centre, top right.
     """
 
-    /// The example replies in `systemPrompt`, read back out of it so the probe's
-    /// reuse check can never drift from what the model was actually shown.
-    static let exampleReplies: [String] = systemPrompt.split(separator: "\n").compactMap { line in
-        guard line.hasPrefix("- owner:"), let you = line.range(of: " you: ") else { return nil }
-        return String(line[you.upperBound...])
+    /// One prompt example: the reply, and the app its request named (nil when the
+    /// request opened nothing), so reuse can be judged with the app swapped out.
+    struct ExampleReply: Equatable, Sendable {
+        let reply: String
+        let appName: String?
     }
+
+    /// Read back out of `systemPrompt` so the probe's reuse check can never drift
+    /// from what the model was actually shown.
+    static let examples: [ExampleReply] = systemPrompt.split(separator: "\n").compactMap { line in
+        guard line.hasPrefix("- owner:"), let you = line.range(of: " you: ") else { return nil }
+        let request = line[line.index(line.startIndex, offsetBy: "- owner: ".count)..<you.lowerBound]
+        var appName: String?
+        if request.hasPrefix("open "), let period = request.firstIndex(of: ".") {
+            appName = String(request[request.index(request.startIndex, offsetBy: 5)..<period])
+        }
+        return ExampleReply(reply: String(line[you.upperBound...]), appName: appName)
+    }
+
+    static var exampleReplies: [String] { examples.map(\.reply) }
 
     /// Case, punctuation and spacing dropped, so "System Settings is up, sir." and
     /// the prompt's "system settings is up, sir." compare equal.
@@ -128,6 +150,30 @@ nonisolated enum RealtimeOpenAppTool {
     static func reusesExampleVerbatim(_ transcript: String) -> Bool {
         let spoken = normalisedAnswer(transcript)
         return !spoken.isEmpty && exampleReplies.contains { normalisedAnswer($0) == spoken }
+    }
+
+    /// Did the model speak an example with its app name swapped for another —
+    /// "System Settings is up, sir." against "calendar is up, sir."? Includes
+    /// verbatim reuse. An example whose reply does not name its app can only be
+    /// reused verbatim. ponytail: the swapped-in name is any 1-4 words; a longer
+    /// app name slips through, widen if the probe ever opens one.
+    static func reusesExampleTemplate(_ transcript: String) -> Bool {
+        let spoken = normalisedAnswer(transcript)
+        guard !spoken.isEmpty else { return false }
+        return examples.contains { example in
+            let reply = normalisedAnswer(example.reply)
+            if reply == spoken { return true }
+            guard let appName = example.appName.map(normalisedAnswer), !appName.isEmpty else { return false }
+            // Padded with spaces so the app name only matches whole words.
+            let padded = " \(reply) ", paddedSpoken = " \(spoken) "
+            guard let appRange = padded.range(of: " \(appName) ") else { return false }
+            let prefix = String(padded[..<appRange.lowerBound]) + " "
+            let suffix = " " + String(padded[appRange.upperBound...])
+            guard paddedSpoken.hasPrefix(prefix), paddedSpoken.hasSuffix(suffix),
+                  paddedSpoken.count > prefix.count + suffix.count else { return false }
+            let swapped = paddedSpoken.dropFirst(prefix.count).dropLast(suffix.count)
+            return (1...4).contains(swapped.split(separator: " ").count)
+        }
     }
 
     /// OpenAI Realtime GA `session.tools` entry.
