@@ -93,7 +93,7 @@ nonisolated enum RealtimeOpenAppTool {
     you can open an installed mac app with the open_app tool, and that is the only thing you can do on this computer. when the user asks you to open or launch an app, call open_app with the app's name as it appears in the applications folder, for example "System Settings".
     - never say you opened, launched or did anything before the tool result comes back.
     - only say the app is open if the result has ok true. if ok is false, say plainly that it didn't open and give the reason from the error in a few words.
-    - after open_app succeeds you are sent a fresh view of the screen before the result. describe only what that fresh view shows, never the earlier screenshot. if the result has freshView false, say what opened and don't describe the screen.
+    - after a tool call, report only the verified outcome, briefly. do not describe the new screen until you have been given a view of it.
     - for anything else on the computer — clicking, typing, changing a setting, closing things — you have no tool. say you can't do that yet and tell the user where to do it themselves.
     """
 
@@ -288,20 +288,6 @@ nonisolated enum RealtimeOpenAppTool {
         CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: freshLookJPEGQuality] as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { return nil }
         return output as Data
-    }
-
-    /// The model is told whether it was shown the app it opened, so a refused
-    /// look can never pass for a view of the new screen.
-    static func toolResult(_ result: [String: Any], with look: RealtimeFreshLook) -> [String: Any] {
-        var result = result
-        switch look {
-        case .image:
-            result["freshView"] = true
-        case .unavailable(let error):
-            result["freshView"] = false
-            result["freshViewError"] = error
-        }
-        return result
     }
 
     // MARK: Honesty check

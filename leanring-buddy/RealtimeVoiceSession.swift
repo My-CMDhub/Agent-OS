@@ -179,6 +179,7 @@ final class RealtimeVoiceSession {
             guard !Task.isCancelled else { return }
             try await connection.endTurn()
             _ = try await connection.turn.finished.value(timeoutSeconds: Self.turnTimeoutSeconds, timeoutKind: "turnTimeout")
+            await liveTurn?.marks?.waitForFreshLook()
             if self.liveTurn === liveTurn { writeLiveTurnLine() }
         } catch {
             print("❌ realtime: turn failed: \(error)")
@@ -217,6 +218,7 @@ final class RealtimeVoiceSession {
             line.harnessError = firstDispatch?.result["error"] as? String
             line.freshLook = marks.freshLookOutcome
             line.freshLookMs = marks.freshLookMilliseconds
+            line.freshLookArrivedAfterSpeechStartMs = marks.freshLookArrivedAfterSpeechStartMs
             line.followUpFirstAudioMs = Self.milliseconds(from: marks.toolResultSentUptime, to: marks.followUpFirstAudioUptime)
             // No tool: the spoken result IS the first audio.
             line.releaseToSpokenResultMs = Self.milliseconds(
@@ -307,6 +309,8 @@ nonisolated struct RealtimeLiveTurnLine {
     /// "attached", a refusal code, or nil when no look was attempted.
     var freshLook: String?
     var freshLookMs: Int?
+    /// Look complete minus the spoken result's first audio.
+    var freshLookArrivedAfterSpeechStartMs: Int?
     var followUpFirstAudioMs: Int?
     var releaseToSpokenResultMs: Int?
     var turnDoneMs: Int?
@@ -330,6 +334,7 @@ nonisolated struct RealtimeLiveTurnLine {
             "toolCalled": toolCalled, "toolName": value(toolName), "toolCallMs": value(toolCallMs),
             "harnessMs": value(harnessMs), "harnessStatus": value(harnessStatus), "harnessError": value(harnessError),
             "freshLook": value(freshLook), "freshLookMs": value(freshLookMs),
+            "freshLookArrivedAfterSpeechStartMs": value(freshLookArrivedAfterSpeechStartMs),
             "followUpFirstAudioMs": value(followUpFirstAudioMs), "releaseToSpokenResultMs": value(releaseToSpokenResultMs),
             "turnDoneMs": value(turnDoneMs), "bargedIn": bargedIn, "errorKind": value(errorKind)
         ]

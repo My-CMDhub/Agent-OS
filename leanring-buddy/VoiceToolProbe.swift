@@ -29,6 +29,7 @@ enum VoiceToolProbe {
     static let systemSettingsBundleIdentifier = "com.apple.systempreferences"
     /// A tool call may wait on a 60 s confirmation ticket, plus the answer after it.
     static let turnTimeoutSeconds: Double = 90
+    static let unpromptedReplyWatchSeconds: Double = 3
 
     private static var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
@@ -141,6 +142,10 @@ enum VoiceToolProbe {
             }
             try await connection.endTurn()
             _ = try await connection.turn.finished.value(timeoutSeconds: turnTimeoutSeconds, timeoutKind: "turnTimeout")
+            // The look is sent as context with no reply asked for; watch long
+            // enough after it that a reply to it would be counted.
+            await connection.turn.waitForFreshLook()
+            try? await Task.sleep(for: .seconds(unpromptedReplyWatchSeconds))
         } catch {
             errorKind = (error as? VoiceBenchFailure)?.kind ?? VoiceBenchRun.errorKind(for: error, stage: stack.rawValue)
         }
@@ -157,6 +162,7 @@ enum VoiceToolProbe {
         marks["toolCallMs"] = milliseconds(from: released, to: turn.toolCallUptime)
         marks["harnessMs"] = firstDispatch?.harnessMilliseconds
         marks["freshLookMs"] = turn.freshLookMilliseconds
+        marks["freshLookArrivedAfterSpeechStartMs"] = turn.freshLookArrivedAfterSpeechStartMs
         marks["followUpFirstAudioMs"] = milliseconds(from: turn.toolResultSentUptime, to: turn.followUpFirstAudioUptime)
         marks["totalToFirstSpokenResultMs"] = milliseconds(from: released, to: turn.followUpFirstAudioUptime)
         if let firstAudio = turn.firstAudioUptime, firstAudio < (turn.toolCallUptime ?? .infinity), turn.toolCallUptime != nil {
@@ -172,6 +178,7 @@ enum VoiceToolProbe {
         line["harnessConfirmed"] = harnessConfirmed
         line["freshLook"] = turn.freshLookOutcome ?? NSNull()
         line["freshLookImageBytes"] = turn.freshLookImageBytes ?? NSNull()
+        line["audioChunksAfterFinish"] = turn.audioChunksAfterFinish
         line["waitedForConfirmation"] = turn.dispatches.contains(where: \.waitedForConfirmation)
         line["frontmostBundleIdentifier"] = frontmostBundleIdentifier ?? NSNull()
         line["systemSettingsFrontmost"] = frontmostBundleIdentifier == systemSettingsBundleIdentifier
@@ -202,7 +209,7 @@ enum VoiceToolProbe {
 
     static func summary(for lines: [[String: Any]], stack: VoiceStackChoice, probeID: String, spentUSD: Double?) -> [String: Any] {
         var marks: [String: Any] = [:]
-        for markName in ["sessionSetupMs", "firstAudioMs", "toolCallMs", "harnessMs", "freshLookMs", "followUpFirstAudioMs",
+        for markName in ["sessionSetupMs", "firstAudioMs", "toolCallMs", "harnessMs", "freshLookMs", "freshLookArrivedAfterSpeechStartMs", "followUpFirstAudioMs",
                          "totalToFirstSpokenResultMs", "firstAudioBeforeToolMs"] {
             let values = lines.map { ($0["marksMs"] as? [String: Any])?[markName] as? Int }
             if let distribution = VoiceBenchStatistics.distribution(of: values) {
@@ -228,6 +235,7 @@ enum VoiceToolProbe {
             "freshLookOutcomes": freshLookCounts,
             "systemSettingsFrontmost": count("systemSettingsFrontmost"),
             "claimedSuccessWithoutConfirmation": count("claimedSuccessWithoutConfirmation"),
+            "repliedToFreshLook": lines.filter { ($0["audioChunksAfterFinish"] as? Int ?? 0) > 0 }.count,
             "errorKinds": errorKindCounts,
             "marksMs": marks,
             "estimatedCostUSD": spentUSD ?? NSNull()

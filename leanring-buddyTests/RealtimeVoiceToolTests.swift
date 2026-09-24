@@ -142,24 +142,18 @@ struct RealtimeVoiceToolTests {
         #expect(line == #"{"expectApp":"com.apple.systempreferences","tier":"window","verb":"look"}"#)
     }
 
-    @Test func refusedLookStillSendsTheResultAndSaysNoFreshView() {
+    @Test func refusedLookIsAnOutcomeAndNeverReadsTheImage() {
         let refused: [String: Any] = ["ok": false, "error": "kernelRefused", "imagePath": "/never/read.jpg"]
         var imageReads = 0
         let look = RealtimeOpenAppTool.freshLook(fromLookResponse: refused) { _ in imageReads += 1; return Data() }
         #expect(imageReads == 0)
         #expect(look.outcome == "kernelRefused")
-        let launched: [String: Any] = ["ok": true, "status": "ready", "error": NSNull(), "message": NSNull()]
-        let result = RealtimeOpenAppTool.toolResult(launched, with: look)
-        #expect(result["ok"] as? Bool == true)
-        #expect(result["status"] as? String == "ready")
-        #expect(result["freshView"] as? Bool == false)
-        #expect(result["freshViewError"] as? String == "kernelRefused")
         #expect(RealtimeOpenAppTool.freshLook(fromLookResponse: [:]) { _ in nil }.outcome == "unreadableHarnessResponse")
         #expect(RealtimeOpenAppTool.freshLook(fromLookResponse: ["ok": true, "imagePath": "/x.jpg"]) { _ in nil }.outcome == "imageUnreadable")
         #expect(RealtimeOpenAppTool.freshLook(fromLookResponse: ["ok": true, "imagePath": "/x.jpg"]) { _ in Data("not a jpeg".utf8) }.outcome == "imageDownscaleFailed")
     }
 
-    @Test func attachedLookMarksTheResultAndIsDownscaled() throws {
+    @Test func attachedLookIsDownscaled() throws {
         // A 2000x1000 image in, long edge 1024 out.
         let context = try #require(CGContext(data: nil, width: 2000, height: 1000, bitsPerComponent: 8, bytesPerRow: 0,
                                              space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
@@ -174,9 +168,25 @@ struct RealtimeVoiceToolTests {
         let properties = try #require(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
         #expect(properties[kCGImagePropertyPixelWidth] as? Int == 1024)
         #expect(properties[kCGImagePropertyPixelHeight] as? Int == 512)
-        let result = RealtimeOpenAppTool.toolResult(["ok": true], with: look)
-        #expect(result["freshView"] as? Bool == true)
-        #expect(result["freshViewError"] == nil)
+    }
+
+    /// The result no longer waits for the look, so the prompt must not promise a
+    /// view before it, nor name a field the result stopped carrying.
+    @MainActor @Test func promptConfirmsFirstAndDescribesOnlyAfterAView() {
+        let prompt = RealtimeOpenAppTool.systemPrompt
+        #expect(prompt.contains("report only the verified outcome"))
+        #expect(prompt.contains("do not describe the new screen until you have been given a view of it"))
+        #expect(!prompt.contains("freshView"))
+    }
+
+    @MainActor @Test func freshLookArrivalIsMeasuredFromTheSpokenResult() {
+        let marks = RealtimeTurnMarks()
+        #expect(marks.freshLookArrivedAfterSpeechStartMs == nil)
+        marks.followUpFirstAudioUptime = 100.0
+        marks.freshLookCompletedUptime = 100.25
+        #expect(marks.freshLookArrivedAfterSpeechStartMs == 250)
+        marks.freshLookCompletedUptime = 99.9
+        #expect(marks.freshLookArrivedAfterSpeechStartMs == -100)
     }
 
     // MARK: Live turn line
@@ -197,7 +207,7 @@ struct RealtimeVoiceToolTests {
         #expect(parsed["freshLookMs"] is NSNull)
         #expect(Set(parsed.keys) == [
             "kind", "stack", "turnId", "sessionWasWarm", "sessionSetupMs", "holdMs", "firstAudioMs", "toolCalled",
-            "toolName", "toolCallMs", "harnessMs", "harnessStatus", "harnessError", "freshLook", "freshLookMs",
+            "toolName", "toolCallMs", "harnessMs", "harnessStatus", "harnessError", "freshLook", "freshLookMs", "freshLookArrivedAfterSpeechStartMs",
             "followUpFirstAudioMs", "releaseToSpokenResultMs", "turnDoneMs", "bargedIn", "errorKind"
         ])
     }
