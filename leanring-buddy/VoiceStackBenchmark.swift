@@ -557,6 +557,11 @@ enum VoiceStackBenchmark {
     /// A debug entry point run from the DerivedData build on this machine, so the
     /// committed fixtures are read from the source tree rather than copied into
     /// the bundle. The app is not sandboxed (`com.apple.security.app-sandbox` false).
+    /// The bench's clips, by name: the folder also holds the menu probe's
+    /// (06-13, 2026-09-25), and a bench that picked those up would stop being
+    /// the same comparison as every run before it.
+    static let benchClipNames: Set<String> = ["01-what-app", "02-wallpaper", "03-export-button", "04-error-meaning", "05-open-settings"]
+
     static let fixtureDirectoryURL = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
         .deletingLastPathComponent()
@@ -623,7 +628,7 @@ enum VoiceStackBenchmark {
 
         var clips: [(name: String, clip: VoiceBenchPCMClip, clip24k: VoiceBenchPCMClip)] = []
         let fixtureURLs = ((try? FileManager.default.contentsOfDirectory(at: fixtureDirectoryURL, includingPropertiesForKeys: nil)) ?? [])
-            .filter { $0.pathExtension == "wav" }
+            .filter { $0.pathExtension == "wav" && benchClipNames.contains($0.deletingPathExtension().lastPathComponent) }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         for fixtureURL in fixtureURLs {
             let clipName = fixtureURL.deletingPathExtension().lastPathComponent

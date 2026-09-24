@@ -80,7 +80,10 @@ struct VoiceStackBenchmarkTests {
             .appendingPathComponent("scripts/voice-fixtures", isDirectory: true)
         let fixtureURLs = try FileManager.default.contentsOfDirectory(at: fixtureDirectory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "wav" }
-        #expect(fixtureURLs.count == 5)
+        // Five bench clips plus eleven for the menu probe (2026-09-25); the bench
+        // still reads only its own five, by name.
+        #expect(fixtureURLs.count == 16)
+        #expect(fixtureURLs.filter { VoiceStackBenchmark.benchClipNames.contains($0.deletingPathExtension().lastPathComponent) }.count == 5)
         for fixtureURL in fixtureURLs {
             let clip = VoiceBenchPCMClip.parseWAV(try Data(contentsOf: fixtureURL))
             #expect(clip?.sampleRate == 16_000, "\(fixtureURL.lastPathComponent)")

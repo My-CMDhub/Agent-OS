@@ -37,13 +37,13 @@ enum VoiceToolProbe {
     static let turnTimeoutSeconds: Double = 90
     static let unpromptedReplyWatchSeconds: Double = 3
 
-    private static var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
+    static var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
-    private static func appendLine(_ lineObject: [String: Any]) {
+    static func appendLine(_ lineObject: [String: Any]) {
         MeasurementLogFile.appendJSONLine(lineObject, toFileNamed: logFileName)
     }
 
-    private static func milliseconds(from start: TimeInterval?, to end: TimeInterval?) -> Int? {
+    static func milliseconds(from start: TimeInterval?, to end: TimeInterval?) -> Int? {
         guard let start, let end else { return nil }
         return Int(((end - start) * 1000).rounded())
     }
@@ -58,19 +58,20 @@ enum VoiceToolProbe {
             return
         }
 
-        let fixture16kData = try? Data(contentsOf: VoiceStackBenchmark.fixtureDirectoryURL.appendingPathComponent(fixtureFileName))
-        guard let fixture16kData, let clip16k = VoiceBenchPCMClip.parseWAV(fixture16kData), clip16k.sampleRate == 16_000,
-              case .success(let clip24k) = VoiceBenchPCMClip.paired24kClip(
-                fileData: try? Data(contentsOf: VoiceStackBenchmark.fixture24kDirectoryURL.appendingPathComponent(fixtureFileName)),
-                matching: clip16k) else {
+        // The menu verbs' scenarios are their own run: fixtures, set-up, checks.
+        if CommandLine.arguments.contains("--voice-tool-probe-menus") {
+            await runMenuScenarios(harness: harness, probeID: probeID)
+            return
+        }
+
+        guard let (clip16k, clip24k) = clips(forFixture: fixtureFileName) else {
             appendLine(["kind": "fixtureUnreadable", "probeId": probeID, "fixture": fixtureFileName])
             print("🧪 voice tool probe: fixture unreadable -> \(logPath)")
             return
         }
 
         let preOpen = CommandLine.arguments.contains("--voice-tool-probe-preopen")
-        let runsPerStack = CommandLine.arguments.first { $0.hasPrefix("--voice-tool-probe-runs=") }
-            .flatMap { Int($0.dropFirst("--voice-tool-probe-runs=".count)) }.map { max(1, $0) } ?? defaultRunsPerStack
+        let runsPerStack = runsPerStackArgument(default: defaultRunsPerStack)
         let harnessAnswer: @Sendable (String) -> String = { line in harness.answer(line: line) }
         // Pre-open mode: the one screenshot must show the app already open.
         if preOpen { _ = await openSystemSettings(harnessAnswer: harnessAnswer) }
@@ -98,11 +99,7 @@ enum VoiceToolProbe {
             at: MeasurementLogFile.directoryURL.appendingPathComponent("voice-tool-probe-answers-\(probeID).jsonl"))
         defer { try? answersFile?.close() }
 
-        // `--voice-tool-probe-stacks=geminiLive` re-runs one stack without paying for the other.
-        let stacksArgument = CommandLine.arguments.first { $0.hasPrefix("--voice-tool-probe-stacks=") }
-        let selectedStacks = stacksArgument.map { argument in
-            argument.dropFirst("--voice-tool-probe-stacks=".count).split(separator: ",").compactMap { VoiceStackChoice(rawValue: String($0)) }
-        } ?? VoiceStackChoice.allCases
+        let selectedStacks = selectedStacksArgument()
         var openAISpentUSD = 0.0
         var runLines: [VoiceStackChoice: [[String: Any]]] = [:]
         var answers: [VoiceStackChoice: [String]] = [:]
@@ -136,6 +133,28 @@ enum VoiceToolProbe {
         print("🧪 voice tool probe: finished (OpenAI estimated US$\(openAISpentUSD)) -> \(logPath)")
     }
 
+    /// The 16 kHz clip and its 24 kHz twin, or nil when either is unreadable.
+    static func clips(forFixture fileName: String) -> (clip16k: VoiceBenchPCMClip, clip24k: VoiceBenchPCMClip)? {
+        let fixture16kData = try? Data(contentsOf: VoiceStackBenchmark.fixtureDirectoryURL.appendingPathComponent(fileName))
+        guard let fixture16kData, let clip16k = VoiceBenchPCMClip.parseWAV(fixture16kData), clip16k.sampleRate == 16_000,
+              case .success(let clip24k) = VoiceBenchPCMClip.paired24kClip(
+                fileData: try? Data(contentsOf: VoiceStackBenchmark.fixture24kDirectoryURL.appendingPathComponent(fileName)),
+                matching: clip16k) else { return nil }
+        return (clip16k, clip24k)
+    }
+
+    static func runsPerStackArgument(default defaultRuns: Int) -> Int {
+        CommandLine.arguments.first { $0.hasPrefix("--voice-tool-probe-runs=") }
+            .flatMap { Int($0.dropFirst("--voice-tool-probe-runs=".count)) }.map { max(1, $0) } ?? defaultRuns
+    }
+
+    /// `--voice-tool-probe-stacks=geminiLive` re-runs one stack without paying for the other.
+    static func selectedStacksArgument() -> [VoiceStackChoice] {
+        CommandLine.arguments.first { $0.hasPrefix("--voice-tool-probe-stacks=") }.map { argument in
+            argument.dropFirst("--voice-tool-probe-stacks=".count).split(separator: ",").compactMap { VoiceStackChoice(rawValue: String($0)) }
+        } ?? VoiceStackChoice.allCases
+    }
+
     // MARK: One run
 
     private static func measureOneRun(
@@ -152,6 +171,30 @@ enum VoiceToolProbe {
         let connection = RealtimeVoiceConnection(stack: stack, harnessAnswer: harnessAnswer)
         connection.appNameOverride = appNameOverride
         defer { connection.close() }
+        let facts = await runTurn(on: connection, clip: clip, screenshotJPEG: screenshotJPEG)
+        line.merge(facts) { _, new in new }
+
+        let frontmostBundleIdentifier = line["frontmostBundleIdentifier"] as? String
+        line["systemSettingsFrontmost"] = frontmostBundleIdentifier == systemSettingsBundleIdentifier
+        let turnID = UUID().uuidString
+        line["turnId"] = turnID
+        RealtimeDecisionTrace.append(
+            connection.turn.decisions, turnID: turnID, stack: stack.rawValue, source: "probe",
+            releasedUptime: connection.turn.lastAudioSentUptime, probeID: probeID, fixture: fixtureFileName,
+            independentCheck: ["kind": "frontmost", "expected": systemSettingsBundleIdentifier,
+                               "actual": frontmostBundleIdentifier ?? NSNull(), "passed": frontmostBundleIdentifier == systemSettingsBundleIdentifier])
+        // The fixture is always an open request, so no call is a skipped tool.
+        line["toolSkipped"] = connection.turn.toolCalls.isEmpty
+        let spentUSD = stack == .openAIRealtime ? connection.estimatedOpenAIUSD : 0
+        if stack == .openAIRealtime { line["estimatedCostUSD"] = spentUSD }
+        return (line, connection.turn.transcript, spentUSD)
+    }
+
+    /// One fixture turn on an open-to-be connection, and everything the turn
+    /// did that does not depend on which fixture it was: marks, tool calls and
+    /// results, the notch's order, the honesty checks, frontmost after.
+    static func runTurn(on connection: RealtimeVoiceConnection, clip: VoiceBenchPCMClip, screenshotJPEG: Data) async -> [String: Any] {
+        var line: [String: Any] = [:]
         let runStartUptime = uptime
         var marks: [String: Any] = [:]
         var errorKind: String?
@@ -178,7 +221,7 @@ enum VoiceToolProbe {
             await connection.turn.waitForFreshLook()
             try? await Task.sleep(for: .seconds(unpromptedReplyWatchSeconds))
         } catch {
-            errorKind = (error as? VoiceBenchFailure)?.kind ?? VoiceBenchRun.errorKind(for: error, stage: stack.rawValue)
+            errorKind = (error as? VoiceBenchFailure)?.kind ?? VoiceBenchRun.errorKind(for: error, stage: connection.stack.rawValue)
             JarvisNotch.shared.handle(.turnEnded)
         }
         // Let a proof or didn't-take hold play out, so the next run starts idle.
@@ -193,7 +236,8 @@ enum VoiceToolProbe {
         let notchTransitions = JarvisNotch.shared.transitions.filter { $0.uptime >= runStartUptime }
         let released = turn.lastAudioSentUptime
         let firstDispatch = turn.dispatches.first
-        let harnessConfirmed = turn.dispatches.contains(where: \.harnessConfirmed)
+        // The receipt is an ACTING tool's ok: a find that worked changed nothing.
+        let actingOk = turn.decisions.filter { RealtimeVoiceVerbs.isActingTool($0.call.name) }.compactMap(\.dispatch).filter(\.harnessConfirmed)
         marks["firstAudioMs"] = milliseconds(from: released, to: turn.firstAudioUptime)
         marks["toolCallMs"] = milliseconds(from: released, to: turn.toolCallUptime)
         marks["harnessMs"] = firstDispatch?.harnessMilliseconds
@@ -208,11 +252,13 @@ enum VoiceToolProbe {
 
         line["marksMs"] = marks
         line["toolCalled"] = !turn.toolCalls.isEmpty
-        line["toolCalls"] = turn.toolCalls.map { ["name": $0.name, "app": ($0.appName ?? NSNull()) as Any] }
+        line["toolCalls"] = turn.toolCalls.map {
+            ["name": $0.name, "app": ($0.appName ?? NSNull()) as Any, "args": RealtimeDecisionTrace.loggedArguments(for: $0)] as [String: Any]
+        }
         line["toolResults"] = turn.dispatches.map(\.result)
         line["harnessStatus"] = (firstDispatch?.result["status"] as? String) ?? NSNull()
         line["harnessError"] = (firstDispatch?.result["error"] as? String) ?? NSNull()
-        line["harnessConfirmed"] = harnessConfirmed
+        line["harnessConfirmed"] = !actingOk.isEmpty
         line["intentShownBeforeLaunchRequest"] = turn.intentShownUptime.flatMap { shown in
             firstDispatch?.firstRequestSentUptime.map { shown <= $0 } } ?? false
         let ownBundleIdentifier = Bundle.main.bundleIdentifier
@@ -221,10 +267,10 @@ enum VoiceToolProbe {
              "frontmostBefore": transition.frontmostBefore ?? NSNull(), "frontmostAfter": transition.frontmostAfter ?? NSNull()] as [String: Any]
         }
         let proofs = notchTransitions.filter { $0.state == "proof" }
-        let confirmedAnswers = turn.dispatches.filter(\.harnessConfirmed).compactMap(\.answeredUptime)
+        let confirmedAnswers = actingOk.compactMap(\.answeredUptime)
         line["proofShown"] = !proofs.isEmpty
         line["didntTakeShown"] = notchTransitions.contains { $0.state == "didntTake" }
-        // A proof with no confirmed harness answer at or before it is the one lie the notch must never tell.
+        // A proof with no confirmed acting answer at or before it is the one lie the notch must never tell.
         line["proofViolations"] = proofs.filter { proof in !confirmedAnswers.contains { $0 <= proof.uptime } }.count
         line["proofAfterOkMs"] = proofs.first.flatMap { proof in milliseconds(from: confirmedAnswers.first, to: proof.uptime) } ?? NSNull()
         line["frontmostUnchangedByNotch"] = notchTransitions.allSatisfy { transition in
@@ -236,20 +282,15 @@ enum VoiceToolProbe {
         line["audioChunksAfterFinish"] = turn.audioChunksAfterFinish
         line["waitedForConfirmation"] = turn.dispatches.contains(where: \.waitedForConfirmation)
         line["frontmostBundleIdentifier"] = frontmostBundleIdentifier ?? NSNull()
-        line["systemSettingsFrontmost"] = frontmostBundleIdentifier == systemSettingsBundleIdentifier
         line["claimedSuccessWithoutReceipt"] = RealtimeOpenAppTool.claimedSuccessWithoutReceipt(
-            transcript: turn.transcript, hadOkToolResult: harnessConfirmed)
-        // The fixture is always an open request, so no call is a skipped tool.
-        line["toolSkipped"] = turn.toolCalls.isEmpty
+            transcript: turn.transcript, hadOkToolResult: !actingOk.isEmpty)
         line["reusedExampleVerbatim"] = RealtimeOpenAppTool.reusesExampleVerbatim(turn.transcript)
         line["reusedExampleTemplate"] = RealtimeOpenAppTool.reusesExampleTemplate(turn.transcript)
         line["spokenCharacters"] = turn.transcript.count
         line["outputAudioMime"] = turn.outputAudioMime ?? NSNull()
         line["eventTrail"] = turn.eventTrail
         line["errorKind"] = errorKind ?? NSNull()
-        let spentUSD = stack == .openAIRealtime ? connection.estimatedOpenAIUSD : 0
-        if stack == .openAIRealtime { line["estimatedCostUSD"] = spentUSD }
-        return (line, turn.transcript, spentUSD)
+        return line
     }
 
     /// One crop of the top band round the notch per state, the first time each is
