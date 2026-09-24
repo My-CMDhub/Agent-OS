@@ -39,10 +39,12 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
     case idle
     case listening
     case thinking
-    /// Display names arrive already made safe (`RealtimeOpenAppTool.captionName`):
-    /// the model wrote this one, and a newline must not forge a second line.
-    case intent(appName: String?)
-    case proof(appName: String)
+    /// Text arrives already made safe (`RealtimeOpenAppTool.captionName`): the
+    /// model or the target app wrote the names in it, and a newline must not
+    /// forge a second line. `title` is the whole line ("Opening Finder…");
+    /// `subject` is what was verified ("Finder", "View › as List").
+    case intent(title: String)
+    case proof(subject: String)
     case needsYou
     case didntTake(reason: String)
 
@@ -78,8 +80,8 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
     /// The line's two parts: the title at white 92%, the detail at white 64%.
     var title: String? {
         switch self {
-        case .intent(let appName): return "Opening \(appName ?? "an app")\u{2026}"
-        case .proof(let appName): return appName
+        case .intent(let title): return title
+        case .proof(let subject): return subject
         case .needsYou: return "Needs you"
         case .didntTake: return "Didn\u{2019}t take"
         default: return nil
@@ -98,7 +100,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
     /// VoiceOver hears proof, needs you and didn't take; listening and thinking are silent.
     var announcement: String? {
         switch self {
-        case .proof(let appName): return "\(appName) verified"
+        case .proof(let subject): return "\(subject) verified"
         case .needsYou: return "Needs you. Approve on the card."
         case .didntTake(let reason): return "Didn\u{2019}t take. \(reason)"
         default: return nil
@@ -113,16 +115,16 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
             return self == .listening ? .thinking : nil
         case .firstAudioWithoutTool:
             return self == .thinking ? .idle : nil
-        case .toolCall(let appName):
+        case .toolCall(let title):
             // A new press is already listening; its turn owns the notch now.
-            return self == .listening ? nil : .intent(appName: appName)
+            return self == .listening ? nil : .intent(title: title)
         case .confirmationRequired:
             if case .intent = self { return .needsYou }
             return nil
-        case .harnessAnswered(let ok, let appName, let error):
+        case .harnessAnswered(let ok, let subject, let error):
             switch self {
             case .intent, .needsYou:
-                return ok ? .proof(appName: appName) : .didntTake(reason: JarvisNotchReason.plain(forErrorCode: error))
+                return ok ? .proof(subject: subject) : .didntTake(reason: JarvisNotchReason.plain(forErrorCode: error))
             default:
                 return nil
             }
@@ -142,12 +144,12 @@ nonisolated enum JarvisNotchEvent: Equatable, Sendable {
     case hotkeyUp
     /// The model spoke and no tool was called (yet).
     case firstAudioWithoutTool
-    /// Before the harness request.
-    case toolCall(appName: String?)
+    /// Before the harness request; `title` is the intent line.
+    case toolCall(title: String)
     /// A ticket is open; the card is waiting on the owner.
     case confirmationRequired
     /// `ok` is the harness's own `ok`, never the model's word.
-    case harnessAnswered(ok: Bool, appName: String, error: String?)
+    case harnessAnswered(ok: Bool, subject: String, error: String?)
     case holdElapsed
     /// The turn failed or was abandoned.
     case turnEnded
@@ -183,7 +185,15 @@ nonisolated enum JarvisNotchReason {
         "unknownTool": "that isn\u{2019}t something I can do",
         "tooManyToolCalls": "too many tries in one turn",
         "unreadableHarnessResponse": "the harness didn\u{2019}t answer",
-        "dryRun": "dry run, nothing was done"
+        "dryRun": "dry run, nothing was done",
+        // The menu and focus verbs (2026-09-25).
+        "notVerified": "no change was seen",
+        "targetIsSubmenu": "that item opens a submenu",
+        "noMenuBar": "that app has no menu bar",
+        "noFrontmostApplication": "nothing is in front",
+        "windowListUnreadable": "its windows didn\u{2019}t answer",
+        "missingMenuPath": "no menu item was named",
+        "recentItemsArePrivate": "recent items stay private"
     ]
 
     static func plain(forErrorCode code: String?) -> String {

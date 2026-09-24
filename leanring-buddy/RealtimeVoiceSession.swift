@@ -11,7 +11,8 @@
 //
 //  Every push-to-talk turn appends one JSON line — counts and timings, never
 //  words — to ~/Library/Logs/Clicky/voice-live.log, including a turn that
-//  failed or was barged in on, so a silent turn is never an invisible one.
+//  failed or was barged in on, so a silent turn is never an invisible one; and
+//  each of its tool calls one line to voice-decisions.log (`RealtimeDecisionTrace`).
 //
 //  Coded, not verified by a run: nothing here can be exercised headlessly (it
 //  needs the owner's hotkey and mic). `--voice-tool-probe` verifies the shared
@@ -243,6 +244,9 @@ final class RealtimeVoiceSession {
             line.releaseToSpokenResultMs = Self.milliseconds(
                 from: released, to: marks.toolCalls.isEmpty ? marks.firstAudioUptime : marks.followUpFirstAudioUptime)
             line.turnDoneMs = bargedIn || errorKind != nil ? nil : Self.milliseconds(from: released, to: uptime)
+            // One line per tool call to voice-decisions.log, joinable on turnId.
+            RealtimeDecisionTrace.append(marks.decisions, turnID: line.turnID, stack: line.stack, source: "live",
+                                         releasedUptime: released)
         }
         MeasurementLogFile.appendJSONLine(line.jsonObject, toFileNamed: Self.liveLogFileName)
     }

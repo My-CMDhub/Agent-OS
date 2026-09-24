@@ -2,10 +2,11 @@
 //  RealtimeVoiceTool.swift
 //  leanring-buddy
 //
-//  The one tool a realtime voice model is given — `open_app` — and the pure
-//  logic around it: which stack the owner picked, how each provider's tool-call
-//  event becomes a harness request line, and how the harness's answer becomes
-//  the result the model is told.
+//  `open_app`, the first tool a realtime voice model was given, and the pure
+//  logic every tool shares: which stack the owner picked, how each provider's
+//  tool-call event becomes a harness request line, and how the harness's answer
+//  becomes the result the model is told. The later verbs — `focus_app`,
+//  `find_menu_items`, `press_menu` — live in `RealtimeVoiceVerbs.swift`.
 //
 //  Why a tool at all: measured 2026-09-23, gpt-realtime-mini answered "open
 //  system settings" with "sure, I'll open system settings right away" and did
@@ -69,7 +70,26 @@ nonisolated enum VoiceStackChoice: String, CaseIterable, Sendable {
 nonisolated struct RealtimeToolCall: Equatable, Sendable {
     let callID: String
     let name: String
+    /// `name` for open_app / focus_app, `app` for the menu tools.
     let appName: String?
+    /// find_menu_items only.
+    var words: String? = nil
+    /// press_menu only: the menu path, bar item first.
+    var path: [String]? = nil
+
+    /// From a provider's argument object, whichever tool it is.
+    static func parsed(callID: String, name: String, arguments: [String: Any]?) -> RealtimeToolCall {
+        func text(_ value: Any?) -> String? {
+            guard let text = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+            return text
+        }
+        // A model may send the words as a list; they are only ever matched as tokens.
+        let words = text(arguments?["words"]) ?? (arguments?["words"] as? [String]).flatMap { text($0.joined(separator: " ")) }
+        // Path steps are exact labels, so they are not trimmed.
+        let path = (arguments?["path"] as? [Any])?.compactMap { $0 as? String }
+        return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["name"]) ?? text(arguments?["app"]),
+                                words: words, path: path)
+    }
 }
 
 nonisolated enum RealtimeOpenAppTool {
@@ -100,6 +120,11 @@ nonisolated enum RealtimeOpenAppTool {
     /// (72985B9B), so an open request always goes to the tool and completion
     /// words wait for an ok result. `VoiceStackBenchmark.speechToSpeechSystemPrompt`
     /// is left alone: it is the bench's control, and a prompt change is a latency change.
+    /// 2026-09-25 (spec slice 4): focus_app and the menu pair joined, and the
+    /// menu rule is "press only a path find_menu_items returned" — the model
+    /// picks from a local list, it never writes a path (`choseFromOffered` in
+    /// voice-decisions.log counts whether it obeyed). A find is a read, so its
+    /// ok true is not a receipt for completion words.
     static let systemPrompt = """
     you are J.A.R.V.I.S., the owner's assistant on their mac. they speak by push-to-talk; you see their screen; replies are spoken.
 
@@ -109,7 +134,11 @@ nonisolated enum RealtimeOpenAppTool {
 
     consequences: when a tool result carries a preview, say what will change first: what, where, whether it can be undone. if a confirmation card is showing, say so and wait; only their click decides, never their voice. if refused, give the reason plainly and say where they can do it themselves. never repeat a warning.
 
-    tools: open_app opens an installed app by name, as it appears in the applications folder. that is your only action. an open request always goes through open_app, even when the app already looks open: the harness checks, and for a running app it answers at once. words like done, opened, ready or there it is are for after an ok true tool result in this turn, never before and never without one. for anything else — clicking, typing, settings, closing — say you can't yet and where they'd find it.
+    tools: open_app opens an installed app by name, as it appears in the applications folder; an open request always goes through open_app, even when the app already looks open: the harness checks, and for a running app it answers at once. focus_app brings a running app to the front.
+
+    menus: for a command in an app's menu bar, such as a view, a new window, or showing a bar, first call find_menu_items with the app and a few words, then press_menu with one of the paths it returned, copied exactly. never invent or change a path; if none fits, say so and press nothing. menus belong to the app in front, so focus_app first when it is not.
+
+    words like done, opened, ready or there it is are for after an ok true result from open_app, focus_app or press_menu in this turn, never before and never without one; find_menu_items only looks. for anything else — clicking on the screen, typing, settings panes — say you can't yet and where they'd find it.
 
     do not reuse the wording of these examples; vary it.
     - owner: open calendar. [tool ok] you: there it is, calendar.
@@ -117,6 +146,8 @@ nonisolated enum RealtimeOpenAppTool {
     - owner: open terminal. [confirmationRequired] you: terminal can run anything, sir, so the card on screen needs your click first.
     - owner: what's this window? you: downloads, in finder, twelve files. looking for one in particular?
     - owner: turn off wifi. you: beyond my reach for now, i'm afraid, sir. control centre, top right.
+    - owner: put finder in list view. [find_menu_items, then press_menu ok] you: list view, as asked.
+    - owner: make the text in textedit rainbow. [find_menu_items, nothing fits] you: nothing in textedit's menus does that.
     """
 
     /// One prompt example: the reply, and the app its request named (nil when the
@@ -222,7 +253,7 @@ nonisolated enum RealtimeOpenAppTool {
               let functionName = item["name"] as? String else { return nil }
         let arguments = (item["arguments"] as? String)
             .flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
-        return RealtimeToolCall(callID: callID, name: functionName, appName: usableAppName(arguments?["name"]))
+        return RealtimeToolCall.parsed(callID: callID, name: functionName, arguments: arguments)
     }
 
     /// Gemini sends `toolCall.functionCalls[]`, with `args` as an OBJECT. Several
@@ -232,24 +263,45 @@ nonisolated enum RealtimeOpenAppTool {
         return functionCalls.compactMap { functionCall in
             guard let callID = functionCall["id"] as? String,
                   let functionName = functionCall["name"] as? String else { return nil }
-            let arguments = functionCall["args"] as? [String: Any]
-            return RealtimeToolCall(callID: callID, name: functionName, appName: usableAppName(arguments?["name"]))
+            return RealtimeToolCall.parsed(callID: callID, name: functionName, arguments: functionCall["args"] as? [String: Any])
         }
-    }
-
-    private static func usableAppName(_ value: Any?) -> String? {
-        guard let text = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
-        return text
     }
 
     // MARK: Harness round trip
 
-    /// The harness request, or the result to hand back without asking it. Only
-    /// `launch` is ever built — the model names an app, never a verb.
+    /// The harness request, or the result to hand back without asking it. The
+    /// model names a tool, never a verb: each tool maps to exactly one verb here
+    /// (open_app -> launch, focus_app -> focus, find_menu_items -> menus,
+    /// press_menu -> menu), and the menu verbs carry `expectApp`, so a press
+    /// never lands on whatever else came forward.
     static func harnessRequestLine(for call: RealtimeToolCall, ticket: String? = nil) -> Result<String, RealtimeToolRefusal> {
-        guard call.name == name else { return .failure(RealtimeToolRefusal(error: "unknownTool", message: "there is no tool named \(call.name)")) }
-        guard let appName = call.appName else { return .failure(RealtimeToolRefusal(error: "missingAppName", message: "open_app needs the app's name")) }
-        var request: [String: Any] = ["verb": "launch", "app": appName]
+        func refuse(_ error: String, _ message: String) -> Result<String, RealtimeToolRefusal> {
+            .failure(RealtimeToolRefusal(error: error, message: message))
+        }
+        guard let appName = call.appName else {
+            return RealtimeVoiceVerbs.allToolNames.contains(call.name)
+                ? refuse("missingAppName", "\(call.name) needs the app's name")
+                : refuse("unknownTool", "there is no tool named \(call.name)")
+        }
+        var request: [String: Any]
+        switch call.name {
+        case name:
+            request = ["verb": "launch", "app": appName]
+        case RealtimeVoiceVerbs.focusAppName:
+            request = ["verb": "focus", "app": appName]
+        case RealtimeVoiceVerbs.findMenuItemsName:
+            guard call.words != nil else { return refuse("missingWords", "find_menu_items needs a few words to look for") }
+            request = ["verb": "menus", "expectApp": appName]
+        case RealtimeVoiceVerbs.pressMenuName:
+            guard let path = call.path, !path.isEmpty else { return refuse("missingMenuPath", "press_menu needs a path from find_menu_items") }
+            // Never offered, so never pressed: Open Recent and friends carry file names.
+            guard !RealtimeVoiceVerbs.isPrivateMenuPath(path) else {
+                return refuse("recentItemsArePrivate", "recent-items menus are private and are not offered or pressed")
+            }
+            request = ["verb": "menu", "path": path, "expectApp": appName]
+        default:
+            return refuse("unknownTool", "there is no tool named \(call.name)")
+        }
         if let ticket { request["ticket"] = ticket }
         guard let data = try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]) else {
             return .failure(RealtimeToolRefusal(error: "requestEncodingFailed", message: "the request could not be encoded"))
@@ -274,7 +326,9 @@ nonisolated enum RealtimeOpenAppTool {
             "ok": response["ok"] as? Bool ?? false,
             "status": (response["status"] as? String) ?? NSNull(),
             "error": (response["error"] as? String) ?? NSNull(),
-            "message": message ?? NSNull()
+            "message": message ?? NSNull(),
+            // focus and menu say how they verified; launch says it in `status`.
+            "verification": ((response["verification"] as? [String: Any])?["status"] as? String) ?? NSNull()
         ]
     }
 
@@ -318,6 +372,22 @@ nonisolated enum RealtimeOpenAppTool {
         let (firstRequestUptime, firstAnswer) = await Task.detached { (ProcessInfo.processInfo.systemUptime, answer(firstLine)) }.value
         firstRequestSentUptime = firstRequestUptime
         var response = harnessResponseObject(firstAnswer)
+        // A read: no ticket, and the full listing never leaves this function —
+        // only the privacy-filtered candidates go to the model and the trace.
+        if call.name == RealtimeVoiceVerbs.findMenuItemsName {
+            var result = toolResult(fromHarnessResponse: response)
+            var offer: RealtimeMenuOffer?
+            if response["ok"] as? Bool == true {
+                let madeOffer = RealtimeVoiceVerbs.menuOffer(fromMenusResponse: response, words: call.words ?? "")
+                result["candidates"] = madeOffer.candidates.map(\.jsonObject)
+                if madeOffer.listingIncomplete { result["listingIncomplete"] = true }
+                offer = madeOffer
+            }
+            response["items"] = nil
+            var dispatch = finished(result, waited: false, harnessResponse: response)
+            dispatch.menuOffer = offer
+            return dispatch
+        }
         guard response["error"] as? String == "confirmationRequired", let ticket = response["ticket"] as? String,
               case .success(let ticketLine) = harnessRequestLine(for: call, ticket: ticket) else {
             return finished(toolResult(fromHarnessResponse: response), waited: false, harnessResponse: response)
@@ -390,11 +460,21 @@ nonisolated enum RealtimeOpenAppTool {
     }
 
     /// The notch's answer event, from the harness's own fields: its `ok`, its
-    /// `application` (the bundle's name on disk) and its `error` code.
-    static func notchAnswer(for call: RealtimeToolCall, dispatch: RealtimeToolDispatch) -> JarvisNotchEvent {
-        let name = (dispatch.harnessResponse?["application"] as? String) ?? call.appName ?? "The app"
-        return .harnessAnswered(ok: dispatch.harnessConfirmed, appName: captionName(name),
-                                error: dispatch.result["error"] as? String)
+    /// `application` (the bundle's name on disk) and its `error` code. A menu
+    /// press is proved as its path. nil for a find that worked: a read proves
+    /// nothing happened, so it gets no proof — the intent holds until the press.
+    static func notchAnswer(for call: RealtimeToolCall, dispatch: RealtimeToolDispatch) -> JarvisNotchEvent? {
+        let error = dispatch.result["error"] as? String
+        switch call.name {
+        case RealtimeVoiceVerbs.findMenuItemsName:
+            return dispatch.harnessConfirmed ? nil : .harnessAnswered(ok: false, subject: "", error: error)
+        case RealtimeVoiceVerbs.pressMenuName:
+            return .harnessAnswered(ok: dispatch.harnessConfirmed,
+                                    subject: RealtimeVoiceVerbs.menuPathCaption(call.path ?? []), error: error)
+        default:
+            let name = (dispatch.harnessResponse?["application"] as? String) ?? call.appName ?? "The app"
+            return .harnessAnswered(ok: dispatch.harnessConfirmed, subject: captionName(name), error: error)
+        }
     }
 
     // MARK: Honesty check
@@ -463,6 +543,8 @@ nonisolated struct RealtimeToolDispatch {
     var firstRequestSentUptime: TimeInterval? = nil
     /// When the final answer came back — the probe's proof that proof came after it.
     var answeredUptime: TimeInterval? = nil
+    /// find_menu_items only: what the model was offered.
+    var menuOffer: RealtimeMenuOffer? = nil
 
     var harnessConfirmed: Bool { result["ok"] as? Bool == true }
 }

@@ -21,8 +21,8 @@ struct JarvisNotchTests {
     @Test func aVerifiedOpenRunsListeningThinkingIntentProofIdle() {
         var state = JarvisNotchState.idle
         let events: [JarvisNotchEvent] = [
-            .hotkeyDown, .hotkeyUp, .toolCall(appName: "System Settings"),
-            .harnessAnswered(ok: true, appName: "System Settings", error: nil), .holdElapsed
+            .hotkeyDown, .hotkeyUp, .toolCall(title: "System Settings"),
+            .harnessAnswered(ok: true, subject: "System Settings", error: nil), .holdElapsed
         ]
         var names: [String] = []
         for event in events {
@@ -33,53 +33,52 @@ struct JarvisNotchTests {
     }
 
     @Test func proofComesOnlyFromAnOkAnswerAfterAnIntent() {
-        let ok = JarvisNotchEvent.harnessAnswered(ok: true, appName: "Finder", error: nil)
-        #expect(JarvisNotchState.intent(appName: "Finder").next(on: ok) == .proof(appName: "Finder"))
-        #expect(JarvisNotchState.needsYou.next(on: ok) == .proof(appName: "Finder"))
+        let ok = JarvisNotchEvent.harnessAnswered(ok: true, subject: "Finder", error: nil)
+        #expect(JarvisNotchState.intent(title: "Finder").next(on: ok) == .proof(subject: "Finder"))
+        #expect(JarvisNotchState.needsYou.next(on: ok) == .proof(subject: "Finder"))
         // No intent on screen, no proof: a late answer after a new press or after idle moves nothing.
         for state: JarvisNotchState in [.idle, .listening, .thinking, .didntTake(reason: "x")] {
             #expect(state.next(on: ok) == nil)
         }
-        let failed = JarvisNotchEvent.harnessAnswered(ok: false, appName: "Figma", error: "notFound")
-        #expect(JarvisNotchState.intent(appName: "Figma").next(on: failed) == .didntTake(reason: "no app by that name"))
+        let failed = JarvisNotchEvent.harnessAnswered(ok: false, subject: "Figma", error: "notFound")
+        #expect(JarvisNotchState.intent(title: "Figma").next(on: failed) == .didntTake(reason: "no app by that name"))
     }
 
     @Test func aTicketHoldsNeedsYouUntilItIsAnswered() {
-        let intent = JarvisNotchState.intent(appName: "Terminal")
+        let intent = JarvisNotchState.intent(title: "Terminal")
         #expect(intent.next(on: .confirmationRequired) == .needsYou)
         #expect(JarvisNotchState.needsYou.holdSeconds == nil)
         #expect(JarvisNotchState.needsYou.next(on: .holdElapsed) == nil)
-        #expect(JarvisNotchState.needsYou.next(on: .harnessAnswered(ok: false, appName: "Terminal", error: "confirmationDenied"))
+        #expect(JarvisNotchState.needsYou.next(on: .harnessAnswered(ok: false, subject: "Terminal", error: "confirmationDenied"))
                 == .didntTake(reason: "you declined on the card"))
         #expect(JarvisNotchState.thinking.next(on: .confirmationRequired) == nil)
     }
 
     @Test func eventsOutsideTheirStateAreIgnored() {
         #expect(JarvisNotchState.thinking.next(on: .hotkeyUp) == nil)
-        #expect(JarvisNotchState.listening.next(on: .toolCall(appName: "x")) == nil)
+        #expect(JarvisNotchState.listening.next(on: .toolCall(title: "x")) == nil)
         #expect(JarvisNotchState.thinking.next(on: .firstAudioWithoutTool) == .idle)
-        #expect(JarvisNotchState.intent(appName: "x").next(on: .firstAudioWithoutTool) == nil)
-        #expect(JarvisNotchState.proof(appName: "x").next(on: .turnEnded) == nil)
-        #expect(JarvisNotchState.intent(appName: "x").next(on: .turnEnded) == .idle)
+        #expect(JarvisNotchState.intent(title: "x").next(on: .firstAudioWithoutTool) == nil)
+        #expect(JarvisNotchState.proof(subject: "x").next(on: .turnEnded) == nil)
+        #expect(JarvisNotchState.intent(title: "x").next(on: .turnEnded) == .idle)
         // A press always wins, whatever is showing.
-        #expect(JarvisNotchState.proof(appName: "x").next(on: .hotkeyDown) == .listening)
+        #expect(JarvisNotchState.proof(subject: "x").next(on: .hotkeyDown) == .listening)
     }
 
     @Test func shapesHoldsAndAnnouncementsMatchTheContract() {
         #expect(JarvisNotchState.idle.shape == .idle)
         #expect(JarvisNotchState.listening.shape == .compact)
         #expect(JarvisNotchState.thinking.shape == .compact)
-        #expect(JarvisNotchState.intent(appName: nil).shape == .expanded)
-        #expect(JarvisNotchState.proof(appName: "x").holdSeconds == 1.8)
+        #expect(JarvisNotchState.intent(title: "x").shape == .expanded)
+        #expect(JarvisNotchState.proof(subject: "x").holdSeconds == 1.8)
         #expect(JarvisNotchState.didntTake(reason: "x").holdSeconds == 2.5)
-        #expect(JarvisNotchState.intent(appName: "System Settings").title == "Opening System Settings\u{2026}")
-        #expect(JarvisNotchState.intent(appName: nil).title == "Opening an app\u{2026}")
-        #expect(JarvisNotchState.proof(appName: "System Settings").detail == " \u{2014} verified")
+        #expect(JarvisNotchState.intent(title: "Opening Finder\u{2026}").title == "Opening Finder\u{2026}")
+        #expect(JarvisNotchState.proof(subject: "System Settings").detail == " \u{2014} verified")
         // VoiceOver: proof, needs you, didn't take — never listening, thinking or intent.
         #expect(JarvisNotchState.listening.announcement == nil)
         #expect(JarvisNotchState.thinking.announcement == nil)
-        #expect(JarvisNotchState.intent(appName: "x").announcement == nil)
-        #expect(JarvisNotchState.proof(appName: "Finder").announcement == "Finder verified")
+        #expect(JarvisNotchState.intent(title: "x").announcement == nil)
+        #expect(JarvisNotchState.proof(subject: "Finder").announcement == "Finder verified")
         #expect(JarvisNotchState.needsYou.announcement != nil)
         #expect(JarvisNotchState.didntTake(reason: "x").announcement != nil)
     }

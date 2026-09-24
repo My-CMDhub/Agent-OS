@@ -185,13 +185,13 @@ struct RealtimeVoiceToolTests {
         #expect(!RealtimeOpenAppTool.systemPrompt.contains("freshView"))
     }
 
-    /// Spec §3.1 minus the bin example: five replies, none about a verb the model
-    /// has no tool for.
+    /// Spec §3.1 minus the bin example, plus the two menu examples of slice 4:
+    /// seven replies, none about a verb the model has no tool for.
     @MainActor @Test func exampleRepliesAreReadFromThePrompt() {
         let replies = RealtimeOpenAppTool.exampleReplies
-        #expect(replies.count == 5)
+        #expect(replies.count == 7)
         #expect(replies.first == "there it is, calendar.")
-        #expect(RealtimeOpenAppTool.examples.map(\.appName) == ["calendar", "figma", "terminal", nil, nil])
+        #expect(RealtimeOpenAppTool.examples.map(\.appName) == ["calendar", "figma", "terminal", nil, nil, nil, nil])
         #expect(RealtimeOpenAppTool.systemPrompt.contains("do not reuse the wording of these examples; vary it."))
         #expect(RealtimeOpenAppTool.systemPrompt.contains("report only the verified outcome, briefly; do not describe the new screen until you have been given a view of it."))
     }
@@ -223,10 +223,10 @@ struct RealtimeVoiceToolTests {
         let call = RealtimeToolCall(callID: "c", name: "open_app", appName: "settings")
         let ready = RealtimeToolDispatch(result: ["ok": true], harnessMilliseconds: 1, waitedForConfirmation: false,
                                          harnessResponse: ["ok": true, "application": "System Settings"])
-        #expect(RealtimeOpenAppTool.notchAnswer(for: call, dispatch: ready) == .harnessAnswered(ok: true, appName: "System Settings", error: nil))
+        #expect(RealtimeOpenAppTool.notchAnswer(for: call, dispatch: ready) == .harnessAnswered(ok: true, subject: "System Settings", error: nil))
         let failed = RealtimeToolDispatch(result: ["ok": false, "error": "notFound"], harnessMilliseconds: 1,
                                           waitedForConfirmation: false, harnessResponse: ["ok": false, "error": "notFound"])
-        #expect(RealtimeOpenAppTool.notchAnswer(for: call, dispatch: failed) == .harnessAnswered(ok: false, appName: "settings", error: "notFound"))
+        #expect(RealtimeOpenAppTool.notchAnswer(for: call, dispatch: failed) == .harnessAnswered(ok: false, subject: "settings", error: "notFound"))
     }
 
     /// `highlight` stays a harness verb after the voice flow stopped using it.

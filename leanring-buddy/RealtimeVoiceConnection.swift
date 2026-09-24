@@ -3,7 +3,8 @@
 //  leanring-buddy
 //
 //  One open speech-to-speech session — OpenAI Realtime or Gemini Live — with the
-//  `open_app` tool declared and answered. Shared by the live push-to-talk loop
+//  voice tools (`open_app`, `focus_app`, `find_menu_items`, `press_menu`)
+//  declared and answered. Shared by the live push-to-talk loop
 //  (`RealtimeVoiceSession`) and `--voice-tool-probe`, so the probe measures the
 //  exact tool path the owner talks to.
 //
@@ -29,7 +30,13 @@ final class RealtimeTurnMarks {
     var toolCallUptime: TimeInterval?
     var toolCalls: [RealtimeToolCall] = []
     var dispatches: [RealtimeToolDispatch] = []
+    /// One per call, in arrival order — the decision trace's rows.
+    var decisions: [RealtimeToolDecision] = []
+    /// The latest finished find_menu_items' candidates: what a press chose from.
+    var latestMenuOffer: [RealtimeMenuCandidate]?
     var toolResultSentUptime: TimeInterval?
+    /// First audio after the LATEST tool result — with find -> press, the words
+    /// about the press, not a "one moment" between the two calls.
     var followUpFirstAudioUptime: TimeInterval?
     /// The first confirmed call's fresh look: "pending" while in flight, then
     /// "attached" or the refusal code; ms from the harness answer to the image
@@ -85,15 +92,19 @@ final class RealtimeVoiceConnection {
     /// Probe only: replaces the app name of every `open_app` call, so a forced
     /// failure (an app that does not exist) runs the real harness path.
     var appNameOverride: String?
+    /// Probe only: the menu fixtures turn the post-launch look off, so a probe
+    /// that brings the owner's Chrome or TextEdit forward never photographs it.
+    var sendsFreshLook = true
 
     /// PCM16 mono 24 kHz, as it arrives.
     var onAudio: ((Data) -> Void)?
     var onTurnFinished: (() -> Void)?
     var onClosed: (() -> Void)?
 
-    /// A model that keeps calling the tool is answered with an error after this
-    /// many calls in one turn, not left to loop against the harness.
-    static let maximumToolCallsPerTurn = 3
+    /// A model that keeps calling tools is answered with an error after this
+    /// many calls in one turn, not left to loop against the harness. focus ->
+    /// find -> press is three, so five leaves one retry and no more.
+    static let maximumToolCallsPerTurn = 5
     static let openAIMaxOutputTokens = VoiceStackBenchmark.openAIRealtimeMaxOutputTokens
     /// The J.A.R.V.I.S. voices, live loop only — the bench keeps "marin" and
     /// Gemini's default as its control. OpenAI lists ten realtime voices and
@@ -133,7 +144,7 @@ final class RealtimeVoiceConnection {
                     "instructions": RealtimeOpenAppTool.systemPrompt,
                     "output_modalities": ["audio"],
                     "max_output_tokens": Self.openAIMaxOutputTokens,
-                    "tools": [RealtimeOpenAppTool.openAIDeclaration],
+                    "tools": RealtimeVoiceVerbs.openAIDeclarations,
                     "tool_choice": "auto",
                     "audio": [
                         // Push-to-talk: we commit, the server's VAD does not decide.
@@ -157,7 +168,7 @@ final class RealtimeVoiceConnection {
                         "speechConfig": ["voiceConfig": ["prebuiltVoiceConfig": ["voiceName": Self.geminiVoice]]]
                     ],
                     "systemInstruction": ["parts": [["text": RealtimeOpenAppTool.systemPrompt]]],
-                    "tools": [RealtimeOpenAppTool.geminiDeclaration],
+                    "tools": [RealtimeVoiceVerbs.geminiDeclaration],
                     "realtimeInputConfig": ["automaticActivityDetection": ["disabled": true]],
                     // What the model said, for the probe's answers file and the honesty check.
                     "outputAudioTranscription": [String: Any]()
@@ -348,6 +359,9 @@ final class RealtimeVoiceConnection {
         }
         if turn.finishedUptime == nil { turn.finishedUptime = arrivalUptime }
         turn.finished.settle(.success(arrivalUptime))
+        // A find with no press leaves its "Looking for…" up; the turn is over.
+        // Proof and didn't-take hold their own time and ignore this.
+        JarvisNotch.shared.handle(.turnEnded)
         onTurnFinished?()
     }
 
@@ -359,6 +373,8 @@ final class RealtimeVoiceConnection {
         for providerCall in calls {
             let call = appNameOverride.map { RealtimeToolCall(callID: providerCall.callID, name: providerCall.name, appName: $0) } ?? providerCall
             turn.toolCalls.append(call)
+            let decisionIndex = turn.decisions.count
+            turn.decisions.append(RealtimeToolDecision(call: call, callUptime: arrivalUptime, offeredBeforeCall: turn.latestMenuOffer))
             turn.toolsInFlight += 1
             let overLimit = turn.toolCalls.count > Self.maximumToolCallsPerTurn
             Task { @MainActor [weak self] in
@@ -372,25 +388,29 @@ final class RealtimeVoiceConnection {
                     guard let harnessAnswer = self?.harnessAnswer else { return }
                     // Before the request, so the owner sees the intent while it runs;
                     // from the tool's own argument, never from anything said aloud.
-                    let isOpenApp = call.name == RealtimeOpenAppTool.name
-                    if isOpenApp {
-                        JarvisNotch.shared.handle(.toolCall(appName: call.appName.map(RealtimeOpenAppTool.captionName)))
+                    let isKnownTool = RealtimeVoiceVerbs.allToolNames.contains(call.name)
+                    if isKnownTool {
+                        JarvisNotch.shared.handle(.toolCall(title: RealtimeVoiceVerbs.intentTitle(for: call)))
                         if turn.intentShownUptime == nil { turn.intentShownUptime = self?.uptime }
                     }
                     dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer, onConfirmationRequired: {
-                        if isOpenApp { JarvisNotch.shared.handle(.confirmationRequired) }
+                        if isKnownTool { JarvisNotch.shared.handle(.confirmationRequired) }
                     })
                     // Proof only from the harness's own ok: true.
-                    if isOpenApp { JarvisNotch.shared.handle(RealtimeOpenAppTool.notchAnswer(for: call, dispatch: dispatch)) }
+                    if isKnownTool, let answered = RealtimeOpenAppTool.notchAnswer(for: call, dispatch: dispatch) {
+                        JarvisNotch.shared.handle(answered)
+                    }
                 }
                 turn.dispatches.append(dispatch)
+                turn.decisions[decisionIndex].dispatch = dispatch
+                if let offer = dispatch.menuOffer { turn.latestMenuOffer = offer.candidates }
                 // The harness's verification is the proof, so the result goes now and
                 // the model confirms the outcome. The model's only picture is the
                 // key-down one, of the app in front BEFORE this launch, so the new
                 // app is looked at in parallel and added as context once it arrives,
                 // without asking for a reply (owner's ruling 2026-09-24).
                 if dispatch.harnessConfirmed, call.name == RealtimeOpenAppTool.name, turn.freshLookOutcome == nil,
-                   let harnessAnswer = self?.harnessAnswer {
+                   self?.sendsFreshLook == true, let harnessAnswer = self?.harnessAnswer {
                     turn.freshLookOutcome = "pending"
                     Task { @MainActor [weak self] in await self?.addFreshLook(afterLaunchResponse: dispatch.harnessResponse, answer: harnessAnswer, to: turn) }
                 }
@@ -431,10 +451,12 @@ final class RealtimeVoiceConnection {
                 let waitDeadline = uptime + 5
                 while openAIResponseActive, uptime < waitDeadline { try await Task.sleep(for: .milliseconds(20)) }
                 turn.toolResultSentUptime = uptime
+                turn.followUpFirstAudioUptime = nil
                 try await socket?.sendJSON(["type": "response.create"])
             case .geminiLive:
                 turn.toolsInFlight -= 1
                 turn.toolResultSentUptime = uptime
+                turn.followUpFirstAudioUptime = nil
                 try await socket?.sendJSON(["toolResponse": ["functionResponses": [["id": call.callID, "name": call.name, "response": result]]]])
             }
         } catch {
