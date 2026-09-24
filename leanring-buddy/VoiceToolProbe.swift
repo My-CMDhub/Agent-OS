@@ -156,6 +156,7 @@ enum VoiceToolProbe {
         marks["firstAudioMs"] = milliseconds(from: released, to: turn.firstAudioUptime)
         marks["toolCallMs"] = milliseconds(from: released, to: turn.toolCallUptime)
         marks["harnessMs"] = firstDispatch?.harnessMilliseconds
+        marks["freshLookMs"] = turn.freshLookMilliseconds
         marks["followUpFirstAudioMs"] = milliseconds(from: turn.toolResultSentUptime, to: turn.followUpFirstAudioUptime)
         marks["totalToFirstSpokenResultMs"] = milliseconds(from: released, to: turn.followUpFirstAudioUptime)
         if let firstAudio = turn.firstAudioUptime, firstAudio < (turn.toolCallUptime ?? .infinity), turn.toolCallUptime != nil {
@@ -169,6 +170,8 @@ enum VoiceToolProbe {
         line["harnessStatus"] = (firstDispatch?.result["status"] as? String) ?? NSNull()
         line["harnessError"] = (firstDispatch?.result["error"] as? String) ?? NSNull()
         line["harnessConfirmed"] = harnessConfirmed
+        line["freshLook"] = turn.freshLookOutcome ?? NSNull()
+        line["freshLookImageBytes"] = turn.freshLookImageBytes ?? NSNull()
         line["waitedForConfirmation"] = turn.dispatches.contains(where: \.waitedForConfirmation)
         line["frontmostBundleIdentifier"] = frontmostBundleIdentifier ?? NSNull()
         line["systemSettingsFrontmost"] = frontmostBundleIdentifier == systemSettingsBundleIdentifier
@@ -199,7 +202,7 @@ enum VoiceToolProbe {
 
     static func summary(for lines: [[String: Any]], stack: VoiceStackChoice, probeID: String, spentUSD: Double?) -> [String: Any] {
         var marks: [String: Any] = [:]
-        for markName in ["sessionSetupMs", "firstAudioMs", "toolCallMs", "harnessMs", "followUpFirstAudioMs",
+        for markName in ["sessionSetupMs", "firstAudioMs", "toolCallMs", "harnessMs", "freshLookMs", "followUpFirstAudioMs",
                          "totalToFirstSpokenResultMs", "firstAudioBeforeToolMs"] {
             let values = lines.map { ($0["marksMs"] as? [String: Any])?[markName] as? Int }
             if let distribution = VoiceBenchStatistics.distribution(of: values) {
@@ -210,7 +213,9 @@ enum VoiceToolProbe {
         }
         var outcomeCounts: [String: Int] = [:]
         var errorKindCounts: [String: Int] = [:]
+        var freshLookCounts: [String: Int] = [:]
         for line in lines {
+            freshLookCounts[(line["freshLook"] as? String) ?? "notAttempted", default: 0] += 1
             let outcome = (line["harnessStatus"] as? String) ?? (line["harnessError"] as? String) ?? "noTool"
             outcomeCounts[outcome, default: 0] += 1
             if let errorKind = line["errorKind"] as? String { errorKindCounts[errorKind, default: 0] += 1 }
@@ -220,6 +225,7 @@ enum VoiceToolProbe {
             "kind": "summary", "probeId": probeID, "stack": stack.rawValue, "runs": lines.count,
             "toolCalled": count("toolCalled"),
             "harnessOutcomes": outcomeCounts,
+            "freshLookOutcomes": freshLookCounts,
             "systemSettingsFrontmost": count("systemSettingsFrontmost"),
             "claimedSuccessWithoutConfirmation": count("claimedSuccessWithoutConfirmation"),
             "errorKinds": errorKindCounts,

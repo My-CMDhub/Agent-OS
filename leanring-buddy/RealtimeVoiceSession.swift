@@ -9,6 +9,10 @@
 //
 //  Lives beside `CompanionManager`, which only routes the hotkey here.
 //
+//  Every push-to-talk turn appends one JSON line — counts and timings, never
+//  words — to ~/Library/Logs/Clicky/voice-live.log, including a turn that
+//  failed or was barged in on, so a silent turn is never an invisible one.
+//
 //  Coded, not verified by a run: nothing here can be exercised headlessly (it
 //  needs the owner's hotkey and mic). `--voice-tool-probe` verifies the shared
 //  connection and tool path with a fixture instead of the mic.
@@ -27,6 +31,25 @@ final class RealtimeVoiceSession {
     private let micEngine = AVAudioEngine()
     private var audioContinuation: AsyncStream<Data>.Continuation?
     private var turnTask: Task<Void, Never>?
+    /// The turn whose line is not yet written; nil once it is.
+    private var liveTurn: LiveTurn?
+
+    private final class LiveTurn {
+        var line: RealtimeLiveTurnLine
+        let pressedUptime: TimeInterval
+        var releasedUptime: TimeInterval?
+        /// The connection's marks for this turn, once `beginTurn` created them.
+        var marks: RealtimeTurnMarks?
+        init(line: RealtimeLiveTurnLine, pressedUptime: TimeInterval) {
+            self.line = line
+            self.pressedUptime = pressedUptime
+        }
+    }
+
+    static let liveLogFileName = "voice-live.log"
+    /// The probe's: a tool call may wait on a 60 s confirmation ticket.
+    static let turnTimeoutSeconds: Double = 90
+    private var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
     private let playbackEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
@@ -100,6 +123,12 @@ final class RealtimeVoiceSession {
 
     func pressed() {
         // Barge-in: a new press silences whatever is still being said.
+        writeLiveTurnLine(bargedIn: true)
+        let stack = selectedStack
+        liveTurn = LiveTurn(
+            line: RealtimeLiveTurnLine(stack: stack.rawValue, turnID: UUID().uuidString,
+                                       sessionWasWarm: connection.map { $0.isOpen && $0.stack == stack } ?? false),
+            pressedUptime: uptime)
         stopPlayback()
         connection?.cancelResponse()
         turnTask?.cancel()
@@ -111,6 +140,7 @@ final class RealtimeVoiceSession {
             try startMic(targetSampleRate: selectedStack.inputSampleRate, continuation: continuation)
         } catch {
             print("❌ realtime: mic failed to start: \(error)")
+            writeLiveTurnLine(errorKind: "micFailed")
             continuation.finish()
             onStateChange?(.idle)
             return
@@ -120,6 +150,7 @@ final class RealtimeVoiceSession {
     }
 
     func released() {
+        liveTurn?.releasedUptime = uptime
         stopMic()
         audioContinuation?.finish()
         audioContinuation = nil
@@ -129,25 +160,70 @@ final class RealtimeVoiceSession {
     /// The mic is already running while this connects and captures; its audio
     /// waits in the stream and is sent in order once the turn is open.
     private func runTurn(_ audioStream: AsyncStream<Data>) async {
+        let liveTurn = self.liveTurn
         do {
             let screenshotTask = Task { @MainActor in
                 try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first(where: \.isCursorScreen)
             }
+            let setupStart = uptime
             let connection = try await readyConnection()
+            if liveTurn?.line.sessionWasWarm == false { liveTurn?.line.sessionSetupMs = Self.milliseconds(from: setupStart, to: uptime) }
             if let screenshot = try? await screenshotTask.value {
                 try await connection.sendScreenshot(screenshot.imageData)
             }
             try await connection.beginTurn()
+            liveTurn?.marks = connection.turn
             for await pcmChunk in audioStream {
                 try await connection.appendAudio(pcmChunk)
             }
             guard !Task.isCancelled else { return }
             try await connection.endTurn()
+            _ = try await connection.turn.finished.value(timeoutSeconds: Self.turnTimeoutSeconds, timeoutKind: "turnTimeout")
+            if self.liveTurn === liveTurn { writeLiveTurnLine() }
         } catch {
             print("❌ realtime: turn failed: \(error)")
+            // A barge-in already wrote this turn's line and owns the state now.
+            guard self.liveTurn === liveTurn, liveTurn != nil else { return }
+            writeLiveTurnLine(errorKind: (error as? VoiceBenchFailure)?.kind ?? VoiceBenchRun.errorKind(for: error, stage: selectedStack.rawValue))
             onStateChange?(.idle)
             prewarm()
         }
+    }
+
+    private static func milliseconds(from start: TimeInterval?, to end: TimeInterval?) -> Int? {
+        guard let start, let end else { return nil }
+        return Int(((end - start) * 1000).rounded())
+    }
+
+    /// Once per turn. Timings run from the key-up (`releasedUptime`), which is
+    /// what the owner feels; the probe's origin is its last audio sent, which a
+    /// fixture sends at the same instant.
+    private func writeLiveTurnLine(bargedIn: Bool = false, errorKind: String? = nil) {
+        guard let liveTurn else { return }
+        self.liveTurn = nil
+        var line = liveTurn.line
+        let released = liveTurn.releasedUptime
+        line.holdMs = Self.milliseconds(from: liveTurn.pressedUptime, to: released)
+        line.bargedIn = bargedIn
+        line.errorKind = errorKind
+        if let marks = liveTurn.marks {
+            let firstDispatch = marks.dispatches.first
+            line.firstAudioMs = Self.milliseconds(from: released, to: marks.firstAudioUptime)
+            line.toolCalled = !marks.toolCalls.isEmpty
+            line.toolName = marks.toolCalls.first?.name
+            line.toolCallMs = Self.milliseconds(from: released, to: marks.toolCallUptime)
+            line.harnessMs = firstDispatch?.harnessMilliseconds
+            line.harnessStatus = firstDispatch?.result["status"] as? String
+            line.harnessError = firstDispatch?.result["error"] as? String
+            line.freshLook = marks.freshLookOutcome
+            line.freshLookMs = marks.freshLookMilliseconds
+            line.followUpFirstAudioMs = Self.milliseconds(from: marks.toolResultSentUptime, to: marks.followUpFirstAudioUptime)
+            // No tool: the spoken result IS the first audio.
+            line.releaseToSpokenResultMs = Self.milliseconds(
+                from: released, to: marks.toolCalls.isEmpty ? marks.firstAudioUptime : marks.followUpFirstAudioUptime)
+            line.turnDoneMs = bargedIn || errorKind != nil ? nil : Self.milliseconds(from: released, to: uptime)
+        }
+        MeasurementLogFile.appendJSONLine(line.jsonObject, toFileNamed: Self.liveLogFileName)
     }
 
     private func startMic(targetSampleRate: Int, continuation: AsyncStream<Data>.Continuation) throws {
@@ -208,5 +284,54 @@ final class RealtimeVoiceSession {
         playbackEngine.stop()
         connection?.close()
         connection = nil
+    }
+}
+
+/// One live push-to-talk turn, as logged. Counts and timings only — no field
+/// here can carry what was said. Names match `--voice-tool-probe`'s marks where
+/// they mean the same thing; `releaseToSpokenResultMs` is the probe's
+/// `totalToFirstSpokenResultMs`, and on a turn with no tool it is the first audio.
+nonisolated struct RealtimeLiveTurnLine {
+    let stack: String
+    let turnID: String
+    let sessionWasWarm: Bool
+    var sessionSetupMs: Int?
+    var holdMs: Int?
+    var firstAudioMs: Int?
+    var toolCalled = false
+    var toolName: String?
+    var toolCallMs: Int?
+    var harnessMs: Int?
+    var harnessStatus: String?
+    var harnessError: String?
+    /// "attached", a refusal code, or nil when no look was attempted.
+    var freshLook: String?
+    var freshLookMs: Int?
+    var followUpFirstAudioMs: Int?
+    var releaseToSpokenResultMs: Int?
+    var turnDoneMs: Int?
+    var bargedIn = false
+    var errorKind: String?
+
+    init(stack: String, turnID: String, sessionWasWarm: Bool) {
+        self.stack = stack
+        self.turnID = turnID
+        self.sessionWasWarm = sessionWasWarm
+    }
+
+    /// Every key is always present, null when unmeasured — an absent key and a
+    /// turn that never got that far must not look alike.
+    var jsonObject: [String: Any] {
+        func value(_ optional: Any?) -> Any { optional ?? NSNull() }
+        return [
+            "kind": "turn", "stack": stack, "turnId": turnID,
+            "sessionWasWarm": sessionWasWarm, "sessionSetupMs": value(sessionSetupMs),
+            "holdMs": value(holdMs), "firstAudioMs": value(firstAudioMs),
+            "toolCalled": toolCalled, "toolName": value(toolName), "toolCallMs": value(toolCallMs),
+            "harnessMs": value(harnessMs), "harnessStatus": value(harnessStatus), "harnessError": value(harnessError),
+            "freshLook": value(freshLook), "freshLookMs": value(freshLookMs),
+            "followUpFirstAudioMs": value(followUpFirstAudioMs), "releaseToSpokenResultMs": value(releaseToSpokenResultMs),
+            "turnDoneMs": value(turnDoneMs), "bargedIn": bargedIn, "errorKind": value(errorKind)
+        ]
     }
 }

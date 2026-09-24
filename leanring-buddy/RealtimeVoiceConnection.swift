@@ -31,6 +31,11 @@ final class RealtimeTurnMarks {
     var dispatches: [RealtimeToolDispatch] = []
     var toolResultSentUptime: TimeInterval?
     var followUpFirstAudioUptime: TimeInterval?
+    /// The first confirmed call's fresh look: "attached" or the refusal code,
+    /// ms from the harness answer to the image sent, and the bytes sent.
+    var freshLookOutcome: String?
+    var freshLookMilliseconds: Int?
+    var freshLookImageBytes: Int?
     var transcript = ""
     var outputAudioMime: String?
     var toolsInFlight = 0
@@ -150,7 +155,11 @@ final class RealtimeVoiceConnection {
 
     // MARK: A turn
 
-    /// Before `beginTurn`, off the audio clock, as the bench does it.
+    /// Before `beginTurn`, off the audio clock, as the bench does it — and again
+    /// after a verified `open_app`, ahead of its result. Gemini documents no
+    /// ordering between a `realtimeInput` frame and a `toolResponse` ("concurrent
+    /// streams … not guaranteed", ai.google.dev/api/live, read 2026-09-24), so the
+    /// probe's answer check is the only evidence the frame is seen in time.
     func sendScreenshot(_ jpegData: Data) async throws {
         let base64Image = jpegData.base64EncodedString()
         switch stack {
@@ -325,7 +334,25 @@ final class RealtimeVoiceConnection {
                     dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer)
                 }
                 turn.dispatches.append(dispatch)
-                await self?.sendToolResult(dispatch.result, for: call, in: turn)
+                var result = dispatch.result
+                // The model's only picture is the key-down one, of the app that was
+                // in front BEFORE this launch — so after a verified launch it is
+                // shown the new app first, and answers from that.
+                if dispatch.harnessConfirmed, call.name == RealtimeOpenAppTool.name, let harnessAnswer = self?.harnessAnswer {
+                    let lookStart = ProcessInfo.processInfo.systemUptime
+                    var look = await RealtimeOpenAppTool.freshLook(afterLaunchResponse: dispatch.harnessResponse, answer: harnessAnswer)
+                    if case .image(let jpeg) = look {
+                        do { try await self?.sendScreenshot(jpeg) } catch { look = .unavailable(error: "imageSendFailed") }
+                    }
+                    if turn.freshLookOutcome == nil {
+                        turn.freshLookOutcome = look.outcome
+                        turn.freshLookMilliseconds = Int(((ProcessInfo.processInfo.systemUptime - lookStart) * 1000).rounded())
+                        if case .image(let jpeg) = look { turn.freshLookImageBytes = jpeg.count }
+                    }
+                    if case .unavailable(let error) = look { print("🎙️ realtime: no fresh look after open_app: \(error)") }
+                    result = RealtimeOpenAppTool.toolResult(result, with: look)
+                }
+                await self?.sendToolResult(result, for: call, in: turn)
             }
         }
     }

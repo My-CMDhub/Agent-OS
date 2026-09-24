@@ -8,7 +8,9 @@
 //  the models actually CALL the tool is proven by `--voice-tool-probe`, not here.
 //
 
+import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
 @testable import Clicky
 
@@ -131,5 +133,72 @@ struct RealtimeVoiceToolTests {
         #expect(VoiceStackChoice.allCases.map(\.pickerLabel) == ["OpenAI", "Gemini"])
         #expect(VoiceStackChoice.openAIRealtime.inputSampleRate == 24_000)
         #expect(VoiceStackChoice.geminiLive.inputSampleRate == 16_000)
+    }
+
+    // MARK: Fresh look
+
+    @Test func lookIsTheHarnessWindowRungPinnedToTheLaunchedApp() throws {
+        let line = try #require(RealtimeOpenAppTool.lookRequestLine(expectApp: "com.apple.systempreferences"))
+        #expect(line == #"{"expectApp":"com.apple.systempreferences","tier":"window","verb":"look"}"#)
+    }
+
+    @Test func refusedLookStillSendsTheResultAndSaysNoFreshView() {
+        let refused: [String: Any] = ["ok": false, "error": "kernelRefused", "imagePath": "/never/read.jpg"]
+        var imageReads = 0
+        let look = RealtimeOpenAppTool.freshLook(fromLookResponse: refused) { _ in imageReads += 1; return Data() }
+        #expect(imageReads == 0)
+        #expect(look.outcome == "kernelRefused")
+        let launched: [String: Any] = ["ok": true, "status": "ready", "error": NSNull(), "message": NSNull()]
+        let result = RealtimeOpenAppTool.toolResult(launched, with: look)
+        #expect(result["ok"] as? Bool == true)
+        #expect(result["status"] as? String == "ready")
+        #expect(result["freshView"] as? Bool == false)
+        #expect(result["freshViewError"] as? String == "kernelRefused")
+        #expect(RealtimeOpenAppTool.freshLook(fromLookResponse: [:]) { _ in nil }.outcome == "unreadableHarnessResponse")
+        #expect(RealtimeOpenAppTool.freshLook(fromLookResponse: ["ok": true, "imagePath": "/x.jpg"]) { _ in nil }.outcome == "imageUnreadable")
+        #expect(RealtimeOpenAppTool.freshLook(fromLookResponse: ["ok": true, "imagePath": "/x.jpg"]) { _ in Data("not a jpeg".utf8) }.outcome == "imageDownscaleFailed")
+    }
+
+    @Test func attachedLookMarksTheResultAndIsDownscaled() throws {
+        // A 2000x1000 image in, long edge 1024 out.
+        let context = try #require(CGContext(data: nil, width: 2000, height: 1000, bitsPerComponent: 8, bytesPerRow: 0,
+                                             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        let encoded = NSMutableData()
+        let destination = try #require(CGImageDestinationCreateWithData(encoded, "public.jpeg" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try #require(context.makeImage()), nil)
+        #expect(CGImageDestinationFinalize(destination))
+        let big = encoded as Data
+        let look = RealtimeOpenAppTool.freshLook(fromLookResponse: ["ok": true, "imagePath": "/x.jpg"]) { _ in big }
+        guard case .image(let jpeg) = look else { Issue.record("expected an image, got \(look.outcome)"); return }
+        let source = try #require(CGImageSourceCreateWithData(jpeg as CFData, nil))
+        let properties = try #require(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        #expect(properties[kCGImagePropertyPixelWidth] as? Int == 1024)
+        #expect(properties[kCGImagePropertyPixelHeight] as? Int == 512)
+        let result = RealtimeOpenAppTool.toolResult(["ok": true], with: look)
+        #expect(result["freshView"] as? Bool == true)
+        #expect(result["freshViewError"] == nil)
+    }
+
+    // MARK: Live turn line
+
+    @Test func failedLiveTurnStillWritesEveryKeyAndNoWords() throws {
+        var line = RealtimeLiveTurnLine(stack: "geminiLive", turnID: "T1", sessionWasWarm: false)
+        line.sessionSetupMs = 1_900
+        line.holdMs = 1_200
+        line.errorKind = "geminiLive:setupTimeout"
+        let jsonLine = try #require(MeasurementLogFile.jsonLine(line.jsonObject))
+        let parsed = object(jsonLine)
+        #expect(parsed["errorKind"] as? String == "geminiLive:setupTimeout")
+        #expect(parsed["sessionWasWarm"] as? Bool == false)
+        #expect(parsed["sessionSetupMs"] as? Int == 1_900)
+        #expect(parsed["toolCalled"] as? Bool == false)
+        #expect(parsed["bargedIn"] as? Bool == false)
+        #expect(parsed["firstAudioMs"] is NSNull)
+        #expect(parsed["freshLookMs"] is NSNull)
+        #expect(Set(parsed.keys) == [
+            "kind", "stack", "turnId", "sessionWasWarm", "sessionSetupMs", "holdMs", "firstAudioMs", "toolCalled",
+            "toolName", "toolCallMs", "harnessMs", "harnessStatus", "harnessError", "freshLook", "freshLookMs",
+            "followUpFirstAudioMs", "releaseToSpokenResultMs", "turnDoneMs", "bargedIn", "errorKind"
+        ])
     }
 }

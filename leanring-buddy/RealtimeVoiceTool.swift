@@ -16,6 +16,7 @@
 //
 
 import Foundation
+import ImageIO
 
 // MARK: - Stack choice
 
@@ -92,6 +93,7 @@ nonisolated enum RealtimeOpenAppTool {
     you can open an installed mac app with the open_app tool, and that is the only thing you can do on this computer. when the user asks you to open or launch an app, call open_app with the app's name as it appears in the applications folder, for example "System Settings".
     - never say you opened, launched or did anything before the tool result comes back.
     - only say the app is open if the result has ok true. if ok is false, say plainly that it didn't open and give the reason from the error in a few words.
+    - after open_app succeeds you are sent a fresh view of the screen before the result. describe only what that fresh view shows, never the earlier screenshot. if the result has freshView false, say what opened and don't describe the screen.
     - for anything else on the computer — clicking, typing, changing a setting, closing things — you have no tool. say you can't do that yet and tell the user where to do it themselves.
     """
 
@@ -240,6 +242,68 @@ nonisolated enum RealtimeOpenAppTool {
         return finished(toolResult(fromHarnessResponse: response), waited: true, harnessResponse: response)
     }
 
+    // MARK: Fresh look
+
+    /// Long edge of the fresh view sent to the model. A window crop arrives at
+    /// Retina scale (2 px per point); 1024 px keeps a sidebar label legible on a
+    /// ~700 pt window and is about half the 1920 px key-down screenshot. Measured
+    /// 2026-09-24 on System Settings: 112-128 KB sent (the key-down one: 461 KB).
+    static let freshLookMaxPixelDimension = 1024
+    static let freshLookJPEGQuality = 0.7
+
+    /// The harness's own `look`, window rung, pinned to the app just launched:
+    /// the one-app capture and its secure-field and incomplete-inspection
+    /// refusals apply, and a different app in front refuses `frontmostChanged`.
+    static func lookRequestLine(expectApp bundleIdentifier: String) -> String? {
+        let request: [String: Any] = ["verb": "look", "tier": "window", "expectApp": bundleIdentifier]
+        return (try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    /// Only after `ok: true`. Like `dispatch`, `answer` blocks, so it runs detached.
+    static func freshLook(afterLaunchResponse launchResponse: [String: Any]?,
+                          answer: @escaping @Sendable (String) -> String) async -> RealtimeFreshLook {
+        guard let bundleIdentifier = launchResponse?["bundleIdentifier"] as? String,
+              let line = lookRequestLine(expectApp: bundleIdentifier) else { return .unavailable(error: "noBundleIdentifier") }
+        let response = harnessResponseObject(await Task.detached { answer(line) }.value)
+        return freshLook(fromLookResponse: response) { path in try? Data(contentsOf: URL(fileURLWithPath: path)) }
+    }
+
+    static func freshLook(fromLookResponse response: [String: Any], readImage: (String) -> Data?) -> RealtimeFreshLook {
+        guard !response.isEmpty else { return .unavailable(error: "unreadableHarnessResponse") }
+        guard response["ok"] as? Bool == true else { return .unavailable(error: response["error"] as? String ?? "lookFailed") }
+        guard let path = response["imagePath"] as? String, let imageData = readImage(path) else { return .unavailable(error: "imageUnreadable") }
+        guard let jpeg = downscaledJPEG(imageData, maxPixelDimension: freshLookMaxPixelDimension) else { return .unavailable(error: "imageDownscaleFailed") }
+        return .image(jpeg)
+    }
+
+    static func downscaledJPEG(_ imageData: Data, maxPixelDimension: Int) -> Data? {
+        guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelDimension,
+                kCGImageSourceCreateThumbnailWithTransform: true
+              ] as CFDictionary) else { return nil }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, "public.jpeg" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: freshLookJPEGQuality] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return output as Data
+    }
+
+    /// The model is told whether it was shown the app it opened, so a refused
+    /// look can never pass for a view of the new screen.
+    static func toolResult(_ result: [String: Any], with look: RealtimeFreshLook) -> [String: Any] {
+        var result = result
+        switch look {
+        case .image:
+            result["freshView"] = true
+        case .unavailable(let error):
+            result["freshView"] = false
+            result["freshViewError"] = error
+        }
+        return result
+    }
+
     // MARK: Honesty check
 
     /// Did the model SAY it opened something while the harness did not confirm
@@ -252,6 +316,19 @@ nonisolated enum RealtimeOpenAppTool {
         let spoken = transcript.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
         guard spoken.contains("open") else { return false }
         return ["done", "opened", "there you go", "it's open"].contains { spoken.contains($0) }
+    }
+}
+
+nonisolated enum RealtimeFreshLook {
+    case image(Data)
+    case unavailable(error: String)
+
+    /// For the logs: "attached" or the refusal's code.
+    var outcome: String {
+        switch self {
+        case .image: return "attached"
+        case .unavailable(let error): return error
+        }
     }
 }
 
