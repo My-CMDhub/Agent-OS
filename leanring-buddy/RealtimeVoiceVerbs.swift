@@ -135,7 +135,18 @@ nonisolated enum RealtimeVoiceVerbs {
 
     static func isPrivateMenuPath(_ path: [String]) -> Bool {
         if let top = path.first, privateTopLevelMenus.contains(foldedTokens(top).joined(separator: " ")) { return true }
-        return path.contains { foldedTokens($0).contains { $0.hasPrefix("recent") } }
+        return path.contains { step in quotesSomething(step) || foldedTokens(step).contains { $0.hasPrefix("recent") } }
+    }
+
+    /// Finder names the selection INSIDE the command: Copy “<file>” as Pathname,
+    /// Open “<file>”, Compress “<file>”, Get Info on “<file>”. Found in the Jev
+    /// replay (2026-09-25): 24 trace entries carried a file name, and each had
+    /// gone to the model too. A quote mark in any step makes the item private;
+    /// a lone ’ does not — it is the apostrophe in "Don’t Save".
+    static let quoteMarks: Set<Character> = ["\u{201C}", "\u{201D}", "\u{201E}", "\"", "\u{2018}", "\u{00AB}", "\u{00BB}", "\u{2039}", "\u{203A}"]
+
+    static func quotesSomething(_ label: String) -> Bool {
+        label.contains { quoteMarks.contains($0) }
     }
 
     /// The Window menu ends with one item per open window, named by its title —

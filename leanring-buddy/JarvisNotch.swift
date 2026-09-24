@@ -193,7 +193,7 @@ nonisolated enum JarvisNotchReason {
         "noFrontmostApplication": "nothing is in front",
         "windowListUnreadable": "its windows didn\u{2019}t answer",
         "missingMenuPath": "no menu item was named",
-        "recentItemsArePrivate": "recent items stay private"
+        "privateMenuItem": "that menu item is private"
     ]
 
     static func plain(forErrorCode code: String?) -> String {

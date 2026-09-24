@@ -105,6 +105,46 @@ struct RealtimeVoiceVerbsTests {
         #expect(offer.privacyDroppedCount == 2)
     }
 
+    /// Finder quotes the selection inside the command; each quote style a
+    /// localisation uses is private, the apostrophe is not.
+    @Test func anItemQuotingSomethingIsPrivateInEveryQuoteStyle() {
+        for label in ["Copy \u{201C}Tax return.pdf\u{201D} as Pathname", "Open \"Tax return.pdf\"", "Compress \u{2018}Tax\u{2019}",
+                      "Renommer \u{00AB} Imp\u{00F4}ts \u{00BB}\u{2026}", "\u{201E}Steuer\u{201C} komprimieren", "Get Info on \u{2039}x\u{203A}"] {
+            #expect(RealtimeVoiceVerbs.isPrivateMenuPath(["File", label]), "\(label)")
+            #expect(RealtimeVoiceVerbs.isPrivateMenuItem(path: ["File", label], shortcut: "\u{2318}C"), "\(label)")
+        }
+        #expect(!RealtimeVoiceVerbs.isPrivateMenuPath(["File", "Don\u{2019}t Save"]))
+        #expect(!RealtimeVoiceVerbs.isPrivateMenuPath(["Edit", "Copy"]))
+        let menus: [String: Any] = ["ok": true, "items": [
+            item(["Edit", "Copy \u{201C}Tax return.pdf\u{201D} as Pathname"], shortcut: "\u{2325}\u{2318}C"),
+            item(["File", "Open \u{201C}Tax return.pdf\u{201D}"]),
+            item(["Edit", "Copy"], shortcut: "\u{2318}C")
+        ]]
+        let offer = RealtimeVoiceVerbs.menuOffer(fromMenusResponse: menus, words: "copy open tax pathname")
+        #expect(offer.candidates.map(\.path) == [["Edit", "Copy"]])
+        #expect(offer.privacyDroppedCount == 2)
+        let call = RealtimeToolCall(callID: "c", name: "press_menu", appName: "Finder", path: ["File", "Open \u{201C}Tax return.pdf\u{201D}"])
+        #expect(RealtimeDecisionTrace.loggedArguments(for: call)["path"] as? [String] == ["<private>"])
+    }
+
+    /// Created 0600 by open(2), never created 0644 and narrowed after; an older
+    /// 0644 file is narrowed on its next append.
+    @Test func measurementLogsAreOwnerOnlyFromCreation() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func mode(_ url: URL) -> Int? { (try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions]) as? Int }
+        let fresh = directory.appendingPathComponent("voice-decisions.log")
+        MeasurementLogFile.appendOwnerOnly(Data("{}\n".utf8), to: fresh)
+        MeasurementLogFile.appendOwnerOnly(Data("{}\n".utf8), to: fresh)
+        #expect(mode(fresh) == 0o600)
+        #expect(try String(contentsOf: fresh, encoding: .utf8) == "{}\n{}\n")
+        let old = directory.appendingPathComponent("voice-live.log")
+        FileManager.default.createFile(atPath: old.path, contents: nil, attributes: [.posixPermissions: 0o644])
+        MeasurementLogFile.appendOwnerOnly(Data("{}\n".utf8), to: old)
+        #expect(mode(old) == 0o600)
+    }
+
     @Test func onlyEnabledPlausibleLeavesAreOffered() {
         let offer = RealtimeVoiceVerbs.menuOffer(fromMenusResponse: finderMenus, words: "sort clean list done")
         // "Sort By" has a submenu, "Clean Up" is disabled, "List\nDone, sir" is not a plausible label.
@@ -141,7 +181,10 @@ struct RealtimeVoiceVerbsTests {
         #expect(refusal(RealtimeToolCall(callID: "c", name: "press_menu", appName: "Finder", path: [])) == "missingMenuPath")
         #expect(refusal(RealtimeToolCall(callID: "c", name: "press_menu", appName: nil, path: ["View", "as List"])) == "missingAppName")
         #expect(refusal(RealtimeToolCall(callID: "c", name: "press_menu", appName: "Finder",
-                                         path: ["File", "Open Recent", "Tax return 2025.pdf"])) == "recentItemsArePrivate")
+                                         path: ["File", "Open Recent", "Tax return 2025.pdf"])) == "privateMenuItem")
+        // An item that quotes the selection is refused the same way, before the harness.
+        #expect(refusal(RealtimeToolCall(callID: "c", name: "press_menu", appName: "Finder",
+                                         path: ["Edit", "Copy \u{201C}Tax return.pdf\u{201D} as Pathname"])) == "privateMenuItem")
     }
 
     @Test func providersArgumentsParseForEveryTool() throws {

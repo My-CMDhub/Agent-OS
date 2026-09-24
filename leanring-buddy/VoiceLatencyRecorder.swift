@@ -47,16 +47,22 @@ nonisolated enum MeasurementLogFile {
             return
         }
         writeQueue.async {
-            let fileURL = directoryURL.appendingPathComponent(fileName)
             try? FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: fileURL.path) {
-                FileManager.default.createFile(atPath: fileURL.path, contents: nil)
-            }
-            guard let fileHandle = try? FileHandle(forWritingTo: fileURL) else { return }
-            defer { try? fileHandle.close() }
-            _ = try? fileHandle.seekToEnd()
-            try? fileHandle.write(contentsOf: Data((line + "\n").utf8))
+            appendOwnerOnly(Data((line + "\n").utf8), to: directoryURL.appendingPathComponent(fileName))
         }
+    }
+
+    /// Created 0600 by `open` itself — a file created 0644 and chmod-ed after
+    /// is readable by every local account in between — and an existing file
+    /// is narrowed on every append. These logs carry what the owner said and
+    /// which menu items their apps offered (2026-09-25: voice-live.log,
+    /// voice-tool-probe.log and voice-bench.log were all 0644).
+    static func appendOwnerOnly(_ data: Data, to fileURL: URL) {
+        let fileDescriptor = open(fileURL.path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+        guard fileDescriptor >= 0 else { return }
+        fchmod(fileDescriptor, 0o600)
+        let fileHandle = FileHandle(fileDescriptor: fileDescriptor, closeOnDealloc: true)
+        try? fileHandle.write(contentsOf: data)
     }
 
     /// A headless run that terminates straight after its last append would

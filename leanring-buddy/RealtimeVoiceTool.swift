@@ -294,9 +294,10 @@ nonisolated enum RealtimeOpenAppTool {
             request = ["verb": "menus", "expectApp": appName]
         case RealtimeVoiceVerbs.pressMenuName:
             guard let path = call.path, !path.isEmpty else { return refuse("missingMenuPath", "press_menu needs a path from find_menu_items") }
-            // Never offered, so never pressed: Open Recent and friends carry file names.
+            // Never offered, so never pressed: Open Recent, History and items
+            // quoting the selection carry file and page names.
             guard !RealtimeVoiceVerbs.isPrivateMenuPath(path) else {
-                return refuse("recentItemsArePrivate", "recent-items menus are private and are not offered or pressed")
+                return refuse("privateMenuItem", "that menu item names the owner's files or pages; it is private and is not offered or pressed")
             }
             request = ["verb": "menu", "path": path, "expectApp": appName]
         default:
