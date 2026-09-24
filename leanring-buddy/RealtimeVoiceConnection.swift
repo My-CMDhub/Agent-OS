@@ -38,6 +38,12 @@ final class RealtimeTurnMarks {
     var freshLookMilliseconds: Int?
     var freshLookImageBytes: Int?
     var freshLookCompletedUptime: TimeInterval?
+    /// The overlay: the "Opening X…" caption's show time, and the outline after a
+    /// confirmed launch — "pending", then "highlighted" or the refusal code.
+    var captionShownUptime: TimeInterval?
+    var highlightOutcome: String?
+    var highlightMilliseconds: Int?
+    var highlightDrawnRect: [String: Any]?
     /// Set when the turn finishes; audio after it is a reply nobody asked for.
     var finishedUptime: TimeInterval?
     var audioChunksAfterFinish = 0
@@ -360,7 +366,14 @@ final class RealtimeVoiceConnection {
                 } else {
                     // `dispatch` hops off main for every harness call.
                     guard let harnessAnswer = self?.harnessAnswer else { return }
+                    // Before the request, so the owner sees the intent while it runs.
+                    if call.name == RealtimeOpenAppTool.name {
+                        ElementHighlightOverlay.showCaption(RealtimeOpenAppTool.openingCaption(for: call),
+                                                            seconds: RealtimeOpenAppTool.confirmationWaitSeconds)
+                        if turn.captionShownUptime == nil { turn.captionShownUptime = self?.uptime }
+                    }
                     dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer)
+                    if call.name == RealtimeOpenAppTool.name { self?.showOutcome(of: dispatch, for: call, in: turn) }
                 }
                 turn.dispatches.append(dispatch)
                 // The harness's verification is the proof, so the result goes now and
@@ -375,6 +388,29 @@ final class RealtimeVoiceConnection {
                 }
                 await self?.sendToolResult(dispatch.result, for: call, in: turn)
             }
+        }
+    }
+
+    /// The status replaces the caption: an outline round the launched window,
+    /// labelled, or the failure alone. Never blocks the tool result.
+    private func showOutcome(of dispatch: RealtimeToolDispatch, for call: RealtimeToolCall, in turn: RealtimeTurnMarks) {
+        let caption = RealtimeOpenAppTool.outcomeCaption(for: call, dispatch: dispatch)
+        guard dispatch.harnessConfirmed else {
+            ElementHighlightOverlay.showCaption(caption)
+            return
+        }
+        guard turn.highlightOutcome == nil else { return }
+        turn.highlightOutcome = "pending"
+        let outlineStart = uptime
+        let answer = harnessAnswer
+        Task { @MainActor [weak self] in
+            let outline = await RealtimeOpenAppTool.outlineLaunchedWindow(
+                launchResponse: dispatch.harnessResponse, label: caption, answer: answer)
+            // No outline: the verified status still replaces "Opening…".
+            if outline.outcome != "highlighted" { ElementHighlightOverlay.showCaption(caption) }
+            turn.highlightOutcome = outline.outcome
+            turn.highlightDrawnRect = outline.drawnRect
+            turn.highlightMilliseconds = Int((((self?.uptime ?? outlineStart) - outlineStart) * 1000).rounded())
         }
     }
 

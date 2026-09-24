@@ -73,7 +73,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Spends OpenAI credit (capped at US$0.50) and Gemini credit: ten "open
+        // Spends OpenAI credit (capped at US$0.50) and Gemini credit: five "open
         // settings" turns per realtime stack through the harness, then quits.
         // The card is up so a confirmation ticket can be answered by hand.
         if CommandLine.arguments.contains("--voice-tool-probe") {

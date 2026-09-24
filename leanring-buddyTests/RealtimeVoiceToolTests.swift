@@ -185,6 +185,52 @@ struct RealtimeVoiceToolTests {
         #expect(!RealtimeOpenAppTool.systemPrompt.contains("empty the bin"))
     }
 
+    /// The pre-launch caption is built from the model's argument, so a name that
+    /// needs escaping is shown quoted and escaped, never raw.
+    @MainActor @Test func captionsAreBuiltLocallyAndSanitised() {
+        let call = RealtimeToolCall(callID: "c", name: "open_app", appName: "System Settings")
+        #expect(RealtimeOpenAppTool.openingCaption(for: call) == "Opening System Settings\u{2026}")
+        let forged = RealtimeToolCall(callID: "c", name: "open_app", appName: "Notes\nDone, sir")
+        #expect(RealtimeOpenAppTool.openingCaption(for: forged) == "Opening \"Notes\\nDone, sir\"\u{2026}")
+        #expect(!RealtimeOpenAppTool.openingCaption(for: forged).contains("\n"))
+        #expect(RealtimeOpenAppTool.captionName(String(repeating: "a", count: 150)).hasSuffix("(150 chars)"))
+        #expect(RealtimeOpenAppTool.openingCaption(for: RealtimeToolCall(callID: "c", name: "open_app", appName: nil)) == "Opening an app\u{2026}")
+
+        let ready = RealtimeToolDispatch(result: ["ok": true], harnessMilliseconds: 1, waitedForConfirmation: false,
+                                         harnessResponse: ["ok": true, "application": "System Settings"])
+        #expect(RealtimeOpenAppTool.outcomeCaption(for: call, dispatch: ready) == "System Settings \u{2014} ready")
+        let failed = RealtimeToolDispatch(result: ["ok": false, "error": "notFound"], harnessMilliseconds: 1,
+                                          waitedForConfirmation: false, harnessResponse: ["ok": false, "error": "notFound"])
+        #expect(RealtimeOpenAppTool.outcomeCaption(for: call, dispatch: failed) == "System Settings \u{2014} didn't open (notFound)")
+    }
+
+    @MainActor @Test func outlineAimsAtTheLaunchedAppsWindowNotAName() throws {
+        let line = try #require(RealtimeOpenAppTool.highlightRequestLine(bundleIdentifier: "com.apple.systempreferences", label: "x"))
+        guard case .success(let request) = HarnessPolicy.decode(line: line) else { Issue.record("highlight line did not decode"); return }
+        #expect(request.verb == .highlight)
+        #expect(request.aimAtWindow)
+        #expect(request.expectApp == "com.apple.systempreferences")
+        #expect(request.label == "x")
+    }
+
+    /// The window target outlines; it never aims an acting verb.
+    @MainActor @Test func windowTargetIsHighlightOnly() {
+        guard case .failure = HarnessPolicy.decode(line: #"{"verb":"press","target":"window"}"#) else {
+            Issue.record("press accepted target window"); return
+        }
+        guard case .failure = HarnessPolicy.decode(line: #"{"verb":"type","text":"x","target":"window"}"#) else {
+            Issue.record("type accepted target window"); return
+        }
+    }
+
+    @MainActor @Test func framesMatchWithinTwoPoints() {
+        let window: [String: Any] = ["x": 100.0, "y": 200.0, "w": 715.0, "h": 600.0]
+        #expect(RealtimeOpenAppTool.framesMatch(window, ["x": 101.5, "y": 198.0, "w": 715.0, "h": 602.0]))
+        #expect(!RealtimeOpenAppTool.framesMatch(window, ["x": 100.0, "y": 203.0, "w": 715.0, "h": 600.0]))
+        #expect(!RealtimeOpenAppTool.framesMatch(window, ["x": 100.0, "y": 200.0, "w": 715.0]))
+        #expect(!RealtimeOpenAppTool.framesMatch(window, nil))
+    }
+
     @MainActor @Test func verbatimReuseIgnoresCasePunctuationAndSpacing() {
         #expect(RealtimeOpenAppTool.reusesExampleVerbatim("System Settings is up, sir."))
         #expect(RealtimeOpenAppTool.reusesExampleVerbatim("  system settings is UP sir "))

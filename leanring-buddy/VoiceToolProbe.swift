@@ -23,7 +23,7 @@ import Foundation
 @MainActor
 enum VoiceToolProbe {
     static let logFileName = "voice-tool-probe.log"
-    static let runsPerStack = 10
+    static let runsPerStack = 5
     static let openAICostCapUSD = 0.50
     static let fixtureFileName = "05-open-settings.wav"
     static let systemSettingsBundleIdentifier = "com.apple.systempreferences"
@@ -157,6 +157,20 @@ enum VoiceToolProbe {
         let frontmostBundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
 
         let turn = connection.turn
+        // The outline's frame against a separate `windows` read of the same app:
+        // a different verb and resolver, so an outline drawn round the wrong
+        // element, or mirrored, cannot agree with it.
+        let outlineDeadline = uptime + 5
+        while turn.highlightOutcome == "pending", uptime < outlineDeadline { try? await Task.sleep(for: .milliseconds(50)) }
+        var windowsFrame: [String: Any]?
+        var windowsError: String?
+        if let bundleIdentifier = turn.dispatches.first?.harnessResponse?["bundleIdentifier"] as? String,
+           let windowsLine = RealtimeOpenAppTool.windowsRequestLine(bundleIdentifier: bundleIdentifier) {
+            let windowsResponse = RealtimeOpenAppTool.harnessResponseObject(await Task.detached { harnessAnswer(windowsLine) }.value)
+            let windows = windowsResponse["windows"] as? [[String: Any]] ?? []
+            windowsFrame = (windows.first { $0["main"] as? Bool == true } ?? windows.first)?["frame"] as? [String: Any]
+            windowsError = windowsResponse["error"] as? String ?? (windows.isEmpty ? "noWindows" : nil)
+        }
         let released = turn.lastAudioSentUptime
         let firstDispatch = turn.dispatches.first
         let harnessConfirmed = turn.dispatches.contains(where: \.harnessConfirmed)
@@ -167,6 +181,8 @@ enum VoiceToolProbe {
         marks["freshLookArrivedAfterSpeechStartMs"] = turn.freshLookArrivedAfterSpeechStartMs
         marks["followUpFirstAudioMs"] = milliseconds(from: turn.toolResultSentUptime, to: turn.followUpFirstAudioUptime)
         marks["totalToFirstSpokenResultMs"] = milliseconds(from: released, to: turn.followUpFirstAudioUptime)
+        marks["captionLeadMs"] = milliseconds(from: turn.captionShownUptime, to: firstDispatch?.firstRequestSentUptime)
+        marks["highlightMs"] = turn.highlightMilliseconds
         if let firstAudio = turn.firstAudioUptime, firstAudio < (turn.toolCallUptime ?? .infinity), turn.toolCallUptime != nil {
             marks["firstAudioBeforeToolMs"] = milliseconds(from: released, to: firstAudio)
         }
@@ -178,6 +194,13 @@ enum VoiceToolProbe {
         line["harnessStatus"] = (firstDispatch?.result["status"] as? String) ?? NSNull()
         line["harnessError"] = (firstDispatch?.result["error"] as? String) ?? NSNull()
         line["harnessConfirmed"] = harnessConfirmed
+        line["captionShownBeforeLaunchRequest"] = turn.captionShownUptime.flatMap { shown in
+            firstDispatch?.firstRequestSentUptime.map { shown <= $0 } } ?? false
+        line["highlightOutcome"] = turn.highlightOutcome ?? "notAttempted"
+        line["highlightDrawnRect"] = turn.highlightDrawnRect ?? NSNull()
+        line["windowsFrame"] = windowsFrame ?? NSNull()
+        line["windowsError"] = windowsError ?? NSNull()
+        line["highlightFrameMatchesWindows"] = RealtimeOpenAppTool.framesMatch(turn.highlightDrawnRect, windowsFrame)
         line["freshLook"] = turn.freshLookOutcome ?? NSNull()
         line["freshLookImageBytes"] = turn.freshLookImageBytes ?? NSNull()
         line["audioChunksAfterFinish"] = turn.audioChunksAfterFinish
@@ -215,7 +238,7 @@ enum VoiceToolProbe {
     static func summary(for lines: [[String: Any]], answers: [String], stack: VoiceStackChoice, probeID: String, spentUSD: Double?) -> [String: Any] {
         var marks: [String: Any] = [:]
         for markName in ["sessionSetupMs", "firstAudioMs", "toolCallMs", "harnessMs", "freshLookMs", "freshLookArrivedAfterSpeechStartMs", "followUpFirstAudioMs",
-                         "totalToFirstSpokenResultMs", "firstAudioBeforeToolMs"] {
+                         "totalToFirstSpokenResultMs", "firstAudioBeforeToolMs", "captionLeadMs", "highlightMs"] {
             let values = lines.map { ($0["marksMs"] as? [String: Any])?[markName] as? Int }
             if let distribution = VoiceBenchStatistics.distribution(of: values) {
                 marks[markName] = ["n": distribution.count, "medianMs": distribution.medianMs, "p95Ms": distribution.p95Ms]
@@ -226,7 +249,9 @@ enum VoiceToolProbe {
         var outcomeCounts: [String: Int] = [:]
         var errorKindCounts: [String: Int] = [:]
         var freshLookCounts: [String: Int] = [:]
+        var highlightCounts: [String: Int] = [:]
         for line in lines {
+            highlightCounts[(line["highlightOutcome"] as? String) ?? "notAttempted", default: 0] += 1
             freshLookCounts[(line["freshLook"] as? String) ?? "notAttempted", default: 0] += 1
             let outcome = (line["harnessStatus"] as? String) ?? (line["harnessError"] as? String) ?? "noTool"
             outcomeCounts[outcome, default: 0] += 1
@@ -238,6 +263,9 @@ enum VoiceToolProbe {
             "toolCalled": count("toolCalled"),
             "harnessOutcomes": outcomeCounts,
             "freshLookOutcomes": freshLookCounts,
+            "highlightOutcomes": highlightCounts,
+            "captionShownBeforeLaunchRequest": count("captionShownBeforeLaunchRequest"),
+            "highlightFrameMatchesWindows": count("highlightFrameMatchesWindows"),
             "systemSettingsFrontmost": count("systemSettingsFrontmost"),
             "claimedSuccessWithoutConfirmation": count("claimedSuccessWithoutConfirmation"),
             "verbatimExampleReuse": answers.filter(RealtimeOpenAppTool.reusesExampleVerbatim).count,

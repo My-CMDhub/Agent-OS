@@ -208,6 +208,9 @@ struct HarnessRequest: Equatable {
     var mode: TypeMode = .insert
     /// Aim at whatever holds keyboard focus instead of resolving a name.
     var aimAtFocus: Bool = false
+    /// highlight only: the walked window itself. System Settings publishes its
+    /// window with no AXTitle (2026-09-24), so no name can reach it.
+    var aimAtWindow: Bool = false
     var thenConfirm: Bool = false
 
     /// A confirmation ticket the owner answered in-process. nil means none offered.
@@ -265,16 +268,20 @@ enum HarnessPolicy {
         // that would otherwise be silently treated as "resolve by name" and aim
         // somewhere the caller did not ask for.
         var aimAtFocus = false
+        var aimAtWindow = false
         if let target = raw.target {
-            guard target == "focused" else {
-                return .failure(.invalidField(field: "target", value: target))
+            switch target {
+            case "focused": aimAtFocus = true
+            // Outline only. An acting verb aimed at a whole window would press
+            // or type into the window element, which no caller means.
+            case "window" where verb == .highlight: aimAtWindow = true
+            default: return .failure(.invalidField(field: "target", value: target))
             }
-            aimAtFocus = true
         }
 
         // A name is what an acting verb aims with — unless it is aiming by focus,
         // which is the whole point of the focus target.
-        if verb.elementAction != nil || verb == .highlight, !aimAtFocus, (raw.title ?? "").isEmpty {
+        if verb.elementAction != nil || verb == .highlight, !aimAtFocus, !aimAtWindow, (raw.title ?? "").isEmpty {
             return .failure(.missingField("title"))
         }
 
@@ -375,6 +382,7 @@ enum HarnessPolicy {
             text: raw.text ?? "",
             mode: mode,
             aimAtFocus: aimAtFocus,
+            aimAtWindow: aimAtWindow,
             thenConfirm: raw.thenConfirm ?? false,
             ticket: raw.ticket,
             path: path,
@@ -1713,6 +1721,7 @@ final class HarnessServer {
         if !request.path.isEmpty { return request.path.joined(separator: " > ") }
         if let statusItem = request.statusItem, !statusItem.isEmpty { return statusItem }
         if request.aimAtFocus { return "<focused>" }
+        if request.aimAtWindow { return "<window>" }
         return request.app
     }
 
@@ -1836,7 +1845,10 @@ final class HarnessServer {
         )
 
         let resolvedNode: AccessibilityElementNode
-        if request.aimAtFocus {
+        if request.aimAtWindow {
+            resolvedNode = rootNode
+            response["resolution"] = ["status": "window", "matchCount": 1]
+        } else if request.aimAtFocus {
             // The OS says what has focus. No name is involved, which is the
             // point: the fields most worth typing into are anonymous.
             guard let focusedNode = AccessibilityTypePerformer.focusedNode() else {
