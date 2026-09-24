@@ -38,12 +38,8 @@ final class RealtimeTurnMarks {
     var freshLookMilliseconds: Int?
     var freshLookImageBytes: Int?
     var freshLookCompletedUptime: TimeInterval?
-    /// The overlay: the "Opening X…" caption's show time, and the outline after a
-    /// confirmed launch — "pending", then "highlighted" or the refusal code.
-    var captionShownUptime: TimeInterval?
-    var highlightOutcome: String?
-    var highlightMilliseconds: Int?
-    var highlightDrawnRect: [String: Any]?
+    /// When the notch first showed this turn's intent — before the harness request.
+    var intentShownUptime: TimeInterval?
     /// Set when the turn finishes; audio after it is a reply nobody asked for.
     var finishedUptime: TimeInterval?
     var audioChunksAfterFinish = 0
@@ -85,6 +81,10 @@ final class RealtimeVoiceConnection {
     /// OpenAI only, from each `response.done`'s usage; a response with no usage
     /// is charged the bench's ceiling, never 0.
     private(set) var estimatedOpenAIUSD = 0.0
+
+    /// Probe only: replaces the app name of every `open_app` call, so a forced
+    /// failure (an app that does not exist) runs the real harness path.
+    var appNameOverride: String?
 
     /// PCM16 mono 24 kHz, as it arrives.
     var onAudio: ((Data) -> Void)?
@@ -332,7 +332,10 @@ final class RealtimeVoiceConnection {
 
     private func receivedAudio(_ audio: Data, arrivalUptime: TimeInterval) {
         if turn.finishedUptime != nil { turn.audioChunksAfterFinish += 1 }
-        if turn.firstAudioUptime == nil { turn.firstAudioUptime = arrivalUptime }
+        if turn.firstAudioUptime == nil {
+            turn.firstAudioUptime = arrivalUptime
+            if turn.toolCalls.isEmpty { JarvisNotch.shared.handle(.firstAudioWithoutTool) }
+        }
         if turn.toolResultSentUptime != nil, turn.followUpFirstAudioUptime == nil { turn.followUpFirstAudioUptime = arrivalUptime }
         onAudio?(audio)
     }
@@ -353,7 +356,8 @@ final class RealtimeVoiceConnection {
     private func receivedToolCalls(_ calls: [RealtimeToolCall], arrivalUptime: TimeInterval) {
         let turn = self.turn
         if turn.toolCallUptime == nil { turn.toolCallUptime = arrivalUptime }
-        for call in calls {
+        for providerCall in calls {
+            let call = appNameOverride.map { RealtimeToolCall(callID: providerCall.callID, name: providerCall.name, appName: $0) } ?? providerCall
             turn.toolCalls.append(call)
             turn.toolsInFlight += 1
             let overLimit = turn.toolCalls.count > Self.maximumToolCallsPerTurn
@@ -366,14 +370,18 @@ final class RealtimeVoiceConnection {
                 } else {
                     // `dispatch` hops off main for every harness call.
                     guard let harnessAnswer = self?.harnessAnswer else { return }
-                    // Before the request, so the owner sees the intent while it runs.
-                    if call.name == RealtimeOpenAppTool.name {
-                        ElementHighlightOverlay.showCaption(RealtimeOpenAppTool.openingCaption(for: call),
-                                                            seconds: RealtimeOpenAppTool.confirmationWaitSeconds)
-                        if turn.captionShownUptime == nil { turn.captionShownUptime = self?.uptime }
+                    // Before the request, so the owner sees the intent while it runs;
+                    // from the tool's own argument, never from anything said aloud.
+                    let isOpenApp = call.name == RealtimeOpenAppTool.name
+                    if isOpenApp {
+                        JarvisNotch.shared.handle(.toolCall(appName: call.appName.map(RealtimeOpenAppTool.captionName)))
+                        if turn.intentShownUptime == nil { turn.intentShownUptime = self?.uptime }
                     }
-                    dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer)
-                    if call.name == RealtimeOpenAppTool.name { self?.showOutcome(of: dispatch, for: call, in: turn) }
+                    dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer, onConfirmationRequired: {
+                        if isOpenApp { JarvisNotch.shared.handle(.confirmationRequired) }
+                    })
+                    // Proof only from the harness's own ok: true.
+                    if isOpenApp { JarvisNotch.shared.handle(RealtimeOpenAppTool.notchAnswer(for: call, dispatch: dispatch)) }
                 }
                 turn.dispatches.append(dispatch)
                 // The harness's verification is the proof, so the result goes now and
@@ -388,29 +396,6 @@ final class RealtimeVoiceConnection {
                 }
                 await self?.sendToolResult(dispatch.result, for: call, in: turn)
             }
-        }
-    }
-
-    /// The status replaces the caption: an outline round the launched window,
-    /// labelled, or the failure alone. Never blocks the tool result.
-    private func showOutcome(of dispatch: RealtimeToolDispatch, for call: RealtimeToolCall, in turn: RealtimeTurnMarks) {
-        let caption = RealtimeOpenAppTool.outcomeCaption(for: call, dispatch: dispatch)
-        guard dispatch.harnessConfirmed else {
-            ElementHighlightOverlay.showCaption(caption)
-            return
-        }
-        guard turn.highlightOutcome == nil else { return }
-        turn.highlightOutcome = "pending"
-        let outlineStart = uptime
-        let answer = harnessAnswer
-        Task { @MainActor [weak self] in
-            let outline = await RealtimeOpenAppTool.outlineLaunchedWindow(
-                launchResponse: dispatch.harnessResponse, label: caption, answer: answer)
-            // No outline: the verified status still replaces "Opening…".
-            if outline.outcome != "highlighted" { ElementHighlightOverlay.showCaption(caption) }
-            turn.highlightOutcome = outline.outcome
-            turn.highlightDrawnRect = outline.drawnRect
-            turn.highlightMilliseconds = Int((((self?.uptime ?? outlineStart) - outlineStart) * 1000).rounded())
         }
     }
 

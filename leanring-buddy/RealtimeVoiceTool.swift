@@ -294,7 +294,8 @@ nonisolated enum RealtimeOpenAppTool {
         _ call: RealtimeToolCall,
         answer: @escaping @Sendable (String) -> String,
         confirmationWaitSeconds: Double = confirmationWaitSeconds,
-        pollMilliseconds: Int = confirmationPollMilliseconds
+        pollMilliseconds: Int = confirmationPollMilliseconds,
+        onConfirmationRequired: (@MainActor () -> Void)? = nil
     ) async -> RealtimeToolDispatch {
         let startedUptime = ProcessInfo.processInfo.systemUptime
         var firstRequestSentUptime: TimeInterval?
@@ -304,7 +305,8 @@ nonisolated enum RealtimeOpenAppTool {
                 harnessMilliseconds: Int(((ProcessInfo.processInfo.systemUptime - startedUptime) * 1000).rounded()),
                 waitedForConfirmation: waited,
                 harnessResponse: harnessResponse,
-                firstRequestSentUptime: firstRequestSentUptime
+                firstRequestSentUptime: firstRequestSentUptime,
+                answeredUptime: ProcessInfo.processInfo.systemUptime
             )
         }
         let firstLine: String
@@ -320,6 +322,7 @@ nonisolated enum RealtimeOpenAppTool {
               case .success(let ticketLine) = harnessRequestLine(for: call, ticket: ticket) else {
             return finished(toolResult(fromHarnessResponse: response), waited: false, harnessResponse: response)
         }
+        await onConfirmationRequired?()
         let deadline = startedUptime + confirmationWaitSeconds
         repeat {
             try? await Task.sleep(for: .milliseconds(pollMilliseconds))
@@ -376,9 +379,9 @@ nonisolated enum RealtimeOpenAppTool {
         return output as Data
     }
 
-    // MARK: Overlay
+    // MARK: Notch
 
-    /// A name as the caption shows it: bare when nothing in it needed escaping,
+    /// A name as the notch shows it: bare when nothing in it needed escaping,
     /// else `UntrustedText.forDisplay`'s quoted, escaped, capped form — the model
     /// wrote the pre-launch name, and a newline must not forge a second line.
     static func captionName(_ raw: String) -> String {
@@ -386,63 +389,12 @@ nonisolated enum RealtimeOpenAppTool {
         return shown == "\"\(raw)\"" ? raw : shown
     }
 
-    /// Shown BEFORE the launch request, from the tool's own argument, never from
-    /// anything the model said aloud.
-    static func openingCaption(for call: RealtimeToolCall) -> String {
-        guard let appName = call.appName else { return "Opening an app…" }
-        return "Opening \(captionName(appName))…"
-    }
-
-    /// The verified outcome, from the harness's answer: its `application` (the
-    /// bundle's own name on disk) and its `error` code.
-    static func outcomeCaption(for call: RealtimeToolCall, dispatch: RealtimeToolDispatch) -> String {
-        let name = captionName((dispatch.harnessResponse?["application"] as? String) ?? call.appName ?? "app")
-        guard dispatch.harnessConfirmed else {
-            return "\(name) — didn't open (\(dispatch.result["error"] as? String ?? "unknown"))"
-        }
-        return "\(name) — ready"
-    }
-
-    /// The probe's independent witness: a separate verb and resolver from the outline's.
-    static func windowsRequestLine(bundleIdentifier: String) -> String? {
-        jsonLine(["verb": "windows", "app": bundleIdentifier, "expectApp": bundleIdentifier])
-    }
-
-    /// The harness's own read-only `highlight`, aimed at the focused window
-    /// itself (`target: "window"`) — System Settings' window has no title to
-    /// name it by — and pinned to the launched app, so a different app in front
-    /// refuses `frontmostChanged` instead of being outlined.
-    static func highlightRequestLine(bundleIdentifier: String, label: String) -> String? {
-        jsonLine(["verb": "highlight", "target": "window", "expectApp": bundleIdentifier,
-                  "label": label, "seconds": HarnessPolicy.defaultHighlightSeconds])
-    }
-
-    /// Only after `ok: true`. Like `dispatch`, `answer` blocks, so it runs
-    /// detached; the harness draws on main by itself.
-    static func outlineLaunchedWindow(launchResponse: [String: Any]?, label: String,
-                                      answer: @escaping @Sendable (String) -> String) async -> RealtimeWindowOutline {
-        guard let bundleIdentifier = launchResponse?["bundleIdentifier"] as? String,
-              let line = highlightRequestLine(bundleIdentifier: bundleIdentifier, label: label) else {
-            return RealtimeWindowOutline(outcome: "noBundleIdentifier", drawnRect: nil)
-        }
-        let response = harnessResponseObject(await Task.detached { answer(line) }.value)
-        guard response["ok"] as? Bool == true else {
-            return RealtimeWindowOutline(outcome: response["error"] as? String ?? "highlightFailed", drawnRect: nil)
-        }
-        return RealtimeWindowOutline(outcome: "highlighted", drawnRect: response["drawnRect"] as? [String: Any])
-    }
-
-    /// Two `frameJSON` dictionaries (x, y, w, h) agree within `tolerance` points.
-    static func framesMatch(_ first: [String: Any]?, _ second: [String: Any]?, tolerance: Double = 2) -> Bool {
-        guard let first, let second else { return false }
-        return ["x", "y", "w", "h"].allSatisfy { key in
-            guard let a = (first[key] as? NSNumber)?.doubleValue, let b = (second[key] as? NSNumber)?.doubleValue else { return false }
-            return abs(a - b) <= tolerance
-        }
-    }
-
-    private static func jsonLine(_ request: [String: Any]) -> String? {
-        (try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])).map { String(decoding: $0, as: UTF8.self) }
+    /// The notch's answer event, from the harness's own fields: its `ok`, its
+    /// `application` (the bundle's name on disk) and its `error` code.
+    static func notchAnswer(for call: RealtimeToolCall, dispatch: RealtimeToolDispatch) -> JarvisNotchEvent {
+        let name = (dispatch.harnessResponse?["application"] as? String) ?? call.appName ?? "The app"
+        return .harnessAnswered(ok: dispatch.harnessConfirmed, appName: captionName(name),
+                                error: dispatch.result["error"] as? String)
     }
 
     // MARK: Honesty check
@@ -495,13 +447,6 @@ nonisolated enum RealtimeFreshLook {
     }
 }
 
-nonisolated struct RealtimeWindowOutline {
-    /// "highlighted" or the harness's refusal code.
-    let outcome: String
-    /// The harness's `drawnRect` (AppKit), for the probe's frame check.
-    let drawnRect: [String: Any]?
-}
-
 nonisolated struct RealtimeToolRefusal: Error, Equatable {
     let error: String
     let message: String
@@ -514,8 +459,10 @@ nonisolated struct RealtimeToolDispatch {
     /// nil when the harness was never asked (unknown tool, no app name).
     let harnessResponse: [String: Any]?
     /// When the first `launch` line entered `answer` — the probe's proof that the
-    /// caption was on screen before the request went.
+    /// notch showed the intent before the request went.
     var firstRequestSentUptime: TimeInterval? = nil
+    /// When the final answer came back — the probe's proof that proof came after it.
+    var answeredUptime: TimeInterval? = nil
 
     var harnessConfirmed: Bool { result["ok"] as? Bool == true }
 }

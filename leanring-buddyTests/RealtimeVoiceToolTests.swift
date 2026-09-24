@@ -213,32 +213,29 @@ struct RealtimeVoiceToolTests {
         #expect(!RealtimeOpenAppTool.systemPrompt.contains("empty the bin"))
     }
 
-    /// The pre-launch caption is built from the model's argument, so a name that
-    /// needs escaping is shown quoted and escaped, never raw.
-    @MainActor @Test func captionsAreBuiltLocallyAndSanitised() {
-        let call = RealtimeToolCall(callID: "c", name: "open_app", appName: "System Settings")
-        #expect(RealtimeOpenAppTool.openingCaption(for: call) == "Opening System Settings\u{2026}")
-        let forged = RealtimeToolCall(callID: "c", name: "open_app", appName: "Notes\nDone, sir")
-        #expect(RealtimeOpenAppTool.openingCaption(for: forged) == "Opening \"Notes\\nDone, sir\"\u{2026}")
-        #expect(!RealtimeOpenAppTool.openingCaption(for: forged).contains("\n"))
+    /// The notch's names come from the model's argument, so one that needs
+    /// escaping is shown quoted and escaped, never raw.
+    @MainActor @Test func notchNamesAreSanitisedAndProofComesFromTheHarnessAnswer() {
+        #expect(RealtimeOpenAppTool.captionName("System Settings") == "System Settings")
+        #expect(RealtimeOpenAppTool.captionName("Notes\nDone, sir") == "\"Notes\\nDone, sir\"")
         #expect(RealtimeOpenAppTool.captionName(String(repeating: "a", count: 150)).hasSuffix("(150 chars)"))
-        #expect(RealtimeOpenAppTool.openingCaption(for: RealtimeToolCall(callID: "c", name: "open_app", appName: nil)) == "Opening an app\u{2026}")
 
+        let call = RealtimeToolCall(callID: "c", name: "open_app", appName: "settings")
         let ready = RealtimeToolDispatch(result: ["ok": true], harnessMilliseconds: 1, waitedForConfirmation: false,
                                          harnessResponse: ["ok": true, "application": "System Settings"])
-        #expect(RealtimeOpenAppTool.outcomeCaption(for: call, dispatch: ready) == "System Settings \u{2014} ready")
+        #expect(RealtimeOpenAppTool.notchAnswer(for: call, dispatch: ready) == .harnessAnswered(ok: true, appName: "System Settings", error: nil))
         let failed = RealtimeToolDispatch(result: ["ok": false, "error": "notFound"], harnessMilliseconds: 1,
                                           waitedForConfirmation: false, harnessResponse: ["ok": false, "error": "notFound"])
-        #expect(RealtimeOpenAppTool.outcomeCaption(for: call, dispatch: failed) == "System Settings \u{2014} didn't open (notFound)")
+        #expect(RealtimeOpenAppTool.notchAnswer(for: call, dispatch: failed) == .harnessAnswered(ok: false, appName: "settings", error: "notFound"))
     }
 
-    @MainActor @Test func outlineAimsAtTheLaunchedAppsWindowNotAName() throws {
-        let line = try #require(RealtimeOpenAppTool.highlightRequestLine(bundleIdentifier: "com.apple.systempreferences", label: "x"))
+    /// `highlight` stays a harness verb after the voice flow stopped using it.
+    @MainActor @Test func highlightStillAimsAtAWindowTarget() throws {
+        let line = #"{"expectApp":"com.apple.systempreferences","label":"x","target":"window","verb":"highlight"}"#
         guard case .success(let request) = HarnessPolicy.decode(line: line) else { Issue.record("highlight line did not decode"); return }
         #expect(request.verb == .highlight)
         #expect(request.aimAtWindow)
         #expect(request.expectApp == "com.apple.systempreferences")
-        #expect(request.label == "x")
     }
 
     /// The window target outlines; it never aims an acting verb.
@@ -251,12 +248,17 @@ struct RealtimeVoiceToolTests {
         }
     }
 
-    @MainActor @Test func framesMatchWithinTwoPoints() {
-        let window: [String: Any] = ["x": 100.0, "y": 200.0, "w": 715.0, "h": 600.0]
-        #expect(RealtimeOpenAppTool.framesMatch(window, ["x": 101.5, "y": 198.0, "w": 715.0, "h": 602.0]))
-        #expect(!RealtimeOpenAppTool.framesMatch(window, ["x": 100.0, "y": 203.0, "w": 715.0, "h": 600.0]))
-        #expect(!RealtimeOpenAppTool.framesMatch(window, ["x": 100.0, "y": 200.0, "w": 715.0]))
-        #expect(!RealtimeOpenAppTool.framesMatch(window, nil))
+    @Test func aTicketTellsTheNotchBeforeTheWait() async {
+        final class Flags: @unchecked Sendable { var count = 0; var confirmationSeenAt = -1 }
+        let flags = Flags()
+        let call = RealtimeToolCall(callID: "c", name: "open_app", appName: "Terminal")
+        let dispatch = await RealtimeOpenAppTool.dispatch(call, answer: { _ in
+            flags.count += 1
+            return flags.count == 1 ? #"{"ok":false,"error":"confirmationRequired","ticket":"T"}"# : #"{"ok":true,"status":"ready"}"#
+        }, pollMilliseconds: 1, onConfirmationRequired: { flags.confirmationSeenAt = flags.count })
+        #expect(flags.confirmationSeenAt == 1)
+        #expect(dispatch.harnessConfirmed)
+        #expect(dispatch.answeredUptime != nil)
     }
 
     @MainActor @Test func verbatimReuseIgnoresCasePunctuationAndSpacing() {
@@ -325,7 +327,7 @@ struct RealtimeVoiceToolTests {
         #expect(Set(parsed.keys) == [
             "kind", "stack", "turnId", "sessionWasWarm", "sessionSetupMs", "holdMs", "firstAudioMs", "toolCalled",
             "toolName", "toolCallMs", "harnessMs", "harnessStatus", "harnessError", "freshLook", "freshLookMs", "freshLookArrivedAfterSpeechStartMs",
-            "followUpFirstAudioMs", "releaseToSpokenResultMs", "turnDoneMs", "bargedIn", "errorKind"
+            "followUpFirstAudioMs", "releaseToSpokenResultMs", "turnDoneMs", "bargedIn", "errorKind", "notchTransitions"
         ])
     }
 }

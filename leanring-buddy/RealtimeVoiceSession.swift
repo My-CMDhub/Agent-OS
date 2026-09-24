@@ -57,6 +57,13 @@ final class RealtimeVoiceSession {
         commonFormat: .pcmFormatFloat32, sampleRate: Double(VoiceStackChoice.outputSampleRate), channels: 1, interleaved: false
     )!
 
+    /// The press and release ticks: their own node on the playback engine, one
+    /// cached buffer each, 48 kHz mono (the mixer resamples).
+    private let tickNode = AVAudioPlayerNode()
+    private let tickFormat = AVAudioFormat(standardFormatWithSampleRate: JarvisNotchTick.sampleRate, channels: 1)!
+    private lazy var tickBuffers: [JarvisNotchTick: AVAudioPCMBuffer] = Dictionary(
+        uniqueKeysWithValues: JarvisNotchTick.allCases.compactMap { tick in tick.buffer(format: tickFormat).map { (tick, $0) } })
+
     /// listening on key-down, processing on key-up, responding at first audio, idle when the turn ends.
     var onStateChange: ((CompanionVoiceState) -> Void)?
 
@@ -65,6 +72,8 @@ final class RealtimeVoiceSession {
         playbackEngine.attach(playerNode)
         // The mixer resamples 24 kHz to the device rate.
         playbackEngine.connect(playerNode, to: playbackEngine.mainMixerNode, format: playbackFormat)
+        playbackEngine.attach(tickNode)
+        playbackEngine.connect(tickNode, to: playbackEngine.mainMixerNode, format: tickFormat)
     }
 
     private var selectedStack: VoiceStackChoice { VoiceStackChoice.stored(in: .standard) }
@@ -130,6 +139,8 @@ final class RealtimeVoiceSession {
                                        sessionWasWarm: connection.map { $0.isOpen && $0.stack == stack } ?? false),
             pressedUptime: uptime)
         stopPlayback()
+        JarvisNotch.shared.handle(.hotkeyDown)
+        playTick(.press)
         connection?.cancelResponse()
         turnTask?.cancel()
         audioContinuation?.finish()
@@ -141,6 +152,8 @@ final class RealtimeVoiceSession {
         } catch {
             print("❌ realtime: mic failed to start: \(error)")
             writeLiveTurnLine(errorKind: "micFailed")
+            JarvisNotch.shared.handle(.hotkeyUp)
+            JarvisNotch.shared.handle(.turnEnded)
             continuation.finish()
             onStateChange?(.idle)
             return
@@ -154,6 +167,8 @@ final class RealtimeVoiceSession {
         stopMic()
         audioContinuation?.finish()
         audioContinuation = nil
+        JarvisNotch.shared.handle(.hotkeyUp)
+        playTick(.release)
         onStateChange?(.processing)
     }
 
@@ -186,6 +201,7 @@ final class RealtimeVoiceSession {
             // A barge-in already wrote this turn's line and owns the state now.
             guard self.liveTurn === liveTurn, liveTurn != nil else { return }
             writeLiveTurnLine(errorKind: (error as? VoiceBenchFailure)?.kind ?? VoiceBenchRun.errorKind(for: error, stage: selectedStack.rawValue))
+            JarvisNotch.shared.handle(.turnEnded)
             onStateChange?(.idle)
             prewarm()
         }
@@ -207,6 +223,9 @@ final class RealtimeVoiceSession {
         line.holdMs = Self.milliseconds(from: liveTurn.pressedUptime, to: released)
         line.bargedIn = bargedIn
         line.errorKind = errorKind
+        line.notchTransitions = JarvisNotch.shared.transitions.filter { $0.uptime >= liveTurn.pressedUptime }.map { transition in
+            ["state": transition.state, "ms": Self.milliseconds(from: released ?? liveTurn.pressedUptime, to: transition.uptime) ?? 0]
+        }
         if let marks = liveTurn.marks {
             let firstDispatch = marks.dispatches.first
             line.firstAudioMs = Self.milliseconds(from: released, to: marks.firstAudioUptime)
@@ -245,6 +264,11 @@ final class RealtimeVoiceSession {
         let converter = BuddyPCM16AudioConverter(targetSampleRate: Double(targetSampleRate))
         return { buffer, _ in
             if let pcmData = converter.convertToPCM16Data(from: buffer) { continuation.yield(pcmData) }
+            // The notch's bars: one RMS per buffer (~21 ms at 48 kHz), drawn on main.
+            if let channel = buffer.floatChannelData?[0] {
+                let rms = JarvisNotchLevel.rms(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+                Task { @MainActor in JarvisNotch.shared.setLevel(rms: rms) }
+            }
         }
     }
 
@@ -274,6 +298,16 @@ final class RealtimeVoiceSession {
             playerNode.play()
             onStateChange?(.responding)
         }
+    }
+
+    /// Silent when the output device is muted.
+    private func playTick(_ tick: JarvisNotchTick) {
+        guard !JarvisNotchTick.systemOutputIsMuted(), let buffer = tickBuffers[tick] else { return }
+        if !playbackEngine.isRunning {
+            do { try playbackEngine.start() } catch { print("❌ realtime: playback failed to start: \(error)"); return }
+        }
+        tickNode.scheduleBuffer(buffer, at: nil, options: .interrupts)
+        if !tickNode.isPlaying { tickNode.play() }
     }
 
     private func stopPlayback() {
@@ -316,6 +350,8 @@ nonisolated struct RealtimeLiveTurnLine {
     var turnDoneMs: Int?
     var bargedIn = false
     var errorKind: String?
+    /// Each notch state this turn reached, ms from the key-up (negative before it).
+    var notchTransitions: [[String: Any]] = []
 
     init(stack: String, turnID: String, sessionWasWarm: Bool) {
         self.stack = stack
@@ -336,7 +372,8 @@ nonisolated struct RealtimeLiveTurnLine {
             "freshLook": value(freshLook), "freshLookMs": value(freshLookMs),
             "freshLookArrivedAfterSpeechStartMs": value(freshLookArrivedAfterSpeechStartMs),
             "followUpFirstAudioMs": value(followUpFirstAudioMs), "releaseToSpokenResultMs": value(releaseToSpokenResultMs),
-            "turnDoneMs": value(turnDoneMs), "bargedIn": bargedIn, "errorKind": value(errorKind)
+            "turnDoneMs": value(turnDoneMs), "bargedIn": bargedIn, "errorKind": value(errorKind),
+            "notchTransitions": notchTransitions
         ]
     }
 }

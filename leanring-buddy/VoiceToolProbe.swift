@@ -11,7 +11,10 @@
 //  System Settings is quit before every run so each launch is real — or, with
 //  `--voice-tool-probe-preopen`, launched through the harness and left frontmost,
 //  the case where the model once claimed success without calling the tool
-//  (72985B9B). `--voice-tool-probe-runs=N` sets runs per stack. Whether
+//  (72985B9B). `--voice-tool-probe-runs=N` sets runs per stack;
+//  `--voice-tool-probe-app=<name>` replaces the app every call names, forcing a
+//  failure through the real harness path; `--voice-tool-probe-notch-shots`
+//  saves one crop of the notch per state to the log directory. Whether
 //  it ended up frontmost is read from NSWorkspace, not from the verb's own
 //  AX-based verification: a verb that marks its own homework proves nothing.
 //
@@ -71,6 +74,12 @@ enum VoiceToolProbe {
         let harnessAnswer: @Sendable (String) -> String = { line in harness.answer(line: line) }
         // Pre-open mode: the one screenshot must show the app already open.
         if preOpen { _ = await openSystemSettings(harnessAnswer: harnessAnswer) }
+        let appNameOverride = CommandLine.arguments.first { $0.hasPrefix("--voice-tool-probe-app=") }
+            .map { String($0.dropFirst("--voice-tool-probe-app=".count)) }
+        // The harness's own frontmost read, either side of every notch transition.
+        JarvisNotch.shared.frontmostWitness = { HarnessServer.frontmostBundleIdentifier() }
+        defer { JarvisNotch.shared.frontmostWitness = nil }
+        if CommandLine.arguments.contains("--voice-tool-probe-notch-shots") { captureOneShotPerNotchState() }
 
         // One screenshot for every run, as the bench does.
         guard let screenshot = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first(where: \.isCursorScreen) else {
@@ -81,7 +90,7 @@ enum VoiceToolProbe {
 
         appendLine([
             "kind": "start", "probeId": probeID, "fixture": fixtureFileName, "runsPerStack": runsPerStack,
-            "mode": preOpen ? "preOpen" : "quitFirst",
+            "mode": preOpen ? "preOpen" : "quitFirst", "appNameOverride": appNameOverride ?? NSNull(),
             "openAICostCapUSD": openAICostCapUSD, "imageBytes": screenshot.imageData.count,
             "harnessSession": HarnessServer.sessionIdentifier
         ])
@@ -105,7 +114,7 @@ enum VoiceToolProbe {
                 if stack == .openAIRealtime, openAISpentUSD > openAICostCapUSD { continue }
                 let clip = stack == .openAIRealtime ? clip24k : clip16k
                 let (line, transcript, spentUSD) = await measureOneRun(
-                    stack: stack, runNumber: runNumber, probeID: probeID, clip: clip, preOpen: preOpen,
+                    stack: stack, runNumber: runNumber, probeID: probeID, clip: clip, preOpen: preOpen, appNameOverride: appNameOverride,
                     screenshotJPEG: screenshot.imageData, harnessAnswer: harnessAnswer)
                 if stack == .openAIRealtime { openAISpentUSD += spentUSD }
                 appendLine(line)
@@ -130,7 +139,7 @@ enum VoiceToolProbe {
     // MARK: One run
 
     private static func measureOneRun(
-        stack: VoiceStackChoice, runNumber: Int, probeID: String, clip: VoiceBenchPCMClip, preOpen: Bool,
+        stack: VoiceStackChoice, runNumber: Int, probeID: String, clip: VoiceBenchPCMClip, preOpen: Bool, appNameOverride: String?,
         screenshotJPEG: Data, harnessAnswer: @escaping @Sendable (String) -> String
     ) async -> (line: [String: Any], transcript: String, spentUSD: Double) {
         var line: [String: Any] = ["kind": "run", "probeId": probeID, "stack": stack.rawValue, "run": runNumber]
@@ -141,7 +150,9 @@ enum VoiceToolProbe {
         }
 
         let connection = RealtimeVoiceConnection(stack: stack, harnessAnswer: harnessAnswer)
+        connection.appNameOverride = appNameOverride
         defer { connection.close() }
+        let runStartUptime = uptime
         var marks: [String: Any] = [:]
         var errorKind: String?
         do {
@@ -150,12 +161,16 @@ enum VoiceToolProbe {
             try await connection.sendScreenshot(screenshotJPEG)
             marks["sessionSetupMs"] = milliseconds(from: setupStart, to: uptime)
             try await connection.beginTurn()
+            // The fixture stands in for the held hotkey, and its own level drives the bars.
+            JarvisNotch.shared.handle(.hotkeyDown)
             let clock = ContinuousClock()
             let streamStart = clock.now
             for (chunkIndex, chunk) in clip.chunks(milliseconds: VoiceStackBenchmark.audioChunkMilliseconds).enumerated() {
                 try await clock.sleep(until: streamStart + .milliseconds(VoiceStackBenchmark.audioChunkMilliseconds * chunkIndex), tolerance: nil)
                 try await connection.appendAudio(chunk)
+                JarvisNotch.shared.setLevel(rms: JarvisNotchLevel.rms(pcm16: chunk))
             }
+            JarvisNotch.shared.handle(.hotkeyUp)
             try await connection.endTurn()
             _ = try await connection.turn.finished.value(timeoutSeconds: turnTimeoutSeconds, timeoutKind: "turnTimeout")
             // The look is sent as context with no reply asked for; watch long
@@ -164,27 +179,18 @@ enum VoiceToolProbe {
             try? await Task.sleep(for: .seconds(unpromptedReplyWatchSeconds))
         } catch {
             errorKind = (error as? VoiceBenchFailure)?.kind ?? VoiceBenchRun.errorKind(for: error, stage: stack.rawValue)
+            JarvisNotch.shared.handle(.turnEnded)
         }
+        // Let a proof or didn't-take hold play out, so the next run starts idle.
+        let settleDeadline = uptime + 3
+        while JarvisNotch.shared.state != .idle, uptime < settleDeadline { try? await Task.sleep(for: .milliseconds(50)) }
 
         // Independent witness, after the app has had a moment to come forward.
         try? await Task.sleep(for: .milliseconds(500))
         let frontmostBundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
 
         let turn = connection.turn
-        // The outline's frame against a separate `windows` read of the same app:
-        // a different verb and resolver, so an outline drawn round the wrong
-        // element, or mirrored, cannot agree with it.
-        let outlineDeadline = uptime + 5
-        while turn.highlightOutcome == "pending", uptime < outlineDeadline { try? await Task.sleep(for: .milliseconds(50)) }
-        var windowsFrame: [String: Any]?
-        var windowsError: String?
-        if let bundleIdentifier = turn.dispatches.first?.harnessResponse?["bundleIdentifier"] as? String,
-           let windowsLine = RealtimeOpenAppTool.windowsRequestLine(bundleIdentifier: bundleIdentifier) {
-            let windowsResponse = RealtimeOpenAppTool.harnessResponseObject(await Task.detached { harnessAnswer(windowsLine) }.value)
-            let windows = windowsResponse["windows"] as? [[String: Any]] ?? []
-            windowsFrame = (windows.first { $0["main"] as? Bool == true } ?? windows.first)?["frame"] as? [String: Any]
-            windowsError = windowsResponse["error"] as? String ?? (windows.isEmpty ? "noWindows" : nil)
-        }
+        let notchTransitions = JarvisNotch.shared.transitions.filter { $0.uptime >= runStartUptime }
         let released = turn.lastAudioSentUptime
         let firstDispatch = turn.dispatches.first
         let harnessConfirmed = turn.dispatches.contains(where: \.harnessConfirmed)
@@ -195,8 +201,7 @@ enum VoiceToolProbe {
         marks["freshLookArrivedAfterSpeechStartMs"] = turn.freshLookArrivedAfterSpeechStartMs
         marks["followUpFirstAudioMs"] = milliseconds(from: turn.toolResultSentUptime, to: turn.followUpFirstAudioUptime)
         marks["totalToFirstSpokenResultMs"] = milliseconds(from: released, to: turn.followUpFirstAudioUptime)
-        marks["captionLeadMs"] = milliseconds(from: turn.captionShownUptime, to: firstDispatch?.firstRequestSentUptime)
-        marks["highlightMs"] = turn.highlightMilliseconds
+        marks["intentLeadMs"] = milliseconds(from: turn.intentShownUptime, to: firstDispatch?.firstRequestSentUptime)
         if let firstAudio = turn.firstAudioUptime, firstAudio < (turn.toolCallUptime ?? .infinity), turn.toolCallUptime != nil {
             marks["firstAudioBeforeToolMs"] = milliseconds(from: released, to: firstAudio)
         }
@@ -208,13 +213,24 @@ enum VoiceToolProbe {
         line["harnessStatus"] = (firstDispatch?.result["status"] as? String) ?? NSNull()
         line["harnessError"] = (firstDispatch?.result["error"] as? String) ?? NSNull()
         line["harnessConfirmed"] = harnessConfirmed
-        line["captionShownBeforeLaunchRequest"] = turn.captionShownUptime.flatMap { shown in
+        line["intentShownBeforeLaunchRequest"] = turn.intentShownUptime.flatMap { shown in
             firstDispatch?.firstRequestSentUptime.map { shown <= $0 } } ?? false
-        line["highlightOutcome"] = turn.highlightOutcome ?? "notAttempted"
-        line["highlightDrawnRect"] = turn.highlightDrawnRect ?? NSNull()
-        line["windowsFrame"] = windowsFrame ?? NSNull()
-        line["windowsError"] = windowsError ?? NSNull()
-        line["highlightFrameMatchesWindows"] = RealtimeOpenAppTool.framesMatch(turn.highlightDrawnRect, windowsFrame)
+        let ownBundleIdentifier = Bundle.main.bundleIdentifier
+        line["notchTransitions"] = notchTransitions.map { transition in
+            ["state": transition.state, "ms": milliseconds(from: released, to: transition.uptime) ?? NSNull(),
+             "frontmostBefore": transition.frontmostBefore ?? NSNull(), "frontmostAfter": transition.frontmostAfter ?? NSNull()] as [String: Any]
+        }
+        let proofs = notchTransitions.filter { $0.state == "proof" }
+        let confirmedAnswers = turn.dispatches.filter(\.harnessConfirmed).compactMap(\.answeredUptime)
+        line["proofShown"] = !proofs.isEmpty
+        line["didntTakeShown"] = notchTransitions.contains { $0.state == "didntTake" }
+        // A proof with no confirmed harness answer at or before it is the one lie the notch must never tell.
+        line["proofViolations"] = proofs.filter { proof in !confirmedAnswers.contains { $0 <= proof.uptime } }.count
+        line["proofAfterOkMs"] = proofs.first.flatMap { proof in milliseconds(from: confirmedAnswers.first, to: proof.uptime) } ?? NSNull()
+        line["frontmostUnchangedByNotch"] = notchTransitions.allSatisfy { transition in
+            transition.frontmostBefore == transition.frontmostAfter
+                && transition.frontmostAfter != nil && transition.frontmostAfter != ownBundleIdentifier
+        }
         line["freshLook"] = turn.freshLookOutcome ?? NSNull()
         line["freshLookImageBytes"] = turn.freshLookImageBytes ?? NSNull()
         line["audioChunksAfterFinish"] = turn.audioChunksAfterFinish
@@ -234,6 +250,32 @@ enum VoiceToolProbe {
         let spentUSD = stack == .openAIRealtime ? connection.estimatedOpenAIUSD : 0
         if stack == .openAIRealtime { line["estimatedCostUSD"] = spentUSD }
         return (line, turn.transcript, spentUSD)
+    }
+
+    /// One crop of the top band round the notch per state, the first time each is
+    /// shown, after its motion has settled. Written beside the logs; read before
+    /// publishing — the band carries whatever the menu bar showed.
+    private static func captureOneShotPerNotchState() {
+        let delays: [String: Double] = ["listening": 0.5, "intent": 0.35, "proof": 0.9, "didntTake": 0.6]
+        var taken = Set<String>()
+        JarvisNotch.shared.onTransition = { state in
+            guard let delay = delays[state.name], !taken.contains(state.name) else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard JarvisNotch.shared.state.name == state.name, !taken.contains(state.name),
+                      let frame = JarvisNotch.shared.panelFrame, let primary = NSScreen.screens.first,
+                      let screen = NSScreen.screens.first(where: { $0.frame.intersects(frame) }) else { return }
+                taken.insert(state.name)
+                // From the screen's top edge, so the menu bar round the notch is in frame.
+                // `screencapture -R` is top-left global points; AppKit is bottom-left.
+                let region = CGRect(x: frame.minX - 60, y: primary.frame.maxY - screen.frame.maxY,
+                                    width: frame.width + 120, height: screen.frame.maxY - frame.minY + 8)
+                let path = MeasurementLogFile.directoryURL.appendingPathComponent("notch-\(state.name).png").path
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                process.arguments = ["-x", "-R\(Int(region.minX)),\(Int(region.minY)),\(Int(region.width)),\(Int(region.height))", path]
+                try? process.run()
+            }
+        }
     }
 
     /// The harness's own `launch`, left frontmost: the "already open" start state.
@@ -262,7 +304,7 @@ enum VoiceToolProbe {
     static func summary(for lines: [[String: Any]], answers: [String], stack: VoiceStackChoice, probeID: String, spentUSD: Double?) -> [String: Any] {
         var marks: [String: Any] = [:]
         for markName in ["sessionSetupMs", "firstAudioMs", "toolCallMs", "harnessMs", "freshLookMs", "freshLookArrivedAfterSpeechStartMs", "followUpFirstAudioMs",
-                         "totalToFirstSpokenResultMs", "firstAudioBeforeToolMs", "captionLeadMs", "highlightMs"] {
+                         "totalToFirstSpokenResultMs", "firstAudioBeforeToolMs", "intentLeadMs"] {
             let values = lines.map { ($0["marksMs"] as? [String: Any])?[markName] as? Int }
             if let distribution = VoiceBenchStatistics.distribution(of: values) {
                 marks[markName] = ["n": distribution.count, "medianMs": distribution.medianMs, "p95Ms": distribution.p95Ms]
@@ -273,9 +315,7 @@ enum VoiceToolProbe {
         var outcomeCounts: [String: Int] = [:]
         var errorKindCounts: [String: Int] = [:]
         var freshLookCounts: [String: Int] = [:]
-        var highlightCounts: [String: Int] = [:]
         for line in lines {
-            highlightCounts[(line["highlightOutcome"] as? String) ?? "notAttempted", default: 0] += 1
             freshLookCounts[(line["freshLook"] as? String) ?? "notAttempted", default: 0] += 1
             let outcome = (line["harnessStatus"] as? String) ?? (line["harnessError"] as? String) ?? "noTool"
             outcomeCounts[outcome, default: 0] += 1
@@ -287,9 +327,11 @@ enum VoiceToolProbe {
             "toolCalled": count("toolCalled"),
             "harnessOutcomes": outcomeCounts,
             "freshLookOutcomes": freshLookCounts,
-            "highlightOutcomes": highlightCounts,
-            "captionShownBeforeLaunchRequest": count("captionShownBeforeLaunchRequest"),
-            "highlightFrameMatchesWindows": count("highlightFrameMatchesWindows"),
+            "intentShownBeforeLaunchRequest": count("intentShownBeforeLaunchRequest"),
+            "proofShown": count("proofShown"),
+            "didntTakeShown": count("didntTakeShown"),
+            "proofViolations": lines.reduce(0) { $0 + (($1["proofViolations"] as? Int) ?? 0) },
+            "frontmostUnchangedByNotch": count("frontmostUnchangedByNotch"),
             "systemSettingsFrontmost": count("systemSettingsFrontmost"),
             "claimedSuccessWithoutReceipt": count("claimedSuccessWithoutReceipt"),
             "toolSkipped": count("toolSkipped"),

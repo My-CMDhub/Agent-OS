@@ -884,19 +884,11 @@ private class AVPlayerNSView: NSView {
 /// (click-through, never key or main), so the cursor overlay's shown or hidden
 /// state is never touched and there is nothing to restore. A second highlight
 /// REPLACES the first — two outlines would not say which request drew which.
-/// A nil rect is a caption alone, top-centre: the voice loop's "Opening X…"
-/// before there is a window to outline, replaced by the outline once there is.
 enum ElementHighlightOverlay {
     private static var window: OverlayWindow?
     private static var generation = 0
 
-    /// Main thread only, and never inside a harness request (see `highlightResponse`).
-    static func showCaption(_ text: String, seconds: Double = HarnessPolicy.defaultHighlightSeconds) {
-        let screenIndex = NSScreen.main.flatMap { NSScreen.screens.firstIndex(of: $0) } ?? 0
-        show(nil, label: text, onScreenAt: screenIndex, seconds: seconds)
-    }
-
-    static func show(_ rectInAppKitCoordinates: CGRect?, label: String?, onScreenAt screenIndex: Int, seconds: Double) {
+    static func show(_ rectInAppKitCoordinates: CGRect, label: String?, onScreenAt screenIndex: Int, seconds: Double) {
         window?.orderOut(nil)
         window = nil
         generation += 1
@@ -918,22 +910,18 @@ enum ElementHighlightOverlay {
 }
 
 private struct ElementHighlightView: View {
-    let rect: CGRect?
+    let rect: CGRect
     let screenFrame: CGRect
     let label: String?
 
     var body: some View {
-        // No rect: the caption sits top-centre, below the menu bar.
-        let rect = self.rect ?? CGRect(x: screenFrame.midX, y: screenFrame.maxY - 60, width: 0, height: 0)
         // SwiftUI's y grows downward, so the AppKit rect is flipped within the screen.
         let top = screenFrame.height - (rect.maxY - screenFrame.origin.y)
         ZStack(alignment: .topLeading) {
-            if self.rect != nil {
-                Rectangle()
-                    .stroke(Color.cyan, lineWidth: 3)
-                    .frame(width: rect.width, height: rect.height)
-                    .position(x: rect.midX - screenFrame.origin.x, y: top + rect.height / 2)
-            }
+            Rectangle()
+                .stroke(Color.cyan, lineWidth: 3)
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX - screenFrame.origin.x, y: top + rect.height / 2)
             if let label {
                 Text(label)
                     .font(.system(size: 12, weight: .semibold))
