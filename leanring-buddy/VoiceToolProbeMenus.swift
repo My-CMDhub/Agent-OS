@@ -244,6 +244,11 @@ extension VoiceToolProbe {
         ])
 
         var openAISpentUSD = 0.0
+        // What the model SAID, owner-only (0600), so a flagged receipt claim can
+        // be read and judged; the run log still carries no model text.
+        let answersFile = VoiceStackBenchmark.openOwnerOnlyAnswersFile(
+            at: MeasurementLogFile.directoryURL.appendingPathComponent("voice-tool-probe-answers-\(probeID).jsonl"))
+        defer { try? answersFile?.close() }
         var runLines: [[String: Any]] = []
         for scenario in scenarios {
             guard let (clip16k, clip24k) = clips(forFixture: scenario.fixture) else {
@@ -254,11 +259,17 @@ extension VoiceToolProbe {
                 let order: [VoiceStackChoice] = runNumber % 2 == 1 ? [.openAIRealtime, .geminiLive] : [.geminiLive, .openAIRealtime]
                 for stack in order where selectedStacks.contains(stack) {
                     if stack == .openAIRealtime, openAISpentUSD > openAICapUSD { continue }
-                    let (line, spentUSD) = await measureMenuRun(
+                    let (line, spentUSD, said) = await measureMenuRun(
                         scenario: scenario, stack: stack, runNumber: runNumber, probeID: probeID,
                         clip: stack == .openAIRealtime ? clip24k : clip16k, harnessAnswer: harnessAnswer)
                     openAISpentUSD += spentUSD
                     appendLine(line)
+                    if let answersFile, let answerLine = MeasurementLogFile.jsonLine([
+                        "probeId": probeID, "turnId": line["turnId"] ?? NSNull(), "fixture": scenario.fixture, "stack": stack.rawValue,
+                        "run": runNumber, "said": said
+                    ]) {
+                        try? answersFile.write(contentsOf: Data((answerLine + "\n").utf8))
+                    }
                     runLines.append(line)
                     print("🧪 menu probe: \(scenario.fixture) \(stack.rawValue) #\(runNumber) chain=\(line["chain"] ?? "-") check=\(line["checkPassed"] ?? "-")")
                 }
@@ -285,7 +296,7 @@ extension VoiceToolProbe {
     private static func measureMenuRun(
         scenario: MenuScenario, stack: VoiceStackChoice, runNumber: Int, probeID: String,
         clip: VoiceBenchPCMClip, harnessAnswer: @escaping @Sendable (String) -> String
-    ) async -> (line: [String: Any], spentUSD: Double) {
+    ) async -> (line: [String: Any], spentUSD: Double, said: String) {
         var line: [String: Any] = [
             "kind": "menuRun", "probeId": probeID, "fixture": scenario.fixture, "appClass": scenario.appClass,
             "app": scenario.appName, "stack": stack.rawValue, "run": runNumber, "adversarial": scenario.adversarial
@@ -321,7 +332,7 @@ extension VoiceToolProbe {
 
         guard let screenshot = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first(where: \.isCursorScreen) else {
             line["errorKind"] = "captureFailed"
-            return (line, 0)
+            return (line, 0, "")
         }
         let connection = RealtimeVoiceConnection(stack: stack, harnessAnswer: harnessAnswer)
         connection.sendsFreshLook = false
@@ -419,7 +430,7 @@ extension VoiceToolProbe {
                                      fixture: scenario.fixture, expectedPath: scenario.expectedPath, independentCheck: check)
         let spentUSD = stack == .openAIRealtime ? connection.estimatedOpenAIUSD : 0
         if stack == .openAIRealtime { line["estimatedCostUSD"] = spentUSD }
-        return (line, spentUSD)
+        return (line, spentUSD, connection.turn.transcript)
     }
 
     // MARK: Summary
