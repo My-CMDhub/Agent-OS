@@ -774,6 +774,9 @@ enum AccessibilityMenu {
     static let enabledAttribute = "AXEnabled"
     static let cmdCharAttribute = "AXMenuItemCmdChar"
     static let cmdModifiersAttribute = "AXMenuItemCmdModifiers"
+    /// A checkmark's character ("✓"), empty or absent when unmarked. Read so a
+    /// caller can check a toggle ("View > as List") without trusting the press.
+    static let markCharAttribute = "AXMenuItemMarkChar"
 
     /// Same rule as the window walk: every read below is synchronous
     /// cross-process IPC and a busy app would otherwise block this process.
@@ -795,6 +798,7 @@ enum AccessibilityMenu {
         let role: String
         let isEnabled: Bool
         let shortcut: String?
+        let isMarked: Bool
         let element: AXUIElement?
         let children: [Node]
 
@@ -803,6 +807,7 @@ enum AccessibilityMenu {
             role: String,
             isEnabled: Bool = true,
             shortcut: String? = nil,
+            isMarked: Bool = false,
             element: AXUIElement? = nil,
             children: [Node] = []
         ) {
@@ -810,6 +815,7 @@ enum AccessibilityMenu {
             self.role = role
             self.isEnabled = isEnabled
             self.shortcut = shortcut
+            self.isMarked = isMarked
             self.element = element
             self.children = children
         }
@@ -894,6 +900,7 @@ enum AccessibilityMenu {
         let isEnabled: Bool
         let shortcut: String?
         let hasSubmenu: Bool
+        let isMarked: Bool
     }
 
     struct Listing {
@@ -953,7 +960,8 @@ enum AccessibilityMenu {
                 role: node.role,
                 isEnabled: node.isEnabled,
                 shortcut: node.shortcut,
-                hasSubmenu: !childNodes.isEmpty
+                hasSubmenu: !childNodes.isEmpty,
+                isMarked: node.isMarked
             ))
         }
 
@@ -1015,12 +1023,12 @@ enum AccessibilityMenu {
 
     /// One level of children, each read in a single batched call.
     ///
-    /// Five attributes per child in one round trip, for the same reason the
+    /// Seven attributes per child in one round trip, for the same reason the
     /// walker batches: collapsing round trips is worth ~2.5x, and a full Mail
     /// listing is 591 of these.
     static let batchedAttributes = [
         kAXRoleAttribute, kAXTitleAttribute, enabledAttribute,
-        cmdCharAttribute, cmdModifiersAttribute, kAXChildrenAttribute
+        cmdCharAttribute, cmdModifiersAttribute, kAXChildrenAttribute, markCharAttribute
     ]
 
     static func liveChildren(of node: Node) -> [Node] {
@@ -1059,6 +1067,7 @@ enum AccessibilityMenu {
                     character: entry(3) as? String,
                     modifiers: (entry(4) as? NSNumber)?.intValue
                 ),
+                isMarked: (entry(6) as? String).map { !$0.isEmpty } ?? false,
                 element: childElement
             )
         }

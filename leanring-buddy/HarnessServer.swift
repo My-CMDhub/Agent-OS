@@ -2522,7 +2522,8 @@ final class HarnessServer {
                 "role": $0.role,
                 "enabled": $0.isEnabled,
                 "shortcut": $0.shortcut ?? NSNull(),
-                "hasSubmenu": $0.hasSubmenu
+                "hasSubmenu": $0.hasSubmenu,
+                "marked": $0.isMarked
             ] as [String: Any]
         }
         response["ok"] = true
