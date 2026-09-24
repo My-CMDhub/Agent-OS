@@ -179,6 +179,18 @@ struct RealtimeVoiceToolTests {
         #expect(!prompt.contains("freshView"))
     }
 
+    /// The live persona is its own prompt; the bench's control must not drift with it.
+    @MainActor @Test func livePersonaIsJarvisAndLeavesTheBenchPromptAlone() {
+        let prompt = RealtimeOpenAppTool.systemPrompt
+        #expect(prompt.hasPrefix("you are J.A.R.V.I.S."))
+        #expect(prompt.contains("\"sir\""))
+        #expect(prompt.contains("never claim an action happened unless its tool result says ok true"))
+        #expect(!prompt.contains("clicky"))
+        #expect(!prompt.contains("POINT"))
+        #expect(VoiceStackBenchmark.speechToSpeechSystemPrompt.hasPrefix("you're clicky"))
+        #expect(VoiceStackBenchmark.openAIRealtimeVoice == "marin")
+    }
+
     @MainActor @Test func freshLookArrivalIsMeasuredFromTheSpokenResult() {
         let marks = RealtimeTurnMarks()
         #expect(marks.freshLookArrivedAfterSpeechStartMs == nil)

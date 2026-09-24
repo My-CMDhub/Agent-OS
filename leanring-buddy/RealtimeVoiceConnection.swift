@@ -89,6 +89,13 @@ final class RealtimeVoiceConnection {
     /// many calls in one turn, not left to loop against the harness.
     static let maximumToolCallsPerTurn = 3
     static let openAIMaxOutputTokens = VoiceStackBenchmark.openAIRealtimeMaxOutputTokens
+    /// The J.A.R.V.I.S. voices, live loop only — the bench keeps "marin" and
+    /// Gemini's default as its control. OpenAI lists ten realtime voices and
+    /// recommends marin or cedar for quality; cedar is the lower, more measured
+    /// of the two. Gemini Live takes any of the 30 TTS voices; Charon is listed
+    /// "Informative", a low, even delivery (both docs read 2026-09-24).
+    static let openAIVoice = "cedar"
+    static let geminiVoice = "Charon"
 
     init(stack: VoiceStackChoice, harnessAnswer: @escaping @Sendable (String) -> String) {
         self.stack = stack
@@ -126,7 +133,7 @@ final class RealtimeVoiceConnection {
                         // Push-to-talk: we commit, the server's VAD does not decide.
                         "input": ["format": ["type": "audio/pcm", "rate": 24_000], "turn_detection": NSNull()],
                         // The rate is required even though 24 kHz is the only one (probed 2026-09-23).
-                        "output": ["format": ["type": "audio/pcm", "rate": 24_000], "voice": VoiceStackBenchmark.openAIRealtimeVoice]
+                        "output": ["format": ["type": "audio/pcm", "rate": 24_000], "voice": Self.openAIVoice]
                     ]
                 ]
             ])
@@ -139,7 +146,10 @@ final class RealtimeVoiceConnection {
             try await socket?.sendJSON([
                 "setup": [
                     "model": "models/\(VoiceStackBenchmark.geminiLiveModel)",
-                    "generationConfig": ["responseModalities": ["AUDIO"], "thinkingConfig": ["thinkingLevel": "MINIMAL"]],
+                    "generationConfig": [
+                        "responseModalities": ["AUDIO"], "thinkingConfig": ["thinkingLevel": "MINIMAL"],
+                        "speechConfig": ["voiceConfig": ["prebuiltVoiceConfig": ["voiceName": Self.geminiVoice]]]
+                    ],
                     "systemInstruction": ["parts": [["text": RealtimeOpenAppTool.systemPrompt]]],
                     "tools": [RealtimeOpenAppTool.geminiDeclaration],
                     "realtimeInputConfig": ["automaticActivityDetection": ["disabled": true]],
