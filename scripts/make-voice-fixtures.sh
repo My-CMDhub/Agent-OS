@@ -22,7 +22,8 @@
 # their length, and every measurement already taken is tied to them. Delete a
 # pair to regenerate it. 06-13 (2026-09-25) are the menu-verb probe's
 # (`--voice-tool-probe-menus`): two native apps and two non-native ones; 14-16
-# are adversarial — no word shared with the menu item they mean.
+# are adversarial — no word shared with the menu item they mean. 18 names an app
+# ambiguously ("code": VS Code and another installed app), so its gold is a question.
 set -e
 
 FIXTURE_DIRECTORY="${0:A:h}/voice-fixtures"
@@ -50,6 +51,7 @@ questions=(
   "15-finder-rows:make finder show everything in rows"
   "16-finder-path-thing:put finder's toolbar path thing on"
   "17-cursor-editor-new-window:open a new window in the cursor code editor"
+  "18-code-new-window:open a new window in code"
 )
 
 for entry in $questions; do

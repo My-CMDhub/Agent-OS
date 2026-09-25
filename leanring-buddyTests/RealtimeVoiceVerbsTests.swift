@@ -219,6 +219,83 @@ struct RealtimeVoiceVerbsTests {
         #expect(Set(geminiNames) == RealtimeVoiceVerbs.allToolNames)
     }
 
+    // MARK: App identity
+
+    private func app(_ path: String, _ name: String? = nil, file: Bool = true) -> RealtimeVoiceVerbs.AppName {
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        return RealtimeVoiceVerbs.AppName(name: name ?? url.deletingPathExtension().lastPathComponent, url: url, isFileName: file)
+    }
+
+    /// This Mac's shape (2026-09-25): VS Code is "Code" in the menu bar, Claude
+    /// Code's URL handler sits in ~/Applications, Finder is found only running.
+    private var installed: [RealtimeVoiceVerbs.AppName] {
+        [app("/Applications/Cursor.app"), app("/Applications/Visual Studio Code.app"), app("/Applications/Google Chrome.app"),
+         app("/Applications/Xcode.app"), app("/Users/o/Applications/Claude Code URL Handler.app"),
+         app("/System/Applications/TextEdit.app"),
+         app("/Applications/Visual Studio Code.app", "Code", file: false),
+         app("/Applications/Google Chrome.app", "Google Chrome", file: false),
+         app("/System/Library/CoreServices/Finder.app", "Finder", file: true)]
+    }
+
+    @Test func aNamedAppResolvesToOneBundleOrIsAskedAbout() {
+        func resolved(_ query: String) -> String? {
+            if case .resolved(let url) = RealtimeVoiceVerbs.resolveApp(named: query, among: installed) { return RealtimeVoiceVerbs.displayName(url) }
+            return nil
+        }
+        #expect(resolved("Cursor") == "Cursor")
+        #expect(resolved("visual studio code") == "Visual Studio Code")
+        #expect(resolved("Chrome") == "Google Chrome")
+        #expect(resolved("Finder") == "Finder")
+        #expect(resolved("Xcode") == "Xcode")
+        #expect(resolved("TextEdit") == "TextEdit")
+        // "code": VS Code's menu-bar name and a word of another app's name. Never Xcode.
+        #expect(RealtimeVoiceVerbs.resolveApp(named: "code", among: installed) == .ambiguous([
+            URL(fileURLWithPath: "/Applications/Visual Studio Code.app", isDirectory: true),
+            URL(fileURLWithPath: "/Users/o/Applications/Claude Code URL Handler.app", isDirectory: true)
+        ]))
+        #expect(RealtimeVoiceVerbs.resolveApp(named: "Kasa", among: installed) == .notInstalled(closest: []))
+        guard case .notInstalled(let closest) = RealtimeVoiceVerbs.resolveApp(named: "VS Code", among: installed) else {
+            Issue.record("VS Code is no app's name here"); return
+        }
+        #expect(closest.map(RealtimeVoiceVerbs.displayName) == ["Visual Studio Code", "Claude Code URL Handler"])
+        #expect(RealtimeVoiceVerbs.resolveApp(named: "  ", among: installed) == .notInstalled(closest: []))
+    }
+
+    @Test func anAmbiguousOrMissingAppIsReportedWithDisplayNamesOnly() {
+        let ambiguous = RealtimeOpenAppTool.appCheckRefusal(.ambiguous(candidates: ["Visual Studio Code", "Claude Code URL Handler"]), named: "code")
+        #expect(ambiguous["ok"] as? Bool == false)
+        #expect(ambiguous["error"] as? String == "ambiguousApp")
+        #expect(ambiguous["candidates"] as? [String] == ["Visual Studio Code", "Claude Code URL Handler"])
+        let missing = RealtimeOpenAppTool.appCheckRefusal(.notInstalled(closest: []), named: "Kasa")
+        #expect(missing["error"] as? String == "appNotInstalled")
+        #expect(RealtimeOpenAppTool.appCheck(.ambiguous(candidates: []), named: "code", harnessResponse: nil)["outcome"] as? String == "ambiguousApp")
+    }
+
+    /// Finder is found on every Mac this runs on; the harness is a stub that
+    /// answers as it does when VS Code is in front.
+    @Test func aMenuCallAgainstADifferentFrontmostAppSaysSoAndNamesBoth() async {
+        let sent = LockedLines()
+        let frontmostChanged = #"{"ok":false,"error":"frontmostChanged","expectedApp":"com.apple.finder","actualApp":{"name":"Code","bundleIdentifier":"com.microsoft.VSCode"}}"#
+        let call = RealtimeToolCall(callID: "c", name: "press_menu", appName: "Finder", path: ["File", "New Finder Window"])
+        let dispatch = await RealtimeOpenAppTool.dispatch(call, answer: { line in sent.append(line); return frontmostChanged })
+        #expect(sent.lines.count == 1)
+        #expect(object(sent.lines.first ?? "")["expectApp"] as? String == "com.apple.finder")
+        #expect(!dispatch.harnessConfirmed)
+        #expect(dispatch.result["error"] as? String == "appMismatch")
+        #expect(dispatch.result["named"] as? String == "Finder")
+        #expect(dispatch.result["frontmost"] as? String == "Code")
+        #expect(dispatch.appCheck?["outcome"] as? String == "appMismatch")
+        #expect(dispatch.appCheck?["resolvedBundleId"] as? String == "com.apple.finder")
+        #expect(dispatch.appCheck?["frontmostBundleId"] as? String == "com.microsoft.VSCode")
+        #expect(RealtimeOpenAppTool.notchAnswer(for: call, dispatch: dispatch) == .harnessAnswered(ok: false, subject: "File \u{203A} New Finder Window", error: "appMismatch"))
+
+        let unknown = RealtimeToolCall(callID: "c", name: "find_menu_items", appName: "Zzqx Nowhere Editor", words: "new window")
+        let refused = await RealtimeOpenAppTool.dispatch(unknown, answer: { line in sent.append(line); return frontmostChanged })
+        #expect(sent.lines.count == 1, "an app that is not installed never reaches the harness")
+        #expect(refused.result["error"] as? String == "appNotInstalled")
+        #expect(refused.appCheck?["outcome"] as? String == "appNotInstalled")
+    }
+
     // MARK: Notch
 
     @Test func intentLinesComeFromTheToolsOwnArguments() {
@@ -269,7 +346,7 @@ struct RealtimeVoiceVerbsTests {
                                                                         waitedForConfirmation: false, harnessResponse: nil))
         let keys: Set<String> = ["kind", "schema", "source", "turnId", "stack", "probeId", "fixture", "seq", "tool", "args", "callMs",
                                  "harnessMs", "ok", "harnessError", "verification", "offered", "offeredCount", "correctOffered", "enabledItemCount",
-                                 "privacyDroppedCount", "listingIncomplete", "choseFromOffered", "independentCheck"]
+                                 "privacyDroppedCount", "listingIncomplete", "choseFromOffered", "independentCheck", "appCheck"]
         let findLine = RealtimeDecisionTrace.line(decision: find, sequence: 1, turnID: "T", stack: "openAIRealtime", source: "live", releasedUptime: 10)
         let probedFind = RealtimeDecisionTrace.line(decision: find, sequence: 1, turnID: "T", stack: "geminiLive", source: "probe",
                                                     releasedUptime: 10, expectedPath: ["View", "Hide Sidebar"])
@@ -278,7 +355,8 @@ struct RealtimeVoiceVerbsTests {
                                                    independentCheck: ["kind": "menuMark", "passed": true])
         #expect(Set(findLine.keys) == keys)
         #expect(Set(pressLine.keys) == keys)
-        #expect(findLine["schema"] as? Int == 1)
+        #expect(findLine["schema"] as? Int == 2)
+        #expect(findLine["appCheck"] is NSNull)
         #expect(findLine["callMs"] as? Int == 1200)
         #expect(findLine["choseFromOffered"] is NSNull)
         #expect((findLine["offered"] as? [[String: Any]])?.first?["path"] as? [String] == ["View", "as List"])
@@ -299,4 +377,12 @@ struct RealtimeVoiceVerbsTests {
         #expect(RealtimeDecisionTrace.loggedArguments(for: call)["path"] as? [String] == ["<private>"])
         #expect(RealtimeDecisionTrace.loggedArguments(for: RealtimeToolCall(callID: "c", name: "focus_app", appName: "Finder"))["name"] as? String == "Finder")
     }
+}
+
+/// The stub harness is called from a detached task.
+private final class LockedLines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    var lines: [String] { lock.lock(); defer { lock.unlock() }; return stored }
+    func append(_ line: String) { lock.lock(); stored.append(line); lock.unlock() }
 }

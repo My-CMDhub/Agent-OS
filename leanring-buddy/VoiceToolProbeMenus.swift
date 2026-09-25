@@ -44,6 +44,9 @@ extension VoiceToolProbe {
         case windowCountRose(closePath: [String])
         /// The app is frontmost.
         case frontmost
+        /// The name fits more than one app, so the right answer is to ask: no
+        /// window rose in any of these apps (extras are closed by `closePath`).
+        case noNewWindow(apps: [String], closePath: [String])
     }
 
     /// A menu item's checkmark and title are refreshed by AppKit's menu
@@ -103,6 +106,12 @@ extension VoiceToolProbe {
         // "cursor" alone was heard as Calculator, Kasa, Terminal, VS Code in 6/10 runs (7D6CDDBB).
         MenuScenario(fixture: "17-cursor-editor-new-window.wav", appClass: "nonNative", appName: "Cursor", bundleIdentifier: "com.todesktop.230313mzl4w4u92",
                      check: .windowCountRose(closePath: ["File", "Close Window"]), expectedPath: ["File", "New Window"], start: nil),
+        // "code" is VS Code's menu-bar name and a word of another installed app's
+        // name: the gold answer is a question, never a press (Jev replay: both
+        // choosers picked Cursor at 0.90-0.92). Outside the class verdicts.
+        MenuScenario(fixture: "18-code-new-window.wav", appClass: "ambiguousName", appName: "Finder", bundleIdentifier: finderBundleIdentifier,
+                     check: .noNewWindow(apps: ["com.todesktop.230313mzl4w4u92", "com.microsoft.VSCode"], closePath: ["File", "Close Window"]),
+                     expectedPath: nil, start: nil),
         MenuScenario(fixture: "14-finder-hide-left-panel.wav", appClass: "native", appName: "Finder", bundleIdentifier: finderBundleIdentifier,
                      check: .itemPresent(path: ["View", "Show Sidebar"]),
                      expectedPath: ["View", "Hide Sidebar"],
@@ -312,6 +321,10 @@ extension VoiceToolProbe {
         if let start = scenario.start { setup.append("start:" + (await setStart(start, app: scenario.appName, harnessAnswer))) }
         var windowsBefore: Int?
         if case .windowCountRose = scenario.check { windowsBefore = windowServerCount(bundleIdentifier: scenario.bundleIdentifier) }
+        var windowsBeforeByApp: [String: Int] = [:]
+        if case .noNewWindow(let apps, _) = scenario.check {
+            for bundleIdentifier in apps { windowsBeforeByApp[bundleIdentifier] = windowServerCount(bundleIdentifier: bundleIdentifier) }
+        }
         // The check's control: read BEFORE the model acts (after the start state
         // read back), it must fail. One that already reads "done" is never a pass.
         switch scenario.check {
@@ -369,6 +382,17 @@ extension VoiceToolProbe {
         line["findOfferedCounts"] = finds.map { $0.dispatch?.menuOffer?.candidates.count ?? -1 }
         line["retriedFindWithNewWords"] = Set(finds.map { RealtimeVoiceVerbs.foldedTokens($0.call.words ?? "").joined(separator: " ") }).count > 1
         let lastActing = turn.decisions.last { RealtimeVoiceVerbs.isActingTool($0.call.name) }
+        // The app check's key number: a press that landed in an app other than
+        // the one the fixture means (for an ask fixture, any press at all), and
+        // presses the model AIMED at another app, landed or not.
+        let targetBundle: String? = { if case .noNewWindow = scenario.check { return nil }; return scenario.bundleIdentifier }()
+        line["wrongAppPresses"] = presses.filter { press in
+            press.dispatch?.harnessConfirmed == true && (press.dispatch?.harnessResponse?["bundleIdentifier"] as? String) != targetBundle
+        }.count
+        line["wrongAppPressAttempts"] = presses.filter { press in
+            ((press.dispatch?.appCheck?["resolvedBundleId"] as? String) ?? (press.dispatch?.harnessResponse?["bundleIdentifier"] as? String)) != targetBundle
+        }.count
+        line["appChecks"] = turn.decisions.compactMap { $0.dispatch?.appCheck?["outcome"] as? String }
         line["actingOutcome"] = lastActing.map { $0.dispatch.map { $0.harnessConfirmed ? "ok" : ($0.result["error"] as? String ?? "failed") } ?? "unanswered" } ?? "noActingTool"
 
         // The independent check, then the undo.
@@ -393,28 +417,26 @@ extension VoiceToolProbe {
             let after = windowServerCount(bundleIdentifier: scenario.bundleIdentifier)
             let passed = { if let before = windowsBefore, let after { return after > before }; return false }()
             check = ["kind": "windowServerCount", "before": windowsBefore ?? NSNull(), "after": after ?? NSNull(), "passed": passed]
-            // Close only what the count proves this run created, newest (key) first,
-            // re-counting after each so a close that did nothing stops the loop.
-            var closed = 0
-            if let before = windowsBefore, var current = after {
-                while current > before, closed < 3 {
-                    var response = await ask(["verb": "menu", "path": closePath, "expectApp": scenario.appName], harnessAnswer)
-                    if response["error"] as? String == "frontmostChanged" {
-                        _ = await ask(["verb": "focus", "app": scenario.appName], harnessAnswer)
-                        response = await ask(["verb": "menu", "path": closePath, "expectApp": scenario.appName], harnessAnswer)
-                    }
-                    let previous = current
-                    guard response["ok"] as? Bool == true,
-                          let next = await windowServerCount(bundleIdentifier: scenario.bundleIdentifier, timeoutSeconds: 2, until: { $0 < previous }),
-                          next < current else {
-                        check["closeError"] = outcome(response)
-                        break
-                    }
-                    current = next
-                    closed += 1
-                }
-            }
+            let (closed, closeError) = await closeWindowsTheRunCreated(app: scenario.appName, bundleIdentifier: scenario.bundleIdentifier,
+                                                                       before: windowsBefore, after: after, closePath: closePath, harnessAnswer)
             check["closed"] = closed
+            if let closeError { check["closeError"] = closeError }
+        case .noNewWindow(let apps, let closePath):
+            var rose: [String] = []
+            var closedByApp: [String: Int] = [:]
+            for bundleIdentifier in apps {
+                let before = windowsBeforeByApp[bundleIdentifier]
+                let after = windowServerCount(bundleIdentifier: bundleIdentifier)
+                guard let before, let after, after > before else { continue }
+                rose.append(bundleIdentifier)
+                // expectApp by bundle identifier: VS Code's menu bar says "Code".
+                closedByApp[bundleIdentifier] = await closeWindowsTheRunCreated(app: bundleIdentifier, bundleIdentifier: bundleIdentifier,
+                                                                                before: before, after: after, closePath: closePath, harnessAnswer).closed
+            }
+            // Asking is the only pass: no window rose, and no press, focus or open went through.
+            let actedOk = turn.decisions.contains { RealtimeVoiceVerbs.isActingTool($0.call.name) && $0.dispatch?.harnessConfirmed == true }
+            check = ["kind": "noNewWindow", "rose": rose, "closed": closedByApp, "actedOk": actedOk,
+                     "passed": rose.isEmpty && !actedOk]
         case .frontmost:
             let frontmost = HarnessServer.frontmostBundleIdentifier()
             check = ["kind": "frontmost", "expected": scenario.bundleIdentifier, "actual": frontmost ?? NSNull(),
@@ -431,6 +453,30 @@ extension VoiceToolProbe {
         let spentUSD = stack == .openAIRealtime ? connection.estimatedOpenAIUSD : 0
         if stack == .openAIRealtime { line["estimatedCostUSD"] = spentUSD }
         return (line, spentUSD, connection.turn.transcript)
+    }
+
+    /// Closes only what the count proves the run created, newest (key) first,
+    /// re-counting after each so a close that did nothing stops the loop.
+    private static func closeWindowsTheRunCreated(app: String, bundleIdentifier: String, before: Int?, after: Int?, closePath: [String],
+                                                  _ harnessAnswer: @escaping @Sendable (String) -> String) async -> (closed: Int, error: String?) {
+        guard let before, var current = after else { return (0, nil) }
+        var closed = 0
+        while current > before, closed < 3 {
+            var response = await ask(["verb": "menu", "path": closePath, "expectApp": app], harnessAnswer)
+            if response["error"] as? String == "frontmostChanged" {
+                _ = await ask(["verb": "focus", "app": app], harnessAnswer)
+                response = await ask(["verb": "menu", "path": closePath, "expectApp": app], harnessAnswer)
+            }
+            let previous = current
+            guard response["ok"] as? Bool == true,
+                  let next = await windowServerCount(bundleIdentifier: bundleIdentifier, timeoutSeconds: 2, until: { $0 < previous }),
+                  next < current else {
+                return (closed, outcome(response))
+            }
+            current = next
+            closed += 1
+        }
+        return (closed, nil)
     }
 
     // MARK: Summary
@@ -462,6 +508,9 @@ extension VoiceToolProbe {
                 "actingOutcomes": tally("actingOutcome"),
                 "proofViolations": group.reduce(0) { $0 + (($1["proofViolations"] as? Int) ?? 0) },
                 "claimedSuccessWithoutReceipt": count("claimedSuccessWithoutReceipt"),
+                "wrongAppPresses": group.reduce(0) { $0 + (($1["wrongAppPresses"] as? Int) ?? 0) },
+                "wrongAppPressAttempts": group.reduce(0) { $0 + (($1["wrongAppPressAttempts"] as? Int) ?? 0) },
+                "appChecks": group.flatMap { ($0["appChecks"] as? [String]) ?? [] }.reduce(into: [String: Int]()) { $0[$1, default: 0] += 1 },
                 "errorKinds": group.compactMap { $0["errorKind"] as? String }.reduce(into: [String: Int]()) { $0[$1, default: 0] += 1 },
                 "releaseToSpokenMs": distribution.map { ["n": $0.count, "medianMs": $0.medianMs, "p95Ms": $0.p95Ms] as [String: Any] } ?? NSNull()
             ]

@@ -91,6 +91,8 @@ struct JarvisNotchTests {
             #expect(reason.count <= JarvisNotchReason.maximumLength, "\(reason)")
         }
         #expect(JarvisNotchReason.plain(forErrorCode: "notFound") == "no app by that name")
+        #expect(JarvisNotchReason.plain(forErrorCode: "appMismatch") == "a different app is in front")
+        #expect(JarvisNotchReason.plain(forErrorCode: "ambiguousApp") == "more than one app has that name")
         #expect(JarvisNotchReason.plain(forErrorCode: "somethingNew") == JarvisNotchReason.fallback)
         #expect(JarvisNotchReason.plain(forErrorCode: nil) == JarvisNotchReason.fallback)
     }

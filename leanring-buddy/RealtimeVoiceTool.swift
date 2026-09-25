@@ -274,7 +274,10 @@ nonisolated enum RealtimeOpenAppTool {
     /// (open_app -> launch, focus_app -> focus, find_menu_items -> menus,
     /// press_menu -> menu), and the menu verbs carry `expectApp`, so a press
     /// never lands on whatever else came forward.
-    static func harnessRequestLine(for call: RealtimeToolCall, ticket: String? = nil) -> Result<String, RealtimeToolRefusal> {
+    /// `expectApp` replaces the model's app name on the menu verbs: `dispatch`
+    /// passes the bundle identifier the name resolved to.
+    static func harnessRequestLine(for call: RealtimeToolCall, ticket: String? = nil,
+                                   expectApp: String? = nil) -> Result<String, RealtimeToolRefusal> {
         func refuse(_ error: String, _ message: String) -> Result<String, RealtimeToolRefusal> {
             .failure(RealtimeToolRefusal(error: error, message: message))
         }
@@ -291,7 +294,7 @@ nonisolated enum RealtimeOpenAppTool {
             request = ["verb": "focus", "app": appName]
         case RealtimeVoiceVerbs.findMenuItemsName:
             guard call.words != nil else { return refuse("missingWords", "find_menu_items needs a few words to look for") }
-            request = ["verb": "menus", "expectApp": appName]
+            request = ["verb": "menus", "expectApp": expectApp ?? appName]
         case RealtimeVoiceVerbs.pressMenuName:
             guard let path = call.path, !path.isEmpty else { return refuse("missingMenuPath", "press_menu needs a path from find_menu_items") }
             // Never offered, so never pressed: Open Recent, History and items
@@ -299,7 +302,7 @@ nonisolated enum RealtimeOpenAppTool {
             guard !RealtimeVoiceVerbs.isPrivateMenuPath(path) else {
                 return refuse("privateMenuItem", "that menu item names the owner's files or pages; it is private and is not offered or pressed")
             }
-            request = ["verb": "menu", "path": path, "expectApp": appName]
+            request = ["verb": "menu", "path": path, "expectApp": expectApp ?? appName]
         default:
             return refuse("unknownTool", "there is no tool named \(call.name)")
         }
@@ -364,10 +367,40 @@ nonisolated enum RealtimeOpenAppTool {
                 answeredUptime: ProcessInfo.processInfo.systemUptime
             )
         }
-        let firstLine: String
+        var firstLine: String
         switch harnessRequestLine(for: call) {
         case .success(let line): firstLine = line
         case .failure(let refusal): return finished(toolResult(for: refusal), waited: false, harnessResponse: nil)
+        }
+        // The menu verbs act only in the app the tool named, resolved to one
+        // installed bundle; the harness's own expectApp guard then compares that
+        // bundle with the app whose menu bar it is about to read.
+        var named: (bundleIdentifier: String, name: String)?
+        if RealtimeVoiceVerbs.isAppScopedMenuTool(call.name), let appName = call.appName {
+            let identity = await Task.detached { RealtimeVoiceVerbs.appIdentity(named: appName) }.value
+            guard case .resolved(let bundleIdentifier, let name) = identity,
+                  case .success(let line) = harnessRequestLine(for: call, expectApp: bundleIdentifier) else {
+                var dispatch = finished(appCheckRefusal(identity, named: appName), waited: false, harnessResponse: nil)
+                dispatch.appCheck = appCheck(identity, named: appName, harnessResponse: nil)
+                return dispatch
+            }
+            named = (bundleIdentifier, name)
+            firstLine = line
+        }
+        func checked(_ dispatch: RealtimeToolDispatch) -> RealtimeToolDispatch {
+            guard let named, let appName = call.appName else { return dispatch }
+            var dispatch = dispatch
+            dispatch.appCheck = appCheck(.resolved(bundleIdentifier: named.bundleIdentifier, name: named.name),
+                                         named: appName, harnessResponse: dispatch.harnessResponse)
+            if dispatch.result["error"] as? String == "frontmostChanged" {
+                let frontmost = ((dispatch.harnessResponse?["actualApp"] as? [String: Any])?["name"] as? String) ?? "another app"
+                dispatch.result["error"] = "appMismatch"
+                dispatch.result["named"] = named.name
+                dispatch.result["frontmost"] = String(frontmost.prefix(60))
+                dispatch.result["message"] = "\(named.name) is not the app in front; \(UntrustedText(frontmost).forDisplay) is. "
+                    + "Nothing was searched or pressed. Focus \(named.name) first, or ask the owner which app they meant."
+            }
+            return dispatch
         }
 
         let (firstRequestUptime, firstAnswer) = await Task.detached { (ProcessInfo.processInfo.systemUptime, answer(firstLine)) }.value
@@ -387,11 +420,11 @@ nonisolated enum RealtimeOpenAppTool {
             response["items"] = nil
             var dispatch = finished(result, waited: false, harnessResponse: response)
             dispatch.menuOffer = offer
-            return dispatch
+            return checked(dispatch)
         }
         guard response["error"] as? String == "confirmationRequired", let ticket = response["ticket"] as? String,
-              case .success(let ticketLine) = harnessRequestLine(for: call, ticket: ticket) else {
-            return finished(toolResult(fromHarnessResponse: response), waited: false, harnessResponse: response)
+              case .success(let ticketLine) = harnessRequestLine(for: call, ticket: ticket, expectApp: named?.bundleIdentifier) else {
+            return checked(finished(toolResult(fromHarnessResponse: response), waited: false, harnessResponse: response))
         }
         await onConfirmationRequired?()
         let deadline = startedUptime + confirmationWaitSeconds
@@ -399,7 +432,49 @@ nonisolated enum RealtimeOpenAppTool {
             try? await Task.sleep(for: .milliseconds(pollMilliseconds))
             response = harnessResponseObject(await Task.detached { answer(ticketLine) }.value)
         } while response["error"] as? String == "confirmationPending" && ProcessInfo.processInfo.systemUptime < deadline
-        return finished(toolResult(fromHarnessResponse: response), waited: true, harnessResponse: response)
+        return checked(finished(toolResult(fromHarnessResponse: response), waited: true, harnessResponse: response))
+    }
+
+    /// What the model is told when the named app is not one installed app.
+    /// Display names only; the model asks, it does not pick.
+    static func appCheckRefusal(_ identity: RealtimeVoiceVerbs.AppIdentity, named appName: String) -> [String: Any] {
+        let shown = UntrustedText(appName).forDisplay
+        switch identity {
+        case .ambiguous(let candidates):
+            return ["ok": false, "status": NSNull(), "error": "ambiguousApp", "named": appName, "candidates": candidates,
+                    "message": "more than one installed app answers to \(shown): \(candidates.joined(separator: ", ")). "
+                        + "Nothing was searched or pressed; ask the owner which one they meant."]
+        case .notInstalled(let closest):
+            return ["ok": false, "status": NSNull(), "error": "appNotInstalled", "named": appName, "candidates": closest,
+                    "message": "no installed app is called \(shown). Nothing was searched or pressed"
+                        + (closest.isEmpty ? "." : "; apps sharing a word with it: \(closest.joined(separator: ", ")).")]
+        case .resolved:
+            return ["ok": false, "status": NSNull(), "error": "requestEncodingFailed", "message": "the request could not be encoded"]
+        }
+    }
+
+    /// The trace's `appCheck`: what the named app resolved to, and what the
+    /// harness found in front when it read the menu bar (its own read, the one
+    /// the verb used). `notChecked`: the harness answered before reading an app.
+    static func appCheck(_ identity: RealtimeVoiceVerbs.AppIdentity, named appName: String,
+                         harnessResponse: [String: Any]?) -> [String: Any] {
+        var check: [String: Any] = ["named": appName, "resolvedBundleId": NSNull(), "frontmostBundleId": NSNull()]
+        switch identity {
+        case .ambiguous: check["outcome"] = "ambiguousApp"
+        case .notInstalled: check["outcome"] = "appNotInstalled"
+        case .resolved(let bundleIdentifier, _):
+            check["resolvedBundleId"] = bundleIdentifier
+            if harnessResponse?["error"] as? String == "frontmostChanged" {
+                check["outcome"] = "appMismatch"
+                check["frontmostBundleId"] = (harnessResponse?["actualApp"] as? [String: Any])?["bundleIdentifier"] ?? NSNull()
+            } else if let frontmost = harnessResponse?["bundleIdentifier"] as? String {
+                check["outcome"] = "match"
+                check["frontmostBundleId"] = frontmost
+            } else {
+                check["outcome"] = "notChecked"
+            }
+        }
+        return check
     }
 
     // MARK: Fresh look
@@ -534,7 +609,7 @@ nonisolated struct RealtimeToolRefusal: Error, Equatable {
 }
 
 nonisolated struct RealtimeToolDispatch {
-    let result: [String: Any]
+    var result: [String: Any]
     let harnessMilliseconds: Int
     let waitedForConfirmation: Bool
     /// nil when the harness was never asked (unknown tool, no app name).
@@ -546,6 +621,8 @@ nonisolated struct RealtimeToolDispatch {
     var answeredUptime: TimeInterval? = nil
     /// find_menu_items only: what the model was offered.
     var menuOffer: RealtimeMenuOffer? = nil
+    /// find_menu_items / press_menu: the app check (`RealtimeOpenAppTool.appCheck`).
+    var appCheck: [String: Any]? = nil
 
     var harnessConfirmed: Bool { result["ok"] as? Bool == true }
 }

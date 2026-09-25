@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds the frozen Jev-vs-LLM chooser dataset from the voice decision trace.
 
-Offline only: reads ~/Library/Logs/Clicky/voice-decisions.log (schema 1, see
+Offline only: reads ~/Library/Logs/Clicky/voice-decisions.log (schema 1-2, see
 RealtimeDecisionTrace in leanring-buddy/RealtimeVoiceVerbs.swift) and, for the
 widened Finder list, one saved harness `menus` response (read-only verb). Writes
 docs/research/jev-eval/dataset.jsonl (git-ignored). No network, no UI actions.

@@ -20,6 +20,7 @@
 //  `RealtimeOpenAppTool.dispatch`; nothing here reads AX or acts.
 //
 
+import AppKit
 import Foundation
 
 nonisolated enum RealtimeVoiceVerbs {
@@ -209,6 +210,117 @@ nonisolated enum RealtimeVoiceVerbs {
             .prefix(limit).map(\.leaf)
     }
 
+    // MARK: App identity
+
+    /// find_menu_items and press_menu run only against the app the tool NAMED,
+    /// resolved to one installed bundle. Measured 2026-09-25 (Jev replay): with
+    /// VS Code's menus offered for "new window in cursor", Jev and Haiku both
+    /// chose File › New Window at 0.92-0.99 — no confidence threshold catches the
+    /// right command in the wrong app, so the app is checked before any chooser.
+    static func isAppScopedMenuTool(_ toolName: String) -> Bool {
+        toolName == findMenuItemsName || toolName == pressMenuName
+    }
+
+    /// One name an app answers to: its file name in an Applications folder, or
+    /// (`isFileName` false) the shorter name it shows in the menu bar while it
+    /// runs — "Code" for Visual Studio Code. A running app found in no
+    /// Applications folder (Finder) is named by its menu-bar name alone.
+    struct AppName: Equatable {
+        let name: String
+        let url: URL
+        let isFileName: Bool
+    }
+
+    enum AppResolution: Equatable {
+        case resolved(URL)
+        /// Two or more installed apps answer to the name: ask, never guess.
+        case ambiguous([URL])
+        /// None does; `closest` share a word with the name (at most five).
+        case notInstalled(closest: [URL])
+    }
+
+    /// A full file name is that app even when its words appear elsewhere
+    /// ("Visual Studio Code", "Finder"). Anything shorter — a menu-bar name or
+    /// the words of a longer name ("Code", "Chrome") — resolves only if exactly
+    /// one app answers to it: "code" is VS Code's menu-bar name AND a word of
+    /// "Claude Code URL Handler", so it is asked about. Words, never letters:
+    /// "code" does not find Xcode. ponytail: no sound-alike matching ("Kasa" for
+    /// Cursor is not installed, and says so); that is its own owner decision.
+    static func resolveApp(named query: String, among names: [AppName]) -> AppResolution {
+        let wanted = foldedTokens(query)
+        guard !wanted.isEmpty else { return .notInstalled(closest: []) }
+        func unique(_ matches: [AppName]) -> [URL] {
+            var seen = Set<String>()
+            return matches.map(\.url).filter { seen.insert($0.standardizedFileURL.path).inserted }
+        }
+        let fullName = unique(names.filter { $0.isFileName && foldedTokens($0.name) == wanted })
+        if fullName.count == 1 { return .resolved(fullName[0]) }
+        if fullName.count > 1 { return .ambiguous(fullName) }
+        let partial = unique(names.filter { name in
+            let tokens = foldedTokens(name.name)
+            return tokens.count >= wanted.count
+                && (0...(tokens.count - wanted.count)).contains { Array(tokens[$0..<($0 + wanted.count)]) == wanted }
+        })
+        if partial.count == 1 { return .resolved(partial[0]) }
+        if partial.count > 1 { return .ambiguous(partial) }
+        let closest = unique(names.filter { name in
+            let tokens = Set(foldedTokens(name.name))
+            return wanted.contains { $0.count >= 3 && tokens.contains($0) }
+        })
+        return .notInstalled(closest: Array(closest.prefix(5)))
+    }
+
+    /// The name an app is shown by: its bundle's file name.
+    static func displayName(_ url: URL) -> String {
+        url.deletingPathExtension().lastPathComponent
+    }
+
+    /// Every name an installed or running regular app answers to: the launch
+    /// verb's Applications folders plus running regular apps. File names only —
+    /// no Info.plist is read until one app is chosen.
+    static func installedAppNames() -> [AppName] {
+        var names = ApplicationLauncher.searchDirectories.flatMap { directory in
+            ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
+                .filter { $0.lowercased().hasSuffix(".app") }
+                .map { file -> AppName in
+                    let url = directory.appendingPathComponent(file, isDirectory: true)
+                    return AppName(name: displayName(url), url: url, isFileName: true)
+                }
+        }
+        let installedPaths = Set(names.map { $0.url.standardizedFileURL.path })
+        for application in NSWorkspace.shared.runningApplications where application.activationPolicy == .regular {
+            guard let name = application.localizedName, let url = application.bundleURL else { continue }
+            names.append(AppName(name: name, url: url, isFileName: !installedPaths.contains(url.standardizedFileURL.path)))
+        }
+        return names
+    }
+
+    enum AppIdentity: Equatable {
+        case resolved(bundleIdentifier: String, name: String)
+        case ambiguous(candidates: [String])
+        case notInstalled(closest: [String])
+    }
+
+    /// A bundle identifier names its app outright; anything else goes through
+    /// `resolveApp`. Blocks on the file system: call it off main.
+    static func appIdentity(named query: String) -> AppIdentity {
+        let resolution: AppResolution
+        if query.contains("."), !query.contains(" "), let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: query) {
+            resolution = .resolved(url)
+        } else {
+            resolution = resolveApp(named: query, among: installedAppNames())
+        }
+        switch resolution {
+        case .resolved(let url):
+            guard let bundleIdentifier = Bundle(url: url)?.bundleIdentifier else { return .notInstalled(closest: []) }
+            return .resolved(bundleIdentifier: bundleIdentifier, name: displayName(url))
+        case .ambiguous(let urls):
+            return .ambiguous(candidates: urls.map(displayName))
+        case .notInstalled(let closest):
+            return .notInstalled(closest: closest.map(displayName))
+        }
+    }
+
     // MARK: Notch text
 
     /// "View › as List": each step shown safe, because the app wrote them.
@@ -275,7 +387,8 @@ nonisolated struct RealtimeToolDecision {
 /// Keep the shape stable; add keys, never rename them, and bump `schema` if a
 /// key's meaning changes. Every key is always present, null when it does not apply.
 ///
-///   kind "toolCall", schema 1
+///   kind "toolCall", schema 2 (2026-09-25: `appCheck` added; schema 1 lines
+///   simply lack it, and every other key means what it did)
 ///   source            "live" | "probe"
 ///   turnId, stack     the turn (voice-live.log / voice-tool-probe.log share turnId)
 ///   probeId, fixture  probe only, else null
@@ -296,9 +409,13 @@ nonisolated struct RealtimeToolDecision {
 ///                     paths when the call arrived? null if nothing was offered
 ///   independentCheck  probe: a structure read that does not trust the verb
 ///                     ({kind, passed, ...}); live: null
+///   appCheck          find_menu_items / press_menu: {outcome, named,
+///                     resolvedBundleId, frontmostBundleId}; outcome is match |
+///                     appMismatch | ambiguousApp | appNotInstalled | notChecked.
+///                     null for other tools and for calls refused before it ran
 nonisolated enum RealtimeDecisionTrace {
     static let fileName = "voice-decisions.log"
-    static let schemaVersion = 1
+    static let schemaVersion = 2
     static let privatePathPlaceholder = ["<private>"]
 
     static func choseFromOffered(path: [String]?, offered: [RealtimeMenuCandidate]?) -> Bool? {
@@ -342,7 +459,8 @@ nonisolated enum RealtimeDecisionTrace {
             "privacyDroppedCount": value(offer?.privacyDroppedCount),
             "listingIncomplete": value(offer?.listingIncomplete),
             "choseFromOffered": value(isPress ? choseFromOffered(path: decision.call.path, offered: decision.offeredBeforeCall) : nil),
-            "independentCheck": value(independentCheck)
+            "independentCheck": value(independentCheck),
+            "appCheck": value(dispatch?.appCheck)
         ]
     }
 
