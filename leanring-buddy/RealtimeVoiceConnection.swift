@@ -70,6 +70,11 @@ final class RealtimeTurnMarks {
     /// Calls this turn the heard check refused. After one, a call whose app
     /// was only guessed from the words is refused too (`unconfirmedRetry`).
     var heardRefusals = 0
+    /// The latest call's work. Each call awaits the one before it, so calls
+    /// reach the harness in the order the model emitted them — each waits a
+    /// different time for the transcript, and focus -> press must not become
+    /// press -> focus.
+    var lastCallTask: Task<Void, Never>?
     var outputAudioMime: String?
     var toolsInFlight = 0
     /// Event names only, never content, each with its arrival in ms after the
@@ -468,7 +473,9 @@ final class RealtimeVoiceConnection {
             turn.decisions.append(RealtimeToolDecision(call: call, callUptime: arrivalUptime, offeredBeforeCall: turn.latestMenuOffer))
             turn.toolsInFlight += 1
             let overLimit = turn.toolCalls.count > Self.maximumToolCallsPerTurn
-            Task { @MainActor [weak self] in
+            let previousCall = turn.lastCallTask
+            turn.lastCallTask = Task { @MainActor [weak self] in
+                await previousCall?.value
                 var dispatch: RealtimeToolDispatch
                 if overLimit {
                     let refusal = RealtimeToolRefusal(error: "tooManyToolCalls", message: "only \(Self.maximumToolCallsPerTurn) tool calls are allowed per turn")

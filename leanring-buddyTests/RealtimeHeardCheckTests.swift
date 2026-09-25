@@ -315,6 +315,24 @@ struct RealtimeHeardCheckTests {
         #expect(requests.count == 0)
     }
 
+    @MainActor @Test func callsReachTheHarnessInTheOrderTheModelEmittedThem() async throws {
+        // The focus waits for the transcript and answers slowly; the unknown tool
+        // would finish at once. Emitted focus-then-bogus, they must finish so.
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { _ in Thread.sleep(forTimeInterval: 0.2); return "{}" })
+        try await connection.beginTurn()
+        try await connection.endTurn()
+        connection.handle(["serverContent": ["inputTranscription": ["text": "switch to finder"]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        connection.handle(["toolCall": ["functionCalls": [["id": "c1", "name": "focus_app", "args": ["name": "Finder"]],
+                                                          ["id": "c2", "name": "bogus_tool", "args": [String: Any]()]]]],
+                          arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        let turn = connection.turn
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        while turn.dispatches.count < 2, ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(turn.dispatches.count == 2)
+        #expect(turn.dispatches.first?.result["error"] as? String != "unknownTool")
+        #expect(turn.dispatches.last?.result["error"] as? String == "unknownTool")
+    }
+
     // MARK: Notch
 
     @Test func theNotchSaysWhichAppItHeard() {
