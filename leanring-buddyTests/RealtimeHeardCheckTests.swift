@@ -139,6 +139,29 @@ struct RealtimeHeardCheckTests {
         #expect(mismatch.refusalError == "heardNamedMismatch")
     }
 
+    @Test func anUncaughtNameInTheAppSlotAsksBeforeAMenuToolAndIsLogged() {
+        func decide(_ transcript: String, tool: String, menuWords: [String] = []) -> RealtimeHeardCheck.Decision {
+            RealtimeHeardCheck.decide(transcript: transcript, named: "Cursor", among: installed, toolName: tool, menuWords: menuWords)
+        }
+        let unclear = decide("Open a new window in Zorbit.", tool: "press_menu")
+        #expect(unclear.outcome == .appNameUnclear)
+        #expect(unclear.heardSlot == ["zorbit"])
+        #expect(RealtimeHeardCheck.refusal(for: unclear, toolName: "press_menu", named: "Cursor")?["error"] as? String == "heardUnavailable")
+        #expect(decide("Open a new window in Zorbit.", tool: "find_menu_items").outcome == .appNameUnclear)
+        // Only the menu tools: open and focus keep their own guards.
+        #expect(decide("Open a new window in Zorbit.", tool: "focus_app").outcome == .noAppHeard)
+        // English, a modern word, a menu word of the call itself, or a sound-alike: not a missed name.
+        #expect(decide("switch to list view", tool: "press_menu") == RealtimeHeardCheck.Decision(outcome: .noAppHeard, heardApps: [], tier: nil))
+        #expect(decide("show the sidebar", tool: "press_menu").outcome == .noAppHeard)
+        #expect(decide("show all the windows", tool: "press_menu").outcome == .noAppHeard, "Webster's lists window, not windows")
+        #expect(decide("hide the minimap", tool: "press_menu", menuWords: ["view", "hide", "minimap"]).outcome == .noAppHeard)
+        let kasa = decide("open a new window in kasa", tool: "press_menu")
+        #expect(kasa.outcome == .match)
+        #expect(kasa.heardSlot == ["kasa"])
+        #expect(RealtimeHeardCheck.isEnglishWord("window") && !RealtimeHeardCheck.isEnglishWord("zorbit"))
+        #expect(RealtimeHeardCheck.englishWords.count > 200_000, "the system word list was read")
+    }
+
     @Test func refusalsNameTheAppsAndOnlyAPressFailsClosedWithoutATranscript() {
         let mismatch = RealtimeHeardCheck.decide(transcript: "new window in cursor", named: "Visual Studio Code", among: installed)
         let told = RealtimeHeardCheck.refusal(for: mismatch, toolName: "press_menu", named: "Visual Studio Code") ?? [:]
@@ -172,7 +195,7 @@ struct RealtimeHeardCheckTests {
         #expect(RealtimeHeardCheck.refusal(for: match, toolName: "press_menu", named: "Cursor") == nil)
 
         let trace = RealtimeHeardCheck.traceObject(mismatch, named: "Visual Studio Code", transcriptArrivalMs: 812, waitedMs: 40)
-        #expect(Set(trace.keys) == ["outcome", "heardApps", "tier", "named", "transcriptArrivalMs", "waitedMs"])
+        #expect(Set(trace.keys) == ["outcome", "heardApps", "tier", "named", "transcriptArrivalMs", "waitedMs", "heardSlot"])
         #expect(trace["outcome"] as? String == "heardNamedMismatch")
     }
 

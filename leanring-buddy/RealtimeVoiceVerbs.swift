@@ -416,8 +416,11 @@ nonisolated struct RealtimeToolDecision {
 ///   heardCheck        every app-naming tool: {outcome, heardApps, tier, named,
 ///                     transcriptArrivalMs, waitedMs}; outcome is match |
 ///                     heardNamedMismatch | ambiguousApp | noAppHeard |
-///                     transcriptMissing. heardApps are display names from the
-///                     file system — the owner's words are never logged here
+///                     transcriptMissing | unconfirmedRetry | appNameUnclear.
+///                     heardApps are display names from the file system.
+///                     heardSlot (added 2026-09-25, absent before): app-slot
+///                     words that are not ordinary English or that name or
+///                     sound like an app — never the rest of the sentence
 nonisolated enum RealtimeDecisionTrace {
     static let fileName = "voice-decisions.log"
     static let schemaVersion = 3

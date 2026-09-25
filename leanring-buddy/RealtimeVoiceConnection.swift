@@ -502,9 +502,10 @@ final class RealtimeVoiceConnection {
         let waitedMs = Int(((ProcessInfo.processInfo.systemUptime - waitStart) * 1000).rounded())
         // The app list reads the file system: off main.
         let afterHeardRefusal = turn.heardRefusals > 0
+        let menuWords = RealtimeVoiceVerbs.foldedTokens(([call.words ?? ""] + (call.path ?? [])).joined(separator: " "))
         let decision = await Task.detached {
             RealtimeHeardCheck.decide(transcript: transcript, named: named, among: RealtimeVoiceVerbs.installedAppNames(),
-                                      afterHeardRefusal: afterHeardRefusal)
+                                      afterHeardRefusal: afterHeardRefusal, toolName: call.name, menuWords: menuWords)
         }.value
         let arrivalMs = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime).map { Int((($0 - released) * 1000).rounded()) }
         let refusal = RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named)

@@ -16,7 +16,9 @@
 //  app names, locally.
 //
 //  Owner-only: the transcript is compared here and written only to the 0600
-//  answers files. The decision trace carries app display names, never words.
+//  answers files. The decision trace (also 0600) carries app display names and
+//  at most the app-slot word(s) that are not ordinary English — the one word a
+//  mishearing lives in ("kasa") — never the sentence.
 //
 
 import Foundation
@@ -232,6 +234,70 @@ nonisolated enum RealtimeHeardCheck {
         return .none
     }
 
+    // MARK: The app slot, read when nothing else settles it (pure)
+
+    /// The words read as "where the app name goes": the word after one of these,
+    /// or the last word said. Wider than the matching slots above, because
+    /// this only ever LOGS a word or ASKS.
+    static let heardSlotLeadWords: Set<String> = ["in", "to", "the", "open", "for"]
+
+    /// macOS's own word list, `/usr/share/dict/words` (Webster's Second, 1934:
+    /// 235,976 words on every Mac), lower-cased. Deterministic, unlike
+    /// NSSpellChecker, which learns the owner's words and follows their language.
+    /// Empty if unreadable, which makes every unknown slot word ASK — closed.
+    static let englishWords: Set<String> = {
+        guard let text = try? String(contentsOfFile: "/usr/share/dict/words", encoding: .utf8) else { return [] }
+        return Set(text.split(separator: "\n").map { $0.lowercased() })
+    }()
+    /// Webster's Second predates computers. ponytail: a hand list of the
+    /// everyday computing words it lacks; a menu word the call itself carries
+    /// ("minimap") is covered separately, so this stays short.
+    static let modernWords: Set<String> = [
+        "email", "desktop", "download", "online", "inbox", "screenshot", "popup", "dropdown", "toolbar", "sidebar",
+        "fullscreen", "emoji", "website", "homepage", "wifi", "bluetooth", "login", "logout", "username", "app", "apps",
+        "tab", "tabs", "url", "browser", "devtools", "incognito", "workspace", "terminal", "settings", "okay"
+    ]
+
+    /// Plural and verb endings stripped once: Webster's lists "window", not "windows".
+    static func isEnglishWord(_ word: String) -> Bool {
+        if englishWords.contains(word) || modernWords.contains(word) { return true }
+        return ["s", "es", "ed", "ing"].contains { suffix in
+            word.count > suffix.count + 2 && word.hasSuffix(suffix) && englishWords.contains(String(word.dropLast(suffix.count)))
+        }
+    }
+
+    struct SlotReading: Equatable {
+        /// Name-like slot words that are not ordinary English, or that name or
+        /// sound like an app: the trace's `heardSlot`.
+        let logged: [String]
+        /// Name-like slot words that are none of: an installed app's word, a
+        /// sound-alike of one, English, a word of the call's own menu query.
+        let unrecognised: [String]
+    }
+
+    static func readSlot(_ spoken: [String], among names: [RealtimeVoiceVerbs.AppName], menuWords: [String]) -> SlotReading {
+        var slot: [String] = []
+        for (index, word) in spoken.enumerated() where index == spoken.count - 1 || (index > 0 && heardSlotLeadWords.contains(spoken[index - 1])) {
+            if word.count >= 3, word.allSatisfy(\.isLetter), !slot.contains(word) { slot.append(word) }
+        }
+        let appWords = Set(names.flatMap { name -> [String] in
+            let tokens = RealtimeVoiceVerbs.foldedTokens(name.name)
+            return tokens + [tokens.joined()]
+        })
+        let appKeys = Set(names.compactMap { name -> String? in
+            let tokens = RealtimeVoiceVerbs.foldedTokens(name.name)
+            return tokens.count == 1 && tokens[0].count >= 5 ? soundKey(tokens[0]) : nil
+        })
+        func isApp(_ word: String) -> Bool {
+            appWords.contains(word) || (word.count >= 4 && !soundAlikeStopWords.contains(word) && appKeys.contains(soundKey(word)))
+        }
+        return SlotReading(
+            logged: slot.filter { isApp($0) || !isEnglishWord($0) },
+            unrecognised: slot.filter { word in
+                !isApp(word) && !isEnglishWord(word) && !menuWords.contains { RealtimeVoiceVerbs.tokensMatch($0, word) }
+            })
+    }
+
     // MARK: The decision (pure)
 
     enum Outcome: String {
@@ -243,6 +309,10 @@ nonisolated enum RealtimeHeardCheck {
         case ambiguousApp
         /// The words name no app ("switch to list view"): the existing check decides.
         case noAppHeard
+        /// A menu tool, no app heard, and the app slot holds a word that is no
+        /// app, no sound-alike, not English and not a menu word ("in Zorbit"):
+        /// the name was said and not caught, so ask rather than trust the model's.
+        case appNameUnclear
         /// No transcript by the deadline.
         case transcriptMissing
         /// The words name the tool's app only by a guess (a distinctive word or
@@ -257,12 +327,15 @@ nonisolated enum RealtimeHeardCheck {
         /// Display names of the apps heard.
         let heardApps: [String]
         let tier: Tier?
+        /// `SlotReading.logged`, for the trace.
+        var heardSlot: [String] = []
         /// The tool result to hand back instead of calling the harness; nil proceeds.
         var refusalError: String? {
             switch outcome {
             case .heardNamedMismatch: return RealtimeHeardCheck.mismatchError
             case .ambiguousApp: return "ambiguousApp"
             case .unconfirmedRetry: return RealtimeHeardCheck.unconfirmedError
+            case .appNameUnclear: return RealtimeHeardCheck.unavailableError
             case .match, .noAppHeard, .transcriptMissing: return nil
             }
         }
@@ -272,11 +345,26 @@ nonisolated enum RealtimeHeardCheck {
     /// fails CLOSED (`refusesWithoutTranscript`); the other tools proceed on the
     /// checks they already had — see `refusesWithoutTranscript`.
     /// `afterHeardRefusal`: this check already refused a call this turn.
+    /// `menuWords`: the call's own query words and path, which an app slot may
+    /// hold ("hide the minimap").
     static func decide(transcript: String?, named: String, among names: [RealtimeVoiceVerbs.AppName],
-                       afterHeardRefusal: Bool = false) -> Decision {
+                       afterHeardRefusal: Bool = false, toolName: String = "", menuWords: [String] = []) -> Decision {
         guard let transcript, !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return Decision(outcome: .transcriptMissing, heardApps: [], tier: nil)
         }
+        let slot = readSlot(RealtimeVoiceVerbs.foldedTokens(transcript), among: names, menuWords: menuWords)
+        var decision = decideHeard(transcript: transcript, named: named, among: names, afterHeardRefusal: afterHeardRefusal)
+        // noAppHeard fails OPEN to the model's name, so a menu tool asks when a
+        // name-like word sat where the app goes and matched nothing.
+        if decision.outcome == .noAppHeard, RealtimeVoiceVerbs.isAppScopedMenuTool(toolName), !slot.unrecognised.isEmpty {
+            decision = Decision(outcome: .appNameUnclear, heardApps: [], tier: nil)
+        }
+        decision.heardSlot = slot.logged
+        return decision
+    }
+
+    private static func decideHeard(transcript: String, named: String, among names: [RealtimeVoiceVerbs.AppName],
+                                    afterHeardRefusal: Bool) -> Decision {
         let heard = appsMentioned(in: transcript, among: names)
         let heardNames = heard.apps.map(RealtimeVoiceVerbs.displayName)
         guard let only = heard.apps.first else { return Decision(outcome: .noAppHeard, heardApps: [], tier: nil) }
@@ -332,6 +420,10 @@ nonisolated enum RealtimeHeardCheck {
             return ["ok": false, "status": NSNull(), "error": "ambiguousApp", "named": named, "candidates": decision.heardApps,
                     "message": "the owner's words fit more than one installed app: \(decision.heardApps.joined(separator: ", ")). "
                         + "Nothing was opened, focused, searched or pressed. Ask the owner which one they meant."]
+        case .appNameUnclear:
+            return ["ok": false, "status": NSNull(), "error": unavailableError, "named": named,
+                    "message": "the owner's words name no installed app that could be recognised, so which app they meant "
+                        + "is not confirmed. Nothing was searched or pressed. Ask them to say the app's name again."]
         case .transcriptMissing where refusesWithoutTranscript(toolName: toolName):
             return ["ok": false, "status": NSNull(), "error": unavailableError, "named": named,
                     "message": "the owner's words were not transcribed in time to confirm which app they meant. "
@@ -341,9 +433,10 @@ nonisolated enum RealtimeHeardCheck {
         }
     }
 
-    /// The decision trace's `heardCheck` (schema 3). No words, only app names and timings.
+    /// The decision trace's `heardCheck` (schema 3). App names, timings, and
+    /// only the app-slot words `heardSlot` keeps — never the sentence.
     static func traceObject(_ decision: Decision, named: String, transcriptArrivalMs: Int?, waitedMs: Int) -> [String: Any] {
         ["outcome": decision.outcome.rawValue, "heardApps": decision.heardApps, "tier": decision.tier?.rawValue ?? NSNull(),
-         "named": named, "transcriptArrivalMs": transcriptArrivalMs ?? NSNull(), "waitedMs": waitedMs]
+         "named": named, "transcriptArrivalMs": transcriptArrivalMs ?? NSNull(), "waitedMs": waitedMs, "heardSlot": decision.heardSlot]
     }
 }
