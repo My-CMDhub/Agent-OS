@@ -64,6 +64,9 @@ final class RealtimeTurnMarks {
     /// OpenAI only: the committed audio item, so a late transcript of an
     /// earlier turn is never read as this one's.
     var audioItemID: String?
+    /// Gemini only: input-transcription pieces that arrive before this are the
+    /// PREVIOUS turn's and are dropped (`beginTurn`).
+    var staleHeardPiecesUntilUptime: TimeInterval?
     /// Calls this turn the heard check refused. After one, a call whose app
     /// was only guessed from the words is refused too (`unconfirmedRetry`).
     var heardRefusals = 0
@@ -129,6 +132,10 @@ final class RealtimeVoiceConnection {
     /// OpenAI only: `response.create` while a response is live is refused
     /// (`conversation_already_has_active_response`), so a tool result waits for it.
     private var openAIResponseActive = false
+    /// OpenAI only: each committed audio item's turn, so a transcript that
+    /// lands after the next turn began still reaches the turn it transcribes.
+    private var turnsByAudioItemID: [String: RealtimeTurnMarks] = [:]
+    private var turnAwaitingCommit: RealtimeTurnMarks?
     /// OpenAI only, from each `response.done`'s usage; a response with no usage
     /// is charged the bench's ceiling, never 0.
     private(set) var estimatedOpenAIUSD = 0.0
@@ -149,6 +156,7 @@ final class RealtimeVoiceConnection {
     /// many calls in one turn, not left to loop against the harness. focus ->
     /// find -> press is three, so five leaves one retry and no more.
     static let maximumToolCallsPerTurn = 5
+    static let supersededError = "superseded"
     static let openAIMaxOutputTokens = VoiceStackBenchmark.openAIRealtimeMaxOutputTokens
     /// The J.A.R.V.I.S. voices, live loop only — the bench keeps "marin" and
     /// Gemini's default as its control. OpenAI lists ten realtime voices and
@@ -269,8 +277,20 @@ final class RealtimeVoiceConnection {
         }
     }
 
+    /// Gemini's input transcription has no item id, so a piece is placed by
+    /// when it arrives. Measured 2026-09-25 over 79 Gemini fixture turns: a
+    /// turn's LAST piece lands at most 387 ms after its release, and its FIRST
+    /// at least 1,735 ms after its activityStart. So when a turn begins while
+    /// the previous transcript is still open, pieces in its first second are
+    /// the previous turn's — dropped, never appended to this one.
+    static let geminiStaleHeardPieceSeconds: Double = 1.0
+
     func beginTurn() async throws {
+        let previous = turn
         turn = RealtimeTurnMarks()
+        if stack == .geminiLive, previous.lastAudioSentUptime != nil, previous.heardCompletedUptime(now: uptime) == nil {
+            turn.staleHeardPiecesUntilUptime = uptime + Self.geminiStaleHeardPieceSeconds
+        }
         switch stack {
         case .openAIRealtime: try await socket?.sendJSON(["type": "input_audio_buffer.clear"])
         case .geminiLive: try await socket?.sendJSON(["realtimeInput": ["activityStart": [String: Any]()]])
@@ -290,6 +310,7 @@ final class RealtimeVoiceConnection {
     /// The push-to-talk release, stated to the server.
     func endTurn() async throws {
         turn.lastAudioSentUptime = uptime
+        turnAwaitingCommit = turn
         switch stack {
         case .openAIRealtime:
             try await socket?.sendJSON(["type": "input_audio_buffer.commit"])
@@ -309,7 +330,8 @@ final class RealtimeVoiceConnection {
 
     // MARK: Server events
 
-    private func handle(_ message: [String: Any], arrivalUptime: TimeInterval) {
+    /// Internal, not private, so a test can feed the provider's events.
+    func handle(_ message: [String: Any], arrivalUptime: TimeInterval) {
         recordEvent(message, arrivalUptime: arrivalUptime)
         switch stack {
         case .openAIRealtime: handleOpenAI(message, arrivalUptime: arrivalUptime)
@@ -328,11 +350,17 @@ final class RealtimeVoiceConnection {
         case "response.output_audio_transcript.delta":
             turn.transcript += message["delta"] as? String ?? ""
         case "input_audio_buffer.committed":
-            turn.audioItemID = message["item_id"] as? String
+            guard let itemID = message["item_id"] as? String else { break }
+            let owner = turnAwaitingCommit ?? turn
+            turnAwaitingCommit = nil
+            owner.audioItemID = itemID
+            turnsByAudioItemID[itemID] = owner
         case "conversation.item.input_audio_transcription.completed", "conversation.item.input_audio_transcription.failed":
-            guard let itemID = message["item_id"] as? String, itemID == turn.audioItemID, turn.heardCompleteUptime == nil else { break }
-            turn.heardText = message["transcript"] as? String ?? ""
-            turn.heardCompleteUptime = arrivalUptime
+            // To the turn whose audio it transcribes, even if another has begun since.
+            guard let itemID = message["item_id"] as? String, let owner = turnsByAudioItemID.removeValue(forKey: itemID),
+                  owner.heardCompleteUptime == nil else { break }
+            owner.heardText = message["transcript"] as? String ?? ""
+            owner.heardCompleteUptime = arrivalUptime
         case "response.output_item.done":
             if let call = RealtimeOpenAppTool.parseOpenAI(message) { receivedToolCalls([call], arrivalUptime: arrivalUptime) }
         case "response.done":
@@ -367,7 +395,8 @@ final class RealtimeVoiceConnection {
         if let spokenPiece = (serverContent["outputTranscription"] as? [String: Any])?["text"] as? String {
             turn.transcript += spokenPiece
         }
-        if let heardPiece = (serverContent["inputTranscription"] as? [String: Any])?["text"] as? String {
+        if let heardPiece = (serverContent["inputTranscription"] as? [String: Any])?["text"] as? String,
+           arrivalUptime >= turn.staleHeardPiecesUntilUptime ?? -.infinity {
             turn.heardText += heardPiece
             turn.heardPieceUptimes.append(arrivalUptime)
         }
@@ -454,6 +483,20 @@ final class RealtimeVoiceConnection {
                     // The owner's words against the tool's app, before anything is focused,
                     // opened, searched or pressed.
                     let heard = await Self.heardCheck(for: call, in: turn)
+                    // The owner pressed the key again while this call waited: whatever
+                    // it would do answers a turn nobody is waiting on. Never run it.
+                    guard self?.turn === turn else {
+                        let refusal = RealtimeToolRefusal(error: Self.supersededError,
+                                                          message: "the owner started a new request before this call ran; nothing was done")
+                        var superseded = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: refusal), harnessMilliseconds: 0,
+                                                              waitedForConfirmation: false, harnessResponse: nil)
+                        superseded.heardCheck = heard?.trace
+                        turn.dispatches.append(superseded)
+                        turn.decisions[decisionIndex].dispatch = superseded
+                        turn.toolsInFlight -= 1
+                        // No result is sent: it would start a reply inside the new turn.
+                        return
+                    }
                     if isKnownTool {
                         JarvisNotch.shared.handle(.toolCall(title: RealtimeVoiceVerbs.intentTitle(for: call)))
                         if turn.intentShownUptime == nil { turn.intentShownUptime = self?.uptime }

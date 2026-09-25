@@ -247,6 +247,74 @@ struct RealtimeHeardCheckTests {
         }
     }
 
+    // MARK: Turns that overlap
+
+    @MainActor @Test func aLateOpenAITranscriptReachesItsOwnTurnNotTheNextOne() async throws {
+        let connection = RealtimeVoiceConnection(stack: .openAIRealtime, harnessAnswer: { _ in "{}" })
+        let now = ProcessInfo.processInfo.systemUptime
+        try await connection.beginTurn()
+        try await connection.endTurn()
+        connection.handle(["type": "input_audio_buffer.committed", "item_id": "item_A"], arrivalUptime: now)
+        let first = connection.turn
+        try await connection.beginTurn()
+        connection.handle(["type": "conversation.item.input_audio_transcription.completed", "item_id": "item_A",
+                           "transcript": "open a new window in cursor"], arrivalUptime: now + 1)
+        #expect(first.heardText == "open a new window in cursor")
+        #expect(first.heardCompleteUptime == now + 1)
+        #expect(connection.turn.heardText.isEmpty)
+        #expect(connection.turn.heardCompleteUptime == nil)
+    }
+
+    @MainActor @Test func geminiPiecesOfThePreviousTurnAreDroppedNotAppended() async throws {
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { _ in "{}" })
+        func piece(_ text: String, at uptime: TimeInterval) {
+            connection.handle(["serverContent": ["inputTranscription": ["text": text]]], arrivalUptime: uptime)
+        }
+        try await connection.beginTurn()
+        try await connection.endTurn()
+        piece("open a new window in", at: ProcessInfo.processInfo.systemUptime)
+        // The next turn begins while that transcript is still open (not yet quiet).
+        try await connection.beginTurn()
+        let began = ProcessInfo.processInfo.systemUptime
+        piece(" cursor", at: began + 0.2)
+        #expect(connection.turn.heardText.isEmpty)
+        piece("switch to list view", at: began + RealtimeVoiceConnection.geminiStaleHeardPieceSeconds + 0.5)
+        #expect(connection.turn.heardText == "switch to list view")
+        // A turn begun after the last one's transcript was complete drops nothing.
+        try await connection.endTurn()
+        connection.turn.heardCompleteUptime = ProcessInfo.processInfo.systemUptime
+        try await connection.beginTurn()
+        piece("open finder", at: ProcessInfo.processInfo.systemUptime)
+        #expect(connection.turn.heardText == "open finder")
+    }
+
+    @MainActor @Test func aCallWhoseTurnWasSupersededWhileItWaitedNeverReachesTheHarness() async throws {
+        final class Requests: @unchecked Sendable {
+            private let lock = NSLock()
+            private var lines: [String] = []
+            func add(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return lines.count }
+        }
+        let requests = Requests()
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { line in requests.add(line); return "{}" })
+        try await connection.beginTurn()
+        try await connection.endTurn()
+        connection.handle(["serverContent": ["inputTranscription": ["text": "open a new window in finder"]]],
+                          arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        connection.handle(["toolCall": ["functionCalls": [["id": "c1", "name": "press_menu",
+                                                           "args": ["app": "Finder", "path": ["File", "New Finder Window"]]]]]],
+                          arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        let first = connection.turn
+        // The owner presses the key again while the call waits for the transcript to go quiet.
+        try await connection.beginTurn()
+        let deadline = ProcessInfo.processInfo.systemUptime + 4
+        while first.decisions.first?.dispatch == nil, ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(first.decisions.first?.dispatch?.result["error"] as? String == "superseded")
+        #expect(requests.count == 0)
+    }
+
     // MARK: Notch
 
     @Test func theNotchSaysWhichAppItHeard() {
