@@ -202,16 +202,63 @@ extension VoiceToolProbe {
     /// window adds THREE such surfaces (6D5164BC: 1 -> 4), so closing "until the
     /// count is back" overshot into the owner's own windows (9BC0CACB, 4 -> 8 -> 0).
     static func windowServerWindowNumbers(bundleIdentifier: String, onScreenOnly: Bool = false) -> [Int]? {
+        windowServerWindows(bundleIdentifier: bundleIdentifier, onScreenOnly: onScreenOnly)?.map(\.number)
+    }
+
+    /// Numbers with bounds (window-server coordinates: top-left origin, like AX).
+    static func windowServerWindows(bundleIdentifier: String, onScreenOnly: Bool = false) -> [(number: Int, bounds: CGRect)]? {
         guard let processIdentifier = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first?.processIdentifier,
               let windows = CGWindowListCopyWindowInfo(onScreenOnly ? [.optionOnScreenOnly, .excludeDesktopElements] : [.optionAll, .excludeDesktopElements],
                                                        kCGNullWindowID) as? [[String: Any]] else { return nil }
         return windows.compactMap { window in
             guard (window[kCGWindowOwnerPID as String] as? Int).map(Int32.init) == processIdentifier,
                   window[kCGWindowLayer as String] as? Int == 0,
-                  let bounds = window[kCGWindowBounds as String] as? [String: Any],
-                  let height = (bounds["Height"] as? NSNumber)?.doubleValue, height >= 100 else { return nil }
-            return window[kCGWindowNumber as String] as? Int
+                  let boundsDictionary = window[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary), bounds.height >= 100,
+                  let number = window[kCGWindowNumber as String] as? Int else { return nil }
+            return (number, bounds)
         }
+    }
+
+    // MARK: Cleanup guards (pure)
+
+    /// Only a press that could have made a window buys a close: the fixture's
+    /// own path, or a "New…" item. A stray press elsewhere (a view toggle, a
+    /// wrong-app press) never licenses closing anything.
+    nonisolated static func pressCountsTowardCloseBudget(path: [String]?, expectedPath: [String]?) -> Bool {
+        guard let path, !path.isEmpty else { return false }
+        if path == expectedPath { return true }
+        return RealtimeVoiceVerbs.foldedTokens(path.last ?? "").first == "new"
+    }
+
+    /// Windows that existed before the run and the window server no longer
+    /// lists. An unreadable list, or an app that is gone, loses all of them.
+    nonisolated static func preexistingWindowsMissing(before: Set<Int>, after: [Int]?) -> Set<Int> {
+        guard let after else { return before }
+        return before.subtracting(after)
+    }
+
+    /// The harness's main window (AppKit coordinates) is the window-server
+    /// window in front (top-left): the one Close Window acts on is the one
+    /// the numbers say is new. Two points of slack for rounding.
+    nonisolated static func sameWindow(harnessMainFrame: CGRect, windowServerBounds: CGRect, primaryDisplayHeight: CGFloat) -> Bool {
+        let flipped = AccessibilityTreeWalker.convertAccessibilityFrameToAppKitFrame(windowServerBounds, primaryDisplayHeightInPoints: primaryDisplayHeight)
+        return abs(flipped.minX - harnessMainFrame.minX) <= 2 && abs(flipped.minY - harnessMainFrame.minY) <= 2
+            && abs(flipped.width - harnessMainFrame.width) <= 2 && abs(flipped.height - harnessMainFrame.height) <= 2
+    }
+
+    enum CleanupStep: Equatable {
+        case close(window: Int)
+        /// Nothing (more) the run created is in front, or the budget is spent.
+        case done
+        /// A new window is in front but the harness's main window is another:
+        /// Close Window would hit the wrong one.
+        case refuse(String)
+    }
+
+    nonisolated static func nextCleanupStep(front: Int?, before: Set<Int>, closed: Int, atMost: Int, harnessMainIsFront: Bool) -> CleanupStep {
+        guard closed < min(atMost, 3), let front, !before.contains(front) else { return .done }
+        return harnessMainIsFront ? .close(window: front) : .refuse("frontIsNotHarnessMainWindow")
     }
 
 
@@ -256,7 +303,8 @@ extension VoiceToolProbe {
             at: MeasurementLogFile.directoryURL.appendingPathComponent("voice-tool-probe-answers-\(probeID).jsonl"))
         defer { try? answersFile?.close() }
         var runLines: [[String: Any]] = []
-        for scenario in scenarios {
+        var abort: String?
+        scenarioLoop: for scenario in scenarios {
             guard let (clip16k, clip24k) = clips(forFixture: scenario.fixture) else {
                 appendLine(["kind": "fixtureUnreadable", "probeId": probeID, "fixture": scenario.fixture])
                 continue
@@ -278,8 +326,21 @@ extension VoiceToolProbe {
                     }
                     runLines.append(line)
                     print("🧪 menu probe: \(scenario.fixture) \(stack.rawValue) #\(runNumber) chain=\(line["chain"] ?? "-") check=\(line["checkPassed"] ?? "-")")
+                    // A window the owner had open is gone: stop everything, close nothing more.
+                    if let reason = line["abort"] as? String {
+                        abort = reason
+                        break scenarioLoop
+                    }
                 }
             }
+        }
+
+        if let abort {
+            appendLine(["kind": "probeAborted", "probeId": probeID, "reason": abort,
+                        "message": "a window that existed before the run is gone; the probe stopped at once and restored nothing"])
+            for summaryLine in menuSummaries(runLines, probeID: probeID, openAISpentUSD: openAISpentUSD) { appendLine(summaryLine) }
+            print("🛑🛑🛑 menu probe ABORTED: \(abort) — a pre-existing window disappeared. Nothing more was pressed, closed or restored. -> \(logPath)")
+            return
         }
 
         // Put Finder back as it was, then quit what the probe launched.
@@ -406,7 +467,10 @@ extension VoiceToolProbe {
 
         // The independent check, then the undo — never more closes than presses that went through there.
         func okPresses(in bundleIdentifier: String) -> Int {
-            presses.filter { $0.dispatch?.harnessConfirmed == true && $0.dispatch?.harnessResponse?["bundleIdentifier"] as? String == bundleIdentifier }.count
+            presses.filter {
+                $0.dispatch?.harnessConfirmed == true && $0.dispatch?.harnessResponse?["bundleIdentifier"] as? String == bundleIdentifier
+                    && pressCountsTowardCloseBudget(path: $0.call.path, expectedPath: scenario.expectedPath)
+            }.count
         }
         var check: [String: Any]
         switch scenario.check {
@@ -429,11 +493,12 @@ extension VoiceToolProbe {
             let after = windowServerCount(bundleIdentifier: scenario.bundleIdentifier)
             let passed = { if let before = windowsBefore, let after { return after > before }; return false }()
             check = ["kind": "windowServerCount", "before": windowsBefore ?? NSNull(), "after": after ?? NSNull(), "passed": passed]
-            let (closed, closeError) = await closeWindowsTheRunCreated(app: scenario.appName, bundleIdentifier: scenario.bundleIdentifier,
-                                                                       before: windowNumbersBefore[scenario.bundleIdentifier],
-                                                                       atMost: okPresses(in: scenario.bundleIdentifier), closePath: closePath, harnessAnswer)
-            check["closed"] = closed
-            if let closeError { check["closeError"] = closeError }
+            let cleanup = await closeWindowsTheRunCreated(app: scenario.appName, bundleIdentifier: scenario.bundleIdentifier,
+                                                          before: windowNumbersBefore[scenario.bundleIdentifier],
+                                                          atMost: okPresses(in: scenario.bundleIdentifier), closePath: closePath, harnessAnswer)
+            check["closed"] = cleanup.closed
+            if let closeError = cleanup.error { check["closeError"] = closeError }
+            if let abort = cleanup.abort { line["abort"] = abort }
         case .noNewWindow(let apps, let closePath):
             var rose: [String] = []
             var closedByApp: [String: Int] = [:]
@@ -443,9 +508,11 @@ extension VoiceToolProbe {
                 guard let before, let after, after > before.count else { continue }
                 rose.append(bundleIdentifier)
                 // expectApp by bundle identifier: VS Code's menu bar says "Code".
-                closedByApp[bundleIdentifier] = await closeWindowsTheRunCreated(app: bundleIdentifier, bundleIdentifier: bundleIdentifier,
-                                                                                before: before, atMost: okPresses(in: bundleIdentifier),
-                                                                                closePath: closePath, harnessAnswer).closed
+                let cleanup = await closeWindowsTheRunCreated(app: bundleIdentifier, bundleIdentifier: bundleIdentifier,
+                                                              before: before, atMost: okPresses(in: bundleIdentifier),
+                                                              closePath: closePath, harnessAnswer)
+                closedByApp[bundleIdentifier] = cleanup.closed
+                if let abort = cleanup.abort { line["abort"] = abort; break }
             }
             // Asking is the only pass: no window rose, and no press, focus or open went through.
             let actedOk = turn.decisions.contains { RealtimeVoiceVerbs.isActingTool($0.call.name) && $0.dispatch?.harnessConfirmed == true }
@@ -470,31 +537,57 @@ extension VoiceToolProbe {
     }
 
     /// Closes a window only while the app's FRONT window is one that did not
-    /// exist before the run (by window number), and only if that window is then
-    /// gone, and never more times than the run pressed there (`atMost`) — so it
-    /// cannot reach a window the owner had open. A window opened some other way
+    /// exist before the run (by window number) AND is the harness's main
+    /// window (the one Close Window acts on), only if that window is then gone,
+    /// and never more times than presses that could have made one (`atMost`).
+    /// After every close, every window that existed before must still be
+    /// listed; if one is not, `abort` says so and nothing more is closed —
+    /// the caller stops the whole probe. A window opened some other way
     /// (open_app) is left, and shows in the count for a person to close.
     private static func closeWindowsTheRunCreated(app: String, bundleIdentifier: String, before: Set<Int>?, atMost: Int, closePath: [String],
-                                                  _ harnessAnswer: @escaping @Sendable (String) -> String) async -> (closed: Int, error: String?) {
-        guard let before else { return (0, nil) }
+                                                  _ harnessAnswer: @escaping @Sendable (String) -> String) async
+        -> (closed: Int, error: String?, abort: String?) {
+        guard let before else { return (0, nil, nil) }
         var closed = 0
-        while closed < min(atMost, 3) {
+        while true {
             // Focus first so the front window and the one Close Window acts on are the same.
             _ = await ask(["verb": "focus", "app": app], harnessAnswer)
-            guard let front = windowServerWindowNumbers(bundleIdentifier: bundleIdentifier, onScreenOnly: true)?.first,
-                  !before.contains(front) else { return (closed, nil) }
-            let response = await ask(["verb": "menu", "path": closePath, "expectApp": app], harnessAnswer)
-            let started = uptime
-            while response["ok"] as? Bool == true, windowServerWindowNumbers(bundleIdentifier: bundleIdentifier)?.contains(front) == true,
-                  uptime - started < 2 {
-                try? await Task.sleep(for: .milliseconds(100))
+            let frontWindow = windowServerWindows(bundleIdentifier: bundleIdentifier, onScreenOnly: true)?.first
+            let listing = await ask(["verb": "windows", "app": app, "expectApp": app], harnessAnswer)
+            let mainFrame = (listing["windows"] as? [[String: Any]])?
+                .first { $0["main"] as? Bool == true && $0["minimized"] as? Bool != true }
+                .flatMap { $0["frame"] as? [String: Any] }
+                .flatMap { frame -> CGRect? in
+                    guard let x = frame["x"] as? Double, let y = frame["y"] as? Double,
+                          let width = frame["width"] as? Double, let height = frame["height"] as? Double else { return nil }
+                    return CGRect(x: x, y: y, width: width, height: height)
+                }
+            let harnessMainIsFront = frontWindow.flatMap { front in
+                mainFrame.map { sameWindow(harnessMainFrame: $0, windowServerBounds: front.bounds,
+                                           primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height) }
+            } ?? false
+            switch nextCleanupStep(front: frontWindow?.number, before: before, closed: closed, atMost: atMost, harnessMainIsFront: harnessMainIsFront) {
+            case .done:
+                return (closed, nil, nil)
+            case .refuse(let reason):
+                return (closed, reason, nil)
+            case .close(let front):
+                let response = await ask(["verb": "menu", "path": closePath, "expectApp": app], harnessAnswer)
+                let started = uptime
+                while response["ok"] as? Bool == true, windowServerWindowNumbers(bundleIdentifier: bundleIdentifier)?.contains(front) == true,
+                      uptime - started < 2 {
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                let missing = preexistingWindowsMissing(before: before, after: windowServerWindowNumbers(bundleIdentifier: bundleIdentifier))
+                if !missing.isEmpty {
+                    return (closed, outcome(response), "preexistingWindowGone:\(bundleIdentifier):\(missing.count)of\(before.count)")
+                }
+                guard response["ok"] as? Bool == true, windowServerWindowNumbers(bundleIdentifier: bundleIdentifier)?.contains(front) == false else {
+                    return (closed, outcome(response), nil)
+                }
+                closed += 1
             }
-            guard response["ok"] as? Bool == true, windowServerWindowNumbers(bundleIdentifier: bundleIdentifier)?.contains(front) == false else {
-                return (closed, outcome(response))
-            }
-            closed += 1
         }
-        return (closed, nil)
     }
 
     // MARK: Summary
