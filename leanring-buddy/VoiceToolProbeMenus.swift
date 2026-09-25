@@ -550,6 +550,8 @@ extension VoiceToolProbe {
         guard let before else { return (0, nil, nil) }
         var closed = 0
         while true {
+            // The budget before anything else: with nothing to close, never bring the app forward.
+            guard closed < min(atMost, 3) else { return (closed, nil, nil) }
             // Focus first so the front window and the one Close Window acts on are the same.
             _ = await ask(["verb": "focus", "app": app], harnessAnswer)
             let frontWindow = windowServerWindows(bundleIdentifier: bundleIdentifier, onScreenOnly: true)?.first
