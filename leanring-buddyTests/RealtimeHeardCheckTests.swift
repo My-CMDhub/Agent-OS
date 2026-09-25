@@ -26,6 +26,8 @@ struct RealtimeHeardCheckTests {
          app("/System/Applications/TextEdit.app"), app("/System/Applications/System Settings.app"),
          app("/System/Applications/Font Book.app"), app("/System/Applications/Time Machine.app"),
          app("/System/Applications/Clock.app"), app("/System/Applications/App Store.app"),
+         app("/System/Applications/Preview.app"), app("/System/Applications/Home.app"), app("/System/Applications/Photos.app"),
+         app("/System/Applications/Notes.app"),
          app("/Applications/Visual Studio Code.app", "Code", file: false),
          app("/System/Library/CoreServices/Finder.app", "Finder", file: true)]
     }
@@ -89,6 +91,21 @@ struct RealtimeHeardCheckTests {
         #expect(heard("") == [])
     }
 
+    @Test func commonWordNamesCountOnlyWhereOnlyAnAppNameFits() {
+        #expect(heard("show the preview pane in finder") == ["Finder"])
+        #expect(heard("go home") == [])
+        #expect(heard("take notes about the photos") == [])
+        #expect(heard("switch to the numbers tab") == [])
+        for (said, app) in [("open preview", "Preview"), ("Preview.", "Preview"), ("bring up photos", "Photos"),
+                            ("switch to notes", "Notes"), ("go to home", "Home"), ("launch photos please", "Photos"), ("Home, please", "Home")] {
+            let result = RealtimeHeardCheck.appsMentioned(in: said, among: installed)
+            #expect(result.apps.map(RealtimeVoiceVerbs.displayName) == [app], "\(said)")
+            #expect(result.tier == .slot, "\(said)")
+        }
+        // Never as a sound-alike or a word: "note" in the slot is not Notes.
+        #expect(heard("open the note") == [])
+    }
+
     // MARK: Decision
 
     @Test func theDecisionTable() {
@@ -110,6 +127,15 @@ struct RealtimeHeardCheckTests {
         #expect(outcome("  ", named: "Cursor") == .transcriptMissing)
         let mismatch = RealtimeHeardCheck.decide(transcript: "new window in cursor", named: "Visual Studio Code", among: installed)
         #expect(mismatch.heardApps == ["Cursor"])
+        // After a refusal this turn, re-calling with an app the words only GUESSED is not the owner's answer.
+        func retry(_ transcript: String, named: String) -> RealtimeHeardCheck.Outcome {
+            RealtimeHeardCheck.decide(transcript: transcript, named: named, among: installed, afterHeardRefusal: true).outcome
+        }
+        #expect(retry("open a new window in kasa", named: "Cursor") == .unconfirmedRetry)
+        #expect(outcome("open a new window in kasa", named: "Cursor") == .match)
+        #expect(retry("open a new window in chrome", named: "Google Chrome") == .unconfirmedRetry)
+        #expect(retry("open a new window in cursor", named: "Cursor") == .match)
+        #expect(retry("open preview", named: "Preview") == .match)
         #expect(mismatch.refusalError == "heardNamedMismatch")
     }
 
@@ -121,6 +147,16 @@ struct RealtimeHeardCheckTests {
         #expect(told["heard"] as? String == "Cursor")
         #expect(told["named"] as? String == "Visual Studio Code")
         #expect((told["message"] as? String)?.hasSuffix("whether they meant Cursor.") == true)
+
+        // A guess is worded as one.
+        let guessed = RealtimeHeardCheck.decide(transcript: "new window in kasa", named: "Visual Studio Code", among: installed)
+        let guessedMessage = RealtimeHeardCheck.refusal(for: guessed, toolName: "press_menu", named: "Visual Studio Code")?["message"] as? String
+        #expect(guessedMessage?.hasPrefix("the owner may have said Cursor, but") == true)
+        #expect((told["message"] as? String)?.hasPrefix("the owner said Cursor, but") == true)
+        let retried = RealtimeHeardCheck.decide(transcript: "new window in kasa", named: "Cursor", among: installed, afterHeardRefusal: true)
+        let retriedTold = RealtimeHeardCheck.refusal(for: retried, toolName: "focus_app", named: "Cursor") ?? [:]
+        #expect(retriedTold["error"] as? String == "heardUnconfirmed")
+        #expect((retriedTold["message"] as? String)?.contains("may have said Cursor") == true)
 
         let ambiguous = RealtimeHeardCheck.decide(transcript: "open a new window in code", named: "Code", among: installed)
         let asked = RealtimeHeardCheck.refusal(for: ambiguous, toolName: "focus_app", named: "Code") ?? [:]
@@ -191,6 +227,7 @@ struct RealtimeHeardCheckTests {
         #expect(long == "heard another app, asking first")
         #expect(long.count <= JarvisNotchReason.maximumLength)
         #expect(JarvisNotchReason.plain(forErrorCode: "heardUnavailable").count <= JarvisNotchReason.maximumLength)
+        #expect(JarvisNotchReason.plain(forErrorCode: "heardUnconfirmed").count <= JarvisNotchReason.maximumLength)
         #expect(JarvisNotchReason.plain(forErrorCode: "appMismatch", subject: "Cursor") == "a different app is in front")
         #expect(JarvisNotchState.thinking.next(on: .toolCall(title: "x"))?.next(on: .harnessAnswered(ok: false, subject: "Cursor", error: "heardNamedMismatch"))
                 == .didntTake(reason: "heard Cursor, asking first"))

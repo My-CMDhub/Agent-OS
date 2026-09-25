@@ -64,6 +64,9 @@ final class RealtimeTurnMarks {
     /// OpenAI only: the committed audio item, so a late transcript of an
     /// earlier turn is never read as this one's.
     var audioItemID: String?
+    /// Calls this turn the heard check refused. After one, a call whose app
+    /// was only guessed from the words is refused too (`unconfirmedRetry`).
+    var heardRefusals = 0
     var outputAudioMime: String?
     var toolsInFlight = 0
     /// Event names only, never content, each with its arrival in ms after the
@@ -498,9 +501,15 @@ final class RealtimeVoiceConnection {
         let transcript = await turn.waitForHeard(until: released + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds)
         let waitedMs = Int(((ProcessInfo.processInfo.systemUptime - waitStart) * 1000).rounded())
         // The app list reads the file system: off main.
-        let decision = await Task.detached { RealtimeHeardCheck.decide(transcript: transcript, named: named, among: RealtimeVoiceVerbs.installedAppNames()) }.value
+        let afterHeardRefusal = turn.heardRefusals > 0
+        let decision = await Task.detached {
+            RealtimeHeardCheck.decide(transcript: transcript, named: named, among: RealtimeVoiceVerbs.installedAppNames(),
+                                      afterHeardRefusal: afterHeardRefusal)
+        }.value
         let arrivalMs = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime).map { Int((($0 - released) * 1000).rounded()) }
-        return (RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named), decision.heardApps.first,
+        let refusal = RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named)
+        if refusal != nil { turn.heardRefusals += 1 }
+        return (refusal, decision.heardApps.first,
                 RealtimeHeardCheck.traceObject(decision, named: named, transcriptArrivalMs: arrivalMs, waitedMs: waitedMs))
     }
 

@@ -200,7 +200,8 @@ nonisolated enum JarvisNotchReason {
         "appNotInstalled": "no app by that name",
         // The heard-vs-named check (2026-09-25); a mismatch names the app heard.
         "heardNamedMismatch": "heard another app, asking first",
-        "heardUnavailable": "didn\u{2019}t catch the app, asking"
+        "heardUnavailable": "didn\u{2019}t catch the app, asking",
+        "heardUnconfirmed": "not sure which app, asking"
     ]
 
     /// `subject` is the app HEARD for a heard-vs-named mismatch ("heard
