@@ -439,8 +439,9 @@ nonisolated enum RealtimeHeardCheck {
 
     /// The decision trace's `heardCheck` (schema 3). App names, timings, and
     /// only the app-slot words `heardSlot` keeps — never the sentence.
-    static func traceObject(_ decision: Decision, named: String, transcriptArrivalMs: Int?, waitedMs: Int) -> [String: Any] {
-        ["outcome": decision.outcome.rawValue, "heardApps": decision.heardApps, "tier": decision.tier?.rawValue ?? NSNull(),
+    /// `refused`: the call was answered with this check's refusal, not run.
+    static func traceObject(_ decision: Decision, named: String, transcriptArrivalMs: Int?, waitedMs: Int, refused: Bool) -> [String: Any] {
+        ["refused": refused, "outcome": decision.outcome.rawValue, "heardApps": decision.heardApps, "tier": decision.tier?.rawValue ?? NSNull(),
          "named": named, "transcriptArrivalMs": transcriptArrivalMs ?? NSNull(), "waitedMs": waitedMs, "heardSlot": decision.heardSlot]
     }
 }

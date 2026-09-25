@@ -199,8 +199,9 @@ struct RealtimeHeardCheckTests {
         let match = RealtimeHeardCheck.decide(transcript: "open cursor", named: "Cursor", among: installed)
         #expect(RealtimeHeardCheck.refusal(for: match, toolName: "press_menu", named: "Cursor") == nil)
 
-        let trace = RealtimeHeardCheck.traceObject(mismatch, named: "Visual Studio Code", transcriptArrivalMs: 812, waitedMs: 40)
-        #expect(Set(trace.keys) == ["outcome", "heardApps", "tier", "named", "transcriptArrivalMs", "waitedMs", "heardSlot"])
+        let trace = RealtimeHeardCheck.traceObject(mismatch, named: "Visual Studio Code", transcriptArrivalMs: 812, waitedMs: 40, refused: true)
+        #expect(Set(trace.keys) == ["outcome", "heardApps", "tier", "named", "transcriptArrivalMs", "waitedMs", "heardSlot", "refused"])
+        #expect(trace["refused"] as? Bool == true)
         #expect(trace["outcome"] as? String == "heardNamedMismatch")
     }
 
@@ -245,6 +246,12 @@ struct RealtimeHeardCheckTests {
             marks.heardPieceUptimes = [base]
             #expect(marks.heardCompletedUptime(now: base + RealtimeTurnMarks.geminiHeardQuietSeconds) == base, "\(base)")
         }
+    }
+
+    @Test func theTranscriptionIsChargedAtItsPublishedPerMinuteRate() {
+        // One minute of PCM16 mono 24 kHz is 2,880,000 bytes: US$0.003.
+        #expect(abs(RealtimeVoiceConnection.openAITranscriptionUSD(pcmBytes: 2 * 24_000 * 60) - 0.003) < 1e-12)
+        #expect(RealtimeVoiceConnection.openAITranscriptionUSD(pcmBytes: 0) == 0)
     }
 
     // MARK: Turns that overlap

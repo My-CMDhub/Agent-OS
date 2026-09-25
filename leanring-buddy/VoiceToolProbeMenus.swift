@@ -458,9 +458,9 @@ extension VoiceToolProbe {
             return nil
         }
         line["wrongAppPressAttempts"] = presses.filter { aimedBundle($0) != targetBundle }.count
-        line["heardRefusedPresses"] = presses.filter { press in
-            ["heardNamedMismatch", "ambiguousApp"].contains(press.dispatch?.heardCheck?["outcome"] as? String ?? "")
-                || press.dispatch?.result["error"] as? String == RealtimeHeardCheck.unavailableError
+        // Every acting call (open, focus, press) the heard check refused, whatever the reason.
+        line["heardRefusedActingCalls"] = turn.decisions.filter { decision in
+            RealtimeVoiceVerbs.isActingTool(decision.call.name) && decision.dispatch?.heardCheck?["refused"] as? Bool == true
         }.count
         line["appChecks"] = turn.decisions.compactMap { $0.dispatch?.appCheck?["outcome"] as? String }
         line["actingOutcome"] = lastActing.map { $0.dispatch.map { $0.harnessConfirmed ? "ok" : ($0.result["error"] as? String ?? "failed") } ?? "unanswered" } ?? "noActingTool"
@@ -622,7 +622,7 @@ extension VoiceToolProbe {
                 "wrongAppPresses": group.reduce(0) { $0 + (($1["wrongAppPresses"] as? Int) ?? 0) },
                 "wrongAppPressAttempts": group.reduce(0) { $0 + (($1["wrongAppPressAttempts"] as? Int) ?? 0) },
                 "heardChecks": group.flatMap { ($0["heardChecks"] as? [String]) ?? [] }.reduce(into: [String: Int]()) { $0[$1, default: 0] += 1 },
-                "heardRefusedPresses": group.reduce(0) { $0 + (($1["heardRefusedPresses"] as? Int) ?? 0) },
+                "heardRefusedActingCalls": group.reduce(0) { $0 + (($1["heardRefusedActingCalls"] as? Int) ?? 0) },
                 "heardArrivalMs": VoiceBenchStatistics.distribution(of: group.map { ($0["marksMs"] as? [String: Any])?["heardArrivalMs"] as? Int })
                     .map { ["n": $0.count, "medianMs": $0.medianMs, "p95Ms": $0.p95Ms] as [String: Any] } ?? NSNull(),
                 "appChecks": group.flatMap { ($0["appChecks"] as? [String]) ?? [] }.reduce(into: [String: Int]()) { $0[$1, default: 0] += 1 },

@@ -425,7 +425,8 @@ nonisolated struct RealtimeToolDecision {
 ///                     heardNamedMismatch | ambiguousApp | noAppHeard |
 ///                     transcriptMissing | unconfirmedRetry | appNameUnclear.
 ///                     heardApps are display names from the file system.
-///                     heardSlot (added 2026-09-25, absent before): app-slot
+///                     refused: the call got this check's refusal and never ran.
+///                     heardSlot, refused (added 2026-09-25, absent before). heardSlot: app-slot
 ///                     words that are not ordinary English or that name or
 ///                     sound like an app — never the rest of the sentence
 nonisolated enum RealtimeDecisionTrace {

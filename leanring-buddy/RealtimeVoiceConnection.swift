@@ -144,6 +144,8 @@ final class RealtimeVoiceConnection {
     /// OpenAI only, from each `response.done`'s usage; a response with no usage
     /// is charged the bench's ceiling, never 0.
     private(set) var estimatedOpenAIUSD = 0.0
+    /// OpenAI only: input audio appended this turn, for the transcription charge.
+    private var turnInputAudioBytes = 0
 
     /// Probe only: replaces the app name of every `open_app` call, so a forced
     /// failure (an app that does not exist) runs the real harness path.
@@ -171,6 +173,15 @@ final class RealtimeVoiceConnection {
     static let openAIVoice = "cedar"
     /// Input transcription: separate from the realtime model, billed apart.
     static let openAITranscriptionModel = "gpt-4o-mini-transcribe"
+    /// Its published estimate, US$0.003 per minute of input audio
+    /// (developers.openai.com/api/docs/pricing, read 2026-09-25). `response.done`
+    /// usage covers only the realtime model, so this is added per committed turn.
+    static let openAITranscriptionUSDPerMinute = 0.003
+
+    /// The transcription charge for `pcmBytes` of PCM16 mono at 24 kHz.
+    nonisolated static func openAITranscriptionUSD(pcmBytes: Int) -> Double {
+        Double(pcmBytes) / (2 * 24_000) / 60 * openAITranscriptionUSDPerMinute
+    }
     static let geminiVoice = "Charon"
 
     init(stack: VoiceStackChoice, harnessAnswer: @escaping @Sendable (String) -> String) {
@@ -293,6 +304,7 @@ final class RealtimeVoiceConnection {
     func beginTurn() async throws {
         let previous = turn
         turn = RealtimeTurnMarks()
+        turnInputAudioBytes = 0
         if stack == .geminiLive, previous.lastAudioSentUptime != nil, previous.heardCompletedUptime(now: uptime) == nil {
             turn.staleHeardPiecesUntilUptime = uptime + Self.geminiStaleHeardPieceSeconds
         }
@@ -306,6 +318,7 @@ final class RealtimeVoiceConnection {
     func appendAudio(_ pcmData: Data) async throws {
         switch stack {
         case .openAIRealtime:
+            turnInputAudioBytes += pcmData.count
             try await socket?.sendJSON(["type": "input_audio_buffer.append", "audio": pcmData.base64EncodedString()])
         case .geminiLive:
             try await socket?.sendJSON(["realtimeInput": ["audio": ["mimeType": "audio/pcm;rate=16000", "data": pcmData.base64EncodedString()]]])
@@ -318,6 +331,7 @@ final class RealtimeVoiceConnection {
         turnAwaitingCommit = turn
         switch stack {
         case .openAIRealtime:
+            estimatedOpenAIUSD += Self.openAITranscriptionUSD(pcmBytes: turnInputAudioBytes)
             try await socket?.sendJSON(["type": "input_audio_buffer.commit"])
             try await socket?.sendJSON(["type": "response.create"])
         case .geminiLive:
@@ -564,7 +578,7 @@ final class RealtimeVoiceConnection {
         let refusal = RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named, namedAppIsRunning: namedAppIsRunning)
         if refusal != nil { turn.heardRefusals += 1 }
         return (refusal, decision.heardApps.first,
-                RealtimeHeardCheck.traceObject(decision, named: named, transcriptArrivalMs: arrivalMs, waitedMs: waitedMs))
+                RealtimeHeardCheck.traceObject(decision, named: named, transcriptArrivalMs: arrivalMs, waitedMs: waitedMs, refused: refusal != nil))
     }
 
     /// Context only: OpenAI gets a user image item and no `response.create`;
