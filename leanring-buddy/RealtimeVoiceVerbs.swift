@@ -143,8 +143,10 @@ nonisolated enum RealtimeVoiceVerbs {
     /// Open “<file>”, Compress “<file>”, Get Info on “<file>”. Found in the Jev
     /// replay (2026-09-25): 24 trace entries carried a file name, and each had
     /// gone to the model too. A quote mark in any step makes the item private;
-    /// a lone ’ does not — it is the apostrophe in "Don’t Save".
-    static let quoteMarks: Set<Character> = ["\u{201C}", "\u{201D}", "\u{201E}", "\"", "\u{2018}", "\u{00AB}", "\u{00BB}", "\u{2039}", "\u{203A}"]
+    /// a lone ’ does not — it is the apostrophe in "Don’t Save". 「」『』 are
+    /// the Japanese and Chinese quotes (review, 2026-09-25).
+    static let quoteMarks: Set<Character> = ["\u{201C}", "\u{201D}", "\u{201E}", "\"", "\u{2018}", "\u{00AB}", "\u{00BB}", "\u{2039}", "\u{203A}",
+                                             "\u{300C}", "\u{300D}", "\u{300E}", "\u{300F}"]
 
     static func quotesSomething(_ label: String) -> Bool {
         label.contains { quoteMarks.contains($0) }

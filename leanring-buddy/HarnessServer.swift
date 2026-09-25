@@ -1283,7 +1283,8 @@ final class HarnessServer {
         ) else { return nil }
 
         try? FileManager.default.createDirectory(at: Self.supportDirectory, withIntermediateDirectories: true)
-        guard (try? data.write(to: url)) != nil else { return nil }
+        // A new file each time, so an owner-only append is an owner-only create.
+        guard Self.append(data, to: url) else { return nil }
         pruneAnomalyDumps()
         return url.path
     }
@@ -3811,16 +3812,15 @@ final class HarnessServer {
         }
     }
 
-    private static func append(_ data: Data, to url: URL) -> Bool {
-        if let handle = try? FileHandle(forWritingTo: url) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            return (try? handle.write(contentsOf: data)) != nil
-        }
+    /// Owner-only, like the voice logs: every audit line names the app, the
+    /// target and any typed text, and `data.write(to:)` created these 0644 —
+    /// readable by every local account (found 2026-09-25). Created 0600 and an
+    /// existing file narrowed on the next append (`appendOwnerOnly`).
+    static func append(_ data: Data, to url: URL) -> Bool {
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
         )
-        return (try? data.write(to: url)) != nil
+        return MeasurementLogFile.appendOwnerOnly(data, to: url)
     }
 
     /// One old file, then the previous one goes. Two files is enough to answer

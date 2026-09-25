@@ -143,6 +143,20 @@ struct RealtimeVoiceVerbsTests {
         FileManager.default.createFile(atPath: old.path, contents: nil, attributes: [.posixPermissions: 0o644])
         MeasurementLogFile.appendOwnerOnly(Data("{}\n".utf8), to: old)
         #expect(mode(old) == 0o600)
+        // The harness's audit log and its day mirror: same rule, directory created on the way.
+        let audit = directory.appendingPathComponent("Logs/harness-audit-2026-09-25.log")
+        #expect(HarnessServer.append(Data("{}\n".utf8), to: audit))
+        #expect(mode(audit) == 0o600)
+        let oldAudit = directory.appendingPathComponent("harness-audit.log")
+        FileManager.default.createFile(atPath: oldAudit.path, contents: Data("{}\n".utf8), attributes: [.posixPermissions: 0o644])
+        #expect(HarnessServer.append(Data("{}\n".utf8), to: oldAudit))
+        #expect(mode(oldAudit) == 0o600)
+        #expect(try String(contentsOf: oldAudit, encoding: .utf8) == "{}\n{}\n")
+    }
+
+    @Test func cjkQuotesMakeAMenuItemPrivate() {
+        #expect(RealtimeVoiceVerbs.isPrivateMenuPath(["File", "「報告書」を開く"]))
+        #expect(RealtimeVoiceVerbs.isPrivateMenuPath(["File", "『メモ』を複製"]))
     }
 
     @Test func onlyEnabledPlausibleLeavesAreOffered() {

@@ -57,12 +57,13 @@ nonisolated enum MeasurementLogFile {
     /// is narrowed on every append. These logs carry what the owner said and
     /// which menu items their apps offered (2026-09-25: voice-live.log,
     /// voice-tool-probe.log and voice-bench.log were all 0644).
-    static func appendOwnerOnly(_ data: Data, to fileURL: URL) {
+    @discardableResult
+    static func appendOwnerOnly(_ data: Data, to fileURL: URL) -> Bool {
         let fileDescriptor = open(fileURL.path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
-        guard fileDescriptor >= 0 else { return }
+        guard fileDescriptor >= 0 else { return false }
         fchmod(fileDescriptor, 0o600)
         let fileHandle = FileHandle(fileDescriptor: fileDescriptor, closeOnDealloc: true)
-        try? fileHandle.write(contentsOf: data)
+        return (try? fileHandle.write(contentsOf: data)) != nil
     }
 
     /// A headless run that terminates straight after its last append would
