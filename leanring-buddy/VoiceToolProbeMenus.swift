@@ -247,6 +247,17 @@ extension VoiceToolProbe {
             && abs(flipped.width - harnessMainFrame.width) <= 2 && abs(flipped.height - harnessMainFrame.height) <= 2
     }
 
+    /// The main, unminimized window's frame from a `windows` answer. The wire
+    /// keys are x, y, w, h (`HarnessServer.frameJSON`); reading "width" found
+    /// nothing, so probe 27BA20D2 refused all 5 Chrome closes.
+    nonisolated static func harnessMainFrame(fromWindowsResponse response: [String: Any]) -> CGRect? {
+        guard let main = (response["windows"] as? [[String: Any]])?.first(where: { $0["main"] as? Bool == true && $0["minimized"] as? Bool != true }),
+              let frame = main["frame"] as? [String: Any],
+              let x = frame["x"] as? Double, let y = frame["y"] as? Double,
+              let width = frame["w"] as? Double, let height = frame["h"] as? Double else { return nil }
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
     enum CleanupStep: Equatable {
         case close(window: Int)
         /// Nothing (more) the run created is in front, or the budget is spent.
@@ -556,14 +567,7 @@ extension VoiceToolProbe {
             _ = await ask(["verb": "focus", "app": app], harnessAnswer)
             let frontWindow = windowServerWindows(bundleIdentifier: bundleIdentifier, onScreenOnly: true)?.first
             let listing = await ask(["verb": "windows", "app": app, "expectApp": app], harnessAnswer)
-            let mainFrame = (listing["windows"] as? [[String: Any]])?
-                .first { $0["main"] as? Bool == true && $0["minimized"] as? Bool != true }
-                .flatMap { $0["frame"] as? [String: Any] }
-                .flatMap { frame -> CGRect? in
-                    guard let x = frame["x"] as? Double, let y = frame["y"] as? Double,
-                          let width = frame["width"] as? Double, let height = frame["height"] as? Double else { return nil }
-                    return CGRect(x: x, y: y, width: width, height: height)
-                }
+            let mainFrame = harnessMainFrame(fromWindowsResponse: listing)
             let harnessMainIsFront = frontWindow.flatMap { front in
                 mainFrame.map { sameWindow(harnessMainFrame: $0, windowServerBounds: front.bounds,
                                            primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height) }

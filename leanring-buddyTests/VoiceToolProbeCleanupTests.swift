@@ -10,6 +10,7 @@
 //
 
 import CoreGraphics
+import Foundation
 import Testing
 @testable import Clicky
 
@@ -46,6 +47,19 @@ struct VoiceToolProbeCleanupTests {
         #expect(VoiceToolProbe.preexistingWindowsMissing(before: [10, 11], after: [10]) == [11])
         // Unreadable, or the app quit: every one of them is gone.
         #expect(VoiceToolProbe.preexistingWindowsMissing(before: [10, 11], after: nil) == [10, 11])
+    }
+
+    @Test func theMainFrameIsReadFromTheHarnessesOwnWireShape() throws {
+        // Built by the harness's own encoder, so a renamed key fails here, not live.
+        var main: [String: Any] = ["main": true, "minimized": false]
+        HarnessServer.attachFrame(CGRect(x: 289, y: 0, width: 920, height: 875), to: &main)
+        let other: [String: Any] = ["main": false, "frame": ["x": 0, "y": 0, "w": 1440, "h": 900]]
+        let response = try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: ["windows": [other, main]])) as? [String: Any] ?? [:]
+        #expect(VoiceToolProbe.harnessMainFrame(fromWindowsResponse: response) == CGRect(x: 289, y: 0, width: 920, height: 875))
+        #expect(VoiceToolProbe.harnessMainFrame(fromWindowsResponse: ["windows": [other]]) == nil)
+        // Live pair (2026-09-25): Finder's window server bounds and the harness's frame are one window.
+        #expect(VoiceToolProbe.sameWindow(harnessMainFrame: CGRect(x: 289, y: 0, width: 920, height: 875),
+                                          windowServerBounds: CGRect(x: 289, y: 25, width: 920, height: 875), primaryDisplayHeight: 900))
     }
 
     @Test func theHarnessesMainWindowMatchesTheWindowServersFrontAcrossTheFlip() {
