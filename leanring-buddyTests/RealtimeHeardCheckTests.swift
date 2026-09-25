@@ -174,6 +174,13 @@ struct RealtimeHeardCheckTests {
         gemini.heardPieceUptimes = [released]
         #expect(gemini.heardCompletedUptime(now: released + 0.1) == nil)
         #expect(gemini.heardCompletedUptime(now: released + RealtimeTurnMarks.geminiHeardQuietSeconds) == released)
+        // Exactly at the boundary at every uptime, not just where 0.3 rounds up (IEEE).
+        for base in [1.1, 12_345.678, 98_765.4321, 1_000_000.7] {
+            let marks = RealtimeTurnMarks()
+            marks.lastAudioSentUptime = base
+            marks.heardPieceUptimes = [base]
+            #expect(marks.heardCompletedUptime(now: base + RealtimeTurnMarks.geminiHeardQuietSeconds) == base, "\(base)")
+        }
     }
 
     // MARK: Notch

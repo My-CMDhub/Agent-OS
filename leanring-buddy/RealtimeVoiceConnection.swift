@@ -89,8 +89,10 @@ final class RealtimeTurnMarks {
         if let heardCompleteUptime { return heardCompleteUptime }
         // Quiet counted from the release too: pieces arrive while the owner is
         // still speaking, and a pause mid-sentence is not the end of it.
+        // A microsecond of slack: `released + 0.3 - released` is 0.29999... at
+        // some uptimes, and the boundary must not depend on which.
         guard let last = heardPieceUptimes.last, let released = lastAudioSentUptime,
-              now - max(last, released) >= Self.geminiHeardQuietSeconds else { return nil }
+              now - max(last, released) >= Self.geminiHeardQuietSeconds - 1e-6 else { return nil }
         return last
     }
 
