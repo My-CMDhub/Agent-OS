@@ -396,8 +396,10 @@ nonisolated struct RealtimeToolDecision {
 /// Keep the shape stable; add keys, never rename them, and bump `schema` if a
 /// key's meaning changes. Every key is always present, null when it does not apply.
 ///
-///   kind "toolCall", schema 3 (2026-09-25: `appCheck` added in 2, `heardCheck`
-///   in 3; earlier lines simply lack them, and every other key means what it did)
+///   kind "toolCall", schema 4 (2026-09-25: `appCheck` added in 2, `heardCheck`
+///   in 3, `autoFocus` in 4; earlier lines simply lack them, and every other key
+///   means what it did — except that from 4 a menu call's ok/harnessError/
+///   appCheck are those of its auto-focus RE-RUN when `autoFocus.retried`)
 ///   source            "live" | "probe"
 ///   turnId, stack     the turn (voice-live.log / voice-tool-probe.log share turnId)
 ///   probeId, fixture  probe only, else null
@@ -431,9 +433,16 @@ nonisolated struct RealtimeToolDecision {
 ///                     heardSlot, refused (added 2026-09-25, absent before). heardSlot: app-slot
 ///                     words that are not ordinary English or that name or
 ///                     sound like an app — never the rest of the sentence
+///   autoFocus         find_menu_items / press_menu that came back appMismatch,
+///                     else null: {triggered, reason, focusStatus, focusMs,
+///                     retried}. reason: witnessesAgree | heard:<outcome> |
+///                     tier:<tier> | unresolved | notRunning
+///                     (`RealtimeHeardCheck.autoFocusGate`); focusStatus: the
+///                     focus's verification, or its error; retried: the call ran
+///                     once more after a confirmed focus
 nonisolated enum RealtimeDecisionTrace {
     static let fileName = "voice-decisions.log"
-    static let schemaVersion = 3
+    static let schemaVersion = 4
     static let privatePathPlaceholder = ["<private>"]
 
     static func choseFromOffered(path: [String]?, offered: [RealtimeMenuCandidate]?) -> Bool? {
@@ -479,7 +488,8 @@ nonisolated enum RealtimeDecisionTrace {
             "choseFromOffered": value(isPress ? choseFromOffered(path: decision.call.path, offered: decision.offeredBeforeCall) : nil),
             "independentCheck": value(independentCheck),
             "appCheck": value(dispatch?.appCheck),
-            "heardCheck": value(dispatch?.heardCheck)
+            "heardCheck": value(dispatch?.heardCheck),
+            "autoFocus": value(dispatch?.autoFocus)
         ]
     }
 

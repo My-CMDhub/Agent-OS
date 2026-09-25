@@ -629,6 +629,9 @@ nonisolated struct RealtimeToolDispatch {
     var appCheck: [String: Any]? = nil
     /// Every app-naming tool: the heard-vs-named check (`RealtimeHeardCheck.traceObject`).
     var heardCheck: [String: Any]? = nil
+    /// A menu tool that came back `appMismatch`: `RealtimeHeardCheck.autoFocusGate`'s
+    /// answer and, if it focused, how that went and whether the call re-ran.
+    var autoFocus: [String: Any]? = nil
 
     var harnessConfirmed: Bool { result["ok"] as? Bool == true }
 }

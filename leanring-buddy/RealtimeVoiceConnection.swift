@@ -506,18 +506,19 @@ final class RealtimeVoiceConnection {
                     let heard = await Self.heardCheck(for: call, in: turn)
                     // The owner pressed the key again while this call waited: whatever
                     // it would do answers a turn nobody is waiting on. Never run it.
-                    guard self?.turn === turn else {
+                    @MainActor func recordSuperseded(autoFocus: [String: Any]? = nil) {
                         let refusal = RealtimeToolRefusal(error: Self.supersededError,
                                                           message: "the owner started a new request before this call ran; nothing was done")
                         var superseded = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: refusal), harnessMilliseconds: 0,
                                                               waitedForConfirmation: false, harnessResponse: nil)
                         superseded.heardCheck = heard?.trace
+                        superseded.autoFocus = autoFocus
                         turn.dispatches.append(superseded)
                         turn.decisions[decisionIndex].dispatch = superseded
                         turn.toolsInFlight -= 1
                         // No result is sent: it would start a reply inside the new turn.
-                        return
                     }
+                    guard self?.turn === turn else { return recordSuperseded() }
                     if isKnownTool {
                         JarvisNotch.shared.handle(.toolCall(title: RealtimeVoiceVerbs.intentTitle(for: call)))
                         if turn.intentShownUptime == nil { turn.intentShownUptime = self?.uptime }
@@ -527,9 +528,41 @@ final class RealtimeVoiceConnection {
                         JarvisNotch.shared.handle(.harnessAnswered(ok: false, subject: RealtimeOpenAppTool.captionName(heard?.heardApp ?? ""),
                                                                    error: refusal["error"] as? String))
                     } else {
-                        dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer, onConfirmationRequired: {
+                        let onConfirmationRequired: @MainActor () -> Void = {
                             if isKnownTool { JarvisNotch.shared.handle(.confirmationRequired) }
-                        })
+                        }
+                        dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer, onConfirmationRequired: onConfirmationRequired)
+                        // Both witnesses name one running app and only the app in front is
+                        // wrong: bring it forward through the harness (policy applies), then
+                        // run this call ONCE more. Never a loop, never a launch.
+                        let resolvedBundle = dispatch.appCheck?["resolvedBundleId"] as? String
+                        let namedAppIsRunning = await Task.detached { resolvedBundle.map { RealtimeVoiceVerbs.isRunning(named: $0) } ?? false }.value
+                        if let gate = RealtimeHeardCheck.autoFocusGate(heard: heard?.decision, dispatchError: dispatch.result["error"] as? String,
+                                                                       resolvedBundleIdentifier: resolvedBundle, namedAppIsRunning: namedAppIsRunning) {
+                            var autoFocus: [String: Any] = ["triggered": gate.triggered, "reason": gate.reason,
+                                                            "focusStatus": NSNull(), "focusMs": NSNull(), "retried": false]
+                            if gate.triggered, let resolvedBundle {
+                                let shownName = (dispatch.result["named"] as? String) ?? resolvedBundle
+                                JarvisNotch.shared.handle(.toolCall(title: "Switching to \(RealtimeOpenAppTool.captionName(shownName))\u{2026}"))
+                                let focusCall = RealtimeToolCall(callID: call.callID, name: RealtimeVoiceVerbs.focusAppName, appName: resolvedBundle)
+                                let focus = await RealtimeOpenAppTool.dispatch(focusCall, answer: harnessAnswer, onConfirmationRequired: onConfirmationRequired)
+                                autoFocus["focusStatus"] = focus.harnessConfirmed ? ((focus.result["verification"] as? String) ?? "ok")
+                                    : ((focus.result["error"] as? String) ?? "failed")
+                                autoFocus["focusMs"] = focus.harnessMilliseconds
+                                if !focus.harnessConfirmed {
+                                    // The focus's own refusal is the answer.
+                                    dispatch.result = focus.result
+                                    dispatch.result["message"] = "\(shownName) was not in front, so bringing it forward was tried first, and that "
+                                        + "did not work (\((focus.result["message"] as? String) ?? "no reason given")). Nothing was searched or pressed."
+                                } else {
+                                    guard self?.turn === turn else { return recordSuperseded(autoFocus: autoFocus) }
+                                    JarvisNotch.shared.handle(.toolCall(title: RealtimeVoiceVerbs.intentTitle(for: call)))
+                                    dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer, onConfirmationRequired: onConfirmationRequired)
+                                    autoFocus["retried"] = true
+                                }
+                            }
+                            dispatch.autoFocus = autoFocus
+                        }
                         // Proof only from the harness's own ok: true.
                         if isKnownTool, let answered = RealtimeOpenAppTool.notchAnswer(for: call, dispatch: dispatch) {
                             JarvisNotch.shared.handle(answered)
@@ -558,7 +591,7 @@ final class RealtimeVoiceConnection {
     /// Waits (bounded) for this turn's transcript, then decides. nil for a call
     /// that names no app (it is refused as `missingAppName` anyway).
     private static func heardCheck(for call: RealtimeToolCall, in turn: RealtimeTurnMarks) async
-        -> (refusal: [String: Any]?, heardApp: String?, trace: [String: Any])? {
+        -> (refusal: [String: Any]?, heardApp: String?, decision: RealtimeHeardCheck.Decision, trace: [String: Any])? {
         guard RealtimeHeardCheck.appliesTo(toolName: call.name), let named = call.appName else { return nil }
         let waitStart = ProcessInfo.processInfo.systemUptime
         let released = turn.lastAudioSentUptime ?? waitStart
@@ -577,7 +610,7 @@ final class RealtimeVoiceConnection {
         let arrivalMs = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime).map { Int((($0 - released) * 1000).rounded()) }
         let refusal = RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named, namedAppIsRunning: namedAppIsRunning)
         if refusal != nil { turn.heardRefusals += 1 }
-        return (refusal, decision.heardApps.first,
+        return (refusal, decision.heardApps.first, decision,
                 RealtimeHeardCheck.traceObject(decision, named: named, transcriptArrivalMs: arrivalMs, waitedMs: waitedMs, refused: refusal != nil))
     }
 

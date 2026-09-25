@@ -437,6 +437,41 @@ nonisolated enum RealtimeHeardCheck {
         }
     }
 
+    // MARK: Auto-focus when both witnesses agree (pure)
+
+    /// Probe 27BA20D2: the owner named Chrome, the tool named Google Chrome,
+    /// the words agreed — and Finder was in front, so the menu tool came back
+    /// `appMismatch` and Gemini stopped instead of focusing (Chrome 1/5). When
+    /// the owner's words and the tool agree on one installed, RUNNING app and
+    /// the only thing wrong is which app is in front, local code brings that
+    /// app forward (reversible, through the harness's own focus and policy) and
+    /// runs the call once more. Only full-name and slot evidence counts: a
+    /// distinctive word ("chrome") or a sound-alike ("kasa") is a guess, the
+    /// same line `Tier.confirmsARetry` draws. Never launches: a stopped app is
+    /// open_app's job, which has its own heard check.
+    static let autoFocusTiers: Set<Tier> = [.fullName, .slot]
+
+    struct AutoFocusGate: Equatable {
+        let triggered: Bool
+        let reason: String
+    }
+
+    /// nil: the call did not come back `appMismatch`, so the question never arose.
+    /// `resolvedBundleIdentifier`: the app check's one installed app (nil: none).
+    static func autoFocusGate(heard: Decision?, dispatchError: String?, resolvedBundleIdentifier: String?,
+                              namedAppIsRunning: Bool) -> AutoFocusGate? {
+        guard dispatchError == "appMismatch" else { return nil }
+        guard let heard, heard.outcome == .match else {
+            return AutoFocusGate(triggered: false, reason: "heard:\(heard?.outcome.rawValue ?? "notChecked")")
+        }
+        guard let tier = heard.tier, autoFocusTiers.contains(tier) else {
+            return AutoFocusGate(triggered: false, reason: "tier:\(heard.tier?.rawValue ?? "none")")
+        }
+        guard resolvedBundleIdentifier != nil else { return AutoFocusGate(triggered: false, reason: "unresolved") }
+        guard namedAppIsRunning else { return AutoFocusGate(triggered: false, reason: "notRunning") }
+        return AutoFocusGate(triggered: true, reason: "witnessesAgree")
+    }
+
     /// The decision trace's `heardCheck` (schema 3). App names, timings, and
     /// only the app-slot words `heardSlot` keeps — never the sentence.
     /// `refused`: the call was answered with this check's refusal, not run.

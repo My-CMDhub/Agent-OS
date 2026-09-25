@@ -340,6 +340,71 @@ struct RealtimeHeardCheckTests {
         #expect(turn.dispatches.last?.result["error"] as? String == "unknownTool")
     }
 
+    // MARK: Auto-focus
+
+    @Test func autoFocusOnlyWhenStrongWordsAndToolAgreeOnARunningApp() {
+        func gate(_ transcript: String?, named: String, afterRefusal: Bool = false, error: String? = "appMismatch",
+                  bundle: String? = "com.example.app", running: Bool = true) -> RealtimeHeardCheck.AutoFocusGate? {
+            let decision = RealtimeHeardCheck.decide(transcript: transcript, named: named, among: installed, afterHeardRefusal: afterRefusal)
+            return RealtimeHeardCheck.autoFocusGate(heard: decision, dispatchError: error, resolvedBundleIdentifier: bundle, namedAppIsRunning: running)
+        }
+        let agree = RealtimeHeardCheck.AutoFocusGate(triggered: true, reason: "witnessesAgree")
+        // Full name and common-word slot: both witnesses, strong evidence.
+        #expect(gate("switch finder to list view", named: "Finder") == agree)
+        #expect(gate("open preview", named: "Preview") == agree)
+        // Only appMismatch raises the question at all.
+        #expect(gate("switch finder to list view", named: "Finder", error: nil) == nil)
+        #expect(gate("switch finder to list view", named: "Finder", error: "notVerified") == nil)
+        #expect(gate("switch finder to list view", named: "Finder", error: "frontmostChanged") == nil)
+        // Not running: open_app's job (its own heard check), never a launch from here.
+        #expect(gate("switch finder to list view", named: "Finder", running: false) == .init(triggered: false, reason: "notRunning"))
+        #expect(gate("switch finder to list view", named: "Finder", bundle: nil) == .init(triggered: false, reason: "unresolved"))
+        // A guess is not the owner's word: sound-alike, and a distinctive word ("chrome", 27BA20D2).
+        #expect(gate("open a new window in kasa", named: "Cursor") == .init(triggered: false, reason: "tier:soundAlike"))
+        #expect(gate("open a new window in chrome", named: "Google Chrome") == .init(triggered: false, reason: "tier:word"))
+        // Anything but a match.
+        #expect(gate("open a new window in code", named: "Visual Studio Code") == .init(triggered: false, reason: "heard:ambiguousApp"))
+        #expect(gate("open a new window in chrome", named: "Google Chrome", afterRefusal: true)
+                == .init(triggered: false, reason: "heard:unconfirmedRetry"))
+        #expect(gate("open a new window in cursor", named: "Visual Studio Code") == .init(triggered: false, reason: "heard:heardNamedMismatch"))
+        #expect(gate("switch to list view", named: "Finder") == .init(triggered: false, reason: "heard:noAppHeard"))
+        #expect(gate(nil, named: "Finder") == .init(triggered: false, reason: "heard:transcriptMissing"))
+        #expect(RealtimeHeardCheck.autoFocusGate(heard: nil, dispatchError: "appMismatch", resolvedBundleIdentifier: "x", namedAppIsRunning: true)
+                == .init(triggered: false, reason: "heard:notChecked"))
+    }
+
+    @MainActor @Test func anAutoFocusFocusesOnceThenRerunsOnceAndNeverLoops() async throws {
+        final class Requests: @unchecked Sendable {
+            private let lock = NSLock()
+            private var verbs: [String] = []
+            func add(_ verb: String) { lock.lock(); verbs.append(verb); lock.unlock() }
+            var all: [String] { lock.lock(); defer { lock.unlock() }; return verbs }
+        }
+        let requests = Requests()
+        // Something else stays in front whatever is focused: the re-run mismatches again, and must stop there.
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { line in
+            let verb = (RealtimeOpenAppTool.harnessResponseObject(line)["verb"] as? String) ?? "?"
+            requests.add(verb)
+            return verb == "focus" ? #"{"ok":true,"verification":{"status":"confirmed"}}"#
+                : #"{"ok":false,"error":"frontmostChanged","actualApp":{"name":"Cursor","bundleIdentifier":"com.todesktop.230313mzl4w4u92"}}"#
+        })
+        try await connection.beginTurn()
+        try await connection.endTurn()
+        connection.handle(["serverContent": ["inputTranscription": ["text": "switch finder to list view"]]],
+                          arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        connection.handle(["toolCall": ["functionCalls": [["id": "c1", "name": "find_menu_items", "args": ["app": "Finder", "words": "list view"]]]]],
+                          arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        let turn = connection.turn
+        let deadline = ProcessInfo.processInfo.systemUptime + 6
+        while turn.decisions.first?.dispatch == nil, ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(requests.all == ["menus", "focus", "menus"])
+        let autoFocus = turn.decisions.first?.dispatch?.autoFocus
+        #expect(autoFocus?["triggered"] as? Bool == true)
+        #expect(autoFocus?["focusStatus"] as? String == "confirmed")
+        #expect(autoFocus?["retried"] as? Bool == true)
+        #expect(turn.decisions.first?.dispatch?.result["error"] as? String == "appMismatch")
+    }
+
     // MARK: Notch
 
     @Test func theNotchSaysWhichAppItHeard() {

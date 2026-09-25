@@ -483,6 +483,7 @@ extension VoiceToolProbe {
             RealtimeVoiceVerbs.isActingTool(decision.call.name) && decision.dispatch?.heardCheck?["refused"] as? Bool == true
         }.count
         line["appChecks"] = turn.decisions.compactMap { $0.dispatch?.appCheck?["outcome"] as? String }
+        line["autoFocus"] = turn.decisions.compactMap { $0.dispatch?.autoFocus }
         line["actingOutcome"] = lastActing.map { $0.dispatch.map { $0.harnessConfirmed ? "ok" : ($0.result["error"] as? String ?? "failed") } ?? "unanswered" } ?? "noActingTool"
 
         // The independent check, then the undo — never more closes than presses that went through there.
@@ -584,6 +585,7 @@ extension VoiceToolProbe {
             case .refuse(let reason):
                 return (closed, reason, nil)
             case .close(let front):
+                let beforeClose = Set(windowServerWindowNumbers(bundleIdentifier: bundleIdentifier) ?? [])
                 let response = await ask(["verb": "menu", "path": closePath, "expectApp": app], harnessAnswer)
                 let started = uptime
                 while response["ok"] as? Bool == true, windowServerWindowNumbers(bundleIdentifier: bundleIdentifier)?.contains(front) == true,
@@ -598,6 +600,15 @@ extension VoiceToolProbe {
                     return (closed, outcome(response), nil)
                 }
                 closed += 1
+                // Closing a full-screen window adds a NEW surface for the slide out of its
+                // Space (~0.6 s, polled 2026-09-25). The next run read one as "before", saw
+                // it go, and aborted on the probe's own window (88AC1E84, 536FCCDB): so wait
+                // (<= 3 s) until nothing is listed that was not there before this close.
+                let closeSettled = uptime
+                while uptime - closeSettled < 3,
+                      windowServerWindowNumbers(bundleIdentifier: bundleIdentifier).map({ !Set($0).isSubset(of: beforeClose) }) == true {
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
             }
         }
     }
@@ -638,6 +649,11 @@ extension VoiceToolProbe {
                 "heardArrivalMs": VoiceBenchStatistics.distribution(of: group.map { ($0["marksMs"] as? [String: Any])?["heardArrivalMs"] as? Int })
                     .map { ["n": $0.count, "medianMs": $0.medianMs, "p95Ms": $0.p95Ms] as [String: Any] } ?? NSNull(),
                 "appChecks": group.flatMap { ($0["appChecks"] as? [String]) ?? [] }.reduce(into: [String: Int]()) { $0[$1, default: 0] += 1 },
+                // reason -> count, and how the triggered ones went: "focusStatus/retried".
+                "autoFocus": group.flatMap { ($0["autoFocus"] as? [[String: Any]]) ?? [] }.reduce(into: [String: Int]()) { counts, gate in
+                    let outcome = gate["triggered"] as? Bool == true ? "/\(gate["focusStatus"] as? String ?? "-")/retried:\(gate["retried"] as? Bool ?? false)" : ""
+                    counts["\(gate["reason"] as? String ?? "-")\(outcome)", default: 0] += 1
+                },
                 "errorKinds": group.compactMap { $0["errorKind"] as? String }.reduce(into: [String: Int]()) { $0[$1, default: 0] += 1 },
                 "releaseToSpokenMs": distribution.map { ["n": $0.count, "medianMs": $0.medianMs, "p95Ms": $0.p95Ms] as [String: Any] } ?? NSNull()
             ]
