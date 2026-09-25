@@ -385,13 +385,14 @@ nonisolated enum RealtimeHeardCheck {
         return Decision(outcome: agrees ? .match : .heardNamedMismatch, heardApps: heardNames, tier: heard.tier)
     }
 
-    /// Owner's decision recorded in the commit: with no transcript, only a
-    /// PRESS refuses. A find is a read. open_app and focus_app change only which
-    /// app is in front, are undone by one more request, and keep every harness
-    /// guard (policy, confirmation tickets for code-running apps) — refusing
-    /// them would make a dropped transcription stop the whole voice loop.
-    static func refusesWithoutTranscript(toolName: String) -> Bool {
-        toolName == RealtimeVoiceVerbs.pressMenuName
+    /// With no transcript: a PRESS refuses, and so does an open_app of an app
+    /// that is not running — a LAUNCH runs the app's code and leaves it running,
+    /// which one more request does not undo. A find is a read; focus_app, and
+    /// open_app of a running app, only change which app is in front, keep every
+    /// harness guard (policy, confirmation tickets for code-running apps), and
+    /// refusing them would let a dropped transcription stop the voice loop.
+    static func refusesWithoutTranscript(toolName: String, namedAppIsRunning: Bool) -> Bool {
+        toolName == RealtimeVoiceVerbs.pressMenuName || (toolName == RealtimeOpenAppTool.name && !namedAppIsRunning)
     }
 
     /// Whether this tool is checked at all: every tool that names an app.
@@ -401,7 +402,8 @@ nonisolated enum RealtimeHeardCheck {
 
     /// What the model is told instead of a harness answer. Display names only
     /// (from the file system, not the transcript); `named` is the model's own.
-    static func refusal(for decision: Decision, toolName: String, named: String) -> [String: Any]? {
+    /// `namedAppIsRunning` matters only without a transcript (`refusesWithoutTranscript`).
+    static func refusal(for decision: Decision, toolName: String, named: String, namedAppIsRunning: Bool = true) -> [String: Any]? {
         let shownNamed = UntrustedText(named).forDisplay
         switch decision.outcome {
         case .heardNamedMismatch:
@@ -424,10 +426,12 @@ nonisolated enum RealtimeHeardCheck {
             return ["ok": false, "status": NSNull(), "error": unavailableError, "named": named,
                     "message": "the owner's words name no installed app that could be recognised, so which app they meant "
                         + "is not confirmed. Nothing was searched or pressed. Ask them to say the app's name again."]
-        case .transcriptMissing where refusesWithoutTranscript(toolName: toolName):
+        case .transcriptMissing where refusesWithoutTranscript(toolName: toolName, namedAppIsRunning: namedAppIsRunning):
+            let nothing = toolName == RealtimeOpenAppTool.name ? "Nothing was opened: \(shownNamed) is not running, and opening it would launch it."
+                : "Nothing was pressed."
             return ["ok": false, "status": NSNull(), "error": unavailableError, "named": named,
                     "message": "the owner's words were not transcribed in time to confirm which app they meant. "
-                        + "Nothing was pressed. Ask them to say the app's name again."]
+                        + nothing + " Ask them to say the app's name again."]
         default:
             return nil
         }

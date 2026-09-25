@@ -321,6 +321,13 @@ nonisolated enum RealtimeVoiceVerbs {
         }
     }
 
+    /// A name that resolves to exactly one installed app, which is running.
+    /// Blocks on the file system: call it off main.
+    static func isRunning(named query: String) -> Bool {
+        guard case .resolved(let bundleIdentifier, _) = appIdentity(named: query) else { return false }
+        return !NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty
+    }
+
     // MARK: Notch text
 
     /// "View › as List": each step shown safe, because the app wrote them.

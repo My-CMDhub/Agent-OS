@@ -503,12 +503,15 @@ final class RealtimeVoiceConnection {
         // The app list reads the file system: off main.
         let afterHeardRefusal = turn.heardRefusals > 0
         let menuWords = RealtimeVoiceVerbs.foldedTokens(([call.words ?? ""] + (call.path ?? [])).joined(separator: " "))
-        let decision = await Task.detached {
-            RealtimeHeardCheck.decide(transcript: transcript, named: named, among: RealtimeVoiceVerbs.installedAppNames(),
-                                      afterHeardRefusal: afterHeardRefusal, toolName: call.name, menuWords: menuWords)
+        let (decision, namedAppIsRunning) = await Task.detached { () -> (RealtimeHeardCheck.Decision, Bool) in
+            let decision = RealtimeHeardCheck.decide(transcript: transcript, named: named, among: RealtimeVoiceVerbs.installedAppNames(),
+                                                     afterHeardRefusal: afterHeardRefusal, toolName: call.name, menuWords: menuWords)
+            // Only asked when it decides: open_app with no transcript.
+            guard decision.outcome == .transcriptMissing, call.name == RealtimeOpenAppTool.name else { return (decision, true) }
+            return (decision, RealtimeVoiceVerbs.isRunning(named: named))
         }.value
         let arrivalMs = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime).map { Int((($0 - released) * 1000).rounded()) }
-        let refusal = RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named)
+        let refusal = RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named, namedAppIsRunning: namedAppIsRunning)
         if refusal != nil { turn.heardRefusals += 1 }
         return (refusal, decision.heardApps.first,
                 RealtimeHeardCheck.traceObject(decision, named: named, transcriptArrivalMs: arrivalMs, waitedMs: waitedMs))

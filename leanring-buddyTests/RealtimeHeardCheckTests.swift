@@ -189,8 +189,13 @@ struct RealtimeHeardCheckTests {
         let missing = RealtimeHeardCheck.decide(transcript: nil, named: "Cursor", among: installed)
         #expect(RealtimeHeardCheck.refusal(for: missing, toolName: "press_menu", named: "Cursor")?["error"] as? String == "heardUnavailable")
         for tool in ["open_app", "focus_app", "find_menu_items"] {
-            #expect(RealtimeHeardCheck.refusal(for: missing, toolName: tool, named: "Cursor") == nil, "\(tool)")
+            #expect(RealtimeHeardCheck.refusal(for: missing, toolName: tool, named: "Cursor", namedAppIsRunning: true) == nil, "\(tool)")
         }
+        // A launch is not undone by one more request: with no transcript it asks.
+        let launch = RealtimeHeardCheck.refusal(for: missing, toolName: "open_app", named: "Cursor", namedAppIsRunning: false) ?? [:]
+        #expect(launch["error"] as? String == "heardUnavailable")
+        #expect((launch["message"] as? String)?.contains("Nothing was opened") == true)
+        #expect(RealtimeHeardCheck.refusal(for: missing, toolName: "focus_app", named: "Cursor", namedAppIsRunning: false) == nil)
         let match = RealtimeHeardCheck.decide(transcript: "open cursor", named: "Cursor", among: installed)
         #expect(RealtimeHeardCheck.refusal(for: match, toolName: "press_menu", named: "Cursor") == nil)
 
