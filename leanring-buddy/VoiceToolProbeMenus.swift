@@ -260,16 +260,25 @@ extension VoiceToolProbe {
 
     enum CleanupStep: Equatable {
         case close(window: Int)
-        /// Nothing (more) the run created is in front, or the budget is spent.
+        /// The main window is one the owner had (or the budget is spent): stop.
         case done
-        /// A new window is in front but the harness's main window is another:
-        /// Close Window would hit the wrong one.
+        /// Which window Close Window would hit cannot be pinned to one number.
         case refuse(String)
     }
 
-    nonisolated static func nextCleanupStep(front: Int?, before: Set<Int>, closed: Int, atMost: Int, harnessMainIsFront: Bool) -> CleanupStep {
-        guard closed < min(atMost, 3), let front, !before.contains(front) else { return .done }
-        return harnessMainIsFront ? .close(window: front) : .refuse("frontIsNotHarnessMainWindow")
+    /// Close Window acts on the harness's MAIN window, so the window to judge
+    /// is the one on-screen window-server window with the main window's frame
+    /// — not the front-most surface. Probe 44322BA6: full-screen Chrome puts a
+    /// 1440x166 toolbar surface in front of every window, so "the front
+    /// surface is the main window" refused 3 of 3 closes. Close only when that
+    /// one window is new; the owner's window as main means stop.
+    nonisolated static func nextCleanupStep(onScreen: [(number: Int, bounds: CGRect)], harnessMainFrame: CGRect?, primaryDisplayHeight: CGFloat,
+                                            before: Set<Int>, closed: Int, atMost: Int) -> CleanupStep {
+        guard closed < min(atMost, 3) else { return .done }
+        guard let harnessMainFrame else { return .refuse("harnessMainWindowUnread") }
+        let matches = onScreen.filter { sameWindow(harnessMainFrame: harnessMainFrame, windowServerBounds: $0.bounds, primaryDisplayHeight: primaryDisplayHeight) }
+        guard matches.count == 1, let main = matches.first else { return .refuse("mainWindowNotOneOnScreenWindow:\(matches.count)") }
+        return before.contains(main.number) ? .done : .close(window: main.number)
     }
 
 
@@ -547,9 +556,9 @@ extension VoiceToolProbe {
         return (line, spentUSD, (connection.turn.transcript, connection.turn.heardText))
     }
 
-    /// Closes a window only while the app's FRONT window is one that did not
-    /// exist before the run (by window number) AND is the harness's main
-    /// window (the one Close Window acts on), only if that window is then gone,
+    /// Closes a window only while the harness's main window (the one Close
+    /// Window acts on) is exactly one on-screen window that did not exist
+    /// before the run (by number), only if that window is then gone,
     /// and never more times than presses that could have made one (`atMost`).
     /// After every close, every window that existed before must still be
     /// listed; if one is not, `abort` says so and nothing more is closed —
@@ -563,16 +572,13 @@ extension VoiceToolProbe {
         while true {
             // The budget before anything else: with nothing to close, never bring the app forward.
             guard closed < min(atMost, 3) else { return (closed, nil, nil) }
-            // Focus first so the front window and the one Close Window acts on are the same.
+            // Focus first, then read which window is main (the one Close Window acts on).
             _ = await ask(["verb": "focus", "app": app], harnessAnswer)
-            let frontWindow = windowServerWindows(bundleIdentifier: bundleIdentifier, onScreenOnly: true)?.first
             let listing = await ask(["verb": "windows", "app": app, "expectApp": app], harnessAnswer)
-            let mainFrame = harnessMainFrame(fromWindowsResponse: listing)
-            let harnessMainIsFront = frontWindow.flatMap { front in
-                mainFrame.map { sameWindow(harnessMainFrame: $0, windowServerBounds: front.bounds,
-                                           primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height) }
-            } ?? false
-            switch nextCleanupStep(front: frontWindow?.number, before: before, closed: closed, atMost: atMost, harnessMainIsFront: harnessMainIsFront) {
+            switch nextCleanupStep(onScreen: windowServerWindows(bundleIdentifier: bundleIdentifier, onScreenOnly: true) ?? [],
+                                   harnessMainFrame: harnessMainFrame(fromWindowsResponse: listing),
+                                   primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height,
+                                   before: before, closed: closed, atMost: atMost) {
             case .done:
                 return (closed, nil, nil)
             case .refuse(let reason):

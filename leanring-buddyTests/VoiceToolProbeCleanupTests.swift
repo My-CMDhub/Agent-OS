@@ -27,19 +27,28 @@ struct VoiceToolProbeCleanupTests {
         #expect(!VoiceToolProbe.pressCountsTowardCloseBudget(path: nil, expectedPath: expected))
     }
 
-    @Test func aWindowIsClosedOnlyIfNewInFrontAndTheHarnessesMainWindow() {
-        let before: Set<Int> = [10, 11, 12]
-        #expect(VoiceToolProbe.nextCleanupStep(front: 99, before: before, closed: 0, atMost: 1, harnessMainIsFront: true) == .close(window: 99))
-        // The owner's window in front: stop, never close it.
-        #expect(VoiceToolProbe.nextCleanupStep(front: 11, before: before, closed: 0, atMost: 1, harnessMainIsFront: true) == .done)
-        // New window in front, but Close Window would act on another.
-        #expect(VoiceToolProbe.nextCleanupStep(front: 99, before: before, closed: 0, atMost: 1, harnessMainIsFront: false)
-                == .refuse("frontIsNotHarnessMainWindow"))
+    @Test func aWindowIsClosedOnlyIfItIsTheHarnessesMainWindowAndNew() {
+        // Window server top-left; harness AppKit on a 900 pt display. Probe 44322BA6's full-screen Chrome:
+        // a new window's toolbar surface (1440x166) in FRONT of its content (0,122,1440,778), which is main.
+        let toolbar = (number: 4919, bounds: CGRect(x: 0, y: 0, width: 1440, height: 166))
+        let content = (number: 4914, bounds: CGRect(x: 0, y: 122, width: 1440, height: 778))
+        let main = CGRect(x: 0, y: 0, width: 1440, height: 778)
+        func step(_ onScreen: [(number: Int, bounds: CGRect)], main: CGRect?, before: Set<Int> = [4133, 4142], closed: Int = 0, atMost: Int = 1)
+            -> VoiceToolProbe.CleanupStep {
+            VoiceToolProbe.nextCleanupStep(onScreen: onScreen, harnessMainFrame: main, primaryDisplayHeight: 900, before: before, closed: closed, atMost: atMost)
+        }
+        #expect(step([toolbar, content], main: main) == .close(window: 4914))
+        // The owner's window is main: stop, never close it.
+        let owner = (number: 4133, bounds: CGRect(x: 0, y: 88, width: 1440, height: 812))
+        #expect(step([owner], main: CGRect(x: 0, y: 0, width: 1440, height: 812)) == .done)
+        // Unread main, or a frame two windows share: refuse.
+        #expect(step([toolbar, content], main: nil) == .refuse("harnessMainWindowUnread"))
+        #expect(step([content, (number: 5000, bounds: content.bounds)], main: main) == .refuse("mainWindowNotOneOnScreenWindow:2"))
+        #expect(step([toolbar], main: main) == .refuse("mainWindowNotOneOnScreenWindow:0"))
         // The budget: presses that could have made a window, and never more than three.
-        #expect(VoiceToolProbe.nextCleanupStep(front: 99, before: before, closed: 1, atMost: 1, harnessMainIsFront: true) == .done)
-        #expect(VoiceToolProbe.nextCleanupStep(front: 99, before: before, closed: 0, atMost: 0, harnessMainIsFront: true) == .done)
-        #expect(VoiceToolProbe.nextCleanupStep(front: 99, before: before, closed: 3, atMost: 9, harnessMainIsFront: true) == .done)
-        #expect(VoiceToolProbe.nextCleanupStep(front: nil, before: before, closed: 0, atMost: 1, harnessMainIsFront: true) == .done)
+        #expect(step([content], main: main, closed: 1, atMost: 1) == .done)
+        #expect(step([content], main: main, atMost: 0) == .done)
+        #expect(step([content], main: main, closed: 3, atMost: 9) == .done)
     }
 
     @Test func anyPreexistingWindowGoneIsAnAbort() {
