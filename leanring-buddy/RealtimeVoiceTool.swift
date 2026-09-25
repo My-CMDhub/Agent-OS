@@ -124,7 +124,9 @@ nonisolated enum RealtimeOpenAppTool {
     /// menu rule is "press only a path find_menu_items returned" — the model
     /// picks from a local list, it never writes a path (`choseFromOffered` in
     /// voice-decisions.log counts whether it obeyed). A find is a read, so its
-    /// ok true is not a receipt for completion words.
+    /// ok true is not a receipt for completion words. 2026-09-25: the heard
+    /// check's refusals get one line — ask, and never focus or open an app to
+    /// "check" first (D66FC598: "code" was focused first, asked about after).
     static let systemPrompt = """
     you are J.A.R.V.I.S., the owner's assistant on their mac. they speak by push-to-talk; you see their screen; replies are spoken.
 
@@ -137,6 +139,8 @@ nonisolated enum RealtimeOpenAppTool {
     tools: open_app opens an installed app by name, as it appears in the applications folder; an open request always goes through open_app, even when the app already looks open: the harness checks, and for a running app it answers at once. focus_app brings a running app to the front.
 
     menus: for a command in an app's menu bar, such as a view, a new window, or showing a bar, first call find_menu_items with the app and a few words, then press_menu with one of the paths it returned, copied exactly. never invent or change a path; if none fits, say so and press nothing. menus belong to the app in front, so focus_app first when it is not.
+
+    if a tool returns heardNamedMismatch or ambiguousApp, ask the owner which app they meant, briefly; never focus or open an app to check first.
 
     words like done, opened, ready or there it is are for after an ok true result from open_app, focus_app or press_menu in this turn, never before and never without one; find_menu_items only looks. for anything else — clicking on the screen, typing, settings panes — say you can't yet and where they'd find it.
 
@@ -623,6 +627,8 @@ nonisolated struct RealtimeToolDispatch {
     var menuOffer: RealtimeMenuOffer? = nil
     /// find_menu_items / press_menu: the app check (`RealtimeOpenAppTool.appCheck`).
     var appCheck: [String: Any]? = nil
+    /// Every app-naming tool: the heard-vs-named check (`RealtimeHeardCheck.traceObject`).
+    var heardCheck: [String: Any]? = nil
 
     var harnessConfirmed: Bool { result["ok"] as? Bool == true }
 }

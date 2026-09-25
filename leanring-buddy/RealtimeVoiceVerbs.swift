@@ -387,8 +387,8 @@ nonisolated struct RealtimeToolDecision {
 /// Keep the shape stable; add keys, never rename them, and bump `schema` if a
 /// key's meaning changes. Every key is always present, null when it does not apply.
 ///
-///   kind "toolCall", schema 2 (2026-09-25: `appCheck` added; schema 1 lines
-///   simply lack it, and every other key means what it did)
+///   kind "toolCall", schema 3 (2026-09-25: `appCheck` added in 2, `heardCheck`
+///   in 3; earlier lines simply lack them, and every other key means what it did)
 ///   source            "live" | "probe"
 ///   turnId, stack     the turn (voice-live.log / voice-tool-probe.log share turnId)
 ///   probeId, fixture  probe only, else null
@@ -413,9 +413,14 @@ nonisolated struct RealtimeToolDecision {
 ///                     resolvedBundleId, frontmostBundleId}; outcome is match |
 ///                     appMismatch | ambiguousApp | appNotInstalled | notChecked.
 ///                     null for other tools and for calls refused before it ran
+///   heardCheck        every app-naming tool: {outcome, heardApps, tier, named,
+///                     transcriptArrivalMs, waitedMs}; outcome is match |
+///                     heardNamedMismatch | ambiguousApp | noAppHeard |
+///                     transcriptMissing. heardApps are display names from the
+///                     file system — the owner's words are never logged here
 nonisolated enum RealtimeDecisionTrace {
     static let fileName = "voice-decisions.log"
-    static let schemaVersion = 2
+    static let schemaVersion = 3
     static let privatePathPlaceholder = ["<private>"]
 
     static func choseFromOffered(path: [String]?, offered: [RealtimeMenuCandidate]?) -> Bool? {
@@ -460,7 +465,8 @@ nonisolated enum RealtimeDecisionTrace {
             "listingIncomplete": value(offer?.listingIncomplete),
             "choseFromOffered": value(isPress ? choseFromOffered(path: decision.call.path, offered: decision.offeredBeforeCall) : nil),
             "independentCheck": value(independentCheck),
-            "appCheck": value(dispatch?.appCheck)
+            "appCheck": value(dispatch?.appCheck),
+            "heardCheck": value(dispatch?.heardCheck)
         ]
     }
 

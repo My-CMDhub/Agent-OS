@@ -51,6 +51,19 @@ final class RealtimeTurnMarks {
     var finishedUptime: TimeInterval?
     var audioChunksAfterFinish = 0
     var transcript = ""
+    /// What the OWNER said, from the provider's separate transcription model
+    /// (not the model that reasons). Owner-only: the heard check and the 0600
+    /// answers files read it; no counts-only log ever does.
+    var heardText = ""
+    /// When this turn's transcript was complete: OpenAI's completed (or failed)
+    /// event for this turn's audio item; Gemini's last piece, once quiet
+    /// (`heardCompletedUptime(now:)`).
+    var heardCompleteUptime: TimeInterval?
+    /// Gemini only: each input-transcription piece's arrival.
+    var heardPieceUptimes: [TimeInterval] = []
+    /// OpenAI only: the committed audio item, so a late transcript of an
+    /// earlier turn is never read as this one's.
+    var audioItemID: String?
     var outputAudioMime: String?
     var toolsInFlight = 0
     /// Event names only, never content, each with its arrival in ms after the
@@ -65,6 +78,32 @@ final class RealtimeTurnMarks {
         while freshLookOutcome == "pending", ProcessInfo.processInfo.systemUptime < deadline {
             try? await Task.sleep(for: .milliseconds(50))
         }
+    }
+
+    /// Gemini sends no end marker for input transcription (ai.google.dev/api/live,
+    /// read 2026-09-25: `text` and `languageCode` only), so its transcript counts
+    /// as complete once a piece has arrived and none followed for this long.
+    static let geminiHeardQuietSeconds: Double = 0.3
+
+    func heardCompletedUptime(now: TimeInterval) -> TimeInterval? {
+        if let heardCompleteUptime { return heardCompleteUptime }
+        // Quiet counted from the release too: pieces arrive while the owner is
+        // still speaking, and a pause mid-sentence is not the end of it.
+        guard let last = heardPieceUptimes.last, let released = lastAudioSentUptime,
+              now - max(last, released) >= Self.geminiHeardQuietSeconds else { return nil }
+        return last
+    }
+
+    /// The transcript once complete, or nil at `deadlineUptime`. Polled: a
+    /// tool call usually arrives BEFORE the transcript (measured, see
+    /// `RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds`).
+    func waitForHeard(until deadlineUptime: TimeInterval) async -> String? {
+        while heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime) == nil,
+              ProcessInfo.processInfo.systemUptime < deadlineUptime {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        guard heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime) != nil else { return nil }
+        return heardText
     }
 
     /// Positive: the image landed while (or after) the model was already speaking.
@@ -112,6 +151,8 @@ final class RealtimeVoiceConnection {
     /// of the two. Gemini Live takes any of the 30 TTS voices; Charon is listed
     /// "Informative", a low, even delivery (both docs read 2026-09-24).
     static let openAIVoice = "cedar"
+    /// Input transcription: separate from the realtime model, billed apart.
+    static let openAITranscriptionModel = "gpt-4o-mini-transcribe"
     static let geminiVoice = "Charon"
 
     init(stack: VoiceStackChoice, harnessAnswer: @escaping @Sendable (String) -> String) {
@@ -148,7 +189,11 @@ final class RealtimeVoiceConnection {
                     "tool_choice": "auto",
                     "audio": [
                         // Push-to-talk: we commit, the server's VAD does not decide.
-                        "input": ["format": ["type": "audio/pcm", "rate": 24_000], "turn_detection": NSNull()],
+                        // The owner's words, from a separate transcription model, for the
+                        // heard-vs-named check (`RealtimeHeardCheck`). The GA shape and
+                        // model the bench has used live since 2026-09-23.
+                        "input": ["format": ["type": "audio/pcm", "rate": 24_000], "turn_detection": NSNull(),
+                                  "transcription": ["model": Self.openAITranscriptionModel]],
                         // The rate is required even though 24 kHz is the only one (probed 2026-09-23).
                         "output": ["format": ["type": "audio/pcm", "rate": 24_000], "voice": Self.openAIVoice]
                     ]
@@ -171,7 +216,9 @@ final class RealtimeVoiceConnection {
                     "tools": [RealtimeVoiceVerbs.geminiDeclaration],
                     "realtimeInputConfig": ["automaticActivityDetection": ["disabled": true]],
                     // What the model said, for the probe's answers file and the honesty check.
-                    "outputAudioTranscription": [String: Any]()
+                    "outputAudioTranscription": [String: Any](),
+                    // What the OWNER said, for the heard-vs-named check (the bench's since 2026-09-23).
+                    "inputAudioTranscription": [String: Any]()
                 ]
             ])
         }
@@ -275,6 +322,12 @@ final class RealtimeVoiceConnection {
             if let audio = Data(base64Encoded: message["delta"] as? String ?? "") { receivedAudio(audio, arrivalUptime: arrivalUptime) }
         case "response.output_audio_transcript.delta":
             turn.transcript += message["delta"] as? String ?? ""
+        case "input_audio_buffer.committed":
+            turn.audioItemID = message["item_id"] as? String
+        case "conversation.item.input_audio_transcription.completed", "conversation.item.input_audio_transcription.failed":
+            guard let itemID = message["item_id"] as? String, itemID == turn.audioItemID, turn.heardCompleteUptime == nil else { break }
+            turn.heardText = message["transcript"] as? String ?? ""
+            turn.heardCompleteUptime = arrivalUptime
         case "response.output_item.done":
             if let call = RealtimeOpenAppTool.parseOpenAI(message) { receivedToolCalls([call], arrivalUptime: arrivalUptime) }
         case "response.done":
@@ -308,6 +361,10 @@ final class RealtimeVoiceConnection {
         guard let serverContent = message["serverContent"] as? [String: Any] else { return }
         if let spokenPiece = (serverContent["outputTranscription"] as? [String: Any])?["text"] as? String {
             turn.transcript += spokenPiece
+        }
+        if let heardPiece = (serverContent["inputTranscription"] as? [String: Any])?["text"] as? String {
+            turn.heardText += heardPiece
+            turn.heardPieceUptimes.append(arrivalUptime)
         }
         if let parts = (serverContent["modelTurn"] as? [String: Any])?["parts"] as? [[String: Any]] {
             for part in parts {
@@ -378,7 +435,7 @@ final class RealtimeVoiceConnection {
             turn.toolsInFlight += 1
             let overLimit = turn.toolCalls.count > Self.maximumToolCallsPerTurn
             Task { @MainActor [weak self] in
-                let dispatch: RealtimeToolDispatch
+                var dispatch: RealtimeToolDispatch
                 if overLimit {
                     let refusal = RealtimeToolRefusal(error: "tooManyToolCalls", message: "only \(Self.maximumToolCallsPerTurn) tool calls are allowed per turn")
                     dispatch = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: refusal), harnessMilliseconds: 0,
@@ -389,17 +446,27 @@ final class RealtimeVoiceConnection {
                     // Before the request, so the owner sees the intent while it runs;
                     // from the tool's own argument, never from anything said aloud.
                     let isKnownTool = RealtimeVoiceVerbs.allToolNames.contains(call.name)
+                    // The owner's words against the tool's app, before anything is focused,
+                    // opened, searched or pressed.
+                    let heard = await Self.heardCheck(for: call, in: turn)
                     if isKnownTool {
                         JarvisNotch.shared.handle(.toolCall(title: RealtimeVoiceVerbs.intentTitle(for: call)))
                         if turn.intentShownUptime == nil { turn.intentShownUptime = self?.uptime }
                     }
-                    dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer, onConfirmationRequired: {
-                        if isKnownTool { JarvisNotch.shared.handle(.confirmationRequired) }
-                    })
-                    // Proof only from the harness's own ok: true.
-                    if isKnownTool, let answered = RealtimeOpenAppTool.notchAnswer(for: call, dispatch: dispatch) {
-                        JarvisNotch.shared.handle(answered)
+                    if let refusal = heard?.refusal {
+                        dispatch = RealtimeToolDispatch(result: refusal, harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: nil)
+                        JarvisNotch.shared.handle(.harnessAnswered(ok: false, subject: RealtimeOpenAppTool.captionName(heard?.heardApp ?? ""),
+                                                                   error: refusal["error"] as? String))
+                    } else {
+                        dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer, onConfirmationRequired: {
+                            if isKnownTool { JarvisNotch.shared.handle(.confirmationRequired) }
+                        })
+                        // Proof only from the harness's own ok: true.
+                        if isKnownTool, let answered = RealtimeOpenAppTool.notchAnswer(for: call, dispatch: dispatch) {
+                            JarvisNotch.shared.handle(answered)
+                        }
                     }
+                    dispatch.heardCheck = heard?.trace
                 }
                 turn.dispatches.append(dispatch)
                 turn.decisions[decisionIndex].dispatch = dispatch
@@ -417,6 +484,22 @@ final class RealtimeVoiceConnection {
                 await self?.sendToolResult(dispatch.result, for: call, in: turn)
             }
         }
+    }
+
+    /// Waits (bounded) for this turn's transcript, then decides. nil for a call
+    /// that names no app (it is refused as `missingAppName` anyway).
+    private static func heardCheck(for call: RealtimeToolCall, in turn: RealtimeTurnMarks) async
+        -> (refusal: [String: Any]?, heardApp: String?, trace: [String: Any])? {
+        guard RealtimeHeardCheck.appliesTo(toolName: call.name), let named = call.appName else { return nil }
+        let waitStart = ProcessInfo.processInfo.systemUptime
+        let released = turn.lastAudioSentUptime ?? waitStart
+        let transcript = await turn.waitForHeard(until: released + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds)
+        let waitedMs = Int(((ProcessInfo.processInfo.systemUptime - waitStart) * 1000).rounded())
+        // The app list reads the file system: off main.
+        let decision = await Task.detached { RealtimeHeardCheck.decide(transcript: transcript, named: named, among: RealtimeVoiceVerbs.installedAppNames()) }.value
+        let arrivalMs = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime).map { Int((($0 - released) * 1000).rounded()) }
+        return (RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named), decision.heardApps.first,
+                RealtimeHeardCheck.traceObject(decision, named: named, transcriptArrivalMs: arrivalMs, waitedMs: waitedMs))
     }
 
     /// Context only: OpenAI gets a user image item and no `response.create`;

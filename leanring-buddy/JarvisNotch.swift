@@ -124,7 +124,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .harnessAnswered(let ok, let subject, let error):
             switch self {
             case .intent, .needsYou:
-                return ok ? .proof(subject: subject) : .didntTake(reason: JarvisNotchReason.plain(forErrorCode: error))
+                return ok ? .proof(subject: subject) : .didntTake(reason: JarvisNotchReason.plain(forErrorCode: error, subject: subject))
             default:
                 return nil
             }
@@ -197,11 +197,20 @@ nonisolated enum JarvisNotchReason {
         // The app check on the menu verbs: the named app, and only it.
         "appMismatch": "a different app is in front",
         "ambiguousApp": "more than one app has that name",
-        "appNotInstalled": "no app by that name"
+        "appNotInstalled": "no app by that name",
+        // The heard-vs-named check (2026-09-25); a mismatch names the app heard.
+        "heardNamedMismatch": "heard another app, asking first",
+        "heardUnavailable": "didn\u{2019}t catch the app, asking"
     ]
 
-    static func plain(forErrorCode code: String?) -> String {
-        code.flatMap { byErrorCode[$0] } ?? fallback
+    /// `subject` is the app HEARD for a heard-vs-named mismatch ("heard
+    /// Cursor, asking first"), when that fits; every other code ignores it.
+    static func plain(forErrorCode code: String?, subject: String = "") -> String {
+        if code == RealtimeHeardCheck.mismatchError, !subject.isEmpty {
+            let named = "heard \(subject), asking first"
+            if named.count <= maximumLength { return named }
+        }
+        return code.flatMap { byErrorCode[$0] } ?? fallback
     }
 }
 

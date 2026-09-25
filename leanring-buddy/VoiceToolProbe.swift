@@ -64,6 +64,10 @@ enum VoiceToolProbe {
             return
         }
 
+        // `--voice-tool-probe-fixture=01-what-app` runs another clip through the same
+        // loop (the heard check's no-app baseline); the open checks then just record.
+        let fixtureFileName = CommandLine.arguments.first { $0.hasPrefix("--voice-tool-probe-fixture=") }
+            .map { String($0.dropFirst("--voice-tool-probe-fixture=".count)) + ".wav" } ?? Self.fixtureFileName
         guard let (clip16k, clip24k) = clips(forFixture: fixtureFileName) else {
             appendLine(["kind": "fixtureUnreadable", "probeId": probeID, "fixture": fixtureFileName])
             print("🧪 voice tool probe: fixture unreadable -> \(logPath)")
@@ -110,15 +114,15 @@ enum VoiceToolProbe {
             for stack in order where selectedStacks.contains(stack) {
                 if stack == .openAIRealtime, openAISpentUSD > openAICostCapUSD { continue }
                 let clip = stack == .openAIRealtime ? clip24k : clip16k
-                let (line, transcript, spentUSD) = await measureOneRun(
-                    stack: stack, runNumber: runNumber, probeID: probeID, clip: clip, preOpen: preOpen, appNameOverride: appNameOverride,
+                let (line, transcript, heard, spentUSD) = await measureOneRun(
+                    stack: stack, runNumber: runNumber, probeID: probeID, fixture: fixtureFileName, clip: clip, preOpen: preOpen, appNameOverride: appNameOverride,
                     screenshotJPEG: screenshot.imageData, harnessAnswer: harnessAnswer)
                 if stack == .openAIRealtime { openAISpentUSD += spentUSD }
                 appendLine(line)
                 runLines[stack, default: []].append(line)
                 answers[stack, default: []].append(transcript)
                 if let answersFile, let answerLine = MeasurementLogFile.jsonLine([
-                    "probeId": probeID, "stack": stack.rawValue, "run": runNumber, "said": transcript
+                    "probeId": probeID, "fixture": fixtureFileName, "stack": stack.rawValue, "run": runNumber, "said": transcript, "heard": heard
                 ]) {
                     try? answersFile.write(contentsOf: Data((answerLine + "\n").utf8))
                 }
@@ -158,10 +162,10 @@ enum VoiceToolProbe {
     // MARK: One run
 
     private static func measureOneRun(
-        stack: VoiceStackChoice, runNumber: Int, probeID: String, clip: VoiceBenchPCMClip, preOpen: Bool, appNameOverride: String?,
-        screenshotJPEG: Data, harnessAnswer: @escaping @Sendable (String) -> String
-    ) async -> (line: [String: Any], transcript: String, spentUSD: Double) {
-        var line: [String: Any] = ["kind": "run", "probeId": probeID, "stack": stack.rawValue, "run": runNumber]
+        stack: VoiceStackChoice, runNumber: Int, probeID: String, fixture fixtureFileName: String, clip: VoiceBenchPCMClip, preOpen: Bool,
+        appNameOverride: String?, screenshotJPEG: Data, harnessAnswer: @escaping @Sendable (String) -> String
+    ) async -> (line: [String: Any], transcript: String, heard: String, spentUSD: Double) {
+        var line: [String: Any] = ["kind": "run", "probeId": probeID, "fixture": fixtureFileName, "stack": stack.rawValue, "run": runNumber]
         if preOpen {
             line["systemSettingsPreOpened"] = await openSystemSettings(harnessAnswer: harnessAnswer)
         } else {
@@ -187,7 +191,7 @@ enum VoiceToolProbe {
         line["toolSkipped"] = connection.turn.toolCalls.isEmpty
         let spentUSD = stack == .openAIRealtime ? connection.estimatedOpenAIUSD : 0
         if stack == .openAIRealtime { line["estimatedCostUSD"] = spentUSD }
-        return (line, connection.turn.transcript, spentUSD)
+        return (line, connection.turn.transcript, connection.turn.heardText, spentUSD)
     }
 
     /// One fixture turn on an open-to-be connection, and everything the turn
@@ -246,6 +250,9 @@ enum VoiceToolProbe {
         marks["followUpFirstAudioMs"] = milliseconds(from: turn.toolResultSentUptime, to: turn.followUpFirstAudioUptime)
         marks["totalToFirstSpokenResultMs"] = milliseconds(from: released, to: turn.followUpFirstAudioUptime)
         marks["intentLeadMs"] = milliseconds(from: turn.intentShownUptime, to: firstDispatch?.firstRequestSentUptime)
+        // The heard check: when the owner's transcript was complete, and how long calls waited for it.
+        marks["heardArrivalMs"] = milliseconds(from: released, to: turn.heardCompletedUptime(now: uptime))
+        marks["firstHeardWaitMs"] = turn.decisions.first?.dispatch?.heardCheck?["waitedMs"] as? Int
         if let firstAudio = turn.firstAudioUptime, firstAudio < (turn.toolCallUptime ?? .infinity), turn.toolCallUptime != nil {
             marks["firstAudioBeforeToolMs"] = milliseconds(from: released, to: firstAudio)
         }
@@ -256,6 +263,9 @@ enum VoiceToolProbe {
             ["name": $0.name, "app": ($0.appName ?? NSNull()) as Any, "args": RealtimeDecisionTrace.loggedArguments(for: $0)] as [String: Any]
         }
         line["toolResults"] = turn.dispatches.map(\.result)
+        line["heardChecks"] = turn.decisions.map { ($0.dispatch?.heardCheck?["outcome"] as? String) ?? "-" }
+        line["heardPiecesMs"] = turn.heardPieceUptimes.map { milliseconds(from: released, to: $0) ?? 0 }
+        line["heardCharacters"] = turn.heardText.count
         line["harnessStatus"] = (firstDispatch?.result["status"] as? String) ?? NSNull()
         line["harnessError"] = (firstDispatch?.result["error"] as? String) ?? NSNull()
         line["harnessConfirmed"] = !actingOk.isEmpty
@@ -345,7 +355,7 @@ enum VoiceToolProbe {
     static func summary(for lines: [[String: Any]], answers: [String], stack: VoiceStackChoice, probeID: String, spentUSD: Double?) -> [String: Any] {
         var marks: [String: Any] = [:]
         for markName in ["sessionSetupMs", "firstAudioMs", "toolCallMs", "harnessMs", "freshLookMs", "freshLookArrivedAfterSpeechStartMs", "followUpFirstAudioMs",
-                         "totalToFirstSpokenResultMs", "firstAudioBeforeToolMs", "intentLeadMs"] {
+                         "totalToFirstSpokenResultMs", "firstAudioBeforeToolMs", "intentLeadMs", "heardArrivalMs", "firstHeardWaitMs"] {
             let values = lines.map { ($0["marksMs"] as? [String: Any])?[markName] as? Int }
             if let distribution = VoiceBenchStatistics.distribution(of: values) {
                 marks[markName] = ["n": distribution.count, "medianMs": distribution.medianMs, "p95Ms": distribution.p95Ms]
@@ -366,6 +376,7 @@ enum VoiceToolProbe {
         return [
             "kind": "summary", "probeId": probeID, "stack": stack.rawValue, "runs": lines.count,
             "toolCalled": count("toolCalled"),
+            "heardChecks": lines.flatMap { ($0["heardChecks"] as? [String]) ?? [] }.reduce(into: [String: Int]()) { $0[$1, default: 0] += 1 },
             "harnessOutcomes": outcomeCounts,
             "freshLookOutcomes": freshLookCounts,
             "intentShownBeforeLaunchRequest": count("intentShownBeforeLaunchRequest"),

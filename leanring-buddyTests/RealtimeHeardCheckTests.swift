@@ -1,0 +1,191 @@
+//
+//  RealtimeHeardCheckTests.swift
+//  leanring-buddyTests
+//
+//  The heard-vs-named check's pure half: which installed apps a transcript
+//  names, the decision against the tool's app, the refusal the model is told,
+//  the bounded wait for a late transcript, and the notch's words. Whether the
+//  providers' transcription arrives, and when, is the probe's question.
+//
+
+import Foundation
+import Testing
+@testable import Clicky
+
+struct RealtimeHeardCheckTests {
+
+    private func app(_ path: String, _ name: String? = nil, file: Bool = true) -> RealtimeVoiceVerbs.AppName {
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        return RealtimeVoiceVerbs.AppName(name: name ?? url.deletingPathExtension().lastPathComponent, url: url, isFileName: file)
+    }
+
+    /// This Mac's shape (2026-09-25), with the common-word names that make matching hard.
+    private var installed: [RealtimeVoiceVerbs.AppName] {
+        [app("/Applications/Cursor.app"), app("/Applications/Visual Studio Code.app"), app("/Applications/Google Chrome.app"),
+         app("/Applications/Xcode.app"), app("/Users/o/Applications/Claude Code URL Handler.app"), app("/Applications/Claude.app"),
+         app("/System/Applications/TextEdit.app"), app("/System/Applications/System Settings.app"),
+         app("/System/Applications/Font Book.app"), app("/System/Applications/Time Machine.app"),
+         app("/System/Applications/Clock.app"), app("/System/Applications/App Store.app"),
+         app("/Applications/Visual Studio Code.app", "Code", file: false),
+         app("/System/Library/CoreServices/Finder.app", "Finder", file: true)]
+    }
+
+    private func heard(_ transcript: String) -> [String] {
+        RealtimeHeardCheck.appsMentioned(in: transcript, among: installed).apps.map(RealtimeVoiceVerbs.displayName)
+    }
+
+    // MARK: Transcript -> apps
+
+    @Test func fullNamesAreHeardWordForWordOrRunTogether() {
+        #expect(heard("Open a new window in Cursor.") == ["Cursor"])
+        #expect(heard("Open system settings for me.") == ["System Settings"])
+        #expect(heard("new text edit document") == ["TextEdit"])
+        #expect(heard("Put Finder's toolbar path thing on.") == ["Finder"])
+        #expect(heard("open visual studio code") == ["Visual Studio Code"])
+        // A word fitting two apps is dropped when an app was named in full: "code" here.
+        #expect(heard("Open a new window in the Cursor code editor.") == ["Cursor"])
+        #expect(RealtimeHeardCheck.appsMentioned(in: "open cursor", among: installed).tier == .fullName)
+        // "claude" is Claude's name and a word of Claude Code URL Handler's: the full name decides.
+        #expect(heard("open claude") == ["Claude"])
+    }
+
+    @Test func aDistinctiveWordNamesItsAppAndASharedWordIsAmbiguous() {
+        #expect(heard("Open a new window in Chrome.") == ["Google Chrome"])
+        let code = RealtimeHeardCheck.appsMentioned(in: "Open a new window in code.", among: installed)
+        #expect(code.ambiguousWord)
+        #expect(code.tier == .word)
+        #expect(code.apps.map(RealtimeVoiceVerbs.displayName) == ["Visual Studio Code", "Claude Code URL Handler"])
+        // Never by letters: "code" is not Xcode.
+        #expect(!code.apps.map(RealtimeVoiceVerbs.displayName).contains("Xcode"))
+    }
+
+    @Test func soundAlikesMapOnlyInTheAppSlot() {
+        for said in ["open a new window in kasa", "Open a new window in Kaza.", "new window in kassa", "open casa"] {
+            let result = RealtimeHeardCheck.appsMentioned(in: said, among: installed)
+            #expect(result.apps.map(RealtimeVoiceVerbs.displayName) == ["Cursor"], "\(said)")
+            #expect(result.tier == .soundAlike)
+        }
+        // What the transcription models actually heard for "cursor" (probe 9BC0CACB).
+        for said in ["Open a new window in Cosa.", "Open a new window in Kursor.", "Open a new window in Cursa.", "Open a new window in Kusa."] {
+            #expect(heard(said) == ["Cursor"], "\(said)")
+        }
+        // Beside an ambiguous word the sound-alike is one more candidate: ask, with Cursor offered.
+        let editor = RealtimeHeardCheck.appsMentioned(in: "Open a new window in the Kasa code editor.", among: installed)
+        #expect(editor.ambiguousWord)
+        #expect(editor.apps.map(RealtimeVoiceVerbs.displayName) == ["Cursor", "Visual Studio Code", "Claude Code URL Handler"])
+        #expect(RealtimeHeardCheck.soundKey("cursor") == "kasa")
+        #expect(RealtimeHeardCheck.soundKey("Kaza") == RealtimeHeardCheck.soundKey("kassa"))
+    }
+
+    @Test func conservativeNegativesHearNoApp() {
+        #expect(heard("What app am I looking at right now?") == [])
+        #expect(heard("Switch to list view.") == [])
+        #expect(heard("make the font bigger") == [], "font is Font Book's word and the Format menu's")
+        #expect(heard("what time is it") == [])
+        #expect(heard("just in case, show the sidebar") == [], "case keys like cursor, and is a stop word")
+        #expect(heard("click the export button") == [], "click keys like clock, but is not in the app slot")
+        #expect(heard("kasa is not an app here") == [], "a sound-alike outside the app slot")
+        #expect(heard("open the app store") == ["App Store"], "a generic word still counts inside a full name")
+        #expect(heard("") == [])
+    }
+
+    // MARK: Decision
+
+    @Test func theDecisionTable() {
+        func outcome(_ transcript: String?, named: String) -> RealtimeHeardCheck.Outcome {
+            RealtimeHeardCheck.decide(transcript: transcript, named: named, among: installed).outcome
+        }
+        #expect(outcome("open a new window in cursor", named: "Cursor") == .match)
+        // D66FC598: the owner said Cursor, the model named VS Code.
+        #expect(outcome("open a new window in cursor", named: "Visual Studio Code") == .heardNamedMismatch)
+        #expect(outcome("switch finder to list view", named: "Finder") == .match)
+        #expect(outcome("switch to list view", named: "Finder") == .noAppHeard)
+        #expect(outcome("open a new window in code", named: "Visual Studio Code") == .ambiguousApp)
+        #expect(outcome("open cursor and chrome", named: "Cursor") == .ambiguousApp)
+        // Gemini's "Kasa": the tool names an app that is not installed; the words sound like Cursor.
+        #expect(outcome("open a new window in kasa", named: "Kasa") == .heardNamedMismatch)
+        // A name the identity check will ask about downstream is not contradicted here.
+        #expect(outcome("open visual studio code", named: "code") == .match)
+        #expect(outcome(nil, named: "Cursor") == .transcriptMissing)
+        #expect(outcome("  ", named: "Cursor") == .transcriptMissing)
+        let mismatch = RealtimeHeardCheck.decide(transcript: "new window in cursor", named: "Visual Studio Code", among: installed)
+        #expect(mismatch.heardApps == ["Cursor"])
+        #expect(mismatch.refusalError == "heardNamedMismatch")
+    }
+
+    @Test func refusalsNameTheAppsAndOnlyAPressFailsClosedWithoutATranscript() {
+        let mismatch = RealtimeHeardCheck.decide(transcript: "new window in cursor", named: "Visual Studio Code", among: installed)
+        let told = RealtimeHeardCheck.refusal(for: mismatch, toolName: "press_menu", named: "Visual Studio Code") ?? [:]
+        #expect(told["ok"] as? Bool == false)
+        #expect(told["error"] as? String == "heardNamedMismatch")
+        #expect(told["heard"] as? String == "Cursor")
+        #expect(told["named"] as? String == "Visual Studio Code")
+        #expect((told["message"] as? String)?.hasSuffix("whether they meant Cursor.") == true)
+
+        let ambiguous = RealtimeHeardCheck.decide(transcript: "open a new window in code", named: "Code", among: installed)
+        let asked = RealtimeHeardCheck.refusal(for: ambiguous, toolName: "focus_app", named: "Code") ?? [:]
+        #expect(asked["error"] as? String == "ambiguousApp")
+        #expect(asked["candidates"] as? [String] == ["Visual Studio Code", "Claude Code URL Handler"])
+
+        let missing = RealtimeHeardCheck.decide(transcript: nil, named: "Cursor", among: installed)
+        #expect(RealtimeHeardCheck.refusal(for: missing, toolName: "press_menu", named: "Cursor")?["error"] as? String == "heardUnavailable")
+        for tool in ["open_app", "focus_app", "find_menu_items"] {
+            #expect(RealtimeHeardCheck.refusal(for: missing, toolName: tool, named: "Cursor") == nil, "\(tool)")
+        }
+        let match = RealtimeHeardCheck.decide(transcript: "open cursor", named: "Cursor", among: installed)
+        #expect(RealtimeHeardCheck.refusal(for: match, toolName: "press_menu", named: "Cursor") == nil)
+
+        let trace = RealtimeHeardCheck.traceObject(mismatch, named: "Visual Studio Code", transcriptArrivalMs: 812, waitedMs: 40)
+        #expect(Set(trace.keys) == ["outcome", "heardApps", "tier", "named", "transcriptArrivalMs", "waitedMs"])
+        #expect(trace["outcome"] as? String == "heardNamedMismatch")
+    }
+
+    @Test func thePromptTellsTheModelToAskNotCheck() {
+        #expect(RealtimeOpenAppTool.systemPrompt.contains("if a tool returns heardNamedMismatch or ambiguousApp, ask the owner which app they meant, briefly; never focus or open an app to check first."))
+    }
+
+    // MARK: The bounded wait
+
+    @MainActor @Test func aLateTranscriptIsWaitedForAndAMissingOneIsNot() async {
+        let turn = RealtimeTurnMarks()
+        let now = ProcessInfo.processInfo.systemUptime
+        turn.lastAudioSentUptime = now
+        // Never arrives: nil at the deadline, not before.
+        let missing = await turn.waitForHeard(until: now + 0.15)
+        #expect(missing == nil)
+        #expect(ProcessInfo.processInfo.systemUptime >= now + 0.15)
+
+        // OpenAI: the completed event lands after the call began waiting.
+        let late = RealtimeTurnMarks()
+        late.lastAudioSentUptime = ProcessInfo.processInfo.systemUptime
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(60))
+            late.heardText = "open a new window in cursor"
+            late.heardCompleteUptime = ProcessInfo.processInfo.systemUptime
+        }
+        let arrived = await late.waitForHeard(until: ProcessInfo.processInfo.systemUptime + 2)
+        #expect(arrived == "open a new window in cursor")
+
+        // Gemini: pieces with no end marker count once quiet for geminiHeardQuietSeconds after the release.
+        let gemini = RealtimeTurnMarks()
+        let released = ProcessInfo.processInfo.systemUptime
+        gemini.lastAudioSentUptime = released
+        gemini.heardText = "open a new window"
+        gemini.heardPieceUptimes = [released]
+        #expect(gemini.heardCompletedUptime(now: released + 0.1) == nil)
+        #expect(gemini.heardCompletedUptime(now: released + RealtimeTurnMarks.geminiHeardQuietSeconds) == released)
+    }
+
+    // MARK: Notch
+
+    @Test func theNotchSaysWhichAppItHeard() {
+        #expect(JarvisNotchReason.plain(forErrorCode: "heardNamedMismatch", subject: "Cursor") == "heard Cursor, asking first")
+        let long = JarvisNotchReason.plain(forErrorCode: "heardNamedMismatch", subject: "Claude Code URL Handler")
+        #expect(long == "heard another app, asking first")
+        #expect(long.count <= JarvisNotchReason.maximumLength)
+        #expect(JarvisNotchReason.plain(forErrorCode: "heardUnavailable").count <= JarvisNotchReason.maximumLength)
+        #expect(JarvisNotchReason.plain(forErrorCode: "appMismatch", subject: "Cursor") == "a different app is in front")
+        #expect(JarvisNotchState.thinking.next(on: .toolCall(title: "x"))?.next(on: .harnessAnswered(ok: false, subject: "Cursor", error: "heardNamedMismatch"))
+                == .didntTake(reason: "heard Cursor, asking first"))
+    }
+}

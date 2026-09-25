@@ -346,7 +346,7 @@ struct RealtimeVoiceVerbsTests {
                                                                         waitedForConfirmation: false, harnessResponse: nil))
         let keys: Set<String> = ["kind", "schema", "source", "turnId", "stack", "probeId", "fixture", "seq", "tool", "args", "callMs",
                                  "harnessMs", "ok", "harnessError", "verification", "offered", "offeredCount", "correctOffered", "enabledItemCount",
-                                 "privacyDroppedCount", "listingIncomplete", "choseFromOffered", "independentCheck", "appCheck"]
+                                 "privacyDroppedCount", "listingIncomplete", "choseFromOffered", "independentCheck", "appCheck", "heardCheck"]
         let findLine = RealtimeDecisionTrace.line(decision: find, sequence: 1, turnID: "T", stack: "openAIRealtime", source: "live", releasedUptime: 10)
         let probedFind = RealtimeDecisionTrace.line(decision: find, sequence: 1, turnID: "T", stack: "geminiLive", source: "probe",
                                                     releasedUptime: 10, expectedPath: ["View", "Hide Sidebar"])
@@ -355,8 +355,9 @@ struct RealtimeVoiceVerbsTests {
                                                    independentCheck: ["kind": "menuMark", "passed": true])
         #expect(Set(findLine.keys) == keys)
         #expect(Set(pressLine.keys) == keys)
-        #expect(findLine["schema"] as? Int == 2)
+        #expect(findLine["schema"] as? Int == 3)
         #expect(findLine["appCheck"] is NSNull)
+        #expect(findLine["heardCheck"] is NSNull)
         #expect(findLine["callMs"] as? Int == 1200)
         #expect(findLine["choseFromOffered"] is NSNull)
         #expect((findLine["offered"] as? [[String: Any]])?.first?["path"] as? [String] == ["View", "as List"])
