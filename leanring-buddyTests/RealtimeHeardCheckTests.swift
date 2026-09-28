@@ -359,9 +359,15 @@ struct RealtimeHeardCheckTests {
         // Not running: open_app's job (its own heard check), never a launch from here.
         #expect(gate("switch finder to list view", named: "Finder", running: false) == .init(triggered: false, reason: "notRunning"))
         #expect(gate("switch finder to list view", named: "Finder", bundle: nil) == .init(triggered: false, reason: "unresolved"))
-        // A guess is not the owner's word: sound-alike, and a distinctive word ("chrome", 27BA20D2).
+        // A distinctive word of one app's name counts (owner 2026-09-28): "chrome" is Google Chrome's.
+        #expect(gate("open a new window in chrome", named: "Google Chrome") == agree)
+        // A sound-alike is a different word guessed: never.
         #expect(gate("open a new window in kasa", named: "Cursor") == .init(triggered: false, reason: "tier:soundAlike"))
-        #expect(gate("open a new window in chrome", named: "Google Chrome") == .init(triggered: false, reason: "tier:word"))
+        // Generic and everyday words never reach the word tier: "google" is on the generic list,
+        // "notes" and "home" name their apps only in the app slot.
+        #expect(gate("search google for this", named: "Google Chrome") == .init(triggered: false, reason: "heard:noAppHeard"))
+        #expect(gate("show my notes", named: "Notes") == .init(triggered: false, reason: "heard:noAppHeard"))
+        #expect(gate("go home", named: "Home") == .init(triggered: false, reason: "heard:noAppHeard"))
         // Anything but a match.
         #expect(gate("open a new window in code", named: "Visual Studio Code") == .init(triggered: false, reason: "heard:ambiguousApp"))
         #expect(gate("open a new window in chrome", named: "Google Chrome", afterRefusal: true)

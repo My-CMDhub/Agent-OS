@@ -445,11 +445,15 @@ nonisolated enum RealtimeHeardCheck {
     /// the owner's words and the tool agree on one installed, RUNNING app and
     /// the only thing wrong is which app is in front, local code brings that
     /// app forward (reversible, through the harness's own focus and policy) and
-    /// runs the call once more. Only full-name and slot evidence counts: a
-    /// distinctive word ("chrome") or a sound-alike ("kasa") is a guess, the
-    /// same line `Tier.confirmsARetry` draws. Never launches: a stopped app is
-    /// open_app's job, which has its own heard check.
-    static let autoFocusTiers: Set<Tier> = [.fullName, .slot]
+    /// runs the call once more. Full-name, slot and word evidence count — a
+    /// distinctive word ("chrome") joined on the owner's ruling 2026-09-28,
+    /// after "chrome" scored at the word tier in 43/43 Chrome calls and so
+    /// never triggered. A word still passes the generic-word and
+    /// everyday-name lists, must fit exactly one app, and must agree with the
+    /// tool's app. A sound-alike ("kasa") is a different word guessed and
+    /// keeps asking. Never launches: a stopped app is open_app's job, which
+    /// has its own heard check.
+    static let autoFocusTiers: Set<Tier> = [.fullName, .slot, .word]
 
     struct AutoFocusGate: Equatable {
         let triggered: Bool
