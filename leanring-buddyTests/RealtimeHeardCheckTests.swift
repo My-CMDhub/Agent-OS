@@ -424,4 +424,28 @@ struct RealtimeHeardCheckTests {
         #expect(JarvisNotchState.thinking.next(on: .toolCall(title: "x"))?.next(on: .harnessAnswered(ok: false, subject: "Cursor", error: "heardNamedMismatch"))
                 == .didntTake(reason: "heard Cursor, asking first"))
     }
+
+    // MARK: Transcriber vocabulary hint
+
+    @Test func transcriptionHintNamesDistinctiveAppsOnceRunningFirst() {
+        let vocabulary = RealtimeHeardCheck.transcriptionVocabulary(
+            from: installed + [app("/Users/o/Applications/Cursor.app")],
+            runningPaths: ["/System/Library/CoreServices/Finder.app"])
+        #expect(vocabulary.first == "Finder")
+        #expect(vocabulary.contains("Cursor") && vocabulary.contains("Visual Studio Code") && vocabulary.contains("TextEdit"))
+        // Everyday-word and all-generic names, and the menu-bar alias "Code", stay out.
+        for skipped in ["Preview", "Home", "Photos", "Notes", "Clock", "Font Book", "Time Machine", "App Store", "Code"] {
+            #expect(!vocabulary.contains(skipped))
+        }
+        #expect(vocabulary.filter { $0 == "Cursor" }.count == 1)
+        #expect(RealtimeHeardCheck.transcriptionPrompt(vocabulary: ["Cursor", "Finder"]) == "App names on this Mac: Cursor, Finder")
+    }
+
+    @Test func transcriptionHintStaysUnderItsCap() {
+        let many = (0..<200).map { app("/Applications/Distinctapp\($0).app") }
+        let prompt = RealtimeHeardCheck.transcriptionPrompt(
+            vocabulary: RealtimeHeardCheck.transcriptionVocabulary(from: many, runningPaths: []))
+        #expect(prompt.count <= RealtimeHeardCheck.transcriptionHintMaxCharacters)
+        #expect(prompt.count > RealtimeHeardCheck.transcriptionHintMaxCharacters - 20)
+    }
 }

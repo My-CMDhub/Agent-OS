@@ -437,6 +437,50 @@ nonisolated enum RealtimeHeardCheck {
         }
     }
 
+    // MARK: Transcriber vocabulary hint (pure)
+
+    /// The transcriber wrote "Kasa"/"Kursor"/"CASA" for "cursor" on the fixture
+    /// voice (probe 27BA20D2), so the check only ever had a sound-alike and
+    /// asked. OpenAI's `audio.input.transcription.prompt` is free text for
+    /// gpt-4o-*-transcribe (developers.openai.com/api/reference/resources/realtime/client-events,
+    /// read 2026-09-28); with this list it wrote "Cursor" 5/5 on fixture 13
+    /// (probe C92505CE). Gemini's documented `customVocabulary`
+    /// (ai.google.dev/api/live, AudioTranscriptionConfig) was accepted and
+    /// changed nothing — "Kasa" 8/8 — so Gemini is sent no hint. No length
+    /// limit is published for these models; whisper-1's is 224 tokens, so the
+    /// prompt stays under `transcriptionHintMaxCharacters` (~150 tokens).
+    /// App display names ONLY — never a file name or window title. Running apps
+    /// first (what the owner acts on), then the rest in folder order; menu-bar
+    /// aliases ("Code") are skipped, their file name is there. Everyday-word
+    /// names ("Preview", "Font Book") would only pull ordinary speech toward an
+    /// app, so they are left out.
+    static let transcriptionHintMaxCharacters = 600
+    static let transcriptionHintPrefix = "App names on this Mac: "
+
+    static func transcriptionVocabulary(from names: [RealtimeVoiceVerbs.AppName], runningPaths: Set<String>) -> [String] {
+        let ordered = names.filter { runningPaths.contains($0.url.standardizedFileURL.path) }
+            + names.filter { !runningPaths.contains($0.url.standardizedFileURL.path) }
+        var seen = Set<String>()
+        var budget = transcriptionHintMaxCharacters - transcriptionHintPrefix.count
+        var vocabulary: [String] = []
+        for name in ordered where name.isFileName {
+            let tokens = RealtimeVoiceVerbs.foldedTokens(name.name)
+            guard !tokens.isEmpty, !(tokens.count == 1 && commonWordAppNames.contains(tokens[0])),
+                  !tokens.allSatisfy(genericNameWords.contains),
+                  seen.insert(tokens.joined(separator: " ")).inserted else { continue }
+            let cost = name.name.count + (vocabulary.isEmpty ? 0 : 2)
+            guard cost <= budget else { break }
+            budget -= cost
+            vocabulary.append(name.name)
+        }
+        return vocabulary
+    }
+
+    /// OpenAI's free-text prompt: `transcriptionHintPrefix` plus the list.
+    static func transcriptionPrompt(vocabulary: [String]) -> String {
+        transcriptionHintPrefix + vocabulary.joined(separator: ", ")
+    }
+
     // MARK: Auto-focus when both witnesses agree (pure)
 
     /// Probe 27BA20D2: the owner named Chrome, the tool named Google Chrome,

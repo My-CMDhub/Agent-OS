@@ -19,6 +19,7 @@
 //  the call, not the answer the user waits for.
 //
 
+import AppKit
 import Foundation
 
 /// Everything one turn did, in uptime seconds. The probe turns these into
@@ -200,6 +201,10 @@ final class RealtimeVoiceConnection {
     func connect() async throws {
         switch stack {
         case .openAIRealtime:
+            // Installed app names bias the owner's-words transcriber toward "Cursor" over "Kasa".
+            let appVocabulary = RealtimeHeardCheck.transcriptionVocabulary(
+                from: RealtimeVoiceVerbs.installedAppNames(),
+                runningPaths: Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.standardizedFileURL.path }))
             let tokenResponse = try await VoiceStackBenchmark.fetchWorkerJSON(routePath: "/openai-realtime-token", stage: "openAIToken")
             guard let ephemeralKey = tokenResponse["token"] as? String else { throw VoiceBenchFailure(kind: "openAIToken:noToken") }
             var components = URLComponents(string: "wss://api.openai.com/v1/realtime")!
@@ -222,7 +227,8 @@ final class RealtimeVoiceConnection {
                         // heard-vs-named check (`RealtimeHeardCheck`). The GA shape and
                         // model the bench has used live since 2026-09-23.
                         "input": ["format": ["type": "audio/pcm", "rate": 24_000], "turn_detection": NSNull(),
-                                  "transcription": ["model": Self.openAITranscriptionModel]],
+                                  "transcription": ["model": Self.openAITranscriptionModel,
+                                                    "prompt": RealtimeHeardCheck.transcriptionPrompt(vocabulary: appVocabulary)]],
                         // The rate is required even though 24 kHz is the only one (probed 2026-09-23).
                         "output": ["format": ["type": "audio/pcm", "rate": 24_000], "voice": Self.openAIVoice]
                     ]
@@ -247,6 +253,7 @@ final class RealtimeVoiceConnection {
                     // What the model said, for the probe's answers file and the honesty check.
                     "outputAudioTranscription": [String: Any](),
                     // What the OWNER said, for the heard-vs-named check (the bench's since 2026-09-23).
+                    // No `customVocabulary`: documented, accepted, and still "Kasa" 8/8 (probes C92505CE, B59C0B0F).
                     "inputAudioTranscription": [String: Any]()
                 ]
             ])
