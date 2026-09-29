@@ -182,7 +182,8 @@ struct RealtimeVoiceVerbsTests {
         #expect(find == #"{"expectApp":"Finder","verb":"menus"}"#)
 
         let press = try RealtimeOpenAppTool.harnessRequestLine(
-            for: RealtimeToolCall(callID: "c", name: "press_menu", appName: "Finder", path: ["View", "as List"])).get()
+            for: RealtimeToolCall(callID: "c", name: "press_menu", appName: "Finder", path: ["View", "as List"]),
+            offered: [RealtimeMenuCandidate(path: ["View", "as List"], shortcut: nil)]).get()
         #expect(press == #"{"expectApp":"Finder","path":["View","as List"],"verb":"menu"}"#)
     }
 
@@ -199,6 +200,88 @@ struct RealtimeVoiceVerbsTests {
         // An item that quotes the selection is refused the same way, before the harness.
         #expect(refusal(RealtimeToolCall(callID: "c", name: "press_menu", appName: "Finder",
                                          path: ["Edit", "Copy \u{201C}Tax return.pdf\u{201D} as Pathname"])) == "privateMenuItem")
+    }
+
+    /// Live 2026-09-28: a press copied from the PREVIOUS turn's find result
+    /// (Cursor, Go > Add Symbol to Current Chat) reached the harness. Only a
+    /// path this turn's find offered is pressed.
+    @Test func aPressOfAPathThisTurnsFindDidNotOfferNeverReachesTheHarness() throws {
+        let press = RealtimeToolCall(callID: "c", name: "press_menu", appName: "Cursor", path: ["Go", "Add Symbol to Current Chat"])
+        func refusal(offered: [RealtimeMenuCandidate]?) -> RealtimeToolRefusal? {
+            if case .failure(let refusal) = RealtimeOpenAppTool.harnessRequestLine(for: press, offered: offered) { return refusal }
+            return nil
+        }
+        // No find this turn.
+        #expect(refusal(offered: nil)?.error == "notOffered")
+        // Intent first: never coach the model into redoing a press nobody asked for.
+        let message = refusal(offered: nil)?.message ?? ""
+        #expect(message.contains("If they did not ask for a menu command now, press nothing and say so."))
+        #expect(!message.contains("Call find_menu_items first"))
+        #expect(!message.contains("\n"))
+        // A find this turn that offered something else.
+        #expect(refusal(offered: [RealtimeMenuCandidate(path: ["File", "New Chat"], shortcut: nil)])?.error == "notOffered")
+        #expect(refusal(offered: [])?.error == "notOffered")
+        // Offered this turn: the request goes.
+        let line = try RealtimeOpenAppTool.harnessRequestLine(
+            for: press, offered: [RealtimeMenuCandidate(path: ["File", "New Chat"], shortcut: nil),
+                                  RealtimeMenuCandidate(path: ["Go", "Add Symbol to Current Chat"], shortcut: nil)]).get()
+        #expect(object(line)["verb"] as? String == "menu")
+        #expect(object(line)["path"] as? [String] == ["Go", "Add Symbol to Current Chat"])
+        // The notch says it in plain words.
+        #expect(JarvisNotchReason.byErrorCode["notOffered"] != nil)
+    }
+
+    /// An offer is Cursor's or Finder's, not just a list of paths: "File > New
+    /// Window" found in one app is not offered in another.
+    @Test func aPressIsOfferedOnlyInTheAppWhoseFindOfferedIt() async {
+        let press = RealtimeToolCall(callID: "c", name: "press_menu", appName: "Finder", path: ["File", "New Finder Window"])
+        let offered = [RealtimeMenuCandidate(path: ["File", "New Finder Window"], shortcut: nil)]
+        func error(expectApp: String, offeredApp: String?) -> String? {
+            if case .failure(let refusal) = RealtimeOpenAppTool.harnessRequestLine(for: press, expectApp: expectApp, offered: offered,
+                                                                                    offeredApp: offeredApp) { return refusal.error }
+            return nil
+        }
+        #expect(error(expectApp: "com.apple.finder", offeredApp: "com.apple.finder") == nil)
+        #expect(error(expectApp: "com.apple.finder", offeredApp: "com.todesktop.230313mzl4w4u92") == "notOffered")
+        #expect(error(expectApp: "com.apple.finder", offeredApp: nil) == "notOffered")
+        // Through dispatch, which resolves "Finder" itself: never reaches the harness.
+        let sent = LockedLines()
+        let refused = await RealtimeOpenAppTool.dispatch(press, offered: offered, offeredApp: "com.todesktop.230313mzl4w4u92",
+                                                         answer: { line in sent.append(line); return #"{"ok":true}"# })
+        #expect(refused.result["error"] as? String == "notOffered")
+        #expect(sent.lines.isEmpty)
+    }
+
+    /// The ticket re-issue goes through the same guard, so it must carry the
+    /// same offer, or an approved card would be answered by a refusal.
+    @Test func aPressThatNeedsACardIsReissuedWithItsTicketAndItsOffer() async {
+        let sent = LockedLines()
+        let press = RealtimeToolCall(callID: "c", name: "press_menu", appName: "Finder", path: ["File", "New Finder Window"])
+        let dispatch = await RealtimeOpenAppTool.dispatch(
+            press, offered: [RealtimeMenuCandidate(path: ["File", "New Finder Window"], shortcut: nil)], offeredApp: "com.apple.finder",
+            answer: { line in
+                sent.append(line)
+                return sent.lines.count == 1 ? #"{"ok":false,"error":"confirmationRequired","ticket":"T1"}"# : #"{"ok":true,"verification":"confirmed"}"#
+            }, confirmationWaitSeconds: 2, pollMilliseconds: 10)
+        #expect(sent.lines.count == 2)
+        #expect(object(sent.lines.last ?? "")["ticket"] as? String == "T1")
+        #expect(dispatch.harnessConfirmed)
+        #expect(dispatch.waitedForConfirmation)
+    }
+
+    /// Counts-only: did the owner's own words share a word with the item pressed?
+    @Test func heardOverlapsLabelIsABooleanOrNullAndIgnoresFillerWords() {
+        let newWindow = ["File", "New Finder Window"]
+        #expect(RealtimeDecisionTrace.heardOverlapsLabel(heard: "open a new finder window", path: newWindow) == true)
+        #expect(RealtimeDecisionTrace.heardOverlapsLabel(heard: "Add this to the CHAT", path: ["Go", "Add Symbol to Current Chat"]) == true)
+        #expect(RealtimeDecisionTrace.heardOverlapsLabel(heard: "switch to list view", path: ["Go", "Add Symbol to Current Chat"]) == false)
+        // Only the item's own label counts, not its menu.
+        #expect(RealtimeDecisionTrace.heardOverlapsLabel(heard: "the go menu", path: ["Go", "Back"]) == false)
+        // Filler shared by both is no overlap.
+        #expect(RealtimeDecisionTrace.heardOverlapsLabel(heard: "open the menu for me", path: ["File", "Menu for the Day"]) == false)
+        #expect(RealtimeDecisionTrace.heardOverlapsLabel(heard: nil, path: newWindow) == nil)
+        #expect(RealtimeDecisionTrace.heardOverlapsLabel(heard: "  ", path: newWindow) == nil)
+        #expect(RealtimeDecisionTrace.heardOverlapsLabel(heard: "new window", path: nil) == false)
     }
 
     @Test func providersArgumentsParseForEveryTool() throws {
@@ -291,7 +374,8 @@ struct RealtimeVoiceVerbsTests {
         let sent = LockedLines()
         let frontmostChanged = #"{"ok":false,"error":"frontmostChanged","expectedApp":"com.apple.finder","actualApp":{"name":"Code","bundleIdentifier":"com.microsoft.VSCode"}}"#
         let call = RealtimeToolCall(callID: "c", name: "press_menu", appName: "Finder", path: ["File", "New Finder Window"])
-        let dispatch = await RealtimeOpenAppTool.dispatch(call, answer: { line in sent.append(line); return frontmostChanged })
+        let dispatch = await RealtimeOpenAppTool.dispatch(call, offered: [RealtimeMenuCandidate(path: ["File", "New Finder Window"], shortcut: nil)],
+                                                          offeredApp: "com.apple.finder", answer: { line in sent.append(line); return frontmostChanged })
         #expect(sent.lines.count == 1)
         #expect(object(sent.lines.first ?? "")["expectApp"] as? String == "com.apple.finder")
         #expect(!dispatch.harnessConfirmed)
@@ -354,13 +438,15 @@ struct RealtimeVoiceVerbsTests {
         findDispatch.menuOffer = offer
         let find = RealtimeToolDecision(call: RealtimeToolCall(callID: "a", name: "find_menu_items", appName: "Finder", words: "list"),
                                         callUptime: 11.2, offeredBeforeCall: nil, dispatch: findDispatch)
+        var pressDispatch = RealtimeToolDispatch(result: ["ok": true, "verification": "confirmed"], harnessMilliseconds: 300,
+                                                 waitedForConfirmation: false, harnessResponse: nil)
+        pressDispatch.heardOverlapsLabel = false
         let press = RealtimeToolDecision(call: RealtimeToolCall(callID: "b", name: "press_menu", appName: "Finder", path: ["View", "as List"]),
-                                         callUptime: 12.0, offeredBeforeCall: offer.candidates,
-                                         dispatch: RealtimeToolDispatch(result: ["ok": true, "verification": "confirmed"], harnessMilliseconds: 300,
-                                                                        waitedForConfirmation: false, harnessResponse: nil))
+                                         callUptime: 12.0, offeredBeforeCall: offer.candidates, dispatch: pressDispatch)
         let keys: Set<String> = ["kind", "schema", "source", "turnId", "stack", "probeId", "fixture", "seq", "tool", "args", "callMs",
                                  "harnessMs", "ok", "harnessError", "verification", "offered", "offeredCount", "correctOffered", "enabledItemCount",
-                                 "privacyDroppedCount", "listingIncomplete", "choseFromOffered", "independentCheck", "appCheck", "heardCheck", "autoFocus"]
+                                 "privacyDroppedCount", "listingIncomplete", "choseFromOffered", "independentCheck", "appCheck", "heardCheck", "autoFocus",
+                                 "heardOverlapsLabel"]
         let findLine = RealtimeDecisionTrace.line(decision: find, sequence: 1, turnID: "T", stack: "openAIRealtime", source: "live", releasedUptime: 10)
         let probedFind = RealtimeDecisionTrace.line(decision: find, sequence: 1, turnID: "T", stack: "geminiLive", source: "probe",
                                                     releasedUptime: 10, expectedPath: ["View", "Hide Sidebar"])
@@ -369,7 +455,7 @@ struct RealtimeVoiceVerbsTests {
                                                    independentCheck: ["kind": "menuMark", "passed": true])
         #expect(Set(findLine.keys) == keys)
         #expect(Set(pressLine.keys) == keys)
-        #expect(findLine["schema"] as? Int == 4)
+        #expect(findLine["schema"] as? Int == 5)
         #expect(findLine["appCheck"] is NSNull)
         #expect(findLine["autoFocus"] is NSNull)
         #expect(findLine["heardCheck"] is NSNull)
@@ -382,6 +468,8 @@ struct RealtimeVoiceVerbsTests {
         #expect(probedFind["correctOffered"] as? Bool == false)
         #expect(pressLine["correctOffered"] is NSNull)
         #expect(pressLine["choseFromOffered"] as? Bool == true)
+        #expect(pressLine["heardOverlapsLabel"] as? Bool == false)
+        #expect(findLine["heardOverlapsLabel"] is NSNull)
         #expect(pressLine["verification"] as? String == "confirmed")
         #expect(pressLine["offered"] is NSNull)
         #expect((pressLine["args"] as? [String: Any])?["path"] as? [String] == ["View", "as List"])

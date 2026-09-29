@@ -384,8 +384,9 @@ nonisolated struct RealtimeToolDecision {
     let call: RealtimeToolCall
     let callUptime: TimeInterval
     /// The candidates of this turn's latest finished find_menu_items when this
-    /// call ARRIVED — the list the model could have chosen from. nil: none yet.
-    let offeredBeforeCall: [RealtimeMenuCandidate]?
+    /// call was DISPATCHED (after the calls before it finished) — the offer the
+    /// notOffered gate used. Set to the arrival-time offer until then. nil: none.
+    var offeredBeforeCall: [RealtimeMenuCandidate]?
     var dispatch: RealtimeToolDispatch?
 }
 
@@ -396,10 +397,11 @@ nonisolated struct RealtimeToolDecision {
 /// Keep the shape stable; add keys, never rename them, and bump `schema` if a
 /// key's meaning changes. Every key is always present, null when it does not apply.
 ///
-///   kind "toolCall", schema 4 (2026-09-25: `appCheck` added in 2, `heardCheck`
+///   kind "toolCall", schema 5 (2026-09-25: `appCheck` added in 2, `heardCheck`
 ///   in 3, `autoFocus` in 4; earlier lines simply lack them, and every other key
 ///   means what it did — except that from 4 a menu call's ok/harnessError/
-///   appCheck are those of its auto-focus RE-RUN when `autoFocus.retried`)
+///   appCheck are those of its auto-focus RE-RUN when `autoFocus.retried`, and
+///   from 5 `choseFromOffered` is judged at dispatch, not arrival)
 ///   source            "live" | "probe"
 ///   turnId, stack     the turn (voice-live.log / voice-tool-probe.log share turnId)
 ///   probeId, fixture  probe only, else null
@@ -416,8 +418,10 @@ nonisolated struct RealtimeToolDecision {
 ///                     find_menu_items (the words the model searched are in args)
 ///   correctOffered    probe, find_menu_items: was the fixture's expected path
 ///                     among `offered`? null live or with no expected path
-///   choseFromOffered  press_menu: was `args.path` one of the latest `offered`
-///                     paths when the call arrived? null if nothing was offered
+///   choseFromOffered  press_menu: was `args.path` one of the `offered` paths the
+///                     gate used, when dispatched? null if nothing was offered.
+///                     Schema 5 (2026-09-29): before, judged at call ARRIVAL, so
+///                     a find and a press in one batch read null or false
 ///   independentCheck  probe: a structure read that does not trust the verb
 ///                     ({kind, passed, ...}); live: null
 ///   appCheck          find_menu_items / press_menu: {outcome, named,
@@ -440,15 +444,29 @@ nonisolated struct RealtimeToolDecision {
 ///                     (`RealtimeHeardCheck.autoFocusGate`); focusStatus: the
 ///                     focus's verification, or its error; retried: the call ran
 ///                     once more after a confirmed focus
+///   heardOverlapsLabel press_menu (added 2026-09-29, absent before): did the
+///                     owner's heard transcript share a non-filler word with the
+///                     pressed item's label? null with no transcript. Measurement
+///                     only; it gates nothing
 nonisolated enum RealtimeDecisionTrace {
     static let fileName = "voice-decisions.log"
-    static let schemaVersion = 4
+    static let schemaVersion = 5
     static let privatePathPlaceholder = ["<private>"]
 
     static func choseFromOffered(path: [String]?, offered: [RealtimeMenuCandidate]?) -> Bool? {
         guard let offered else { return nil }
         guard let path else { return false }
         return offered.contains { $0.path == path }
+    }
+
+    /// press_menu, counts-only: does the owner's own transcript share a word
+    /// (not a filler word) with the pressed item's label? nil with no
+    /// transcript. Only this boolean is logged, never the words.
+    static func heardOverlapsLabel(heard: String?, path: [String]?) -> Bool? {
+        guard let heard, !heard.allSatisfy(\.isWhitespace) else { return nil }
+        let spoken = Set(RealtimeVoiceVerbs.foldedTokens(heard)).subtracting(RealtimeVoiceVerbs.ignoredQueryWords)
+        let label = Set(RealtimeVoiceVerbs.foldedTokens(path?.last ?? "")).subtracting(RealtimeVoiceVerbs.ignoredQueryWords)
+        return spoken.contains { word in label.contains { RealtimeVoiceVerbs.tokensMatch(word, $0) } }
     }
 
     static func loggedArguments(for call: RealtimeToolCall) -> [String: Any] {
@@ -489,7 +507,8 @@ nonisolated enum RealtimeDecisionTrace {
             "independentCheck": value(independentCheck),
             "appCheck": value(dispatch?.appCheck),
             "heardCheck": value(dispatch?.heardCheck),
-            "autoFocus": value(dispatch?.autoFocus)
+            "autoFocus": value(dispatch?.autoFocus),
+            "heardOverlapsLabel": value(isPress ? dispatch?.heardOverlapsLabel : nil)
         ]
     }
 

@@ -208,6 +208,83 @@ struct RealtimeTurnCompletionTests {
         #expect(answering.eventTrail.contains { $0.hasPrefix("ignored:toolResult@") })
     }
 
+    // MARK: press_menu only from this turn's find (live 2026-09-28)
+
+    private final class MenuHarness: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        var menuPresses: Int { lock.lock(); defer { lock.unlock() }; return lines.filter { $0.contains(#""verb":"menu""#) }.count }
+        func answer(_ line: String) -> String {
+            lock.lock(); lines.append(line); lock.unlock()
+            guard line.contains(#""verb":"menus""#) else { return #"{"ok":true,"verification":"confirmed"}"# }
+            return #"{"ok":true,"items":[{"path":["File","New Finder Window"],"enabled":true,"hasSubmenu":false,"shortcut":"⌘N"},"#
+                + #"{"path":["View","as List"],"enabled":true,"hasSubmenu":false,"shortcut":"⌘2"}]}"#
+        }
+    }
+
+    private let findNewWindow: [String: Any] = ["id": "f1", "name": "find_menu_items", "args": ["app": "Finder", "words": "new window"]]
+    private let pressNewWindow: [String: Any] = ["id": "p1", "name": "press_menu", "args": ["app": "Finder", "path": ["File", "New Finder Window"]]]
+
+    private func heardTurn(_ connection: RealtimeVoiceConnection, calls: [[String: Any]]) async throws -> RealtimeTurnMarks {
+        try await connection.beginTurn()
+        try await connection.endTurn()
+        let turn = connection.turn
+        connection.handle(["serverContent": ["inputTranscription": ["text": "open a new finder window"]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        connection.handle(["toolCall": ["functionCalls": calls]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        let deadline = ProcessInfo.processInfo.systemUptime + 6
+        while turn.dispatches.count < calls.count, ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        return turn
+    }
+
+    /// Calls run in order, so a press emitted in the same batch as its find
+    /// sees that find's offer.
+    @Test func aFindAndAPressInOneBatchPressTheOfferedItem() async throws {
+        let harness = MenuHarness()
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { harness.answer($0) })
+        let turn = try await heardTurn(connection, calls: [findNewWindow, pressNewWindow])
+        #expect(turn.dispatches.count == 2)
+        #expect(turn.dispatches.last?.result["error"] == nil || turn.dispatches.last?.result["error"] is NSNull)
+        #expect(harness.menuPresses == 1)
+        #expect(turn.dispatches.last?.heardOverlapsLabel == true)
+    }
+
+    /// The trace judges a press against the offer the GATE used, not the one
+    /// standing when the call arrived: here that was find X's, and the press was of Y.
+    @Test func aPressAfterAnEarlierFindIsTracedAgainstTheOfferItWasJudgedOn() async throws {
+        let harness = MenuHarness()
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { harness.answer($0) })
+        try await connection.beginTurn()
+        try await connection.endTurn()
+        let turn = connection.turn
+        connection.handle(["serverContent": ["inputTranscription": ["text": "finder as a list"]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        let findX: [String: Any] = ["id": "f1", "name": "find_menu_items", "args": ["app": "Finder", "words": "new window"]]
+        let findY: [String: Any] = ["id": "f2", "name": "find_menu_items", "args": ["app": "Finder", "words": "list"]]
+        let pressY: [String: Any] = ["id": "p1", "name": "press_menu", "args": ["app": "Finder", "path": ["View", "as List"]]]
+        connection.handle(["toolCall": ["functionCalls": [findX]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        let deadline = ProcessInfo.processInfo.systemUptime + 6
+        while turn.dispatches.count < 1, ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        connection.handle(["toolCall": ["functionCalls": [findY, pressY]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        while turn.dispatches.count < 3, ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(turn.dispatches.count == 3)
+        #expect(harness.menuPresses == 1)
+        let pressLine = RealtimeDecisionTrace.line(decision: turn.decisions[2], sequence: 3, turnID: "T", stack: "geminiLive",
+                                                   source: "live", releasedUptime: nil)
+        #expect(pressLine["choseFromOffered"] as? Bool == true)
+        #expect(pressLine["harnessError"] is NSNull)
+    }
+
+    /// The live defect: the path came from the PREVIOUS turn's find, which the
+    /// model keeps in its context.
+    @Test func aPressCopiedFromThePreviousTurnsFindNeverReachesTheHarness() async throws {
+        let harness = MenuHarness()
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { harness.answer($0) })
+        _ = try await heardTurn(connection, calls: [findNewWindow])
+        let second = try await heardTurn(connection, calls: [pressNewWindow])
+        #expect(second.dispatches.count == 1)
+        #expect(second.dispatches.first?.result["error"] as? String == "notOffered")
+        #expect(harness.menuPresses == 0)
+    }
+
     @Test func geminiInterruptedWithNoTurnCompleteDoesNotSwallowTheNextAnswer() async throws {
         let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { _ in "{}" })
         try await connection.beginTurn()

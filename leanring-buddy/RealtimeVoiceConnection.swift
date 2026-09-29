@@ -35,6 +35,8 @@ final class RealtimeTurnMarks {
     var decisions: [RealtimeToolDecision] = []
     /// The latest finished find_menu_items' candidates: what a press chose from.
     var latestMenuOffer: [RealtimeMenuCandidate]?
+    /// The bundle that find resolved to: an offer is pressed only in its own app.
+    var latestMenuOfferApp: String?
     var toolResultSentUptime: TimeInterval?
     /// First audio after the LATEST tool result — with find -> press, the words
     /// about the press, not a "one moment" between the two calls.
@@ -612,6 +614,12 @@ final class RealtimeVoiceConnection {
             let previousCall = turn.lastCallTask
             turn.lastCallTask = Task { @MainActor [weak self] in
                 await previousCall?.value
+                // Read now, after the previous call finished: a find and a press sent
+                // in one batch must still press what that find offered. The trace
+                // records this offer, the one the gate judges by.
+                let offered = turn.latestMenuOffer
+                let offeredApp = turn.latestMenuOfferApp
+                turn.decisions[decisionIndex].offeredBeforeCall = offered
                 var dispatch: RealtimeToolDispatch
                 if overLimit {
                     let refusal = RealtimeToolRefusal(error: "tooManyToolCalls", message: "only \(Self.maximumToolCallsPerTurn) tool calls are allowed per turn")
@@ -634,6 +642,7 @@ final class RealtimeVoiceConnection {
                         var superseded = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: refusal), harnessMilliseconds: 0,
                                                               waitedForConfirmation: false, harnessResponse: nil)
                         superseded.heardCheck = heard?.trace
+                        superseded.heardOverlapsLabel = heard?.overlapsLabel
                         superseded.autoFocus = autoFocus
                         turn.dispatches.append(superseded)
                         turn.decisions[decisionIndex].dispatch = superseded
@@ -653,7 +662,8 @@ final class RealtimeVoiceConnection {
                         let onConfirmationRequired: @MainActor () -> Void = {
                             if isKnownTool { JarvisNotch.shared.handle(.confirmationRequired) }
                         }
-                        dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer, onConfirmationRequired: onConfirmationRequired)
+                        dispatch = await RealtimeOpenAppTool.dispatch(call, offered: offered, offeredApp: offeredApp, answer: harnessAnswer,
+                                                                      onConfirmationRequired: onConfirmationRequired)
                         // Both witnesses name one running app and only the app in front is
                         // wrong: bring it forward through the harness (policy applies), then
                         // run this call ONCE more. Never a loop, never a launch.
@@ -679,7 +689,8 @@ final class RealtimeVoiceConnection {
                                 } else {
                                     guard self?.turn === turn, !turn.supersededByPress else { return recordSuperseded(autoFocus: autoFocus) }
                                     JarvisNotch.shared.handle(.toolCall(title: RealtimeVoiceVerbs.intentTitle(for: call)))
-                                    dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer, onConfirmationRequired: onConfirmationRequired)
+                                    dispatch = await RealtimeOpenAppTool.dispatch(call, offered: offered, offeredApp: offeredApp, answer: harnessAnswer,
+                                                                                  onConfirmationRequired: onConfirmationRequired)
                                     autoFocus["retried"] = true
                                 }
                             }
@@ -691,10 +702,14 @@ final class RealtimeVoiceConnection {
                         }
                     }
                     dispatch.heardCheck = heard?.trace
+                    dispatch.heardOverlapsLabel = heard?.overlapsLabel
                 }
                 turn.dispatches.append(dispatch)
                 turn.decisions[decisionIndex].dispatch = dispatch
-                if let offer = dispatch.menuOffer { turn.latestMenuOffer = offer.candidates }
+                if let offer = dispatch.menuOffer {
+                    turn.latestMenuOffer = offer.candidates
+                    turn.latestMenuOfferApp = dispatch.appCheck?["resolvedBundleId"] as? String
+                }
                 // The harness's verification is the proof, so the result goes now and
                 // the model confirms the outcome. The model's only picture is the
                 // key-down one, of the app in front BEFORE this launch, so the new
@@ -717,7 +732,7 @@ final class RealtimeVoiceConnection {
     /// Waits (bounded) for this turn's transcript, then decides. nil for a call
     /// that names no app (it is refused as `missingAppName` anyway).
     private static func heardCheck(for call: RealtimeToolCall, in turn: RealtimeTurnMarks) async
-        -> (refusal: [String: Any]?, heardApp: String?, decision: RealtimeHeardCheck.Decision, trace: [String: Any])? {
+        -> (refusal: [String: Any]?, heardApp: String?, decision: RealtimeHeardCheck.Decision, trace: [String: Any], overlapsLabel: Bool?)? {
         guard RealtimeHeardCheck.appliesTo(toolName: call.name), let named = call.appName else { return nil }
         let waitStart = ProcessInfo.processInfo.systemUptime
         let released = turn.lastAudioSentUptime ?? waitStart
@@ -737,7 +752,8 @@ final class RealtimeVoiceConnection {
         let refusal = RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named, namedAppIsRunning: namedAppIsRunning)
         if refusal != nil { turn.heardRefusals += 1 }
         return (refusal, decision.heardApps.first, decision,
-                RealtimeHeardCheck.traceObject(decision, named: named, transcriptArrivalMs: arrivalMs, waitedMs: waitedMs, refused: refusal != nil))
+                RealtimeHeardCheck.traceObject(decision, named: named, transcriptArrivalMs: arrivalMs, waitedMs: waitedMs, refused: refusal != nil),
+                call.name == RealtimeVoiceVerbs.pressMenuName ? RealtimeDecisionTrace.heardOverlapsLabel(heard: transcript, path: call.path) : nil)
     }
 
     /// Context only: OpenAI gets a user image item and no `response.create`;

@@ -207,6 +207,7 @@ nonisolated enum JarvisNotchReason {
         "windowListUnreadable": "its windows didn\u{2019}t answer",
         "missingMenuPath": "no menu item was named",
         "privateMenuItem": "that menu item is private",
+        "notOffered": "it wasn\u{2019}t offered this turn",
         // The app check on the menu verbs: the named app, and only it.
         "appMismatch": "a different app is in front",
         "ambiguousApp": "more than one app has that name",

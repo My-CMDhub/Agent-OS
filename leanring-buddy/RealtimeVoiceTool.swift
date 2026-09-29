@@ -280,8 +280,14 @@ nonisolated enum RealtimeOpenAppTool {
     /// never lands on whatever else came forward.
     /// `expectApp` replaces the model's app name on the menu verbs: `dispatch`
     /// passes the bundle identifier the name resolved to.
+    /// `offered` is THIS turn's latest find_menu_items candidates and `offeredApp`
+    /// the bundle that find resolved to; a press of any other path, or in another
+    /// app, is refused here (live 2026-09-28: Gemini pressed a path copied from
+    /// the previous turn's find result, which it keeps in its context).
     static func harnessRequestLine(for call: RealtimeToolCall, ticket: String? = nil,
-                                   expectApp: String? = nil) -> Result<String, RealtimeToolRefusal> {
+                                   expectApp: String? = nil,
+                                   offered: [RealtimeMenuCandidate]? = nil,
+                                   offeredApp: String? = nil) -> Result<String, RealtimeToolRefusal> {
         func refuse(_ error: String, _ message: String) -> Result<String, RealtimeToolRefusal> {
             .failure(RealtimeToolRefusal(error: error, message: message))
         }
@@ -305,6 +311,14 @@ nonisolated enum RealtimeOpenAppTool {
             // quoting the selection carry file and page names.
             guard !RealtimeVoiceVerbs.isPrivateMenuPath(path) else {
                 return refuse("privateMenuItem", "that menu item names the owner's files or pages; it is private and is not offered or pressed")
+            }
+            // Offered in THIS app: with `expectApp` (every line sent), the find's
+            // resolved bundle must be the press's. Intent first: the message must
+            // never coach a find-then-press of something nobody asked for.
+            guard RealtimeDecisionTrace.choseFromOffered(path: path, offered: offered) == true,
+                  expectApp == nil || offeredApp == expectApp else {
+                return refuse("notOffered", "Nothing was pressed. Press only a path that find_menu_items returned in this turn for what the owner "
+                    + "asked in this turn. If they did not ask for a menu command now, press nothing and say so.")
             }
             request = ["verb": "menu", "path": path, "expectApp": expectApp ?? appName]
         default:
@@ -354,6 +368,8 @@ nonisolated enum RealtimeOpenAppTool {
     /// only ever called from a detached task — never from main.
     static func dispatch(
         _ call: RealtimeToolCall,
+        offered: [RealtimeMenuCandidate]? = nil,
+        offeredApp: String? = nil,
         answer: @escaping @Sendable (String) -> String,
         confirmationWaitSeconds: Double = confirmationWaitSeconds,
         pollMilliseconds: Int = confirmationPollMilliseconds,
@@ -372,7 +388,7 @@ nonisolated enum RealtimeOpenAppTool {
             )
         }
         var firstLine: String
-        switch harnessRequestLine(for: call) {
+        switch harnessRequestLine(for: call, offered: offered, offeredApp: offeredApp) {
         case .success(let line): firstLine = line
         case .failure(let refusal): return finished(toolResult(for: refusal), waited: false, harnessResponse: nil)
         }
@@ -382,9 +398,15 @@ nonisolated enum RealtimeOpenAppTool {
         var named: (bundleIdentifier: String, name: String)?
         if RealtimeVoiceVerbs.isAppScopedMenuTool(call.name), let appName = call.appName {
             let identity = await Task.detached { RealtimeVoiceVerbs.appIdentity(named: appName) }.value
-            guard case .resolved(let bundleIdentifier, let name) = identity,
-                  case .success(let line) = harnessRequestLine(for: call, expectApp: bundleIdentifier) else {
-                var dispatch = finished(appCheckRefusal(identity, named: appName), waited: false, harnessResponse: nil)
+            var resolvedLine: Result<String, RealtimeToolRefusal>?
+            if case .resolved(let bundleIdentifier, _) = identity {
+                resolvedLine = harnessRequestLine(for: call, expectApp: bundleIdentifier, offered: offered, offeredApp: offeredApp)
+            }
+            guard case .resolved(let bundleIdentifier, let name) = identity, case .success(let line)? = resolvedLine else {
+                // Resolved but refused: notOffered, the offer being another app's.
+                var result = appCheckRefusal(identity, named: appName)
+                if case .failure(let refusal)? = resolvedLine { result = toolResult(for: refusal) }
+                var dispatch = finished(result, waited: false, harnessResponse: nil)
                 dispatch.appCheck = appCheck(identity, named: appName, harnessResponse: nil)
                 return dispatch
             }
@@ -427,7 +449,8 @@ nonisolated enum RealtimeOpenAppTool {
             return checked(dispatch)
         }
         guard response["error"] as? String == "confirmationRequired", let ticket = response["ticket"] as? String,
-              case .success(let ticketLine) = harnessRequestLine(for: call, ticket: ticket, expectApp: named?.bundleIdentifier) else {
+              case .success(let ticketLine) = harnessRequestLine(for: call, ticket: ticket, expectApp: named?.bundleIdentifier,
+                                                                    offered: offered, offeredApp: offeredApp) else {
             return checked(finished(toolResult(fromHarnessResponse: response), waited: false, harnessResponse: response))
         }
         await onConfirmationRequired?()
@@ -632,6 +655,8 @@ nonisolated struct RealtimeToolDispatch {
     /// A menu tool that came back `appMismatch`: `RealtimeHeardCheck.autoFocusGate`'s
     /// answer and, if it focused, how that went and whether the call re-ran.
     var autoFocus: [String: Any]? = nil
+    /// press_menu: `RealtimeDecisionTrace.heardOverlapsLabel` — a boolean, never the words.
+    var heardOverlapsLabel: Bool? = nil
 
     var harnessConfirmed: Bool { result["ok"] as? Bool == true }
 }
