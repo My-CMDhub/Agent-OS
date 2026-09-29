@@ -83,6 +83,54 @@ struct JarvisNotchTests {
         #expect(JarvisNotchState.didntTake(reason: "x").announcement != nil)
     }
 
+    @Test func aTurnThatEndsWithNothingSaysNoReplyThenGoesIdle() {
+        #expect(JarvisNotchState.thinking.next(on: .noReply) == .noReply)
+        #expect(JarvisNotchState.noReply.next(on: .holdElapsed) == .idle)
+        #expect(JarvisNotchState.noReply.next(on: .hotkeyDown) == .listening)
+        // A late answer clears it.
+        #expect(JarvisNotchState.noReply.next(on: .firstAudioWithoutTool) == .idle)
+        // Only a turn still waiting says it: a press, an intent or an answer owns the notch.
+        for state: JarvisNotchState in [.idle, .listening, .intent(title: "x"), .proof(subject: "x"), .needsYou, .didntTake(reason: "x")] {
+            #expect(state.next(on: .noReply) == nil, "\(state.name)")
+        }
+        let line = (JarvisNotchState.noReply.title ?? "") + (JarvisNotchState.noReply.detail ?? "")
+        #expect(line == "No reply \u{2014} try again")
+        #expect(line.count <= JarvisNotchReason.maximumLength)
+        #expect(JarvisNotchState.noReply.shape == .expanded)
+        #expect(JarvisNotchState.noReply.holdSeconds == 2)
+        #expect(JarvisNotchState.noReply.announcement == "No reply. Try again.")
+    }
+
+    @Test func theDrawnWitnessJudgesTheWindowServerNotThePanel() {
+        func judge(idle: Bool, _ sample: String, onscreen: Bool, alpha: Double = 1, onCursorScreen: Bool = true) -> Bool {
+            JarvisNotch.drawnMatchesLogic(stateIsIdle: idle, sample: sample, serverOnscreen: onscreen,
+                                          serverAlpha: alpha, onCursorScreen: onCursorScreen)
+        }
+        #expect(judge(idle: false, "atTransition", onscreen: true))
+        // The bug class: a state on the notch that the window server is not drawing.
+        #expect(!judge(idle: false, "settled", onscreen: false))
+        #expect(!judge(idle: false, "settled", onscreen: true, alpha: 0))
+        #expect(!judge(idle: false, "settled", onscreen: true, onCursorScreen: false))
+        // Idle is still collapsing at its transition; once settled it must be gone.
+        #expect(judge(idle: true, "atTransition", onscreen: true))
+        #expect(!judge(idle: true, "settled", onscreen: true))
+        #expect(judge(idle: true, "settled", onscreen: false))
+    }
+
+    /// notch-drawn.log is written twice per transition on the live path.
+    @Test func aLogAtItsCapRotatesToOneBackup() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = directory.appendingPathComponent("notch-drawn.log")
+        try Data(count: 10).write(to: log)
+        MeasurementLogFile.rotateIfLarge(log, atBytes: 11)
+        #expect(FileManager.default.fileExists(atPath: log.path))
+        MeasurementLogFile.rotateIfLarge(log, atBytes: 10)
+        #expect(!FileManager.default.fileExists(atPath: log.path))
+        #expect(FileManager.default.fileExists(atPath: log.appendingPathExtension("1").path))
+    }
+
     // MARK: Reason map
 
     @Test func everyReasonFitsTheLine() {

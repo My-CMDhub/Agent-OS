@@ -85,6 +85,17 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Spends OpenAI (capped) and Gemini credit: the live push-to-talk session
+        // driven headless through barge-ins, silence and taps, then quits. Needs
+        // --harness-dry-run and 120 s of owner idle; refuses every tool call.
+        if CommandLine.arguments.contains("--notch-probe") {
+            Task { @MainActor in
+                await NotchProbe.run()
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // Walks Finder / System Settings / Cursor on main and on a background
         // queue, writes ~/Library/Logs/Clicky/ax-thread-probe.log, then quits.
         if CommandLine.arguments.contains("--ax-thread-probe") {

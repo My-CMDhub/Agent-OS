@@ -14,9 +14,9 @@
 //  failed or was barged in on, so a silent turn is never an invisible one; and
 //  each of its tool calls one line to voice-decisions.log (`RealtimeDecisionTrace`).
 //
-//  Coded, not verified by a run: nothing here can be exercised headlessly (it
-//  needs the owner's hotkey and mic). `--voice-tool-probe` verifies the shared
-//  connection and tool path with a fixture instead of the mic.
+//  `--notch-probe` drives `pressed()` / `released()` headless with a fixture in
+//  place of the mic (`probeMode`), barge-ins included; `--voice-tool-probe`
+//  verifies the shared connection and tool path.
 //
 
 import AVFoundation
@@ -34,6 +34,26 @@ final class RealtimeVoiceSession {
     private var turnTask: Task<Void, Never>?
     /// The turn whose line is not yet written; nil once it is.
     private var liveTurn: LiveTurn?
+    /// The latest turn's id, kept past its line: a press while its answer still
+    /// plays is a barge-in even when that line was already written.
+    private var lastTurnID: String?
+    /// When the scheduled reply audio runs out, by arithmetic on what was
+    /// scheduled — no render callback to trust. 0 once playback is stopped.
+    private var replyAudioEndsUptime: TimeInterval = 0
+    var isReplyAudioPlaying: Bool { uptime < replyAudioEndsUptime }
+
+    /// Probe only (`--notch-probe`): no mic and no key-down capture —
+    /// `feedProbeAudio` stands in for the mic — and nothing is heard aloud.
+    var probeMode = false {
+        didSet { playerNode.volume = probeMode ? 0 : 1; tickNode.volume = probeMode ? 0 : 1 }
+    }
+    /// Probe only: the stack, without writing the owner's picker.
+    var stackOverride: VoiceStackChoice?
+    /// Probe only: each line as it is written, and to its own file — the
+    /// owner's voice-live.log stays the owner's.
+    var onLiveTurnLine: ((RealtimeLiveTurnLine) -> Void)?
+    var liveTurnLogFileName = RealtimeVoiceSession.liveLogFileName
+    var estimatedOpenAIUSD: Double { connection?.estimatedOpenAIUSD ?? 0 }
 
     private final class LiveTurn {
         var line: RealtimeLiveTurnLine
@@ -41,6 +61,8 @@ final class RealtimeVoiceSession {
         var releasedUptime: TimeInterval?
         /// The connection's marks for this turn, once `beginTurn` created them.
         var marks: RealtimeTurnMarks?
+        /// The no-reply watchdog showed "No reply" for this turn.
+        var watchdogFired = false
         init(line: RealtimeLiveTurnLine, pressedUptime: TimeInterval) {
             self.line = line
             self.pressedUptime = pressedUptime
@@ -50,6 +72,19 @@ final class RealtimeVoiceSession {
     static let liveLogFileName = "voice-live.log"
     /// The probe's: a tool call may wait on a 60 s confirmation ticket.
     static let turnTimeoutSeconds: Double = 90
+    /// Probe only: stands in for the key-down capture, which keeps live
+    /// `beginTurn` ~230-350 ms behind the press (review 2026-09-29) — the window
+    /// where a cut-off answer's leftovers still arrive for the old turn.
+    static let probeCaptureStandInMilliseconds = 300
+    /// A turn still `thinking` this long after the release, with no word and no
+    /// tool call, shows "No reply" (the turn itself keeps waiting). 4.1x the
+    /// slowest release -> first word or tool call on the live path (2,441 ms,
+    /// Gemini; n = 243 across voice-live.log and voice-tool-probe.log to
+    /// 2026-09-28), and 1.5x the bench's worst outlier (6,727 ms, a full-display
+    /// screenshot, voice-bench.log).
+    static let noReplyWatchdogSeconds: Double = 10
+    /// Probe only: shortened to force the watchdog.
+    var noReplyWatchdogSeconds = RealtimeVoiceSession.noReplyWatchdogSeconds
     private var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
     private let playbackEngine = AVAudioEngine()
@@ -77,7 +112,7 @@ final class RealtimeVoiceSession {
         playbackEngine.connect(tickNode, to: playbackEngine.mainMixerNode, format: tickFormat)
     }
 
-    private var selectedStack: VoiceStackChoice { VoiceStackChoice.stored(in: .standard) }
+    private var selectedStack: VoiceStackChoice { stackOverride ?? VoiceStackChoice.stored(in: .standard) }
 
     // MARK: Connection
 
@@ -133,23 +168,30 @@ final class RealtimeVoiceSession {
 
     func pressed() {
         // Barge-in: a new press silences whatever is still being said.
+        let previousLineWasOpen = liveTurn != nil
+        let previousAudioWasPlaying = isReplyAudioPlaying
         writeLiveTurnLine(bargedIn: true)
         let stack = selectedStack
-        liveTurn = LiveTurn(
-            line: RealtimeLiveTurnLine(stack: stack.rawValue, turnID: UUID().uuidString,
-                                       sessionWasWarm: connection.map { $0.isOpen && $0.stack == stack } ?? false),
-            pressedUptime: uptime)
+        var line = RealtimeLiveTurnLine(stack: stack.rawValue, turnID: UUID().uuidString,
+                                        sessionWasWarm: connection.map { $0.isOpen && $0.stack == stack } ?? false)
+        if previousLineWasOpen || previousAudioWasPlaying {
+            line.bargedInPreviousTurnID = lastTurnID
+            line.previousAudioWasPlaying = previousAudioWasPlaying
+        }
+        lastTurnID = line.turnID
+        liveTurn = LiveTurn(line: line, pressedUptime: uptime)
         stopPlayback()
+        JarvisNotch.shared.currentTurnID = line.turnID
         JarvisNotch.shared.handle(.hotkeyDown)
         playTick(.press)
-        connection?.cancelResponse()
+        connection?.supersedeForPress()
         turnTask?.cancel()
         audioContinuation?.finish()
 
         let (audioStream, continuation) = AsyncStream<Data>.makeStream(bufferingPolicy: .unbounded)
         audioContinuation = continuation
         do {
-            try startMic(targetSampleRate: selectedStack.inputSampleRate, continuation: continuation)
+            if !probeMode { try startMic(targetSampleRate: selectedStack.inputSampleRate, continuation: continuation) }
         } catch {
             print("❌ realtime: mic failed to start: \(error)")
             writeLiveTurnLine(errorKind: "micFailed")
@@ -165,7 +207,7 @@ final class RealtimeVoiceSession {
 
     func released() {
         liveTurn?.releasedUptime = uptime
-        stopMic()
+        if !probeMode { stopMic() }
         audioContinuation?.finish()
         audioContinuation = nil
         JarvisNotch.shared.handle(.hotkeyUp)
@@ -173,13 +215,24 @@ final class RealtimeVoiceSession {
         onStateChange?(.processing)
     }
 
+    /// Probe only: a fixture chunk where the mic's would be, at the input rate.
+    func feedProbeAudio(_ pcmChunk: Data) {
+        audioContinuation?.yield(pcmChunk)
+        JarvisNotch.shared.setLevel(rms: JarvisNotchLevel.rms(pcm16: pcmChunk))
+    }
+
     /// The mic is already running while this connects and captures; its audio
     /// waits in the stream and is sent in order once the turn is open.
     private func runTurn(_ audioStream: AsyncStream<Data>) async {
         let liveTurn = self.liveTurn
         do {
-            let screenshotTask = Task { @MainActor in
-                try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first(where: \.isCursorScreen)
+            let probeMode = self.probeMode
+            let screenshotTask = Task { @MainActor () -> CompanionScreenCapture? in
+                guard !probeMode else {
+                    try await Task.sleep(for: .milliseconds(Self.probeCaptureStandInMilliseconds))
+                    return nil
+                }
+                return try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first(where: \.isCursorScreen)
             }
             let setupStart = uptime
             let connection = try await readyConnection()
@@ -187,6 +240,8 @@ final class RealtimeVoiceSession {
             if let screenshot = try? await screenshotTask.value {
                 try await connection.sendScreenshot(screenshot.imageData)
             }
+            // A press since this one owns the connection now: its `beginTurn` must not be replaced by ours.
+            guard !Task.isCancelled else { return }
             try await connection.beginTurn()
             liveTurn?.marks = connection.turn
             for await pcmChunk in audioStream {
@@ -194,6 +249,17 @@ final class RealtimeVoiceSession {
             }
             guard !Task.isCancelled else { return }
             try await connection.endTurn()
+            // Still thinking this long after the release, with not a word or a call:
+            // say so. The turn keeps waiting; a late answer still plays.
+            let watchdogSeconds = noReplyWatchdogSeconds
+            let watchdog = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(watchdogSeconds))
+                guard !Task.isCancelled, let self, self.liveTurn === liveTurn, let liveTurn, let marks = liveTurn.marks,
+                      marks.firstAudioUptime == nil, marks.toolCalls.isEmpty, JarvisNotch.shared.state == .thinking else { return }
+                liveTurn.watchdogFired = true
+                JarvisNotch.shared.handle(.noReply)
+            }
+            defer { watchdog.cancel() }
             _ = try await connection.turn.finished.value(timeoutSeconds: Self.turnTimeoutSeconds, timeoutKind: "turnTimeout")
             await liveTurn?.marks?.waitForFreshLook()
             if self.liveTurn === liveTurn { writeLiveTurnLine() }
@@ -224,6 +290,9 @@ final class RealtimeVoiceSession {
         line.holdMs = Self.milliseconds(from: liveTurn.pressedUptime, to: released)
         line.bargedIn = bargedIn
         line.errorKind = errorKind
+        line.watchdogFired = liveTurn.watchdogFired
+        line.turnEndReason = errorKind != nil ? "error" : bargedIn ? "bargedIn"
+            : (liveTurn.marks?.toolCalls.isEmpty == false ? "toolAnswered" : liveTurn.marks?.firstAudioUptime != nil ? "spoke" : "silent")
         line.notchTransitions = JarvisNotch.shared.transitions.filter { $0.uptime >= liveTurn.pressedUptime }.map { transition in
             ["state": transition.state, "ms": Self.milliseconds(from: released ?? liveTurn.pressedUptime, to: transition.uptime) ?? 0]
         }
@@ -244,11 +313,16 @@ final class RealtimeVoiceSession {
             line.releaseToSpokenResultMs = Self.milliseconds(
                 from: released, to: marks.toolCalls.isEmpty ? marks.firstAudioUptime : marks.followUpFirstAudioUptime)
             line.turnDoneMs = bargedIn || errorKind != nil ? nil : Self.milliseconds(from: released, to: uptime)
+            // Negative: a completion that arrived while the key was still held was credited to this turn.
+            line.finishedMs = Self.milliseconds(from: marks.lastAudioSentUptime, to: marks.finishedUptime)
+            line.staleCompletionsIgnored = marks.staleCompletionsIgnored
+            line.eventTrail = marks.eventTrail
             // One line per tool call to voice-decisions.log, joinable on turnId.
-            RealtimeDecisionTrace.append(marks.decisions, turnID: line.turnID, stack: line.stack, source: "live",
+            RealtimeDecisionTrace.append(marks.decisions, turnID: line.turnID, stack: line.stack, source: probeMode ? "notchProbe" : "live",
                                          releasedUptime: released)
         }
-        MeasurementLogFile.appendJSONLine(line.jsonObject, toFileNamed: Self.liveLogFileName)
+        MeasurementLogFile.appendJSONLine(line.jsonObject, toFileNamed: liveTurnLogFileName)
+        onLiveTurnLine?(line)
     }
 
     private func startMic(targetSampleRate: Int, continuation: AsyncStream<Data>.Continuation) throws {
@@ -298,6 +372,7 @@ final class RealtimeVoiceSession {
             do { try playbackEngine.start() } catch { print("❌ realtime: playback failed to start: \(error)"); return }
         }
         playerNode.scheduleBuffer(buffer)
+        replyAudioEndsUptime = max(uptime, replyAudioEndsUptime) + Double(frameCount) / playbackFormat.sampleRate
         if !playerNode.isPlaying {
             playerNode.play()
             onStateChange?(.responding)
@@ -316,6 +391,7 @@ final class RealtimeVoiceSession {
 
     private func stopPlayback() {
         playerNode.stop()
+        replyAudioEndsUptime = 0
     }
 
     func stop() {
@@ -354,7 +430,21 @@ nonisolated struct RealtimeLiveTurnLine {
     var turnDoneMs: Int?
     var bargedIn = false
     var errorKind: String?
+    /// spoke | toolAnswered | silent | error | bargedIn — how it really ended.
+    var turnEndReason: String?
+    /// The no-reply watchdog showed "No reply" before that.
+    var watchdogFired = false
+    /// When `finished` settled, ms from the release; negative is a completion credited early.
+    var finishedMs: Int?
+    var staleCompletionsIgnored = 0
+    /// Set when this press cut off the previous turn — its line still open or its
+    /// answer still playing — even if that line was already written.
+    var bargedInPreviousTurnID: String?
+    var previousAudioWasPlaying = false
+    /// Provider event names from `beginTurn`, ms from the release (negative before it).
+    var eventTrail: [String] = []
     /// Each notch state this turn reached, ms from the key-up (negative before it).
+    /// Later ones (a hold running out) are in notch-drawn.log under this turnId.
     var notchTransitions: [[String: Any]] = []
 
     init(stack: String, turnID: String, sessionWasWarm: Bool) {
@@ -377,7 +467,9 @@ nonisolated struct RealtimeLiveTurnLine {
             "freshLookArrivedAfterSpeechStartMs": value(freshLookArrivedAfterSpeechStartMs),
             "followUpFirstAudioMs": value(followUpFirstAudioMs), "releaseToSpokenResultMs": value(releaseToSpokenResultMs),
             "turnDoneMs": value(turnDoneMs), "bargedIn": bargedIn, "errorKind": value(errorKind),
-            "notchTransitions": notchTransitions
+            "turnEndReason": value(turnEndReason), "watchdogFired": watchdogFired, "finishedMs": value(finishedMs), "staleCompletionsIgnored": staleCompletionsIgnored,
+            "bargedInPreviousTurnId": value(bargedInPreviousTurnID), "previousAudioWasPlaying": previousAudioWasPlaying,
+            "eventTrail": eventTrail, "notchTransitions": notchTransitions
         ]
     }
 }

@@ -78,10 +78,27 @@ final class RealtimeTurnMarks {
     var lastCallTask: Task<Void, Never>?
     var outputAudioMime: String?
     var toolsInFlight = 0
-    /// Event names only, never content, each with its arrival in ms after the
-    /// release — so a turn that stalls says what it last heard.
-    var eventTrail: [String] = []
+    /// Event names only, never content, from `beginTurn` on — what arrives while
+    /// the key is still held is exactly what a stalled turn needs to show.
+    var events: [(name: String, uptime: TimeInterval)] = []
+    /// Completions that belonged to an earlier turn and were not counted here.
+    var staleCompletionsIgnored = 0
+    /// OpenAI only: the responses this turn's own `response.create`s started.
+    var responseIDs: Set<String> = []
+    /// Gemini only: when `interrupted` arrived in this turn. The next `turnComplete`
+    /// — and any audio or call before it — is the cut-off answer's, not this turn's.
+    var geminiInterruptedUptime: TimeInterval?
+    /// The owner pressed again (`supersedeForPress`): nothing that still arrives
+    /// for this turn is played, finished or dispatched, and no result it produces
+    /// asks for a reply.
+    var supersededByPress = false
     let finished = VoiceBenchWaiter<TimeInterval>()
+
+    /// Each event with its arrival in ms after the release, negative before it.
+    var eventTrail: [String] {
+        guard let origin = lastAudioSentUptime ?? events.first?.uptime else { return [] }
+        return events.map { "\($0.name)@\(Int((($0.uptime - origin) * 1000).rounded()))" }
+    }
 
     /// The look runs past the spoken result, so a line written at turn end waits
     /// for it (bounded) rather than logging "pending".
@@ -142,6 +159,11 @@ final class RealtimeVoiceConnection {
     /// lands after the next turn began still reaches the turn it transcribes.
     private var turnsByAudioItemID: [String: RealtimeTurnMarks] = [:]
     private var turnAwaitingCommit: RealtimeTurnMarks?
+    /// OpenAI only: each `response.create` sent, oldest first, with its `event_id`.
+    /// The server answers them in order, so each `response.created` names the
+    /// head's response; an error naming a create's `event_id` removes that one.
+    private var turnsAwaitingResponseCreated: [(eventID: String, turn: RealtimeTurnMarks)] = []
+    var pendingResponseCreateEventIDs: [String] { turnsAwaitingResponseCreated.map(\.eventID) }
     /// OpenAI only, from each `response.done`'s usage; a response with no usage
     /// is charged the bench's ceiling, never 0.
     private(set) var estimatedOpenAIUSD = 0.0
@@ -165,6 +187,7 @@ final class RealtimeVoiceConnection {
     /// find -> press is three, so five leaves one retry and no more.
     static let maximumToolCallsPerTurn = 5
     static let supersededError = "superseded"
+    static let openAICancelNotActiveCode = "response_cancel_not_active"
     static let openAIMaxOutputTokens = VoiceStackBenchmark.openAIRealtimeMaxOutputTokens
     /// The J.A.R.V.I.S. voices, live loop only — the bench keeps "marin" and
     /// Gemini's default as its control. OpenAI lists ten realtime voices and
@@ -340,7 +363,7 @@ final class RealtimeVoiceConnection {
         case .openAIRealtime:
             estimatedOpenAIUSD += Self.openAITranscriptionUSD(pcmBytes: turnInputAudioBytes)
             try await socket?.sendJSON(["type": "input_audio_buffer.commit"])
-            try await socket?.sendJSON(["type": "response.create"])
+            try await sendResponseCreate(for: turn)
         case .geminiLive:
             try await socket?.sendJSON(["realtimeInput": ["activityEnd": [String: Any]()]])
         }
@@ -349,9 +372,27 @@ final class RealtimeVoiceConnection {
     /// Barge-in. Gemini needs nothing: the next `activityStart` interrupts it.
     /// ponytail: OpenAI's server-side transcript still holds the unplayed tail of
     /// the cancelled answer; `conversation.item.truncate` fixes that if it matters.
+    /// Also while a `response.create` is sent and not yet acknowledged: that
+    /// answer is about to start. A cancel with nothing active comes back
+    /// `response_cancel_not_active`, which is harmless.
     func cancelResponse() {
-        guard stack == .openAIRealtime, openAIResponseActive else { return }
+        guard stack == .openAIRealtime, openAIResponseActive || !turnsAwaitingResponseCreated.isEmpty else { return }
         Task { try? await socket?.sendJSON(["type": "response.cancel"]) }
+    }
+
+    /// The press, BEFORE `beginTurn` replaces `turn`: live `beginTurn` waits for
+    /// the key-down capture first (~230-350 ms, review 2026-09-29), and in that
+    /// window the answer being cut off would still play, finish (idling the
+    /// companion and pre-warming while the key is held) and run its calls.
+    func supersedeForPress() {
+        turn.supersededByPress = true
+        cancelResponse()
+    }
+
+    private func sendResponseCreate(for turn: RealtimeTurnMarks) async throws {
+        let eventID = "create_" + UUID().uuidString
+        turnsAwaitingResponseCreated.append((eventID, turn))
+        try await socket?.sendJSON(["type": "response.create", "event_id": eventID])
     }
 
     // MARK: Server events
@@ -371,7 +412,11 @@ final class RealtimeVoiceConnection {
             readyWaiter.settle(.success(arrivalUptime))
         case "response.created":
             openAIResponseActive = true
+            if let responseID = (message["response"] as? [String: Any])?["id"] as? String, !turnsAwaitingResponseCreated.isEmpty {
+                turnsAwaitingResponseCreated.removeFirst().turn.responseIDs.insert(responseID)
+            }
         case "response.output_audio.delta":
+            guard openAIEventIsThisTurns(responseID: message["response_id"] as? String) else { return ignoreStale("audio", arrivalUptime: arrivalUptime) }
             if let audio = Data(base64Encoded: message["delta"] as? String ?? "") { receivedAudio(audio, arrivalUptime: arrivalUptime) }
         case "response.output_audio_transcript.delta":
             turn.transcript += message["delta"] as? String ?? ""
@@ -388,7 +433,10 @@ final class RealtimeVoiceConnection {
             owner.heardText = message["transcript"] as? String ?? ""
             owner.heardCompleteUptime = arrivalUptime
         case "response.output_item.done":
-            if let call = RealtimeOpenAppTool.parseOpenAI(message) { receivedToolCalls([call], arrivalUptime: arrivalUptime) }
+            guard let call = RealtimeOpenAppTool.parseOpenAI(message) else { break }
+            // A call of the cut-off answer would act for a request nobody is waiting on.
+            guard openAIEventIsThisTurns(responseID: message["response_id"] as? String) else { return ignoreStale("toolCall", arrivalUptime: arrivalUptime) }
+            receivedToolCalls([call], arrivalUptime: arrivalUptime)
         case "response.done":
             openAIResponseActive = false
             let response = message["response"] as? [String: Any]
@@ -398,12 +446,24 @@ final class RealtimeVoiceConnection {
             } else {
                 estimatedOpenAIUSD += VoiceStackBenchmark.openAIRealtimeMissingUsageCeilingUSD
             }
+            guard openAIEventIsThisTurns(responseID: response?["id"] as? String) else {
+                turn.staleCompletionsIgnored += 1
+                return ignoreStale("responseDone", arrivalUptime: arrivalUptime)
+            }
             receivedTurnDone(arrivalUptime: arrivalUptime)
         case "error":
             // Console only: the message is the server's text.
             let serverError = message["error"] as? [String: Any]
             print("🎙️ realtime: OpenAI error \(serverError?["code"] ?? "-"): \(serverError?["message"] ?? "-")")
+            // A barge-in's `response.cancel` that lost the race to the answer's own
+            // end: nothing was active to cancel, and nothing is wrong with the new turn.
+            guard serverError?["code"] as? String != Self.openAICancelNotActiveCode else { break }
             let failure = VoiceBenchFailure(kind: "openAI:serverError:\(serverError?["code"] as? String ?? "-")")
+            // A refused `response.create` never gets its `response.created`: forget that
+            // one, named by its `event_id`, and no other still in flight.
+            if let refusedEventID = serverError?["event_id"] as? String {
+                turnsAwaitingResponseCreated.removeAll { $0.eventID == refusedEventID }
+            }
             readyWaiter.settle(.failure(failure))
             turn.finished.settle(.failure(failure))
         default:
@@ -415,9 +475,15 @@ final class RealtimeVoiceConnection {
         if message["setupComplete"] != nil {
             readyWaiter.settle(.success(arrivalUptime))
         }
+        let serverContent = message["serverContent"] as? [String: Any]
+        if serverContent?["interrupted"] as? Bool == true { turn.geminiInterruptedUptime = arrivalUptime }
+        let isStale = !geminiEventIsThisTurns(arrivalUptime: arrivalUptime)
         let calls = RealtimeOpenAppTool.parseGemini(message)
-        if !calls.isEmpty { receivedToolCalls(calls, arrivalUptime: arrivalUptime) }
-        guard let serverContent = message["serverContent"] as? [String: Any] else { return }
+        if !calls.isEmpty {
+            // A call of the cut-off answer would act for a request nobody is waiting on.
+            if isStale { ignoreStale("toolCall", arrivalUptime: arrivalUptime) } else { receivedToolCalls(calls, arrivalUptime: arrivalUptime) }
+        }
+        guard let serverContent else { return }
         if let spokenPiece = (serverContent["outputTranscription"] as? [String: Any])?["text"] as? String {
             turn.transcript += spokenPiece
         }
@@ -427,24 +493,73 @@ final class RealtimeVoiceConnection {
             turn.heardPieceUptimes.append(arrivalUptime)
         }
         if let parts = (serverContent["modelTurn"] as? [String: Any])?["parts"] as? [[String: Any]] {
-            for part in parts {
+            for part in parts where !isStale {
                 guard let inlineData = part["inlineData"] as? [String: Any],
                       let mimeType = inlineData["mimeType"] as? String, mimeType.hasPrefix("audio/"),
                       let audio = Data(base64Encoded: inlineData["data"] as? String ?? "") else { continue }
                 if turn.outputAudioMime == nil { turn.outputAudioMime = mimeType }
                 receivedAudio(audio, arrivalUptime: arrivalUptime)
             }
+            if isStale { ignoreStale("audio", arrivalUptime: arrivalUptime) }
         }
         if serverContent["turnComplete"] as? Bool == true {
+            guard !isStale else {
+                turn.geminiInterruptedUptime = nil
+                turn.staleCompletionsIgnored += 1
+                return ignoreStale("turnComplete", arrivalUptime: arrivalUptime)
+            }
             receivedTurnDone(arrivalUptime: arrivalUptime)
         }
     }
 
+    // MARK: Whose answer is this
+
+    // A barge-in replaces `turn` while the cut-off answer is still arriving, and
+    // its audio and done event then land in the NEW turn. Measured 2026-09-29 by
+    // `--notch-probe`, Gemini, 20 presses 0.6 s into an answer: one more
+    // `modelTurn` of the old answer, then `interrupted` 44-170 ms after the press
+    // (median 78) and `turnComplete` 114-353 ms after it (median 199); 20 of 20
+    // `interrupted` were followed by a `turnComplete`. Credited, that audio became
+    // the new turn's "first audio" and that done its finish (finishedMs -1,574 to
+    // -1,735), and the notch stayed on `thinking` — the owner's four silent turns
+    // in voice-live.log 2026-09-28, each straight after a barge-in. So: nothing
+    // before this turn's release is its answer (under push-to-talk the model
+    // cannot answer a request not yet ended), and on Gemini an `interrupted` in
+    // this turn consumes the next `turnComplete` — a tap shorter than ~350 ms is
+    // released before it lands. OpenAI names its response on every event, so
+    // there a done, delta or call counts only for a response this turn created.
+    // And from the press itself (`supersedeForPress`), not only from `beginTurn`.
+
+    /// An `interrupted` whose `turnComplete` never came must not swallow the
+    /// next answer: it marks the old answer for this long only. 5.2x the widest
+    /// measured `interrupted` -> `turnComplete` gap (286 ms, 20 of 20 barge-ins,
+    /// 2026-09-29); an answer's first audio comes >= 906 ms after the release.
+    static let geminiInterruptedStaleSeconds: Double = 1.5
+
+    private func geminiEventIsThisTurns(arrivalUptime: TimeInterval) -> Bool {
+        guard !turn.supersededByPress, turn.lastAudioSentUptime != nil else { return false }
+        return turn.geminiInterruptedUptime.map { arrivalUptime - $0 > Self.geminiInterruptedStaleSeconds } ?? true
+    }
+
+    private func openAIEventIsThisTurns(responseID: String?) -> Bool {
+        guard !turn.supersededByPress, turn.lastAudioSentUptime != nil else { return false }
+        return responseID.map { turn.responseIDs.contains($0) } ?? true
+    }
+
+    /// Into the trail, never into the turn: "ignored:turnComplete@-1642".
+    private func ignoreStale(_ kind: String, arrivalUptime: TimeInterval, in marks: RealtimeTurnMarks? = nil) {
+        let marks = marks ?? turn
+        let name = "ignored:" + kind
+        guard !marks.events.suffix(3).contains(where: { $0.name == name }), marks.events.count < 200 else { return }
+        marks.events.append((name, arrivalUptime))
+    }
+
     private func recordEvent(_ message: [String: Any], arrivalUptime: TimeInterval) {
-        guard let released = turn.lastAudioSentUptime, turn.eventTrail.count < 200 else { return }
+        guard turn.events.count < 200 else { return }
         var names: [String]
         if let type = message["type"] as? String {
-            names = [type]
+            // An error's code is the server's enum, never content.
+            names = [type == "error" ? "error:" + ((message["error"] as? [String: Any])?["code"] as? String ?? "-") : type]
         } else {
             names = message.keys.sorted()
             if let serverContent = message["serverContent"] as? [String: Any] { names += serverContent.keys.sorted().map { "serverContent." + $0 } }
@@ -452,10 +567,9 @@ final class RealtimeVoiceConnection {
         // Audio and transcript deltas would drown the trail; their first arrival is already a mark.
         names.removeAll { $0.hasSuffix(".delta") || $0 == "serverContent" || $0 == "serverContent.outputTranscription" }
         guard !names.isEmpty else { return }
-        let elapsedMilliseconds = Int(((arrivalUptime - released) * 1000).rounded())
-        let entry = names.joined(separator: "+") + "@\(elapsedMilliseconds)"
-        if turn.eventTrail.last?.hasPrefix(names.joined(separator: "+") + "@") == true, names == ["serverContent.modelTurn"] { return }
-        turn.eventTrail.append(entry)
+        let name = names.joined(separator: "+")
+        if turn.events.last?.name == name, names == ["serverContent.modelTurn"] { return }
+        turn.events.append((name, arrivalUptime))
     }
 
     private func receivedAudio(_ audio: Data, arrivalUptime: TimeInterval) {
@@ -477,8 +591,9 @@ final class RealtimeVoiceConnection {
         if turn.finishedUptime == nil { turn.finishedUptime = arrivalUptime }
         turn.finished.settle(.success(arrivalUptime))
         // A find with no press leaves its "Looking for…" up; the turn is over.
-        // Proof and didn't-take hold their own time and ignore this.
-        JarvisNotch.shared.handle(.turnEnded)
+        // Proof and didn't-take hold their own time and ignore this. A turn that
+        // ends with no word and no call says so, rather than go quiet.
+        JarvisNotch.shared.handle(turn.firstAudioUptime == nil && turn.toolCalls.isEmpty ? .noReply : .turnEnded)
         onTurnFinished?()
     }
 
@@ -525,7 +640,7 @@ final class RealtimeVoiceConnection {
                         turn.toolsInFlight -= 1
                         // No result is sent: it would start a reply inside the new turn.
                     }
-                    guard self?.turn === turn else { return recordSuperseded() }
+                    guard self?.turn === turn, !turn.supersededByPress else { return recordSuperseded() }
                     if isKnownTool {
                         JarvisNotch.shared.handle(.toolCall(title: RealtimeVoiceVerbs.intentTitle(for: call)))
                         if turn.intentShownUptime == nil { turn.intentShownUptime = self?.uptime }
@@ -562,7 +677,7 @@ final class RealtimeVoiceConnection {
                                     dispatch.result["message"] = "\(shownName) was not in front, so bringing it forward was tried first, and that "
                                         + "did not work (\((focus.result["message"] as? String) ?? "no reason given")). Nothing was searched or pressed."
                                 } else {
-                                    guard self?.turn === turn else { return recordSuperseded(autoFocus: autoFocus) }
+                                    guard self?.turn === turn, !turn.supersededByPress else { return recordSuperseded(autoFocus: autoFocus) }
                                     JarvisNotch.shared.handle(.toolCall(title: RealtimeVoiceVerbs.intentTitle(for: call)))
                                     dispatch = await RealtimeOpenAppTool.dispatch(call, answer: harnessAnswer, onConfirmationRequired: onConfirmationRequired)
                                     autoFocus["retried"] = true
@@ -590,7 +705,11 @@ final class RealtimeVoiceConnection {
                     turn.freshLookOutcome = "pending"
                     Task { @MainActor [weak self] in await self?.addFreshLook(afterLaunchResponse: dispatch.harnessResponse, answer: harnessAnswer, to: turn) }
                 }
-                await self?.sendToolResult(dispatch.result, for: call, in: turn)
+                // Pressed again while the harness answered (a card, say): the action is
+                // recorded as it happened, but its result must not start a reply inside
+                // the new turn.
+                let superseded = self?.turn !== turn || turn.supersededByPress
+                await self?.sendToolResult(dispatch.result, for: call, in: turn, requestingReply: !superseded)
             }
         }
     }
@@ -638,7 +757,13 @@ final class RealtimeVoiceConnection {
         if case .unavailable(let error) = look { print("🎙️ realtime: no fresh look after open_app: \(error)") }
     }
 
-    private func sendToolResult(_ result: [String: Any], for call: RealtimeToolCall, in turn: RealtimeTurnMarks) async {
+    /// `requestingReply: false` (a superseded turn): OpenAI still gets the
+    /// `function_call_output`, so every call item in its conversation keeps its
+    /// output and the model's context says what was actually done — but no
+    /// `response.create`. Gemini gets nothing: its `toolResponse` IS the request
+    /// to reply, and its interrupted answer's call needs none.
+    private func sendToolResult(_ result: [String: Any], for call: RealtimeToolCall, in turn: RealtimeTurnMarks,
+                                requestingReply: Bool) async {
         // Decremented BEFORE the send that can start the follow-up, so that
         // follow-up's done event can never find this call still "in flight".
         do {
@@ -648,15 +773,20 @@ final class RealtimeVoiceConnection {
                 try await socket?.sendJSON(["type": "conversation.item.create",
                                             "item": ["type": "function_call_output", "call_id": call.callID, "output": output]])
                 turn.toolsInFlight -= 1
+                guard requestingReply else { return ignoreStale("toolResult", arrivalUptime: uptime, in: turn) }
                 // One follow-up for all the calls of a response, once that response is over.
                 guard turn.toolsInFlight == 0 else { return }
                 let waitDeadline = uptime + 5
                 while openAIResponseActive, uptime < waitDeadline { try await Task.sleep(for: .milliseconds(20)) }
+                // A press during the wait cancels the answer that held it, which ends
+                // the loop: a create now would still be live at the new turn's release.
+                guard self.turn === turn, !turn.supersededByPress else { return ignoreStale("toolResult", arrivalUptime: uptime, in: turn) }
                 turn.toolResultSentUptime = uptime
                 turn.followUpFirstAudioUptime = nil
-                try await socket?.sendJSON(["type": "response.create"])
+                try await sendResponseCreate(for: turn)
             case .geminiLive:
                 turn.toolsInFlight -= 1
+                guard requestingReply else { return ignoreStale("toolResult", arrivalUptime: uptime, in: turn) }
                 turn.toolResultSentUptime = uptime
                 turn.followUpFirstAudioUptime = nil
                 try await socket?.sendJSON(["toolResponse": ["functionResponses": [["id": call.callID, "name": call.name, "response": result]]]])

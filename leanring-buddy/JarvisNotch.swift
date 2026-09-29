@@ -47,6 +47,8 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
     case proof(subject: String)
     case needsYou
     case didntTake(reason: String)
+    /// The turn ended and nothing came back: no words, no tool call.
+    case noReply
 
     var name: String {
         switch self {
@@ -57,6 +59,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .proof: return "proof"
         case .needsYou: return "needsYou"
         case .didntTake: return "didntTake"
+        case .noReply: return "noReply"
         }
     }
 
@@ -64,7 +67,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         switch self {
         case .idle: return .idle
         case .listening, .thinking: return .compact
-        case .intent, .proof, .needsYou, .didntTake: return .expanded
+        case .intent, .proof, .needsYou, .didntTake, .noReply: return .expanded
         }
     }
 
@@ -73,6 +76,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         switch self {
         case .proof: return 1.8
         case .didntTake: return 2.5
+        case .noReply: return 2
         default: return nil
         }
     }
@@ -84,6 +88,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .proof(let subject): return subject
         case .needsYou: return "Needs you"
         case .didntTake: return "Didn\u{2019}t take"
+        case .noReply: return "No reply"
         default: return nil
         }
     }
@@ -93,6 +98,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .proof: return " \u{2014} verified"
         case .needsYou: return " \u{2014} approve on the card"
         case .didntTake(let reason): return " \u{2014} \(reason)"
+        case .noReply: return " \u{2014} try again"
         default: return nil
         }
     }
@@ -103,6 +109,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .proof(let subject): return "\(subject) verified"
         case .needsYou: return "Needs you. Approve on the card."
         case .didntTake(let reason): return "Didn\u{2019}t take. \(reason)"
+        case .noReply: return "No reply. Try again."
         default: return nil
         }
     }
@@ -114,7 +121,8 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .hotkeyUp:
             return self == .listening ? .thinking : nil
         case .firstAudioWithoutTool:
-            return self == .thinking ? .idle : nil
+            // A late answer clears "No reply".
+            return self == .thinking || self == .noReply ? .idle : nil
         case .toolCall(let title):
             // A new press is already listening; its turn owns the notch now.
             return self == .listening ? nil : .intent(title: title)
@@ -135,6 +143,9 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
             case .thinking, .intent, .needsYou: return .idle
             default: return nil
             }
+        case .noReply:
+            // Only a turn still waiting: a press, an intent or an answer owns the notch.
+            return self == .thinking ? .noReply : nil
         }
     }
 }
@@ -153,6 +164,8 @@ nonisolated enum JarvisNotchEvent: Equatable, Sendable {
     case holdElapsed
     /// The turn failed or was abandoned.
     case turnEnded
+    /// The turn ended with no words and no tool call, or the watchdog gave up on it.
+    case noReply
 }
 
 // MARK: - Reason map
@@ -402,6 +415,29 @@ final class JarvisNotch {
     var frontmostWitness: (() -> String?)?
     /// Probe only: screenshots.
     var onTransition: ((JarvisNotchState) -> Void)?
+    /// The push-to-talk turn this state belongs to, for notch-drawn.log.
+    var currentTurnID: String?
+
+    /// One per drawn sample: what the WINDOW SERVER shows against what the state
+    /// machine believes. The last 1,024 (a 50-turn probe run is ~400), for the
+    /// probe; every one to notch-drawn.log.
+    struct DrawnSample {
+        let turnID: String?
+        let state: String
+        let sample: String
+        let matchesLogic: Bool
+        /// When the state it samples was entered.
+        let transitionUptime: TimeInterval
+    }
+    private(set) var drawnSamples: [DrawnSample] = []
+    static let drawnLogFileName = "notch-drawn.log"
+    /// The window server lists an ordered-in panel 9-36 ms after
+    /// `orderFrontRegardless` returns (8/8 trials, 2026-09-29) and not at all
+    /// when read synchronously — 36 of 36 order-ins "missing" in the first probe
+    /// were that lag, every one onscreen by the settled sample. ~3x the slowest.
+    static let orderInSampleSeconds = 0.1
+    /// After the idle order-out (0.6 s) has run.
+    static let settledSampleSeconds = 0.7
 
     private init() {}
 
@@ -442,8 +478,56 @@ final class JarvisNotch {
         transitions.append(Transition(state: next.name, uptime: ProcessInfo.processInfo.systemUptime,
                                       frontmostBefore: before, frontmostAfter: frontmostWitness?()))
         if transitions.count > 64 { transitions.removeFirst(transitions.count - 64) }
+        let transitionUptime = ProcessInfo.processInfo.systemUptime
+        for (sample, delay) in [("atTransition", Self.orderInSampleSeconds), ("settled", Self.settledSampleSeconds)] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.generation == shown else { return }
+                self.recordDrawn(sample: sample, transitionUptime: transitionUptime)
+            }
+        }
         onTransition?(next)
         return next
+    }
+
+    /// The panel's belief (its own properties) beside the window server's view of
+    /// the same window number — the independent witness. One window, no AX: cheap
+    /// enough for every transition. State names only, never a title or subject.
+    private func recordDrawn(sample: String, transitionUptime: TimeInterval) {
+        let windowNumber = panel?.windowNumber ?? 0
+        let serverInfo = windowNumber > 0
+            ? (CGWindowListCopyWindowInfo([.optionIncludingWindow], CGWindowID(windowNumber)) as? [[String: Any]])?.first
+            : nil
+        let serverOnscreen = serverInfo?[kCGWindowIsOnscreen as String] as? Bool ?? false
+        let serverAlpha = (serverInfo?[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 0
+        let pointer = NSEvent.mouseLocation
+        let cursorScreen = NSScreen.screens.first { NSMouseInRect(pointer, $0.frame, false) }
+        let onCursorScreen = panel.map { panel in cursorScreen.map { $0.frame.intersects(panel.frame) } ?? false } ?? false
+        let matchesLogic = Self.drawnMatchesLogic(stateIsIdle: state == .idle, sample: sample, serverOnscreen: serverOnscreen,
+                                                  serverAlpha: serverAlpha, onCursorScreen: onCursorScreen)
+        drawnSamples.append(DrawnSample(turnID: currentTurnID, state: state.name, sample: sample, matchesLogic: matchesLogic,
+                                        transitionUptime: transitionUptime))
+        if drawnSamples.count > 1024 { drawnSamples.removeFirst(drawnSamples.count - 1024) }
+        func rect(_ frame: CGRect?) -> Any { frame.map { [$0.minX, $0.minY, $0.width, $0.height] } ?? NSNull() }
+        let serverBounds = (serverInfo?[kCGWindowBounds as String] as? [String: Any]).flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) }
+        MeasurementLogFile.appendJSONLine([
+            "kind": "drawn", "state": state.name, "generation": generation, "turnId": currentTurnID ?? NSNull(), "sample": sample,
+            "uptime": MeasurementLogFile.roundedUptime(ProcessInfo.processInfo.systemUptime),
+            "transitionUptime": MeasurementLogFile.roundedUptime(transitionUptime),
+            "panelVisible": panel?.isVisible ?? false, "alphaValue": panel.map { Double($0.alphaValue) } ?? NSNull(),
+            "occlusionVisible": panel?.occlusionState.contains(.visible) ?? false, "windowNumber": windowNumber,
+            "panelFrame": rect(panel?.frame), "screenFrame": rect(panel?.screen?.frame), "onCursorScreen": onCursorScreen,
+            "windowServer": serverInfo == nil ? NSNull() : ["onscreen": serverOnscreen, "alpha": serverAlpha, "bounds": rect(serverBounds)] as [String: Any],
+            "drawnMatchesLogic": matchesLogic
+        ], toFileNamed: Self.drawnLogFileName, rotatingAtBytes: HarnessServer.auditLogRotationBytes)
+    }
+
+    /// Non-idle: the window server has it on screen, visible, on the cursor's
+    /// screen. Idle, once settled: it is off screen. Idle at the first sample is
+    /// still collapsing, and says nothing.
+    nonisolated static func drawnMatchesLogic(stateIsIdle: Bool, sample: String, serverOnscreen: Bool,
+                                              serverAlpha: Double, onCursorScreen: Bool) -> Bool {
+        if stateIsIdle { return sample == "atTransition" || !serverOnscreen }
+        return serverOnscreen && serverAlpha > 0 && onCursorScreen
     }
 
     /// Mic RMS, from the audio thread via main. Moves the bars only while listening.
@@ -599,6 +683,10 @@ private struct JarvisNotchView: View {
                 .foregroundStyle(Color.white.opacity(0.92))
         case .didntTake:
             Image(systemName: "circle.slash")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.6))
+        case .noReply:
+            Image(systemName: "speaker.slash")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.6))
         case .idle:

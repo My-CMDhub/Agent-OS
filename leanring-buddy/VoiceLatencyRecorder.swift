@@ -41,15 +41,27 @@ nonisolated enum MeasurementLogFile {
         return String(data: data, encoding: .utf8)
     }
 
-    static func appendJSONLine(_ object: [String: Any], toFileNamed fileName: String) {
+    /// `rotatingAtBytes`: for a log written on every live event (notch-drawn.log,
+    /// twice per notch transition), one `.1` kept, like harness-audit.log.
+    static func appendJSONLine(_ object: [String: Any], toFileNamed fileName: String, rotatingAtBytes: Int? = nil) {
         guard let line = jsonLine(object) else {
             print("⚠️ MeasurementLogFile: a \(fileName) line was not valid JSON and was dropped")
             return
         }
         writeQueue.async {
             try? FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-            appendOwnerOnly(Data((line + "\n").utf8), to: directoryURL.appendingPathComponent(fileName))
+            let fileURL = directoryURL.appendingPathComponent(fileName)
+            if let rotatingAtBytes { rotateIfLarge(fileURL, atBytes: rotatingAtBytes) }
+            appendOwnerOnly(Data((line + "\n").utf8), to: fileURL)
         }
+    }
+
+    /// At or over `limit`, the file becomes `<name>.1`, replacing the previous one.
+    static func rotateIfLarge(_ fileURL: URL, atBytes limit: Int) {
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.size] as? Int, size >= limit else { return }
+        let rotatedURL = fileURL.appendingPathExtension("1")
+        try? FileManager.default.removeItem(at: rotatedURL)
+        try? FileManager.default.moveItem(at: fileURL, to: rotatedURL)
     }
 
     /// Created 0600 by `open` itself — a file created 0644 and chmod-ed after
