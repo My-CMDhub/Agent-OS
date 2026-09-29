@@ -13,12 +13,15 @@
 //  words — to ~/Library/Logs/Clicky/voice-live.log, including a turn that
 //  failed or was barged in on, so a silent turn is never an invisible one; and
 //  each of its tool calls one line to voice-decisions.log (`RealtimeDecisionTrace`).
+//  The words themselves go only to the owner-only voice-transcripts.log
+//  (`RealtimeTranscriptLog`, owner's ruling 2026-09-30).
 //
 //  `--notch-probe` drives `pressed()` / `released()` headless with a fixture in
 //  place of the mic (`probeMode`), barge-ins included; `--voice-tool-probe`
 //  verifies the shared connection and tool path.
 //
 
+import AppKit
 import AVFoundation
 import Foundation
 
@@ -70,6 +73,24 @@ final class RealtimeVoiceSession {
     }
 
     static let liveLogFileName = "voice-live.log"
+    /// The key-down frontmost read is cross-process AX: the system-wide element
+    /// can sit on the ~6 s default messaging timeout, then the `AXFrontmost`
+    /// fallback on another 0.5 s. The line is a hint, so it gets this long from
+    /// key-down — about the capture it runs beside (~230-350 ms) — or is skipped.
+    nonisolated static let frontmostReadDeadlineSeconds: Double = 0.3
+
+    /// `read`'s answer, or nil once `seconds` pass — whichever comes first. The
+    /// read cannot be cancelled (a blocked AX call returns when it returns); a
+    /// late answer is dropped. Both run on GCD, not the Swift cooperative pool:
+    /// a blocking read there holds a pool thread, and a timer task queued behind
+    /// busy pool threads lost the race to a 2 s read under a 0.1 s deadline (test run 2026-09-30).
+    nonisolated static func value<T: Sendable>(within seconds: Double, _ read: @escaping @Sendable () -> T?) async -> T? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+            let once = ResumeOnce(continuation)
+            DispatchQueue.global(qos: .userInitiated).async { once.resume(read()) }
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + seconds) { once.resume(nil) }
+        }
+    }
     /// The probe's: a tool call may wait on a 60 s confirmation ticket.
     static let turnTimeoutSeconds: Double = 90
     /// Probe only: stands in for the key-down capture, which keeps live
@@ -234,6 +255,17 @@ final class RealtimeVoiceSession {
                 }
                 return try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first(where: \.isCursorScreen)
             }
+            // The app in front, from structure — the harness's own read, off main
+            // (cross-process AX), bounded from key-down. Its name only; never
+            // Clicky's own panel.
+            let frontmostLineTask = Task { () -> String? in
+                guard !probeMode else { return nil }
+                return await Self.value(within: Self.frontmostReadDeadlineSeconds) { () -> String? in
+                    guard let application = AccessibilityTreeWalker.focusedApplication(),
+                          !HarnessServer.isHarnessItself(bundleIdentifier: application.bundleIdentifier) else { return nil }
+                    return RealtimeOpenAppTool.frontmostAppContextLine(appName: application.localizedName)
+                }
+            }
             let setupStart = uptime
             let connection = try await readyConnection()
             if liveTurn?.line.sessionWasWarm == false { liveTurn?.line.sessionSetupMs = Self.milliseconds(from: setupStart, to: uptime) }
@@ -243,11 +275,21 @@ final class RealtimeVoiceSession {
             // A press since this one owns the connection now: its `beginTurn` must not be replaced by ours.
             guard !Task.isCancelled else { return }
             try await connection.beginTurn()
-            liveTurn?.marks = connection.turn
+            let marks = connection.turn
+            liveTurn?.marks = marks
+            // Beside the audio, never ahead of it; before the release, so on Gemini
+            // it stays inside the owner's activity. Not into a turn that replaced this one.
+            let contextSend = Task { @MainActor in
+                guard let frontmostLine = await frontmostLineTask.value, connection.turn === marks else { return }
+                try? await connection.sendContextText(frontmostLine)
+            }
             for await pcmChunk in audioStream {
                 try await connection.appendAudio(pcmChunk)
             }
             guard !Task.isCancelled else { return }
+            // Bounded by the read's deadline, which started at key-down: already over
+            // for any hold longer than ~0.3 s.
+            await contextSend.value
             try await connection.endTurn()
             // Still thinking this long after the release, with not a word or a call:
             // say so. The turn keeps waiting; a late answer still plays.
@@ -320,9 +362,24 @@ final class RealtimeVoiceSession {
             // One line per tool call to voice-decisions.log, joinable on turnId.
             RealtimeDecisionTrace.append(marks.decisions, turnID: line.turnID, stack: line.stack, source: probeMode ? "notchProbe" : "live",
                                          releasedUptime: released)
+            if !probeMode { Self.appendTranscriptLine(for: marks, turnID: line.turnID, stack: line.stack, bargedIn: bargedIn) }
         }
         MeasurementLogFile.appendJSONLine(line.jsonObject, toFileNamed: liveTurnLogFileName)
         onLiveTurnLine?(line)
+    }
+
+    /// Waits (bounded, detached from the loop) for the owner's transcript to be
+    /// complete — OpenAI's completed event, Gemini's quiet window — so the next
+    /// press is never held up by it.
+    private static func appendTranscriptLine(for marks: RealtimeTurnMarks, turnID: String, stack: String, bargedIn: Bool) {
+        let date = Date()
+        Task { @MainActor in
+            let deadline = (marks.lastAudioSentUptime ?? ProcessInfo.processInfo.systemUptime) + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds
+            let complete = RealtimeTranscriptLog.heardComplete(providerSaidDone: await marks.waitForHeard(until: deadline) != nil,
+                                                               bargedIn: bargedIn, stack: stack)
+            RealtimeTranscriptLog.append(RealtimeTranscriptLog.line(turnID: turnID, stack: stack, date: date, heard: marks.heardText,
+                                                                    heardComplete: complete, said: marks.transcript, decisions: marks.decisions))
+        }
     }
 
     private func startMic(targetSampleRate: Int, continuation: AsyncStream<Data>.Continuation) throws {
@@ -471,5 +528,60 @@ nonisolated struct RealtimeLiveTurnLine {
             "bargedInPreviousTurnId": value(bargedInPreviousTurnID), "previousAudioWasPlaying": previousAudioWasPlaying,
             "eventTrail": eventTrail, "notchTransitions": notchTransitions
         ]
+    }
+}
+
+/// `~/Library/Logs/Clicky/voice-transcripts.log`: what the owner said and what
+/// the model said, one JSON line per LIVE turn (never a probe or the bench),
+/// with the turn's tool calls. Owner's ruling 2026-09-30: the owner's words are
+/// kept, LOCAL ONLY — 0600, rotated at 5 MB, never sent anywhere and never
+/// copied into a counts-only log (voice-live.log, voice-decisions.log join it
+/// on turnId). `heard` is the provider's input transcription, `said` its
+/// transcript of the model's audio; `heardComplete` false means the provider
+/// never said it was done (a barged-in turn, a dropped transcription).
+nonisolated enum RealtimeTranscriptLog {
+    static let fileName = "voice-transcripts.log"
+
+    static func line(turnID: String, stack: String, date: Date, heard: String, heardComplete: Bool, said: String,
+                     decisions: [RealtimeToolDecision]) -> [String: Any] {
+        [
+            "kind": "transcript", "turnId": turnID, "stack": stack,
+            "timestamp": ISO8601DateFormatter().string(from: date),
+            "heard": heard, "heardComplete": heardComplete, "said": said,
+            "toolCalls": decisions.map { decision -> [String: Any] in
+                ["tool": decision.call.name, "args": RealtimeDecisionTrace.loggedArguments(for: decision.call),
+                 "error": (decision.dispatch?.result["error"] as? String) ?? NSNull()]
+            }
+        ]
+    }
+
+    /// Gemini's pieces carry no item id: once the owner presses again, a
+    /// barged turn's late pieces land in the new turn and are dropped there
+    /// (`RealtimeVoiceConnection.geminiStaleHeardPieceSeconds`), so a quiet
+    /// window on the old turn proves nothing. OpenAI routes by item id.
+    static func heardComplete(providerSaidDone: Bool, bargedIn: Bool, stack: String) -> Bool {
+        providerSaidDone && !(bargedIn && stack == VoiceStackChoice.geminiLive.rawValue)
+    }
+
+    static func append(_ line: [String: Any], in directory: URL = MeasurementLogFile.directoryURL) {
+        MeasurementLogFile.appendJSONLine(line, toFileNamed: fileName, rotatingAtBytes: HarnessServer.auditLogRotationBytes, in: directory)
+    }
+}
+
+/// Resumes its continuation once; later answers are dropped (`RealtimeVoiceSession.value(within:_:)`).
+private final class ResumeOnce<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Never>?
+
+    init(_ continuation: CheckedContinuation<Value, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ value: Value) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
     }
 }

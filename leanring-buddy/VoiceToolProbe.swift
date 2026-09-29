@@ -14,7 +14,11 @@
 //  (72985B9B). `--voice-tool-probe-runs=N` sets runs per stack;
 //  `--voice-tool-probe-app=<name>` replaces the app every call names, forcing a
 //  failure through the real harness path; `--voice-tool-probe-notch-shots`
-//  saves one crop of the notch per state to the log directory. Whether
+//  saves one crop of the notch per state to the log directory.
+//  `--voice-tool-probe-no-screen` sends no screenshot and leaves System Settings
+//  alone (no quit, no open): no pixel of the owner's screen leaves the machine.
+//  The key-down frontmost-app line is sent as live sends it, unless
+//  `--voice-tool-probe-no-frontmost-line` (the before of a before/after). Whether
 //  it ended up frontmost is read from NSWorkspace, not from the verb's own
 //  AX-based verification: a verb that marks its own homework proves nothing.
 //
@@ -77,8 +81,9 @@ enum VoiceToolProbe {
         let preOpen = CommandLine.arguments.contains("--voice-tool-probe-preopen")
         let runsPerStack = runsPerStackArgument(default: defaultRunsPerStack)
         let harnessAnswer: @Sendable (String) -> String = { line in harness.answer(line: line) }
+        let noScreen = CommandLine.arguments.contains("--voice-tool-probe-no-screen")
         // Pre-open mode: the one screenshot must show the app already open.
-        if preOpen { _ = await openSystemSettings(harnessAnswer: harnessAnswer) }
+        if preOpen, !noScreen { _ = await openSystemSettings(harnessAnswer: harnessAnswer) }
         let appNameOverride = CommandLine.arguments.first { $0.hasPrefix("--voice-tool-probe-app=") }
             .map { String($0.dropFirst("--voice-tool-probe-app=".count)) }
         // The harness's own frontmost read, either side of every notch transition.
@@ -86,17 +91,22 @@ enum VoiceToolProbe {
         defer { JarvisNotch.shared.frontmostWitness = nil }
         if CommandLine.arguments.contains("--voice-tool-probe-notch-shots") { captureOneShotPerNotchState() }
 
-        // One screenshot for every run, as the bench does.
-        guard let screenshot = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first(where: \.isCursorScreen) else {
-            appendLine(["kind": "captureFailed", "probeId": probeID])
-            print("🧪 voice tool probe: capture failed -> \(logPath)")
-            return
+        // One screenshot for every run, as the bench does — none with --voice-tool-probe-no-screen.
+        var screenshotJPEG: Data?
+        if !noScreen {
+            guard let screenshot = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first(where: \.isCursorScreen) else {
+                appendLine(["kind": "captureFailed", "probeId": probeID])
+                print("🧪 voice tool probe: capture failed -> \(logPath)")
+                return
+            }
+            screenshotJPEG = screenshot.imageData
         }
 
         appendLine([
             "kind": "start", "probeId": probeID, "fixture": fixtureFileName, "runsPerStack": runsPerStack,
             "mode": preOpen ? "preOpen" : "quitFirst", "appNameOverride": appNameOverride ?? NSNull(),
-            "openAICostCapUSD": openAICostCapUSD, "imageBytes": screenshot.imageData.count,
+            "openAICostCapUSD": openAICostCapUSD, "imageBytes": screenshotJPEG?.count ?? 0, "noScreen": noScreen,
+            "frontmostLine": !CommandLine.arguments.contains("--voice-tool-probe-no-frontmost-line"),
             "harnessSession": HarnessServer.sessionIdentifier
         ])
         let answersFile = VoiceStackBenchmark.openOwnerOnlyAnswersFile(
@@ -116,7 +126,7 @@ enum VoiceToolProbe {
                 let clip = stack == .openAIRealtime ? clip24k : clip16k
                 let (line, transcript, heard, spentUSD) = await measureOneRun(
                     stack: stack, runNumber: runNumber, probeID: probeID, fixture: fixtureFileName, clip: clip, preOpen: preOpen, appNameOverride: appNameOverride,
-                    screenshotJPEG: screenshot.imageData, harnessAnswer: harnessAnswer)
+                    screenshotJPEG: screenshotJPEG, harnessAnswer: harnessAnswer)
                 if stack == .openAIRealtime { openAISpentUSD += spentUSD }
                 appendLine(line)
                 runLines[stack, default: []].append(line)
@@ -163,10 +173,12 @@ enum VoiceToolProbe {
 
     private static func measureOneRun(
         stack: VoiceStackChoice, runNumber: Int, probeID: String, fixture fixtureFileName: String, clip: VoiceBenchPCMClip, preOpen: Bool,
-        appNameOverride: String?, screenshotJPEG: Data, harnessAnswer: @escaping @Sendable (String) -> String
+        appNameOverride: String?, screenshotJPEG: Data?, harnessAnswer: @escaping @Sendable (String) -> String
     ) async -> (line: [String: Any], transcript: String, heard: String, spentUSD: Double) {
         var line: [String: Any] = ["kind": "run", "probeId": probeID, "fixture": fixtureFileName, "stack": stack.rawValue, "run": runNumber]
-        if preOpen {
+        if screenshotJPEG == nil {
+            // --voice-tool-probe-no-screen: the owner's apps are left as they are.
+        } else if preOpen {
             line["systemSettingsPreOpened"] = await openSystemSettings(harnessAnswer: harnessAnswer)
         } else {
             line["systemSettingsQuit"] = await quitSystemSettings()
@@ -197,17 +209,27 @@ enum VoiceToolProbe {
     /// One fixture turn on an open-to-be connection, and everything the turn
     /// did that does not depend on which fixture it was: marks, tool calls and
     /// results, the notch's order, the honesty checks, frontmost after.
-    static func runTurn(on connection: RealtimeVoiceConnection, clip: VoiceBenchPCMClip, screenshotJPEG: Data) async -> [String: Any] {
+    static func runTurn(on connection: RealtimeVoiceConnection, clip: VoiceBenchPCMClip, screenshotJPEG: Data?) async -> [String: Any] {
         var line: [String: Any] = [:]
         let runStartUptime = uptime
         var marks: [String: Any] = [:]
         var errorKind: String?
+        var frontmost: NSRunningApplication?
         do {
             let setupStart = uptime
             try await connection.connect()
-            try await connection.sendScreenshot(screenshotJPEG)
+            if let screenshotJPEG { try await connection.sendScreenshot(screenshotJPEG) }
             marks["sessionSetupMs"] = milliseconds(from: setupStart, to: uptime)
             try await connection.beginTurn()
+            // As live sends it (`RealtimeVoiceSession.runTurn`); the probe reads it on main.
+            frontmost = AccessibilityTreeWalker.focusedApplication()
+            if !CommandLine.arguments.contains("--voice-tool-probe-no-frontmost-line"),
+               !HarnessServer.isHarnessItself(bundleIdentifier: frontmost?.bundleIdentifier),
+               let frontmostLine = RealtimeOpenAppTool.frontmostAppContextLine(appName: frontmost?.localizedName) {
+                try await connection.sendContextText(frontmostLine)
+                line["frontmostLineSent"] = true
+            }
+            line["frontmostAtKeyDown"] = frontmost?.bundleIdentifier ?? NSNull()
             // The fixture stands in for the held hotkey, and its own level drives the bars.
             JarvisNotch.shared.handle(.hotkeyDown)
             let clock = ContinuousClock()
@@ -297,6 +319,9 @@ enum VoiceToolProbe {
         line["reusedExampleVerbatim"] = RealtimeOpenAppTool.reusesExampleVerbatim(turn.transcript)
         line["reusedExampleTemplate"] = RealtimeOpenAppTool.reusesExampleTemplate(turn.transcript)
         line["spokenCharacters"] = turn.transcript.count
+        // Counts-only: did the spoken answer name the app that was in front at key-down?
+        line["saidNamesFrontmostApp"] = frontmost?.localizedName.map { name in
+            turn.transcript.range(of: name, options: [.caseInsensitive, .diacriticInsensitive]) != nil } ?? NSNull()
         line["outputAudioMime"] = turn.outputAudioMime ?? NSNull()
         line["eventTrail"] = turn.eventTrail
         line["errorKind"] = errorKind ?? NSNull()

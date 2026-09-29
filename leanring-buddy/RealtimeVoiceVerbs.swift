@@ -378,16 +378,27 @@ nonisolated struct RealtimeMenuOffer: Equatable, Sendable {
     let listingIncomplete: Bool
 }
 
+/// A turn's latest finished find_menu_items: its candidates, the bundle that
+/// find resolved to, and when it finished — what a press is judged against.
+nonisolated struct RealtimeStandingOffer: Sendable {
+    let candidates: [RealtimeMenuCandidate]
+    let app: String?
+    let uptime: TimeInterval
+}
+
 /// One tool call as the turn saw it: what was asked, what the model had been
 /// offered when it asked, and — once the harness answered — the dispatch.
 nonisolated struct RealtimeToolDecision {
     let call: RealtimeToolCall
     let callUptime: TimeInterval
-    /// The candidates of this turn's latest finished find_menu_items when this
-    /// call was DISPATCHED (after the calls before it finished) — the offer the
-    /// notOffered gate used. Set to the arrival-time offer until then. nil: none.
+    /// The candidates the notOffered gate judged this call against, set when it
+    /// was DISPATCHED (after the calls before it finished): this turn's latest
+    /// find, or the previous turn's when `offerSource` says so. Set to the
+    /// arrival-time offer until then. nil: none.
     var offeredBeforeCall: [RealtimeMenuCandidate]?
     var dispatch: RealtimeToolDispatch?
+    /// press_menu that passed the notOffered gate: whose offer let it through.
+    var offerSource: RealtimeOpenAppTool.OfferSource? = nil
 }
 
 // MARK: - Decision trace
@@ -397,11 +408,12 @@ nonisolated struct RealtimeToolDecision {
 /// Keep the shape stable; add keys, never rename them, and bump `schema` if a
 /// key's meaning changes. Every key is always present, null when it does not apply.
 ///
-///   kind "toolCall", schema 5 (2026-09-25: `appCheck` added in 2, `heardCheck`
+///   kind "toolCall", schema 6 (2026-09-25: `appCheck` added in 2, `heardCheck`
 ///   in 3, `autoFocus` in 4; earlier lines simply lack them, and every other key
 ///   means what it did — except that from 4 a menu call's ok/harnessError/
-///   appCheck are those of its auto-focus RE-RUN when `autoFocus.retried`, and
-///   from 5 `choseFromOffered` is judged at dispatch, not arrival)
+///   appCheck are those of its auto-focus RE-RUN when `autoFocus.retried`, from
+///   5 `choseFromOffered` is judged at dispatch, not arrival, and from 6 against
+///   the previous turn's offer when `offerSource` says so)
 ///   source            "live" | "probe"
 ///   turnId, stack     the turn (voice-live.log / voice-tool-probe.log share turnId)
 ///   probeId, fixture  probe only, else null
@@ -421,7 +433,9 @@ nonisolated struct RealtimeToolDecision {
 ///   choseFromOffered  press_menu: was `args.path` one of the `offered` paths the
 ///                     gate used, when dispatched? null if nothing was offered.
 ///                     Schema 5 (2026-09-29): before, judged at call ARRIVAL, so
-///                     a find and a press in one batch read null or false
+///                     a find and a press in one batch read null or false.
+///                     Schema 6 (2026-09-30): the gate's offer may be the
+///                     previous turn's (`offerSource`)
 ///   independentCheck  probe: a structure read that does not trust the verb
 ///                     ({kind, passed, ...}); live: null
 ///   appCheck          find_menu_items / press_menu: {outcome, named,
@@ -447,10 +461,15 @@ nonisolated struct RealtimeToolDecision {
 ///   heardOverlapsLabel press_menu (added 2026-09-29, absent before): did the
 ///                     owner's heard transcript share a non-filler word with the
 ///                     pressed item's label? null with no transcript. Measurement
-///                     only; it gates nothing
+///                     only; the previous-turn gate uses the stricter
+///                     `followUpConfirmed` (not logged; `offerSource` is its outcome)
+///   offerSource       press_menu that passed the notOffered gate (added
+///                     2026-09-30, schema 6): thisTurn | previousTurnConfirmedByWords
+///                     (`RealtimeOpenAppTool.pressOffer`). null when refused
+///                     notOffered, stopped before the gate, or not a press
 nonisolated enum RealtimeDecisionTrace {
     static let fileName = "voice-decisions.log"
-    static let schemaVersion = 5
+    static let schemaVersion = 6
     static let privatePathPlaceholder = ["<private>"]
 
     static func choseFromOffered(path: [String]?, offered: [RealtimeMenuCandidate]?) -> Bool? {
@@ -467,6 +486,28 @@ nonisolated enum RealtimeDecisionTrace {
         let spoken = Set(RealtimeVoiceVerbs.foldedTokens(heard)).subtracting(RealtimeVoiceVerbs.ignoredQueryWords)
         let label = Set(RealtimeVoiceVerbs.foldedTokens(path?.last ?? "")).subtracting(RealtimeVoiceVerbs.ignoredQueryWords)
         return spoken.contains { word in label.contains { RealtimeVoiceVerbs.tokensMatch(word, $0) } }
+    }
+
+    /// Words that turn a mention into a "no" or a question (review 2026-09-30:
+    /// "no, not the side bar" shared "side" with "Secondary Side Bar").
+    static let followUpVetoWords: Set<String> = ["no", "not", "don", "dont", "never", "cancel", "stop", "wait", "nevermind", "none", "neither",
+                                                 "what", "which", "why", "how", "difference"]
+
+    /// The previous-turn press gate (`RealtimeOpenAppTool.pressOffer`): strictly
+    /// stronger than `heardOverlapsLabel`, which stays a counts-only measurement.
+    /// A yes that names the item: no veto word, not a question (no "?" at the
+    /// end), and a label word of 4+ letters said in full or by a 4+ letter
+    /// prefix ("not" never finds "Note", "can" never "Cancel"). nil with no
+    /// transcript. Precision over recall: a miss only means "search again".
+    static func followUpConfirmed(heard: String?, path: [String]?) -> Bool? {
+        guard let heard, !heard.allSatisfy(\.isWhitespace) else { return nil }
+        let spoken = RealtimeVoiceVerbs.foldedTokens(heard)
+        guard !spoken.contains(where: followUpVetoWords.contains),
+              !heard.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?") else { return false }
+        let label = RealtimeVoiceVerbs.foldedTokens(path?.last ?? "").filter { $0.count >= 4 }
+        return spoken.contains { word in
+            label.contains { word == $0 || (min(word.count, $0.count) >= 4 && (word.hasPrefix($0) || $0.hasPrefix(word))) }
+        }
     }
 
     static func loggedArguments(for call: RealtimeToolCall) -> [String: Any] {
@@ -508,7 +549,8 @@ nonisolated enum RealtimeDecisionTrace {
             "appCheck": value(dispatch?.appCheck),
             "heardCheck": value(dispatch?.heardCheck),
             "autoFocus": value(dispatch?.autoFocus),
-            "heardOverlapsLabel": value(isPress ? dispatch?.heardOverlapsLabel : nil)
+            "heardOverlapsLabel": value(isPress ? dispatch?.heardOverlapsLabel : nil),
+            "offerSource": value(isPress ? decision.offerSource?.rawValue : nil)
         ]
     }
 

@@ -43,14 +43,16 @@ nonisolated enum MeasurementLogFile {
 
     /// `rotatingAtBytes`: for a log written on every live event (notch-drawn.log,
     /// twice per notch transition), one `.1` kept, like harness-audit.log.
-    static func appendJSONLine(_ object: [String: Any], toFileNamed fileName: String, rotatingAtBytes: Int? = nil) {
+    /// `directory`: a test's own, so it never writes into the owner's logs.
+    static func appendJSONLine(_ object: [String: Any], toFileNamed fileName: String, rotatingAtBytes: Int? = nil,
+                               in directory: URL = directoryURL) {
         guard let line = jsonLine(object) else {
             print("⚠️ MeasurementLogFile: a \(fileName) line was not valid JSON and was dropped")
             return
         }
         writeQueue.async {
-            try? FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-            let fileURL = directoryURL.appendingPathComponent(fileName)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let fileURL = directory.appendingPathComponent(fileName)
             if let rotatingAtBytes { rotateIfLarge(fileURL, atBytes: rotatingAtBytes) }
             appendOwnerOnly(Data((line + "\n").utf8), to: fileURL)
         }

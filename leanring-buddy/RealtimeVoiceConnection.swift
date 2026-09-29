@@ -33,10 +33,12 @@ final class RealtimeTurnMarks {
     var dispatches: [RealtimeToolDispatch] = []
     /// One per call, in arrival order — the decision trace's rows.
     var decisions: [RealtimeToolDecision] = []
-    /// The latest finished find_menu_items' candidates: what a press chose from.
-    var latestMenuOffer: [RealtimeMenuCandidate]?
-    /// The bundle that find resolved to: an offer is pressed only in its own app.
-    var latestMenuOfferApp: String?
+    /// The latest finished find_menu_items' candidates, the bundle it resolved
+    /// to (an offer is pressed only in its own app) and when: what a press chose from.
+    var latestMenuOffer: RealtimeStandingOffer?
+    /// The previous turn's `latestMenuOffer`, carried at `beginTurn` and never
+    /// further: a press may use it only as `RealtimeOpenAppTool.pressOffer` allows.
+    var previousTurnMenuOffer: RealtimeStandingOffer?
     var toolResultSentUptime: TimeInterval?
     /// First audio after the LATEST tool result — with find -> press, the words
     /// about the press, not a "one moment" between the two calls.
@@ -336,6 +338,12 @@ final class RealtimeVoiceConnection {
     func beginTurn() async throws {
         let previous = turn
         turn = RealtimeTurnMarks()
+        // Also a barged-in turn's: barging in is how an owner says "yes, that one"
+        // while the question is still being asked. But only a find that finished
+        // BEFORE the press made an offer: one cut off before it ran, or still
+        // running when the owner pressed, never set `latestMenuOffer`, because
+        // the model never got its result.
+        turn.previousTurnMenuOffer = previous.latestMenuOffer
         turnInputAudioBytes = 0
         if stack == .geminiLive, previous.lastAudioSentUptime != nil, previous.heardCompletedUptime(now: uptime) == nil {
             turn.staleHeardPiecesUntilUptime = uptime + Self.geminiStaleHeardPieceSeconds
@@ -391,6 +399,28 @@ final class RealtimeVoiceConnection {
         cancelResponse()
     }
 
+    /// Context the model reads and is not asked to answer: OpenAI, a user text
+    /// item with no `response.create`; Gemini, `realtimeInput.text` — its only
+    /// mid-session text path on 3.1 Flash Live (`clientContent` is initial
+    /// history only there, and would interrupt). Sent after `beginTurn`, so on
+    /// Gemini it lands inside the owner's own activity rather than opening a
+    /// turn of its own. UNMEASURED as of 2026-09-30: a reply to it would show as
+    /// `ignored:audio` before the release in the turn's eventTrail.
+    nonisolated static func contextTextMessage(stack: VoiceStackChoice, text: String) -> [String: Any] {
+        switch stack {
+        case .openAIRealtime:
+            return ["type": "conversation.item.create",
+                    "item": ["type": "message", "role": "user", "content": [["type": "input_text", "text": text]]]]
+        case .geminiLive:
+            return ["realtimeInput": ["text": text]]
+        }
+    }
+
+    /// After `beginTurn`, before the audio (`contextTextMessage`).
+    func sendContextText(_ text: String) async throws {
+        try await socket?.sendJSON(Self.contextTextMessage(stack: stack, text: text))
+    }
+
     private func sendResponseCreate(for turn: RealtimeTurnMarks) async throws {
         let eventID = "create_" + UUID().uuidString
         turnsAwaitingResponseCreated.append((eventID, turn))
@@ -421,6 +451,8 @@ final class RealtimeVoiceConnection {
             guard openAIEventIsThisTurns(responseID: message["response_id"] as? String) else { return ignoreStale("audio", arrivalUptime: arrivalUptime) }
             if let audio = Data(base64Encoded: message["delta"] as? String ?? "") { receivedAudio(audio, arrivalUptime: arrivalUptime) }
         case "response.output_audio_transcript.delta":
+            // The cut-off answer's words are not this turn's `said`.
+            guard openAIEventIsThisTurns(responseID: message["response_id"] as? String) else { break }
             turn.transcript += message["delta"] as? String ?? ""
         case "input_audio_buffer.committed":
             guard let itemID = message["item_id"] as? String else { break }
@@ -486,7 +518,7 @@ final class RealtimeVoiceConnection {
             if isStale { ignoreStale("toolCall", arrivalUptime: arrivalUptime) } else { receivedToolCalls(calls, arrivalUptime: arrivalUptime) }
         }
         guard let serverContent else { return }
-        if let spokenPiece = (serverContent["outputTranscription"] as? [String: Any])?["text"] as? String {
+        if let spokenPiece = (serverContent["outputTranscription"] as? [String: Any])?["text"] as? String, !isStale {
             turn.transcript += spokenPiece
         }
         if let heardPiece = (serverContent["inputTranscription"] as? [String: Any])?["text"] as? String,
@@ -608,18 +640,16 @@ final class RealtimeVoiceConnection {
             let call = appNameOverride.map { RealtimeToolCall(callID: providerCall.callID, name: providerCall.name, appName: $0) } ?? providerCall
             turn.toolCalls.append(call)
             let decisionIndex = turn.decisions.count
-            turn.decisions.append(RealtimeToolDecision(call: call, callUptime: arrivalUptime, offeredBeforeCall: turn.latestMenuOffer))
+            turn.decisions.append(RealtimeToolDecision(call: call, callUptime: arrivalUptime, offeredBeforeCall: turn.latestMenuOffer?.candidates))
             turn.toolsInFlight += 1
             let overLimit = turn.toolCalls.count > Self.maximumToolCallsPerTurn
             let previousCall = turn.lastCallTask
             turn.lastCallTask = Task { @MainActor [weak self] in
                 await previousCall?.value
                 // Read now, after the previous call finished: a find and a press sent
-                // in one batch must still press what that find offered. The trace
-                // records this offer, the one the gate judges by.
-                let offered = turn.latestMenuOffer
-                let offeredApp = turn.latestMenuOfferApp
-                turn.decisions[decisionIndex].offeredBeforeCall = offered
+                // in one batch must still press what that find offered.
+                let thisTurnOffer = turn.latestMenuOffer
+                turn.decisions[decisionIndex].offeredBeforeCall = thisTurnOffer?.candidates
                 var dispatch: RealtimeToolDispatch
                 if overLimit {
                     let refusal = RealtimeToolRefusal(error: "tooManyToolCalls", message: "only \(Self.maximumToolCallsPerTurn) tool calls are allowed per turn")
@@ -634,6 +664,13 @@ final class RealtimeVoiceConnection {
                     // The owner's words against the tool's app, before anything is focused,
                     // opened, searched or pressed.
                     let heard = await Self.heardCheck(for: call, in: turn)
+                    // Which offer the notOffered gate judges by: this turn's, or the previous
+                    // turn's when the owner's own words name the item. The trace records it.
+                    let chosen = RealtimeOpenAppTool.pressOffer(path: call.path, thisTurn: thisTurnOffer, previousTurn: turn.previousTurnMenuOffer,
+                                                                followUpConfirmed: heard?.followUpConfirmed, now: ProcessInfo.processInfo.systemUptime)
+                    let offered = chosen.offer?.candidates
+                    let offeredApp = chosen.offer?.app
+                    turn.decisions[decisionIndex].offeredBeforeCall = offered
                     // The owner pressed the key again while this call waited: whatever
                     // it would do answers a turn nobody is waiting on. Never run it.
                     @MainActor func recordSuperseded(autoFocus: [String: Any]? = nil) {
@@ -703,12 +740,18 @@ final class RealtimeVoiceConnection {
                     }
                     dispatch.heardCheck = heard?.trace
                     dispatch.heardOverlapsLabel = heard?.overlapsLabel
+                    if RealtimeOpenAppTool.passedOfferGate(toolName: call.name, dispatch: dispatch) {
+                        turn.decisions[decisionIndex].offerSource = chosen.source
+                    }
                 }
                 turn.dispatches.append(dispatch)
                 turn.decisions[decisionIndex].dispatch = dispatch
-                if let offer = dispatch.menuOffer {
-                    turn.latestMenuOffer = offer.candidates
-                    turn.latestMenuOfferApp = dispatch.appCheck?["resolvedBundleId"] as? String
+                // A find that finished after the owner pressed again answered nobody:
+                // the model never got its result, so it is no offer to press or confirm.
+                if let offer = dispatch.menuOffer, self?.turn === turn, !turn.supersededByPress {
+                    turn.latestMenuOffer = RealtimeStandingOffer(candidates: offer.candidates,
+                                                                 app: dispatch.appCheck?["resolvedBundleId"] as? String,
+                                                                 uptime: ProcessInfo.processInfo.systemUptime)
                 }
                 // The harness's verification is the proof, so the result goes now and
                 // the model confirms the outcome. The model's only picture is the
@@ -732,7 +775,8 @@ final class RealtimeVoiceConnection {
     /// Waits (bounded) for this turn's transcript, then decides. nil for a call
     /// that names no app (it is refused as `missingAppName` anyway).
     private static func heardCheck(for call: RealtimeToolCall, in turn: RealtimeTurnMarks) async
-        -> (refusal: [String: Any]?, heardApp: String?, decision: RealtimeHeardCheck.Decision, trace: [String: Any], overlapsLabel: Bool?)? {
+        -> (refusal: [String: Any]?, heardApp: String?, decision: RealtimeHeardCheck.Decision, trace: [String: Any], overlapsLabel: Bool?,
+            followUpConfirmed: Bool?)? {
         guard RealtimeHeardCheck.appliesTo(toolName: call.name), let named = call.appName else { return nil }
         let waitStart = ProcessInfo.processInfo.systemUptime
         let released = turn.lastAudioSentUptime ?? waitStart
@@ -753,7 +797,8 @@ final class RealtimeVoiceConnection {
         if refusal != nil { turn.heardRefusals += 1 }
         return (refusal, decision.heardApps.first, decision,
                 RealtimeHeardCheck.traceObject(decision, named: named, transcriptArrivalMs: arrivalMs, waitedMs: waitedMs, refused: refusal != nil),
-                call.name == RealtimeVoiceVerbs.pressMenuName ? RealtimeDecisionTrace.heardOverlapsLabel(heard: transcript, path: call.path) : nil)
+                call.name == RealtimeVoiceVerbs.pressMenuName ? RealtimeDecisionTrace.heardOverlapsLabel(heard: transcript, path: call.path) : nil,
+                call.name == RealtimeVoiceVerbs.pressMenuName ? RealtimeDecisionTrace.followUpConfirmed(heard: transcript, path: call.path) : nil)
     }
 
     /// Context only: OpenAI gets a user image item and no `response.create`;

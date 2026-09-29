@@ -214,6 +214,8 @@ struct RealtimeTurnCompletionTests {
         private let lock = NSLock()
         private var lines: [String] = []
         var menuPresses: Int { lock.lock(); defer { lock.unlock() }; return lines.filter { $0.contains(#""verb":"menu""#) }.count }
+        /// Every request line recorded — it is recorded before the answer is computed.
+        var requests: Int { lock.lock(); defer { lock.unlock() }; return lines.count }
         func answer(_ line: String) -> String {
             lock.lock(); lines.append(line); lock.unlock()
             guard line.contains(#""verb":"menus""#) else { return #"{"ok":true,"verification":"confirmed"}"# }
@@ -225,14 +227,18 @@ struct RealtimeTurnCompletionTests {
     private let findNewWindow: [String: Any] = ["id": "f1", "name": "find_menu_items", "args": ["app": "Finder", "words": "new window"]]
     private let pressNewWindow: [String: Any] = ["id": "p1", "name": "press_menu", "args": ["app": "Finder", "path": ["File", "New Finder Window"]]]
 
-    private func heardTurn(_ connection: RealtimeVoiceConnection, calls: [[String: Any]]) async throws -> RealtimeTurnMarks {
+    private func heardTurn(_ connection: RealtimeVoiceConnection, calls: [[String: Any]],
+                           heard: String = "open a new finder window") async throws -> RealtimeTurnMarks {
         try await connection.beginTurn()
         try await connection.endTurn()
         let turn = connection.turn
-        connection.handle(["serverContent": ["inputTranscription": ["text": "open a new finder window"]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
-        connection.handle(["toolCall": ["functionCalls": calls]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        connection.handle(["serverContent": ["inputTranscription": ["text": heard]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        if !calls.isEmpty { connection.handle(["toolCall": ["functionCalls": calls]], arrivalUptime: ProcessInfo.processInfo.systemUptime) }
         let deadline = ProcessInfo.processInfo.systemUptime + 6
         while turn.dispatches.count < calls.count, ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        // The transcript complete, so the next turn's first second is not read as this one's tail.
+        while turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime) == nil,
+              ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(for: .milliseconds(20)) }
         return turn
     }
 
@@ -274,15 +280,85 @@ struct RealtimeTurnCompletionTests {
     }
 
     /// The live defect: the path came from the PREVIOUS turn's find, which the
-    /// model keeps in its context.
+    /// model keeps in its context, and the owner's words this turn never named it.
     @Test func aPressCopiedFromThePreviousTurnsFindNeverReachesTheHarness() async throws {
         let harness = MenuHarness()
         let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { harness.answer($0) })
         _ = try await heardTurn(connection, calls: [findNewWindow])
-        let second = try await heardTurn(connection, calls: [pressNewWindow])
+        let second = try await heardTurn(connection, calls: [pressNewWindow], heard: "what else is there")
         #expect(second.dispatches.count == 1)
         #expect(second.dispatches.first?.result["error"] as? String == "notOffered")
         #expect(harness.menuPresses == 0)
+        let pressLine = RealtimeDecisionTrace.line(decision: second.decisions[0], sequence: 1, turnID: "T", stack: "geminiLive",
+                                                   source: "live", releasedUptime: nil)
+        #expect(pressLine["offerSource"] is NSNull)
+    }
+
+    /// Live 2026-09-30 (3A9A8C): the model searched, asked, and the owner said
+    /// yes next turn, naming the item. That press goes, and the trace says why.
+    @Test func aPressTheOwnerConfirmsByNameNextTurnUsesThePreviousTurnsOffer() async throws {
+        let harness = MenuHarness()
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { harness.answer($0) })
+        _ = try await heardTurn(connection, calls: [findNewWindow], heard: "can you open a finder window")
+        let second = try await heardTurn(connection, calls: [pressNewWindow], heard: "yes, a new finder window")
+        #expect(second.dispatches.first?.result["error"] == nil || second.dispatches.first?.result["error"] is NSNull)
+        #expect(harness.menuPresses == 1)
+        let pressLine = RealtimeDecisionTrace.line(decision: second.decisions[0], sequence: 1, turnID: "T", stack: "geminiLive",
+                                                   source: "live", releasedUptime: nil)
+        #expect(pressLine["offerSource"] as? String == "previousTurnConfirmedByWords")
+        #expect(pressLine["choseFromOffered"] as? Bool == true)
+    }
+
+    /// A find that finished after the owner pressed again answered a turn nobody
+    /// is waiting on, so it is not the next turn's "previous" offer.
+    @Test func aFindThatFinishesAfterABargeInLeavesNoOfferToConfirm() async throws {
+        let release = DispatchSemaphore(value: 0)
+        let harness = MenuHarness()
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { line in
+            let answer = harness.answer(line)
+            if line.contains(#""verb":"menus""#) { release.wait() }
+            return answer
+        })
+        try await connection.beginTurn()
+        try await connection.endTurn()
+        let turn = connection.turn
+        connection.handle(["serverContent": ["inputTranscription": ["text": "open a new finder window"]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        connection.handle(["toolCall": ["functionCalls": [findNewWindow]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        let deadline = ProcessInfo.processInfo.systemUptime + 6
+        while harness.requests == 0, ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        connection.supersedeForPress()
+        release.signal()
+        while turn.dispatches.isEmpty, ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(turn.dispatches.first?.menuOffer != nil)
+        #expect(turn.latestMenuOffer == nil)
+        try await connection.beginTurn()
+        #expect(connection.turn.previousTurnMenuOffer == nil)
+    }
+
+    /// Only one turn back: a turn in between with no find leaves nothing to confirm.
+    @Test func anOfferTwoTurnsBackIsNeverPressed() async throws {
+        let harness = MenuHarness()
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { harness.answer($0) })
+        _ = try await heardTurn(connection, calls: [findNewWindow])
+        _ = try await heardTurn(connection, calls: [], heard: "thanks")
+        let third = try await heardTurn(connection, calls: [pressNewWindow], heard: "yes, a new finder window")
+        #expect(third.dispatches.first?.result["error"] as? String == "notOffered")
+        #expect(harness.menuPresses == 0)
+    }
+
+    /// A cut-off answer's words, still arriving while the key is held, are not
+    /// what the new turn's model said (voice-transcripts.log records `said`).
+    @Test func geminiWordsOfTheCutOffAnswerAreNotTheNewTurnsSaid() async throws {
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { _ in "{}" })
+        try await connection.beginTurn()
+        try await connection.endTurn()
+        try await connection.beginTurn()
+        let barged = connection.turn
+        connection.handle(["serverContent": ["outputTranscription": ["text": "as I was saying"]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        #expect(barged.transcript == "")
+        try await connection.endTurn()
+        connection.handle(["serverContent": ["outputTranscription": ["text": "cursor, sir."]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        #expect(barged.transcript == "cursor, sir.")
     }
 
     @Test func geminiInterruptedWithNoTurnCompleteDoesNotSwallowTheNextAnswer() async throws {
