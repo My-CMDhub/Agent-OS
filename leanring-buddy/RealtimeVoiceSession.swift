@@ -40,6 +40,8 @@ final class RealtimeVoiceSession {
     /// The latest turn's id, kept past its line: a press while its answer still
     /// plays is a barge-in even when that line was already written.
     private var lastTurnID: String?
+    /// The last written line's `errorKind`: a failed turn's words are no answer to agree with.
+    private var lastLineErrorKind: String?
     /// When the scheduled reply audio runs out, by arithmetic on what was
     /// scheduled — no render callback to trust. 0 once playback is stopped.
     private var replyAudioEndsUptime: TimeInterval = 0
@@ -66,6 +68,8 @@ final class RealtimeVoiceSession {
         var marks: RealtimeTurnMarks?
         /// The no-reply watchdog showed "No reply" for this turn.
         var watchdogFired = false
+        /// `RealtimeVoiceSession.previousReplyWasHeard`, decided at the press.
+        var previousReplyWasHeard = false
         init(line: RealtimeLiveTurnLine, pressedUptime: TimeInterval) {
             self.line = line
             self.pressedUptime = pressedUptime
@@ -84,12 +88,29 @@ final class RealtimeVoiceSession {
     /// late answer is dropped. Both run on GCD, not the Swift cooperative pool:
     /// a blocking read there holds a pool thread, and a timer task queued behind
     /// busy pool threads lost the race to a 2 s read under a 0.1 s deadline (test run 2026-09-30).
+    /// The read runs on its OWN thread (review 2026-09-30): a stuck AX read
+    /// never holds a GCD worker the deadline's timer needs.
     nonisolated static func value<T: Sendable>(within seconds: Double, _ read: @escaping @Sendable () -> T?) async -> T? {
         await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
             let once = ResumeOnce(continuation)
-            DispatchQueue.global(qos: .userInitiated).async { once.resume(read()) }
+            Thread { once.resume(read()) }.start()
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + seconds) { once.resume(nil) }
         }
+    }
+
+    /// The key-down "under the owner's pointer" read, shared with the tool probe:
+    /// the AX rung only, bounded — a walk here would queue on the harness in
+    /// front of the turn's own calls (review 2026-09-30: ~1.8 s in Mail).
+    nonisolated static func keyDownPointerHit(mouse: CGPoint, screens: [CGRect], primaryDisplayHeight: CGFloat) async -> RealtimeScreenHit {
+        await RealtimeOpenAppTool.axHit(at: mouse, screens: screens, primaryDisplayHeight: primaryDisplayHeight,
+                                        deadlineSeconds: frontmostReadDeadlineSeconds)
+    }
+    /// Did the owner hear the previous answer whole? Only if this press cut
+    /// nothing off — its line was closed and its audio done (both set
+    /// `bargedInPreviousTurnID`) — and that turn did not end in an error, whose
+    /// transcript may be a fragment. The plain-yes gate trusts `said` only then.
+    nonisolated static func previousReplyWasHeard(line: RealtimeLiveTurnLine, previousErrorKind: String?) -> Bool {
+        line.bargedInPreviousTurnID == nil && !line.previousAudioWasPlaying && previousErrorKind == nil
     }
     /// The probe's: a tool call may wait on a 60 s confirmation ticket.
     static let turnTimeoutSeconds: Double = 90
@@ -131,6 +152,34 @@ final class RealtimeVoiceSession {
         playbackEngine.connect(playerNode, to: playbackEngine.mainMixerNode, format: playbackFormat)
         playbackEngine.attach(tickNode)
         playbackEngine.connect(tickNode, to: playbackEngine.mainMixerNode, format: tickFormat)
+        // The pointer stays while its turn is still being answered or its
+        // reply still plays (slice 1b: no fixed 2.5 s); the notch reads the same state.
+        ElementPointer.holdWhile = { [weak self] in
+            guard let self else { return false }
+            return self.liveTurn != nil || self.isReplyAudioPlaying
+        }
+        ElementPointer.onVisibilityChange = { [weak self] visible, uptime in self?.pointerVisibilityChanged(visible, at: uptime) }
+    }
+
+    /// The turn the pointer was shown in: its id and release, and when it appeared.
+    private var pointerShown: (turnID: String, releasedUptime: TimeInterval?, shownUptime: TimeInterval)?
+
+    /// One `kind: "pointer"` line in voice-live.log when the pointer goes, ms
+    /// from that turn's release: shown, hidden, and when the reply's audio ran
+    /// out. Its own line because the turn's line is written before either end.
+    private func pointerVisibilityChanged(_ visible: Bool, at uptime: TimeInterval) {
+        if visible {
+            pointerShown = (lastTurnID ?? "-", liveTurn?.releasedUptime, uptime)
+            return
+        }
+        guard let shown = pointerShown else { return }
+        pointerShown = nil
+        MeasurementLogFile.appendJSONLine([
+            "kind": "pointer", "turnId": shown.turnID,
+            "pointerShownMs": Self.milliseconds(from: shown.releasedUptime, to: shown.shownUptime) ?? NSNull(),
+            "pointerHiddenMs": Self.milliseconds(from: shown.releasedUptime, to: uptime) ?? NSNull(),
+            "replyAudioEndMs": replyAudioEndsUptime > 0 ? (Self.milliseconds(from: shown.releasedUptime, to: replyAudioEndsUptime) ?? NSNull()) as Any : NSNull()
+        ], toFileNamed: liveTurnLogFileName)
     }
 
     private var selectedStack: VoiceStackChoice { stackOverride ?? VoiceStackChoice.stored(in: .standard) }
@@ -188,6 +237,8 @@ final class RealtimeVoiceSession {
     // MARK: Push-to-talk
 
     func pressed() {
+        // A new request takes the last pointer away (its audio end is still known here).
+        ElementPointer.hide()
         // Barge-in: a new press silences whatever is still being said.
         let previousLineWasOpen = liveTurn != nil
         let previousAudioWasPlaying = isReplyAudioPlaying
@@ -201,6 +252,7 @@ final class RealtimeVoiceSession {
         }
         lastTurnID = line.turnID
         liveTurn = LiveTurn(line: line, pressedUptime: uptime)
+        liveTurn?.previousReplyWasHeard = Self.previousReplyWasHeard(line: line, previousErrorKind: lastLineErrorKind)
         stopPlayback()
         JarvisNotch.shared.currentTurnID = line.turnID
         JarvisNotch.shared.handle(.hotkeyDown)
@@ -266,22 +318,42 @@ final class RealtimeVoiceSession {
                     return RealtimeOpenAppTool.frontmostAppContextLine(appName: application.localizedName)
                 }
             }
+            // What is under the owner's mouse, from structure, bounded from key-down
+            // like the frontmost line: "this one" / "where my cursor is".
+            let mouse = NSEvent.mouseLocation
+            let screens = NSScreen.screens.map(\.frame)
+            let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+            let pointerTask = Task { () -> RealtimeScreenHit? in
+                guard !probeMode else { return nil }
+                return await Self.keyDownPointerHit(mouse: mouse, screens: screens, primaryDisplayHeight: primaryHeight)
+            }
             let setupStart = uptime
             let connection = try await readyConnection()
             if liveTurn?.line.sessionWasWarm == false { liveTurn?.line.sessionSetupMs = Self.milliseconds(from: setupStart, to: uptime) }
+            var screenshotDisplayFrame: CGRect?
             if let screenshot = try? await screenshotTask.value {
                 try await connection.sendScreenshot(screenshot.imageData)
+                screenshotDisplayFrame = screenshot.displayFrame
             }
             // A press since this one owns the connection now: its `beginTurn` must not be replaced by ours.
             guard !Task.isCancelled else { return }
-            try await connection.beginTurn()
+            // A press while the last answer still played cut words off it: those
+            // words cannot be what a plain "yes" agrees to (`confirmedByPlainYes`).
+            try await connection.beginTurn(previousReplyWasHeard: liveTurn?.previousReplyWasHeard == true)
             let marks = connection.turn
             liveTurn?.marks = marks
+            marks.screenshotDisplayFrame = screenshotDisplayFrame
             // Beside the audio, never ahead of it; before the release, so on Gemini
             // it stays inside the owner's activity. Not into a turn that replaced this one.
             let contextSend = Task { @MainActor in
-                guard let frontmostLine = await frontmostLineTask.value, connection.turn === marks else { return }
-                try? await connection.sendContextText(frontmostLine)
+                if let frontmostLine = await frontmostLineTask.value, connection.turn === marks {
+                    try? await connection.sendContextText(frontmostLine)
+                }
+                guard case .element(let candidate, let app)? = await pointerTask.value, connection.turn === marks else { return }
+                marks.keyDownPointer = RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY),
+                                                            app: app, source: .underPointer)
+                let appName = app.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first?.localizedName }
+                try? await connection.sendContextText(RealtimeOpenAppTool.pointerContextLine(candidate: candidate, appName: appName))
             }
             for await pcmChunk in audioStream {
                 try await connection.appendAudio(pcmChunk)
@@ -332,6 +404,7 @@ final class RealtimeVoiceSession {
         line.holdMs = Self.milliseconds(from: liveTurn.pressedUptime, to: released)
         line.bargedIn = bargedIn
         line.errorKind = errorKind
+        lastLineErrorKind = errorKind
         line.watchdogFired = liveTurn.watchdogFired
         line.turnEndReason = errorKind != nil ? "error" : bargedIn ? "bargedIn"
             : (liveTurn.marks?.toolCalls.isEmpty == false ? "toolAnswered" : liveTurn.marks?.firstAudioUptime != nil ? "spoke" : "silent")
@@ -359,6 +432,9 @@ final class RealtimeVoiceSession {
             line.finishedMs = Self.milliseconds(from: marks.lastAudioSentUptime, to: marks.finishedUptime)
             line.staleCompletionsIgnored = marks.staleCompletionsIgnored
             line.eventTrail = marks.eventTrail
+            line.claimedWithoutReceipt = RealtimeOpenAppTool.claimedWithoutReceipt(
+                transcript: marks.transcript,
+                okToolNames: Set(marks.decisions.filter { $0.dispatch?.harnessConfirmed == true }.map(\.call.name)))
             // One line per tool call to voice-decisions.log, joinable on turnId.
             RealtimeDecisionTrace.append(marks.decisions, turnID: line.turnID, stack: line.stack, source: probeMode ? "notchProbe" : "live",
                                          releasedUptime: released)
@@ -503,6 +579,9 @@ nonisolated struct RealtimeLiveTurnLine {
     /// Each notch state this turn reached, ms from the key-up (negative before it).
     /// Later ones (a hold running out) are in notch-drawn.log under this turnId.
     var notchTransitions: [[String: Any]] = []
+    /// Counts-only: the model said done / pointed / clicked with no ok result
+    /// of that kind this turn (`RealtimeOpenAppTool.claimedWithoutReceipt`).
+    var claimedWithoutReceipt = false
 
     init(stack: String, turnID: String, sessionWasWarm: Bool) {
         self.stack = stack
@@ -526,7 +605,7 @@ nonisolated struct RealtimeLiveTurnLine {
             "turnDoneMs": value(turnDoneMs), "bargedIn": bargedIn, "errorKind": value(errorKind),
             "turnEndReason": value(turnEndReason), "watchdogFired": watchdogFired, "finishedMs": value(finishedMs), "staleCompletionsIgnored": staleCompletionsIgnored,
             "bargedInPreviousTurnId": value(bargedInPreviousTurnID), "previousAudioWasPlaying": previousAudioWasPlaying,
-            "eventTrail": eventTrail, "notchTransitions": notchTransitions
+            "eventTrail": eventTrail, "notchTransitions": notchTransitions, "claimedWithoutReceipt": claimedWithoutReceipt
         ]
     }
 }

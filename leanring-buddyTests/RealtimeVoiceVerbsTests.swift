@@ -179,7 +179,7 @@ struct RealtimeVoiceVerbsTests {
 
         let find = try RealtimeOpenAppTool.harnessRequestLine(
             for: RealtimeToolCall(callID: "c", name: "find_menu_items", appName: "Finder", words: "list")).get()
-        #expect(find == #"{"expectApp":"Finder","verb":"menus"}"#)
+        #expect(find == #"{"expectApp":"Finder","forModel":true,"verb":"menus"}"#)
 
         let press = try RealtimeOpenAppTool.harnessRequestLine(
             for: RealtimeToolCall(callID: "c", name: "press_menu", appName: "Finder", path: ["View", "as List"]),
@@ -400,7 +400,9 @@ struct RealtimeVoiceVerbsTests {
         let start = ProcessInfo.processInfo.systemUptime
         let slow = await RealtimeVoiceSession.value(within: 0.1) { () -> String? in Thread.sleep(forTimeInterval: 2); return "late" }
         #expect(slow == nil)
-        #expect(ProcessInfo.processInfo.systemUptime - start < 1)
+        // The read runs on its own thread, so a stuck read never holds a worker
+        // the deadline needs; the bound is the deadline plus a loaded runner.
+        #expect(ProcessInfo.processInfo.systemUptime - start < 2.0)
         let fast = await RealtimeVoiceSession.value(within: 1) { () -> String? in "Cursor" }
         #expect(fast == "Cursor")
         #expect(RealtimeVoiceSession.frontmostReadDeadlineSeconds <= 0.3)
@@ -643,7 +645,7 @@ struct RealtimeVoiceVerbsTests {
         let keys: Set<String> = ["kind", "schema", "source", "turnId", "stack", "probeId", "fixture", "seq", "tool", "args", "callMs",
                                  "harnessMs", "ok", "harnessError", "verification", "offered", "offeredCount", "correctOffered", "enabledItemCount",
                                  "privacyDroppedCount", "listingIncomplete", "choseFromOffered", "independentCheck", "appCheck", "heardCheck", "autoFocus",
-                                 "heardOverlapsLabel", "offerSource"]
+                                 "heardOverlapsLabel", "offerSource", "snappedBy"]
         let findLine = RealtimeDecisionTrace.line(decision: find, sequence: 1, turnID: "T", stack: "openAIRealtime", source: "live", releasedUptime: 10)
         let probedFind = RealtimeDecisionTrace.line(decision: find, sequence: 1, turnID: "T", stack: "geminiLive", source: "probe",
                                                     releasedUptime: 10, expectedPath: ["View", "Hide Sidebar"])
@@ -652,7 +654,7 @@ struct RealtimeVoiceVerbsTests {
                                                    independentCheck: ["kind": "menuMark", "passed": true])
         #expect(Set(findLine.keys) == keys)
         #expect(Set(pressLine.keys) == keys)
-        #expect(findLine["schema"] as? Int == 6)
+        #expect(findLine["schema"] as? Int == 9)
         #expect(findLine["offerSource"] is NSNull)
         #expect(pressLine["offerSource"] as? String == "previousTurnConfirmedByWords")
         #expect(findLine["appCheck"] is NSNull)

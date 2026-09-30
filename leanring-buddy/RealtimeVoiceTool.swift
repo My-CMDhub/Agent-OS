@@ -16,6 +16,7 @@
 //  file, kill switch, kernel, confirmation tickets, audit. Nothing here acts.
 //
 
+import AppKit
 import Foundation
 import ImageIO
 
@@ -76,6 +77,13 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
     var words: String? = nil
     /// press_menu only: the menu path, bar item first.
     var path: [String]? = nil
+    /// point_at / press_element: the element's name, as find_on_screen offered it.
+    var elementName: String? = nil
+    /// point_at / press_element: a position in the key-down screenshot, 0-1 from its top-left.
+    var x: Double? = nil
+    var y: Double? = nil
+    /// point_at / press_element: the element under the owner's mouse at key-down.
+    var underPointer: Bool = false
 
     /// From a provider's argument object, whichever tool it is.
     static func parsed(callID: String, name: String, arguments: [String: Any]?) -> RealtimeToolCall {
@@ -87,6 +95,14 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
         let words = text(arguments?["words"]) ?? (arguments?["words"] as? [String]).flatMap { text($0.joined(separator: " ")) }
         // Path steps are exact labels, so they are not trimmed.
         let path = (arguments?["path"] as? [Any])?.compactMap { $0 as? String }
+        // point_at's `name` is the control's; its app is `app`. Every other tool
+        // names its app in `name` (open/focus) or `app` (the menu pair).
+        guard !RealtimeVoiceVerbs.isScreenTargetTool(name) else {
+            func number(_ value: Any?) -> Double? { (value as? NSNumber)?.doubleValue ?? (value as? String).flatMap(Double.init) }
+            return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["app"]), elementName: text(arguments?["name"]),
+                                    x: number(arguments?["x"]), y: number(arguments?["y"]),
+                                    underPointer: (arguments?["underPointer"] as? Bool) ?? false)
+        }
         return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["name"]) ?? text(arguments?["app"]),
                                 words: words, path: path)
     }
@@ -142,9 +158,11 @@ nonisolated enum RealtimeOpenAppTool {
 
     menus: for a command in an app's menu bar, such as a view, a new window, or showing a bar, first call find_menu_items with the app and a few words, then press_menu with one of the paths it returned, copied exactly. never invent or change a path; if none fits, say so and press nothing. menus belong to the app in front, so focus_app first when it is not.
 
+    screen: you can point at and press what you can see. to point, call point_at; to click, call press_element. aim either by a name find_on_screen returned, or by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image), or with underPointer true when the owner says "this one" or "where my cursor is". a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. never say you can't do something you can see.
+
     if a tool returns heardNamedMismatch or ambiguousApp, ask the owner which app they meant, briefly; never focus or open an app to check first.
 
-    words like done, opened, ready or there it is are for after an ok true result from open_app, focus_app or press_menu in this turn, never before and never without one; find_menu_items only looks. for anything else — clicking on the screen, typing, settings panes — say you can't yet and where they'd find it.
+    words like done, opened, ready, there it is, pointing or highlighted are for after an ok true result from open_app, focus_app, press_menu, point_at or press_element in this turn, never before and never without one; find_menu_items and find_on_screen only look. for typing, say you can't yet.
 
     do not reuse the wording of these examples; vary it.
     - owner: open calendar. [tool ok] you: there it is, calendar.
@@ -286,10 +304,16 @@ nonisolated enum RealtimeOpenAppTool {
     /// the bundle that find resolved to; a press of any other path, or in another
     /// app, is refused here (live 2026-09-28: Gemini pressed a path copied from
     /// the previous turn's find result, which it keeps in its context).
+    /// find_on_screen -> snapshot; point_at -> highlight in pointer style (or an
+    /// approximate ring at a point); press_element -> press, by the element's
+    /// exact name and the point inside it (`requireAtPoint`). Both aim only at
+    /// `screenTarget`, which `resolveScreenTarget` produced (an offer, a
+    /// screenshot position, the owner's pointer), and only in its own app.
     static func harnessRequestLine(for call: RealtimeToolCall, ticket: String? = nil,
                                    expectApp: String? = nil,
                                    offered: [RealtimeMenuCandidate]? = nil,
-                                   offeredApp: String? = nil) -> Result<String, RealtimeToolRefusal> {
+                                   offeredApp: String? = nil,
+                                   screenTarget: RealtimeScreenTarget? = nil) -> Result<String, RealtimeToolRefusal> {
         func refuse(_ error: String, _ message: String) -> Result<String, RealtimeToolRefusal> {
             .failure(RealtimeToolRefusal(error: error, message: message))
         }
@@ -306,7 +330,8 @@ nonisolated enum RealtimeOpenAppTool {
             request = ["verb": "focus", "app": appName]
         case RealtimeVoiceVerbs.findMenuItemsName:
             guard call.words != nil else { return refuse("missingWords", "find_menu_items needs a few words to look for") }
-            request = ["verb": "menus", "expectApp": expectApp ?? appName]
+            // `forModel`: the listing's names go to a remote model, so a policy `refuse` holds.
+            request = ["verb": "menus", "expectApp": expectApp ?? appName, "forModel": true]
         case RealtimeVoiceVerbs.pressMenuName:
             guard let path = call.path, !path.isEmpty else { return refuse("missingMenuPath", "press_menu needs a path from find_menu_items") }
             // Never offered, so never pressed: Open Recent, History and items
@@ -323,6 +348,37 @@ nonisolated enum RealtimeOpenAppTool {
                     + "asked in this turn. If they did not ask for a menu command now, press nothing and say so.")
             }
             request = ["verb": "menu", "path": path, "expectApp": expectApp ?? appName]
+        case RealtimeVoiceVerbs.findOnScreenName:
+            guard call.words != nil else { return refuse("missingWords", "find_on_screen needs a few words to look for") }
+            request = ["verb": "snapshot", "expectApp": expectApp ?? appName, "forModel": true]
+        case RealtimeVoiceVerbs.pointAtName, RealtimeVoiceVerbs.pressElementName:
+            let isPress = call.name == RealtimeVoiceVerbs.pressElementName
+            // Aimed only in the app the target came from; a ring names nothing, so it needs none.
+            guard let screenTarget,
+                  expectApp == nil || screenTarget.app == expectApp || (screenTarget.candidate == nil && screenTarget.app == nil) else {
+                return refuse("notOffered", "Nothing was \(isPress ? "pressed" : "pointed at"). Aim only at a name find_on_screen returned in this "
+                    + "turn, a position in this turn's screenshot, or the element under the owner's pointer, for what the owner asked now.")
+            }
+            let nearPoint: [String: Any] = ["x": Double(screenTarget.point.x), "y": Double(screenTarget.point.y)]
+            guard let target = screenTarget.candidate else {
+                if isPress { return refuse("nothingAtPoint", "nothing that can be pressed is at that position; nothing was pressed") }
+                request = ["verb": "highlight", "target": "point", "pointer": true, "nearPoint": nearPoint, "speechHold": true,
+                           "seconds": RealtimeScreenVerbs.pointHoldSeconds, "expectApp": expectApp ?? appName]
+                break
+            }
+            // The target's own frame picks out a shared name; the harness re-reads
+            // the element and refuses if the name now resolves somewhere else.
+            // A label publishes no press: its pressable ancestor, which holds the point.
+            let pressed = target.pressable ? RealtimeScreenPressTarget(name: target.name, role: target.role, frame: target.frame)
+                : target.pressAncestor
+            if isPress, pressed == nil {
+                return refuse("notPressable", "\(target.described) publishes no press and sits in nothing that does; nothing was pressed. Point at it instead.")
+            }
+            request = isPress
+                ? ["verb": "press", "title": pressed?.name ?? target.name, "role": pressed?.role ?? target.role, "nearPoint": nearPoint,
+                   "requireAtPoint": true, "expectApp": expectApp ?? appName]
+                : ["verb": "highlight", "title": target.name, "role": target.role, "pointer": true, "nearPoint": nearPoint,
+                   "speechHold": true, "seconds": RealtimeScreenVerbs.pointHoldSeconds, "expectApp": expectApp ?? appName]
         default:
             return refuse("unknownTool", "there is no tool named \(call.name)")
         }
@@ -368,10 +424,15 @@ nonisolated enum RealtimeOpenAppTool {
     /// `answer` is `HarnessServer.answer(line:)` in the app. It BLOCKS (it syncs
     /// onto the request queue, which syncs onto main for ticket state), so it is
     /// only ever called from a detached task — never from main.
+    /// `screens` (AppKit frames) is where find_on_screen's controls must be
+    /// visible and how their position is phrased; nil reads the real displays.
     static func dispatch(
         _ call: RealtimeToolCall,
         offered: [RealtimeMenuCandidate]? = nil,
         offeredApp: String? = nil,
+        screenTarget: RealtimeScreenTarget? = nil,
+        screens: [CGRect]? = nil,
+        screenshotDisplay: CGRect? = nil,
         answer: @escaping @Sendable (String) -> String,
         confirmationWaitSeconds: Double = confirmationWaitSeconds,
         pollMilliseconds: Int = confirmationPollMilliseconds,
@@ -390,7 +451,8 @@ nonisolated enum RealtimeOpenAppTool {
             )
         }
         var firstLine: String
-        switch harnessRequestLine(for: call, offered: offered, offeredApp: offeredApp) {
+        let call = await withFrontmostApp(call)
+        switch harnessRequestLine(for: call, offered: offered, offeredApp: offeredApp, screenTarget: screenTarget) {
         case .success(let line): firstLine = line
         case .failure(let refusal): return finished(toolResult(for: refusal), waited: false, harnessResponse: nil)
         }
@@ -402,7 +464,8 @@ nonisolated enum RealtimeOpenAppTool {
             let identity = await Task.detached { RealtimeVoiceVerbs.appIdentity(named: appName) }.value
             var resolvedLine: Result<String, RealtimeToolRefusal>?
             if case .resolved(let bundleIdentifier, _) = identity {
-                resolvedLine = harnessRequestLine(for: call, expectApp: bundleIdentifier, offered: offered, offeredApp: offeredApp)
+                resolvedLine = harnessRequestLine(for: call, expectApp: bundleIdentifier, offered: offered, offeredApp: offeredApp,
+                                                  screenTarget: screenTarget)
             }
             guard case .resolved(let bundleIdentifier, let name) = identity, case .success(let line)? = resolvedLine else {
                 // Resolved but refused: notOffered, the offer being another app's.
@@ -450,10 +513,49 @@ nonisolated enum RealtimeOpenAppTool {
             dispatch.menuOffer = offer
             return checked(dispatch)
         }
+        // The same for the window: the snapshot's elements never leave here.
+        if call.name == RealtimeVoiceVerbs.findOnScreenName {
+            var result = toolResult(fromHarnessResponse: response)
+            var offer: RealtimeScreenOffer?
+            if response["ok"] as? Bool == true {
+                let displays: [CGRect]
+                if let screens { displays = screens } else { displays = await MainActor.run { NSScreen.screens.map(\.frame) } }
+                let madeOffer = RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: response, words: call.words ?? "", screens: displays,
+                                                                screenshotDisplay: screenshotDisplay)
+                result["candidates"] = madeOffer.candidates.map(\.jsonObject)
+                if madeOffer.listingIncomplete { result["listingIncomplete"] = true }
+                offer = madeOffer
+            }
+            response["elements"] = nil
+            var dispatch = finished(result, waited: false, harnessResponse: response)
+            dispatch.screenOffer = offer
+            return checked(dispatch)
+        }
+        // A point says WHAT it pointed at and where the pointer went, and names a
+        // control that is gone as that — not as "no app by that name".
+        if call.name == RealtimeVoiceVerbs.pointAtName {
+            var aimed = response
+            // A position or the owner's pointer whose element the walk cannot
+            // name: the ring goes to the point instead, said to be approximate.
+            if let screenTarget, screenTarget.source == .screenshotPoint || screenTarget.source == .underPointer,
+               ["notFound", "ambiguous", "elementMoved"].contains(response["error"] as? String ?? ""),
+               case .success(let ringLine) = harnessRequestLine(
+                   for: call, expectApp: named?.bundleIdentifier,
+                   screenTarget: RealtimeScreenTarget(candidate: nil, point: screenTarget.point, app: screenTarget.app, source: screenTarget.source)) {
+                aimed = harnessResponseObject(await Task.detached { answer(ringLine) }.value)
+            }
+            let displays: [CGRect]
+            if let screens { displays = screens } else { displays = await MainActor.run { NSScreen.screens.map(\.frame) } }
+            var result = pointResult(response: aimed, target: screenTarget, screens: displays)
+            if aimed["approximate"] as? Bool == true { result["approximate"] = true }
+            return checked(finished(result, waited: false, harnessResponse: aimed))
+        }
         guard response["error"] as? String == "confirmationRequired", let ticket = response["ticket"] as? String,
               case .success(let ticketLine) = harnessRequestLine(for: call, ticket: ticket, expectApp: named?.bundleIdentifier,
-                                                                    offered: offered, offeredApp: offeredApp) else {
-            return checked(finished(toolResult(fromHarnessResponse: response), waited: false, harnessResponse: response))
+                                                                    offered: offered, offeredApp: offeredApp,
+                                                                    screenTarget: screenTarget) else {
+            return checked(finished(pressedResult(toolResult(fromHarnessResponse: response), call: call, target: screenTarget),
+                                    waited: false, harnessResponse: response))
         }
         await onConfirmationRequired?()
         let deadline = startedUptime + confirmationWaitSeconds
@@ -461,7 +563,194 @@ nonisolated enum RealtimeOpenAppTool {
             try? await Task.sleep(for: .milliseconds(pollMilliseconds))
             response = harnessResponseObject(await Task.detached { answer(ticketLine) }.value)
         } while response["error"] as? String == "confirmationPending" && ProcessInfo.processInfo.systemUptime < deadline
-        return checked(finished(toolResult(fromHarnessResponse: response), waited: true, harnessResponse: response))
+        return checked(finished(pressedResult(toolResult(fromHarnessResponse: response), call: call, target: screenTarget),
+                                waited: true, harnessResponse: response))
+    }
+
+    /// press_element's result says WHAT was pressed; the rest is the harness's.
+    static func pressedResult(_ result: [String: Any], call: RealtimeToolCall, target: RealtimeScreenTarget?) -> [String: Any] {
+        guard call.name == RealtimeVoiceVerbs.pressElementName, let candidate = target?.candidate else { return result }
+        var result = result
+        result["target"] = candidate.pressable ? candidate.described : (candidate.pressAncestor?.described ?? candidate.described)
+        if result["error"] as? String == "notFound" { result["error"] = "elementNotFound" }
+        return result
+    }
+
+    /// point_at's result: ok, what was actually pointed at ("group \"Models\""),
+    /// and where — re-read from the live frame the pointer went to.
+    static func pointResult(response: [String: Any], target: RealtimeScreenTarget?, screens: [CGRect]) -> [String: Any] {
+        var result = toolResult(fromHarnessResponse: response)
+        if result["ok"] as? Bool == true, let target {
+            let drawn = RealtimeScreenVerbs.frame(response["drawnRect"])
+            if let candidate = target.candidate, response["approximate"] as? Bool != true {
+                result["pointedAt"] = candidate.described
+                let frame = drawn ?? candidate.frame
+                // Unmoved: the offer's neighbour still stands beside it.
+                let neighbour = frame == candidate.frame ? candidate.position.firstIndex(of: ",").map { String(candidate.position[$0...]) } : nil
+                result["where"] = RealtimeScreenVerbs.positionPhrase(of: frame, neighbours: [], screens: screens) + (neighbour ?? "")
+            } else {
+                result["where"] = RealtimeScreenVerbs.positionPhrase(of: drawn ?? CGRect(origin: target.point, size: .zero), neighbours: [], screens: screens)
+            }
+        }
+        switch result["error"] as? String {
+        case "notFound":
+            result["error"] = "elementNotFound"
+            result["message"] = "that element is no longer in the window; nothing was pointed at"
+        case "elementMoved":
+            result["message"] = "that element is no longer where it was seen; nothing was pointed at"
+        case "ambiguous":
+            result["error"] = "elementAmbiguous"
+            result["message"] = "more than one element in the window has that name; nothing was pointed at"
+        default: break
+        }
+        return result
+    }
+
+    /// point_at / press_element / the reads with no app named: the app in front
+    /// (its bundle identifier). Everything after resolves and checks it as usual.
+    static func withFrontmostApp(_ call: RealtimeToolCall) async -> RealtimeToolCall {
+        guard call.appName == nil, RealtimeVoiceVerbs.takesFrontmostApp(call.name) else { return call }
+        return RealtimeToolCall(callID: call.callID, name: call.name,
+                                appName: await Task.detached { AccessibilityTreeWalker.focusedApplication()?.bundleIdentifier }.value,
+                                words: call.words, path: call.path, elementName: call.elementName, x: call.x, y: call.y,
+                                underPointer: call.underPointer)
+    }
+
+    // MARK: Screen targets
+
+    /// Where point_at / press_element aim, before the harness is asked:
+    ///  - underPointer: the element under the owner's mouse at key-down.
+    ///  - x, y: the screenshot fraction, on the screenshot's own display. With
+    ///    a name the offer holds, that element; else the hit test's snap. No
+    ///    offer needed — the screenshot is the evidence (`screenshotPoint`).
+    ///    Nothing there: an approximate ring for a point; refused for a press.
+    ///  - a name alone: this turn's find_on_screen offer, or the previous turn's
+    ///    under the press_menu rules (`pointOffer`), else `notOffered`.
+    static func resolveScreenTarget(call: RealtimeToolCall, thisTurn: RealtimeStandingOffer?, previousTurn: RealtimeStandingOffer?,
+                                    followUpConfirmed: Bool?, confirmedByYes: Bool, now: TimeInterval,
+                                    screenshotDisplay: CGRect?, screenshotStale: Bool = false, keyDownPointer: RealtimeScreenTarget?,
+                                    hitTest: (CGPoint) async -> RealtimeScreenHit) async -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
+        func refuse(_ error: String, _ message: String) -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
+            .failure(RealtimeToolRefusal(error: error, message: message))
+        }
+        let isPress = call.name == RealtimeVoiceVerbs.pressElementName
+        if call.x != nil || call.y != nil, !call.underPointer, screenshotStale {
+            return refuse("screenshotStale", "the screen has changed since the screenshot this turn, so a position in it is out of date; "
+                + "aim by a name from find_on_screen instead")
+        }
+        if call.underPointer {
+            guard let keyDownPointer else {
+                return refuse("nothingUnderPointer", "nothing nameable was under the owner's pointer when they spoke; ask them what they mean")
+            }
+            return .success(keyDownPointer)
+        }
+        let chosen = pointOffer(name: call.elementName, thisTurn: thisTurn, previousTurn: previousTurn,
+                                followUpConfirmed: followUpConfirmed, confirmedByYes: confirmedByYes, now: now)
+        if let x = call.x, let y = call.y {
+            guard let screenshotDisplay else {
+                return refuse("noScreenshotPosition", "no screenshot was taken this turn, so a position in it names nothing; aim by name")
+            }
+            guard let point = RealtimeScreenVerbs.screenshotPoint(x: x, y: y, display: screenshotDisplay) else {
+                return refuse("positionOutOfRange", "x and y are fractions of the screenshot, each from 0 to 1")
+            }
+            if let name = call.elementName, let offer = chosen.offer, let source = chosen.source {
+                let named = offer.elements.filter { $0.name == name }
+                if let nearest = named.min(by: { hypot($0.frame.midX - point.x, $0.frame.midY - point.y) < hypot($1.frame.midX - point.x, $1.frame.midY - point.y) }) {
+                    return .success(RealtimeScreenTarget(candidate: nearest, point: CGPoint(x: nearest.frame.midX, y: nearest.frame.midY),
+                                                         app: offer.app, source: source))
+                }
+            }
+            switch await hitTest(point) {
+            case .element(let candidate, let app):
+                return .success(RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY),
+                                                     app: app, source: .screenshotPoint))
+            case .refused(let error):
+                return refuse(error, error == "secureField" ? "that is a password field; nothing was done"
+                    : error == "policyRefused" ? "the owner's policy refuses this app; nothing was done" : "that is Clicky itself; nothing was done")
+            case .nothing:
+                if isPress { return refuse("nothingAtPoint", "nothing that can be pressed is at that position; nothing was pressed") }
+                return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .screenshotPoint))
+            }
+        }
+        guard let name = call.elementName else {
+            return refuse("missingTarget", "\(call.name) needs a name from find_on_screen, x and y in the screenshot, or underPointer")
+        }
+        guard let offer = chosen.offer, let source = chosen.source, let candidate = offer.elements.first(where: { $0.name == name }) else {
+            return refuse("notOffered", "Nothing was \(isPress ? "pressed" : "pointed at"). That name was not among what find_on_screen returned; "
+                + "aim by the element's position in the screenshot instead, or call find_on_screen.")
+        }
+        return .success(RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY),
+                                             app: offer.app, source: source))
+    }
+
+    /// "What is at this point?" in `app`: the walk first (the harness's forModel
+    /// snapshot, `RealtimeScreenVerbs.structuralHit`), then the system-wide AX
+    /// hit test, which also refuses a password box and Clicky itself. Blocking
+    /// reads run off the cooperative pool, each under its own deadline. An app
+    /// the policy refuses is refused here too: the AX fallback reads no policy.
+    static func screenHit(at point: CGPoint, app: String?, answer: @escaping @Sendable (String) -> String, screens: [CGRect],
+                          primaryDisplayHeight: CGFloat, deadlineSeconds: Double,
+                          snapshotDeadlineSeconds: Double = 2) async -> (hit: RealtimeScreenHit, rung: String) {
+        if let app, case .success(let line) = harnessRequestLine(
+            for: RealtimeToolCall(callID: "hit", name: RealtimeVoiceVerbs.findOnScreenName, appName: app, words: "hit")),
+           let answered = await RealtimeVoiceSession.value(within: snapshotDeadlineSeconds, { answer(line) }) {
+            let snapshot = harnessResponseObject(answered)
+            // Refused or unreadable: fail closed, never on to the AX path, which reads no policy.
+            if (snapshot["error"] as? String)?.hasPrefix("policy") == true { return (.refused(error: "policyRefused"), "policy") }
+            if let hit = RealtimeScreenVerbs.structuralHit(at: point, snapshotResponse: snapshot, screens: screens) {
+                return (hit, "walk")
+            }
+        }
+        return (await axHit(at: point, screens: screens, primaryDisplayHeight: primaryDisplayHeight, deadlineSeconds: deadlineSeconds), "ax")
+    }
+
+    /// The AX rung alone, bounded, and judged by the per-app policy of the app
+    /// it landed in (fail closed: an unreadable policy file refuses). The key-down
+    /// pointer line uses only this: a walk there would queue in front of the turn's calls.
+    static func axHit(at point: CGPoint, screens: [CGRect], primaryDisplayHeight: CGFloat, deadlineSeconds: Double) async -> RealtimeScreenHit {
+        let hit = await RealtimeVoiceSession.value(within: deadlineSeconds) {
+            RealtimeScreenHitTest.hit(atAppKitPoint: point, primaryDisplayHeight: primaryDisplayHeight, screens: screens)
+        } ?? .nothing
+        guard case .element(_, let app) = hit else { return hit }
+        let allowed = await Task.detached {
+            HarnessPolicy.policyAllowsModelRead(bundleIdentifier: app, load: HarnessAppPolicy.load(from: HarnessServer.policyURL))
+        }.value
+        return allowed ? hit : .refused(error: "policyRefused")
+    }
+
+    /// The key-down screenshot no longer shows the screen once something this
+    /// turn changed it (an acting tool that came back ok — pointing changes
+    /// nothing) or a fresh look replaced it. Review 2026-09-30: an x, y was
+    /// hit-tested on the LIVE screen, not the picture the model read it from.
+    static func screenshotIsStale(decisions: [RealtimeToolDecision], freshLookOutcome: String?) -> Bool {
+        freshLookOutcome != nil || decisions.contains {
+            $0.call.name != RealtimeVoiceVerbs.pointAtName && RealtimeVoiceVerbs.isActingTool($0.call.name) && $0.dispatch?.harnessConfirmed == true
+        }
+    }
+
+    /// Words that claim pressing: only an ok press is their receipt.
+    static let pressClaimPhrases = ["pressed", "clicked"]
+    /// Words that claim pointing: an ok point or press is theirs.
+    static let pointClaimPhrases = ["pointer is now", "pointing at", "pointing to", "highlighted", "is now indicating", "i've pointed"]
+
+    /// The live line's `claimedWithoutReceipt`, by kind: "clicked" needs an ok
+    /// press_element or press_menu, "highlighted" an ok point or press, "done"
+    /// any acting tool's ok. `okToolNames`: the tools whose result said ok true.
+    static func claimedWithoutReceipt(transcript: String, okToolNames: Set<String>) -> Bool {
+        let pressed = !okToolNames.isDisjoint(with: [RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName])
+        let pointed = pressed || okToolNames.contains(RealtimeVoiceVerbs.pointAtName)
+        let acted = !okToolNames.filter(RealtimeVoiceVerbs.isActingTool).isEmpty
+        if !pressed, claims(transcript, phrases: pressClaimPhrases) { return true }
+        if !pointed, claims(transcript, phrases: pointClaimPhrases) { return true }
+        let general = completionClaimPhrases.filter { !pressClaimPhrases.contains($0) && !pointClaimPhrases.contains($0) }
+        return !acted && claims(transcript, phrases: general)
+    }
+
+    /// Sent at key-down beside the frontmost line: the element under the
+    /// owner's mouse, by role and name, quoted — never a value.
+    static func pointerContextLine(candidate: RealtimeScreenCandidate, appName: String?) -> String {
+        "system context, not the owner's words: the owner's mouse pointer is over \(candidate.described)"
+            + (appName.map { " in \(UntrustedText($0).forDisplay)" } ?? "") + "."
     }
 
     /// What the model is told when the named app is not one installed app.
@@ -558,7 +847,11 @@ nonisolated enum RealtimeOpenAppTool {
 
     /// Whose find offered the pressed path (voice-decisions.log `offerSource`).
     enum OfferSource: String, Sendable {
-        case thisTurn, previousTurnConfirmedByWords
+        case thisTurn, previousTurnConfirmedByWords, previousTurnConfirmedByYes
+        /// point_at / press_element aimed by a position in the key-down screenshot.
+        case screenshotPoint
+        /// point_at / press_element aimed at the element under the owner's mouse.
+        case underPointer
     }
 
     /// Ask-then-confirm spans two turns: the model searches, asks, and the owner
@@ -575,12 +868,53 @@ nonisolated enum RealtimeOpenAppTool {
     /// had no such words. Else this
     /// turn's offer, which `harnessRequestLine` refuses as `notOffered`. The
     /// app is still checked there: an offer is pressed only in its own app.
+    /// `confirmedByYes`: `RealtimeDecisionTrace.confirmedByPlainYes` — a bare
+    /// yes to the one item the previous answer named — opens the same door,
+    /// under the same 60 s, one turn back and (in `harnessRequestLine`) same app.
     static func pressOffer(path: [String]?, thisTurn: RealtimeStandingOffer?, previousTurn: RealtimeStandingOffer?,
-                           followUpConfirmed: Bool?, now: TimeInterval) -> (offer: RealtimeStandingOffer?, source: OfferSource?) {
-        if RealtimeDecisionTrace.choseFromOffered(path: path, offered: thisTurn?.candidates) == true { return (thisTurn, .thisTurn) }
-        if let previousTurn, followUpConfirmed == true, now - previousTurn.uptime <= previousTurnOfferMaximumAgeSeconds,
-           RealtimeDecisionTrace.choseFromOffered(path: path, offered: previousTurn.candidates) == true {
-            return (previousTurn, .previousTurnConfirmedByWords)
+                           followUpConfirmed: Bool?, confirmedByYes: Bool = false,
+                           now: TimeInterval) -> (offer: RealtimeStandingOffer?, source: OfferSource?) {
+        standingOffer(thisTurn: thisTurn, previousTurn: previousTurn, followUpConfirmed: followUpConfirmed,
+                      confirmedByYes: confirmedByYes, now: now) { RealtimeDecisionTrace.choseFromOffered(path: path, offered: $0.candidates) == true }
+    }
+
+    /// A plain yes for this press or point (`RealtimeDecisionTrace.confirmedByPlainYes`),
+    /// judged against ONE kind of offer: the previous turn's LATEST find
+    /// (review 2026-09-30). A turn that searched the menus, then the window, and
+    /// asked about the window's "Toggle Panel" was answered about that control —
+    /// never the menu item that shares its words.
+    static func plainYesConfirms(call: RealtimeToolCall, heard: String?, previousSaid: String?,
+                                 previousMenu: RealtimeStandingOffer?, previousScreen: RealtimeStandingOffer?) -> Bool {
+        let isPoint = RealtimeVoiceVerbs.isScreenTargetTool(call.name)
+        guard isPoint || call.name == RealtimeVoiceVerbs.pressMenuName else { return false }
+        let latestIsScreen: Bool
+        switch (previousMenu, previousScreen) {
+        case (nil, nil): return false
+        case (nil, _): latestIsScreen = true
+        case (_, nil): latestIsScreen = false
+        case let (menu?, screen?): latestIsScreen = screen.uptime > menu.uptime
+        }
+        guard latestIsScreen == isPoint else { return false }
+        let labels = isPoint ? (previousScreen?.elements.map(\.name) ?? []) : (previousMenu?.candidates.compactMap(\.path.last) ?? [])
+        return RealtimeDecisionTrace.confirmedByPlainYes(heard: heard, previousSaid: previousSaid, offeredLabels: labels,
+                                                         label: isPoint ? call.elementName : call.path?.last)
+    }
+
+    /// point_at's offer, by the same rules as a press: its name among the controls offered.
+    static func pointOffer(name: String?, thisTurn: RealtimeStandingOffer?, previousTurn: RealtimeStandingOffer?,
+                           followUpConfirmed: Bool?, confirmedByYes: Bool = false,
+                           now: TimeInterval) -> (offer: RealtimeStandingOffer?, source: OfferSource?) {
+        standingOffer(thisTurn: thisTurn, previousTurn: previousTurn, followUpConfirmed: followUpConfirmed,
+                      confirmedByYes: confirmedByYes, now: now) { offer in name.map { name in offer.elements.contains { $0.name == name } } ?? false }
+    }
+
+    private static func standingOffer(thisTurn: RealtimeStandingOffer?, previousTurn: RealtimeStandingOffer?, followUpConfirmed: Bool?,
+                                      confirmedByYes: Bool, now: TimeInterval,
+                                      offers: (RealtimeStandingOffer) -> Bool) -> (offer: RealtimeStandingOffer?, source: OfferSource?) {
+        if let thisTurn, offers(thisTurn) { return (thisTurn, .thisTurn) }
+        if let previousTurn, now - previousTurn.uptime <= previousTurnOfferMaximumAgeSeconds, offers(previousTurn) {
+            if followUpConfirmed == true { return (previousTurn, .previousTurnConfirmedByWords) }
+            if confirmedByYes { return (previousTurn, .previousTurnConfirmedByYes) }
         }
         return (thisTurn, nil)
     }
@@ -600,7 +934,7 @@ nonisolated enum RealtimeOpenAppTool {
     /// (every line sent carries it). A heard refusal, an unresolved app, a
     /// notOffered refusal or a superseded call never sent one.
     static func passedOfferGate(toolName: String, dispatch: RealtimeToolDispatch) -> Bool {
-        toolName == RealtimeVoiceVerbs.pressMenuName && dispatch.harnessResponse != nil
+        (toolName == RealtimeVoiceVerbs.pressMenuName || RealtimeVoiceVerbs.isScreenTargetTool(toolName)) && dispatch.harnessResponse != nil
     }
 
     /// A name as the notch shows it: bare when nothing in it needed escaping,
@@ -619,8 +953,16 @@ nonisolated enum RealtimeOpenAppTool {
     static func notchAnswer(for call: RealtimeToolCall, dispatch: RealtimeToolDispatch) -> JarvisNotchEvent? {
         let error = dispatch.result["error"] as? String
         switch call.name {
-        case RealtimeVoiceVerbs.findMenuItemsName:
+        case RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.findOnScreenName:
             return dispatch.harnessConfirmed ? nil : .harnessAnswered(ok: false, subject: "", error: error)
+        case RealtimeVoiceVerbs.pointAtName:
+            // Pointing proves where a control is, not that anything happened: an
+            // intent caption, never the cyan proof.
+            let subject = captionName(call.elementName ?? "")
+            return dispatch.harnessConfirmed ? .toolCall(title: "\(subject.isEmpty ? "It" : subject) \u{2014} here")
+                : .harnessAnswered(ok: false, subject: subject, error: error)
+        case RealtimeVoiceVerbs.pressElementName:
+            return .harnessAnswered(ok: dispatch.harnessConfirmed, subject: captionName(call.elementName ?? "it"), error: error)
         case RealtimeVoiceVerbs.pressMenuName:
             return .harnessAnswered(ok: dispatch.harnessConfirmed,
                                     subject: RealtimeVoiceVerbs.menuPathCaption(call.path ?? []), error: error)
@@ -636,7 +978,10 @@ nonisolated enum RealtimeOpenAppTool {
     /// probe's count can be read side by side. Matched whole-word, any case.
     static let completionClaimPhrases = [
         "done", "opened", "open", "ready", "there it is", "here it is", "in front",
-        "up and running", "launched", "as requested"
+        "up and running", "launched", "as requested",
+        // Pointing and pressing (live BE391D: "The pointer is now indicating 'Models'"
+        // after a refused point); each kind's receipt is `claimedWithoutReceipt`'s.
+        "pointer is now", "pointing at", "pointing to", "highlighted", "is now indicating", "i've pointed", "pressed", "clicked"
     ]
 
     /// A claim in the same clause as a negation ("it didn't open", "not ready") is
@@ -646,14 +991,30 @@ nonisolated enum RealtimeOpenAppTool {
     /// Did the model speak a completion claim? Whole words, case-insensitive; a
     /// claim preceded within three words by a negation does not count.
     static func claimsCompletion(_ transcript: String) -> Bool {
-        let words = transcript.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
-            .split { !($0.isLetter || $0 == "'") }.map(String.init)
-        return completionClaimPhrases.contains { phrase in
-            let phraseWords = phrase.split(separator: " ").map(String.init)
-            guard words.count >= phraseWords.count else { return false }
-            return (0...(words.count - phraseWords.count)).contains { start in
-                guard Array(words[start..<(start + phraseWords.count)]) == phraseWords else { return false }
-                return !words[max(0, start - 3)..<start].contains { negations.contains($0) || $0.hasSuffix("n't") }
+        claims(transcript, phrases: completionClaimPhrases)
+    }
+
+    /// A phrase said as a statement: whole words, not within three words of a
+    /// negation, and not in a sentence that ends in a question mark
+    /// ("highlighted?" asks; it claims nothing).
+    static func claims(_ transcript: String, phrases: [String]) -> Bool {
+        var statements: [String] = []
+        var current = ""
+        for character in transcript.replacingOccurrences(of: "\u{2019}", with: "'") {
+            guard ".!?\n".contains(character) else { current.append(character); continue }
+            if character != "?" { statements.append(current) }
+            current = ""
+        }
+        statements.append(current)
+        return statements.contains { sentence in
+            let words = sentence.lowercased().split { !($0.isLetter || $0 == "'") }.map(String.init)
+            return phrases.contains { phrase in
+                let phraseWords = phrase.split(separator: " ").map(String.init)
+                guard words.count >= phraseWords.count else { return false }
+                return (0...(words.count - phraseWords.count)).contains { start in
+                    guard Array(words[start..<(start + phraseWords.count)]) == phraseWords else { return false }
+                    return !words[max(0, start - 3)..<start].contains { negations.contains($0) || $0.hasSuffix("n't") }
+                }
             }
         }
     }
@@ -698,6 +1059,8 @@ nonisolated struct RealtimeToolDispatch {
     var answeredUptime: TimeInterval? = nil
     /// find_menu_items only: what the model was offered.
     var menuOffer: RealtimeMenuOffer? = nil
+    /// find_on_screen only: what the model was offered.
+    var screenOffer: RealtimeScreenOffer? = nil
     /// find_menu_items / press_menu: the app check (`RealtimeOpenAppTool.appCheck`).
     var appCheck: [String: Any]? = nil
     /// Every app-naming tool: the heard-vs-named check (`RealtimeHeardCheck.traceObject`).

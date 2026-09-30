@@ -215,7 +215,15 @@ nonisolated enum JarvisNotchReason {
         // The heard-vs-named check (2026-09-25); a mismatch names the app heard.
         "heardNamedMismatch": "heard another app, asking first",
         "heardUnavailable": "didn\u{2019}t catch the app, asking",
-        "heardUnconfirmed": "not sure which app, asking"
+        "heardUnconfirmed": "not sure which app, asking",
+        // find_on_screen / point_at (2026-09-30).
+        "elementNotFound": "it\u{2019}s no longer on screen",
+        "elementAmbiguous": "more than one has that name",
+        "elementMoved": "it moved since I looked",
+        "missingElementName": "no control was named",
+        "secureField": "that\u{2019}s a password field",
+        "targetNotOnScreen": "it\u{2019}s not on screen",
+        "frameUnreadable": "its position didn\u{2019}t read"
     ]
 
     /// `subject` is the app HEARD for a heard-vs-named mismatch ("heard

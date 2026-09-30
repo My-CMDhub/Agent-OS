@@ -3,8 +3,8 @@
 //  leanring-buddy
 //
 //  One open speech-to-speech session — OpenAI Realtime or Gemini Live — with the
-//  voice tools (`open_app`, `focus_app`, `find_menu_items`, `press_menu`)
-//  declared and answered. Shared by the live push-to-talk loop
+//  voice tools (`open_app`, `focus_app`, `find_menu_items`, `press_menu`,
+//  `find_on_screen`, `point_at`) declared and answered. Shared by the live push-to-talk loop
 //  (`RealtimeVoiceSession`) and `--voice-tool-probe`, so the probe measures the
 //  exact tool path the owner talks to.
 //
@@ -39,6 +39,16 @@ final class RealtimeTurnMarks {
     /// The previous turn's `latestMenuOffer`, carried at `beginTurn` and never
     /// further: a press may use it only as `RealtimeOpenAppTool.pressOffer` allows.
     var previousTurnMenuOffer: RealtimeStandingOffer?
+    /// The same pair for find_on_screen's controls (`RealtimeOpenAppTool.pointOffer`).
+    var latestScreenOffer: RealtimeStandingOffer?
+    var previousTurnScreenOffer: RealtimeStandingOffer?
+    /// The key-down screenshot's display (AppKit): what point_at's x and y are fractions of.
+    var screenshotDisplayFrame: CGRect?
+    /// The element under the owner's mouse at key-down (`underPointer`).
+    var keyDownPointer: RealtimeScreenTarget?
+    /// What the previous answer SAID (`transcript`), carried only when the owner
+    /// heard all of it — the plain-yes gate reads it (`confirmedByPlainYes`).
+    var previousTurnSaid: String?
     var toolResultSentUptime: TimeInterval?
     /// First audio after the LATEST tool result — with find -> press, the words
     /// about the press, not a "one moment" between the two calls.
@@ -190,6 +200,8 @@ final class RealtimeVoiceConnection {
     /// many calls in one turn, not left to loop against the harness. focus ->
     /// find -> press is three, so five leaves one retry and no more.
     static let maximumToolCallsPerTurn = 5
+    /// A position's hit test: 0.25 s of AX messaging timeout, plus room to walk up.
+    static let hitTestDeadlineSeconds: Double = 0.4
     static let supersededError = "superseded"
     static let openAICancelNotActiveCode = "response_cancel_not_active"
     static let openAIMaxOutputTokens = VoiceStackBenchmark.openAIRealtimeMaxOutputTokens
@@ -335,9 +347,15 @@ final class RealtimeVoiceConnection {
     /// the previous turn's — dropped, never appended to this one.
     static let geminiStaleHeardPieceSeconds: Double = 1.0
 
-    func beginTurn() async throws {
+    /// `previousReplyWasHeard`: the previous answer's audio had finished playing
+    /// when the owner pressed. Its transcript runs ahead of the audio, so a press
+    /// mid-answer leaves words in it the owner never heard; then no plain yes
+    /// can confirm what it named. Defaults to false: only the live loop knows.
+    func beginTurn(previousReplyWasHeard: Bool = false) async throws {
         let previous = turn
         turn = RealtimeTurnMarks()
+        turn.previousTurnScreenOffer = previous.latestScreenOffer
+        if previousReplyWasHeard, !previous.transcript.isEmpty { turn.previousTurnSaid = previous.transcript }
         // Also a barged-in turn's: barging in is how an owner says "yes, that one"
         // while the question is still being asked. But only a find that finished
         // BEFORE the press made an offer: one cut off before it ran, or still
@@ -640,16 +658,21 @@ final class RealtimeVoiceConnection {
             let call = appNameOverride.map { RealtimeToolCall(callID: providerCall.callID, name: providerCall.name, appName: $0) } ?? providerCall
             turn.toolCalls.append(call)
             let decisionIndex = turn.decisions.count
-            turn.decisions.append(RealtimeToolDecision(call: call, callUptime: arrivalUptime, offeredBeforeCall: turn.latestMenuOffer?.candidates))
+            turn.decisions.append(RealtimeToolDecision(call: call, callUptime: arrivalUptime, offeredBeforeCall: turn.latestMenuOffer?.candidates,
+                                                       offeredElementsBeforeCall: turn.latestScreenOffer?.elements))
             turn.toolsInFlight += 1
             let overLimit = turn.toolCalls.count > Self.maximumToolCallsPerTurn
             let previousCall = turn.lastCallTask
             turn.lastCallTask = Task { @MainActor [weak self] in
                 await previousCall?.value
+                // No app named on a screen tool or a read: the app in front is meant.
+                let call = await RealtimeOpenAppTool.withFrontmostApp(call)
                 // Read now, after the previous call finished: a find and a press sent
                 // in one batch must still press what that find offered.
                 let thisTurnOffer = turn.latestMenuOffer
+                let thisTurnScreenOffer = turn.latestScreenOffer
                 turn.decisions[decisionIndex].offeredBeforeCall = thisTurnOffer?.candidates
+                turn.decisions[decisionIndex].offeredElementsBeforeCall = thisTurnScreenOffer?.elements
                 var dispatch: RealtimeToolDispatch
                 if overLimit {
                     let refusal = RealtimeToolRefusal(error: "tooManyToolCalls", message: "only \(Self.maximumToolCallsPerTurn) tool calls are allowed per turn")
@@ -666,11 +689,44 @@ final class RealtimeVoiceConnection {
                     let heard = await Self.heardCheck(for: call, in: turn)
                     // Which offer the notOffered gate judges by: this turn's, or the previous
                     // turn's when the owner's own words name the item. The trace records it.
+                    // point_at / press_element: a name from the offer, a screenshot
+                    // position (hit-tested) or the owner's pointer, resolved here.
+                    let isScreenTarget = RealtimeVoiceVerbs.isScreenTargetTool(call.name)
                     let chosen = RealtimeOpenAppTool.pressOffer(path: call.path, thisTurn: thisTurnOffer, previousTurn: turn.previousTurnMenuOffer,
-                                                                followUpConfirmed: heard?.followUpConfirmed, now: ProcessInfo.processInfo.systemUptime)
-                    let offered = chosen.offer?.candidates
-                    let offeredApp = chosen.offer?.app
-                    turn.decisions[decisionIndex].offeredBeforeCall = offered
+                                                                followUpConfirmed: heard?.followUpConfirmed, confirmedByYes: heard?.confirmedByYes == true,
+                                                                now: ProcessInfo.processInfo.systemUptime)
+                    let offered = isScreenTarget ? nil : chosen.offer?.candidates
+                    let offeredApp = isScreenTarget ? nil : chosen.offer?.app
+                    var screenTarget: RealtimeScreenTarget?
+                    var screenRefusal: RealtimeToolRefusal?
+                    if isScreenTarget {
+                        let rung = RungBox()
+                        let screens = NSScreen.screens.map(\.frame)
+                        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+                        let resolved = await RealtimeOpenAppTool.resolveScreenTarget(
+                            call: call, thisTurn: thisTurnScreenOffer, previousTurn: turn.previousTurnScreenOffer,
+                            followUpConfirmed: heard?.followUpConfirmed, confirmedByYes: heard?.confirmedByYes == true,
+                            now: ProcessInfo.processInfo.systemUptime, screenshotDisplay: turn.screenshotDisplayFrame,
+                            screenshotStale: RealtimeOpenAppTool.screenshotIsStale(decisions: Array(turn.decisions[..<decisionIndex]),
+                                                                                  freshLookOutcome: turn.freshLookOutcome),
+                            keyDownPointer: turn.keyDownPointer) { point in
+                                let answered = await RealtimeOpenAppTool.screenHit(at: point, app: call.appName, answer: harnessAnswer, screens: screens,
+                                                                                   primaryDisplayHeight: primaryHeight,
+                                                                                   deadlineSeconds: Self.hitTestDeadlineSeconds)
+                                rung.value = answered.rung
+                                return answered.hit
+                            }
+                        switch resolved {
+                        case .success(let target):
+                            screenTarget = target
+                            // Which rung named it: the offer, the key-down pointer, the walk or AX.
+                            turn.decisions[decisionIndex].snappedBy = target.source == .screenshotPoint ? (rung.value ?? "none") : target.source.rawValue
+                        case .failure(let refusal): screenRefusal = refusal
+                        }
+                        turn.decisions[decisionIndex].offeredElementsBeforeCall = (thisTurnScreenOffer ?? turn.previousTurnScreenOffer)?.elements
+                    } else {
+                        turn.decisions[decisionIndex].offeredBeforeCall = offered
+                    }
                     // The owner pressed the key again while this call waited: whatever
                     // it would do answers a turn nobody is waiting on. Never run it.
                     @MainActor func recordSuperseded(autoFocus: [String: Any]? = nil) {
@@ -695,12 +751,17 @@ final class RealtimeVoiceConnection {
                         dispatch = RealtimeToolDispatch(result: refusal, harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: nil)
                         JarvisNotch.shared.handle(.harnessAnswered(ok: false, subject: RealtimeOpenAppTool.captionName(heard?.heardApp ?? ""),
                                                                    error: refusal["error"] as? String))
+                    } else if let screenRefusal {
+                        dispatch = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: screenRefusal), harnessMilliseconds: 0,
+                                                        waitedForConfirmation: false, harnessResponse: nil)
+                        JarvisNotch.shared.handle(.harnessAnswered(ok: false, subject: "", error: screenRefusal.error))
                     } else {
                         let onConfirmationRequired: @MainActor () -> Void = {
                             if isKnownTool { JarvisNotch.shared.handle(.confirmationRequired) }
                         }
-                        dispatch = await RealtimeOpenAppTool.dispatch(call, offered: offered, offeredApp: offeredApp, answer: harnessAnswer,
-                                                                      onConfirmationRequired: onConfirmationRequired)
+                        dispatch = await RealtimeOpenAppTool.dispatch(call, offered: offered, offeredApp: offeredApp, screenTarget: screenTarget,
+                                                                      screenshotDisplay: turn.screenshotDisplayFrame,
+                                                                      answer: harnessAnswer, onConfirmationRequired: onConfirmationRequired)
                         // Both witnesses name one running app and only the app in front is
                         // wrong: bring it forward through the harness (policy applies), then
                         // run this call ONCE more. Never a loop, never a launch.
@@ -726,7 +787,8 @@ final class RealtimeVoiceConnection {
                                 } else {
                                     guard self?.turn === turn, !turn.supersededByPress else { return recordSuperseded(autoFocus: autoFocus) }
                                     JarvisNotch.shared.handle(.toolCall(title: RealtimeVoiceVerbs.intentTitle(for: call)))
-                                    dispatch = await RealtimeOpenAppTool.dispatch(call, offered: offered, offeredApp: offeredApp, answer: harnessAnswer,
+                                    dispatch = await RealtimeOpenAppTool.dispatch(call, offered: offered, offeredApp: offeredApp,
+                                                                                  screenTarget: screenTarget, answer: harnessAnswer,
                                                                                   onConfirmationRequired: onConfirmationRequired)
                                     autoFocus["retried"] = true
                                 }
@@ -741,7 +803,7 @@ final class RealtimeVoiceConnection {
                     dispatch.heardCheck = heard?.trace
                     dispatch.heardOverlapsLabel = heard?.overlapsLabel
                     if RealtimeOpenAppTool.passedOfferGate(toolName: call.name, dispatch: dispatch) {
-                        turn.decisions[decisionIndex].offerSource = chosen.source
+                        turn.decisions[decisionIndex].offerSource = isScreenTarget ? screenTarget?.source : chosen.source
                     }
                 }
                 turn.dispatches.append(dispatch)
@@ -752,6 +814,10 @@ final class RealtimeVoiceConnection {
                     turn.latestMenuOffer = RealtimeStandingOffer(candidates: offer.candidates,
                                                                  app: dispatch.appCheck?["resolvedBundleId"] as? String,
                                                                  uptime: ProcessInfo.processInfo.systemUptime)
+                }
+                if let offer = dispatch.screenOffer, self?.turn === turn, !turn.supersededByPress {
+                    turn.latestScreenOffer = RealtimeStandingOffer(candidates: [], app: dispatch.appCheck?["resolvedBundleId"] as? String,
+                                                                   uptime: ProcessInfo.processInfo.systemUptime, elements: offer.candidates)
                 }
                 // The harness's verification is the proof, so the result goes now and
                 // the model confirms the outcome. The model's only picture is the
@@ -776,15 +842,21 @@ final class RealtimeVoiceConnection {
     /// that names no app (it is refused as `missingAppName` anyway).
     private static func heardCheck(for call: RealtimeToolCall, in turn: RealtimeTurnMarks) async
         -> (refusal: [String: Any]?, heardApp: String?, decision: RealtimeHeardCheck.Decision, trace: [String: Any], overlapsLabel: Bool?,
-            followUpConfirmed: Bool?)? {
-        guard RealtimeHeardCheck.appliesTo(toolName: call.name), let named = call.appName else { return nil }
+            followUpConfirmed: Bool?, confirmedByYes: Bool)? {
+        guard RealtimeHeardCheck.appliesTo(toolName: call.name), let appName = call.appName else { return nil }
+        // An app filled in from the one in front is a bundle identifier; the words are matched against names.
+        let named = await Task.detached { () -> String in
+            guard appName.contains("."), !appName.contains(" "),
+                  case .resolved(_, let name) = RealtimeVoiceVerbs.appIdentity(named: appName) else { return appName }
+            return name
+        }.value
         let waitStart = ProcessInfo.processInfo.systemUptime
         let released = turn.lastAudioSentUptime ?? waitStart
         let transcript = await turn.waitForHeard(until: released + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds)
         let waitedMs = Int(((ProcessInfo.processInfo.systemUptime - waitStart) * 1000).rounded())
         // The app list reads the file system: off main.
         let afterHeardRefusal = turn.heardRefusals > 0
-        let menuWords = RealtimeVoiceVerbs.foldedTokens(([call.words ?? ""] + (call.path ?? [])).joined(separator: " "))
+        let menuWords = RealtimeVoiceVerbs.foldedTokens(([call.words ?? "", call.elementName ?? ""] + (call.path ?? [])).joined(separator: " "))
         let (decision, namedAppIsRunning) = await Task.detached { () -> (RealtimeHeardCheck.Decision, Bool) in
             let decision = RealtimeHeardCheck.decide(transcript: transcript, named: named, among: RealtimeVoiceVerbs.installedAppNames(),
                                                      afterHeardRefusal: afterHeardRefusal, toolName: call.name, menuWords: menuWords)
@@ -793,12 +865,20 @@ final class RealtimeVoiceConnection {
             return (decision, RealtimeVoiceVerbs.isRunning(named: named))
         }.value
         let arrivalMs = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime).map { Int((($0 - released) * 1000).rounded()) }
-        let refusal = RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named, namedAppIsRunning: namedAppIsRunning)
+        // A read is never refused here (`mayRefuse`); its decision still drives auto-focus.
+        let refusal = RealtimeHeardCheck.mayRefuse(toolName: call.name)
+            ? RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named, namedAppIsRunning: namedAppIsRunning) : nil
         if refusal != nil { turn.heardRefusals += 1 }
+        // The item a press or a point names.
+        let isPoint = RealtimeVoiceVerbs.isScreenTargetTool(call.name)
+        let label = isPoint ? call.elementName : call.path?.last
+        let choosing = call.name == RealtimeVoiceVerbs.pressMenuName || isPoint
         return (refusal, decision.heardApps.first, decision,
                 RealtimeHeardCheck.traceObject(decision, named: named, transcriptArrivalMs: arrivalMs, waitedMs: waitedMs, refused: refusal != nil),
                 call.name == RealtimeVoiceVerbs.pressMenuName ? RealtimeDecisionTrace.heardOverlapsLabel(heard: transcript, path: call.path) : nil,
-                call.name == RealtimeVoiceVerbs.pressMenuName ? RealtimeDecisionTrace.followUpConfirmed(heard: transcript, path: call.path) : nil)
+                choosing ? RealtimeDecisionTrace.followUpConfirmed(heard: transcript, path: label.map { [$0] }) : nil,
+                RealtimeOpenAppTool.plainYesConfirms(call: call, heard: transcript, previousSaid: turn.previousTurnSaid,
+                                                     previousMenu: turn.previousTurnMenuOffer, previousScreen: turn.previousTurnScreenOffer))
     }
 
     /// Context only: OpenAI gets a user image item and no `response.create`;
@@ -856,4 +936,9 @@ final class RealtimeVoiceConnection {
             turn.finished.settle(.failure(VoiceBenchFailure(kind: "\(stack.rawValue):toolResultSendFailed")))
         }
     }
+}
+
+/// The hit test's rung, written from inside `resolveScreenTarget`'s closure.
+@MainActor private final class RungBox {
+    var value: String?
 }

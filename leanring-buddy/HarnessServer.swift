@@ -70,6 +70,15 @@ struct HarnessRawRequest: Decodable {
     /// highlight only: how long the outline stays, and a short caption for it.
     let seconds: Double?
     let label: String?
+    /// highlight only: the voice loop's `point_at` — the pointer flies to the
+    /// element and marks it by role (`ElementPointer`), instead of the outline.
+    let pointer: Bool?
+    /// snapshot / menus only: see `HarnessRequest.forModel`.
+    let forModel: Bool?
+    /// press only: see `HarnessRequest.requireAtPoint`.
+    let requireAtPoint: Bool?
+    /// highlight + pointer only: see `HarnessRequest.speechHold`.
+    let speechHold: Bool?
 }
 
 struct HarnessPoint: Decodable {
@@ -236,6 +245,21 @@ struct HarnessRequest: Equatable {
     /// highlight only, already clamped and validated by `decode`.
     var highlightSeconds: Double = HarnessPolicy.defaultHighlightSeconds
     var label: String? = nil
+    /// highlight only: draw `ElementPointer` instead of the outline.
+    var pointer: Bool = false
+    /// snapshot / menus only: the voice loop's read, whose names go to a remote
+    /// model, so the per-app policy applies (`modelReadRefusal`).
+    var forModel: Bool = false
+    /// press, and every pointer: refuse unless the resolved element contains
+    /// `nearPoint` — a single match skips the resolver's point narrowing, so a
+    /// same-named element elsewhere would otherwise be the one acted on.
+    var requireAtPoint: Bool = false
+    /// highlight + pointer only (`"target":"point"`): no element, just an
+    /// approximate ring at `nearPoint`.
+    var aimAtPoint: Bool = false
+    /// highlight + pointer only: the voice loop's pointer, held while its reply
+    /// plays (`ElementPointer.holdWhile`); without it the request's `seconds` hold.
+    var speechHold: Bool = false
 }
 
 // MARK: - Pure decision logic
@@ -269,19 +293,22 @@ enum HarnessPolicy {
         // somewhere the caller did not ask for.
         var aimAtFocus = false
         var aimAtWindow = false
+        var aimAtPoint = false
         if let target = raw.target {
             switch target {
             case "focused": aimAtFocus = true
             // Outline only. An acting verb aimed at a whole window would press
             // or type into the window element, which no caller means.
             case "window" where verb == .highlight: aimAtWindow = true
+            // The voice loop's approximate ring: a point with nothing to name there.
+            case "point" where verb == .highlight && raw.pointer == true && raw.nearPoint != nil: aimAtPoint = true
             default: return .failure(.invalidField(field: "target", value: target))
             }
         }
 
         // A name is what an acting verb aims with — unless it is aiming by focus,
         // which is the whole point of the focus target.
-        if verb.elementAction != nil || verb == .highlight, !aimAtFocus, !aimAtWindow, (raw.title ?? "").isEmpty {
+        if verb.elementAction != nil || verb == .highlight, !aimAtFocus, !aimAtWindow, !aimAtPoint, (raw.title ?? "").isEmpty {
             return .failure(.missingField("title"))
         }
 
@@ -351,6 +378,25 @@ enum HarnessPolicy {
         if let label = raw.label, !UntrustedText(label).isPlausibleControlLabel {
             return .failure(.invalidField(field: "label", value: UntrustedText(label).forDisplay))
         }
+        // A pointer is an outline's style, never an acting verb's option.
+        if raw.pointer == true, verb != .highlight {
+            return .failure(.invalidField(field: "pointer", value: "true"))
+        }
+        // The pointer aims where the offer saw the control; without the point
+        // it cannot tell that control from a same-named one elsewhere.
+        if raw.pointer == true, raw.nearPoint == nil {
+            return .failure(.missingField("nearPoint"))
+        }
+        if raw.forModel == true, verb != .snapshot, verb != .menus {
+            return .failure(.invalidField(field: "forModel", value: "true"))
+        }
+        if raw.speechHold == true, verb != .highlight || raw.pointer != true {
+            return .failure(.invalidField(field: "speechHold", value: "true"))
+        }
+        if raw.requireAtPoint == true {
+            guard verb == .press else { return .failure(.invalidField(field: "requireAtPoint", value: "true")) }
+            guard raw.nearPoint != nil else { return .failure(.missingField("nearPoint")) }
+        }
 
         var mode = TypeMode.insert
         if verb == .type {
@@ -392,11 +438,56 @@ enum HarnessPolicy {
             tier: tier,
             escalate: raw.escalate ?? false,
             highlightSeconds: clampedHighlightSeconds(raw.seconds),
-            label: raw.label
+            label: raw.label,
+            pointer: raw.pointer ?? false,
+            forModel: raw.forModel ?? false,
+            requireAtPoint: raw.requireAtPoint ?? false,
+            aimAtPoint: aimAtPoint,
+            speechHold: raw.speechHold ?? false
         ))
     }
 
     static let defaultHighlightSeconds = 2.0
+
+    /// The voice loop's pointer, after the resolver: never onto a password box
+    /// (by SUBROLE — secure fields are AXTextField/AXSecureTextField — or a text
+    /// field whose subrole did not read), and only where the offer saw it. A
+    /// single match skips the resolver's `nearPoint` narrowing, so a control
+    /// that is gone and a same-named one elsewhere would otherwise be pointed at.
+    static func pointerRefusal(resolvedFrame: CGRect, nearPoint: CGPoint?, role: String, subrole: String?,
+                               subroleReadFailed: Bool) -> (code: String, message: String)? {
+        if subrole == ActionSafetyKernel.secureFieldSubrole || (role == "AXTextField" && subroleReadFailed) {
+            return ("secureField", "the element is a secure text field (or a text field whose subrole could not be read); nothing is pointed at")
+        }
+        return movedRefusal(resolvedFrame: resolvedFrame, nearPoint: nearPoint)
+    }
+
+    /// `requireAtPoint`'s check, shared by the pointer and press_element.
+    /// May an app's names go to the model? The policy file read once, failing
+    /// closed: unreadable refuses, missing allows, `refuse` refuses.
+    static func policyAllowsModelRead(bundleIdentifier: String?, load: HarnessAppPolicy.Load) -> Bool {
+        switch load {
+        case .missing: return true
+        case .unreadable: return false
+        case .loaded(let policy, _): return modelReadRefusal(forModel: true, bundleIdentifier: bundleIdentifier, policy: policy) == nil
+        }
+    }
+
+    static func movedRefusal(resolvedFrame: CGRect, nearPoint: CGPoint?) -> (code: String, message: String)? {
+        guard let nearPoint, resolvedFrame.contains(nearPoint) else {
+            return ("elementMoved", "the element with that name is no longer where it was aimed; nothing was done to it")
+        }
+        return nil
+    }
+
+    /// `snapshot` / `menus` with `forModel`: the voice loop's reads, whose names
+    /// go to a remote model. A policy `refuse` is "do not touch this app", and
+    /// handing its names to a model counts, as a photograph does for `look`.
+    /// `confirm` gates acting, not reading. nil policy = no file = allow.
+    static func modelReadRefusal(forModel: Bool, bundleIdentifier: String?, policy: HarnessAppPolicy.Policy?) -> String? {
+        guard forModel, HarnessAppPolicy.verdict(for: bundleIdentifier, in: policy).0 == .refuse else { return nil }
+        return "app policy refuses \(bundleIdentifier ?? "this app") — none of its names were read for the model"
+    }
 
     /// Long enough to see, short enough that a forgotten outline cannot sit over
     /// the owner's work: 0.5-10 s, default 2.
@@ -1390,7 +1481,8 @@ final class HarnessServer {
         consumedTicketID = nil
         // `look` is read-only but takes a photograph, and a policy `refuse` is
         // "do not touch this app" — a picture of it counts.
-        if request.verb.isMutating || request.verb == .look {
+        // A voice read hands names to a remote model, so it asks the policy too.
+        if request.verb.isMutating || request.verb == .look || request.forModel {
             switch HarnessAppPolicy.load(from: Self.policyURL) {
             case .loaded(let policy, _): loadedPolicy = policy
             case .missing: break
@@ -1442,6 +1534,14 @@ final class HarnessServer {
     // MARK: snapshot
 
     private func snapshotResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        // A voice read of a refused app is refused before one of its elements is
+        // read (review 2026-09-30), and again below against the app actually walked.
+        if request.forModel, let reason = HarnessPolicy.modelReadRefusal(
+            forModel: true, bundleIdentifier: AccessibilityTreeWalker.focusedApplication()?.bundleIdentifier, policy: loadedPolicy
+        ) {
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "policyRefused", startedAt: startedAt)
+            return ["ok": false, "error": "policyRefused", "message": reason]
+        }
         let snapshot: AccessibilityWindowSnapshot
         do {
             snapshot = try AccessibilityTreeWalker.snapshotFocusedWindow()
@@ -1455,6 +1555,12 @@ final class HarnessServer {
             request, name: snapshot.applicationName, bundleIdentifier: snapshot.bundleIdentifier,
             dryRun: dryRun, startedAt: startedAt
         ) { return refusal }
+
+        if let reason = HarnessPolicy.modelReadRefusal(forModel: request.forModel, bundleIdentifier: snapshot.bundleIdentifier,
+                                                       policy: loadedPolicy) {
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "policyRefused", startedAt: startedAt)
+            return ["ok": false, "error": "policyRefused", "message": reason]
+        }
 
         guard let rootNode = snapshot.rootNode else {
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: "noRootNode", startedAt: startedAt)
@@ -1476,8 +1582,46 @@ final class HarnessServer {
             "focusChangedDuringWalk": snapshot.focusChangedDuringWalk,
             "frontmostSource": snapshot.frontmostSource?.rawValue ?? NSNull(),
             "actionableCount": actionable.count,
-            "elements": actionable.map(Self.summarise)
+            // The window itself (AppKit): what `highlight` checks reachability
+            // against, so a caller offering elements can check the same.
+            "windowFrame": Self.frameJSON(rootNode.frameInAppKitCoordinates).frame,
+            // forModel: every NAMED element, any role, with its nearest listed
+            // ancestor — the voice loop offers what is visible, and a label
+            // inside a button is that button (`RealtimeScreenVerbs.visiblePool`).
+            "elements": request.forModel ? Self.namedElements(in: rootNode) : actionable.map(Self.summarise)
         ]
+    }
+
+    /// Pre-order, every node with a name and a non-zero frame that can be SEEN:
+    /// `summarise` plus `nameSource` (a text field's AXValue is what the owner
+    /// typed), `parent` (index of the nearest listed ancestor) and
+    /// `subroleReadFailed`. Review 2026-09-30:
+    ///  - seen means inside every AXScrollArea / AXWebArea it scrolls in, not
+    ///    just the window: rows scrolled under a toolbar, and the visible-subset
+    ///    walk's one-screen margin, are in the tree and not on screen;
+    ///  - nothing INSIDE a text input or a secure field is listed: Chromium
+    ///    publishes a contenteditable's draft (Cursor's chat box) as child
+    ///    AXStaticText, and that is typed text, not a label.
+    static func namedElements(in rootNode: AccessibilityElementNode) -> [[String: Any]] {
+        var listed: [[String: Any]] = []
+        func visit(_ node: AccessibilityElementNode, parent: Int?, clip: CGRect) {
+            let frame = node.frameInAppKitCoordinates
+            var next = parent
+            if node.displayName != nil, frame.width > 0, frame.height > 0, !frame.intersection(clip).isEmpty {
+                var entry = summarise(node)
+                entry["nameSource"] = node.title != nil ? "title" : node.elementDescription != nil ? "description" : "value"
+                entry["parent"] = parent ?? NSNull()
+                entry["subroleReadFailed"] = node.subroleReadFailed
+                listed.append(entry)
+                next = listed.count - 1
+            }
+            if RealtimeScreenVerbs.textInputRoles.contains(node.role) || node.subrole == ActionSafetyKernel.secureFieldSubrole { return }
+            let scrolls = (node.role == "AXScrollArea" || node.role == "AXWebArea") && frame.width > 0 && frame.height > 0
+            let childClip = scrolls ? clip.intersection(frame) : clip
+            for child in node.children { visit(child, parent: next, clip: childClip) }
+        }
+        visit(rootNode, parent: nil, clip: rootNode.frameInAppKitCoordinates)
+        return listed
     }
 
     /// The wire form of an element. `name` is raw because JSON encoding is the
@@ -1737,6 +1881,9 @@ final class HarnessServer {
     /// class of `snapshot`, not of `press`. It still writes its audit line.
     private func highlightResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
         var response: [String: Any] = ["dryRun": dryRun]
+        if request.aimAtPoint, let point = request.nearPoint {
+            return approximateRingResponse(request, at: point, dryRun: dryRun, startedAt: startedAt, into: &response)
+        }
         // `.press` only fills the intent's slot: the resolver matches on name, role,
         // container and point and never reads the action.
         guard let target = resolveTarget(request, action: .press, dryRun: dryRun, startedAt: startedAt, into: &response)
@@ -1776,19 +1923,63 @@ final class HarnessServer {
             return refuse("targetNotOnScreen", "the element's frame is on no display")
         }
 
+        // The voice loop's pointer: never onto a password box, whatever name led here.
+        let resolvedRole = target.node.role
+        if request.pointer, let refusal = HarnessPolicy.pointerRefusal(
+            resolvedFrame: target.node.frameInAppKitCoordinates, nearPoint: request.nearPoint, role: resolvedRole,
+            subrole: target.node.subrole, subroleReadFailed: target.node.subroleReadFailed
+        ) {
+            return refuse(refusal.code, refusal.message)
+        }
+
         phaseTiming.actionStarting()
         // Never inside the request: a synchronous show pumps the run loop and lets
         // a second socket request land inside this one.
-        let seconds = request.highlightSeconds, label = request.label
+        let seconds = request.highlightSeconds, label = request.label, pointer = request.pointer, speechHold = request.speechHold
         DispatchQueue.main.async {
-            ElementHighlightOverlay.show(drawnRect, label: label, onScreenAt: screenIndex, seconds: seconds)
+            if pointer {
+                ElementPointer.show(drawnRect, role: resolvedRole, seconds: seconds, followSpeech: speechHold)
+            } else {
+                ElementHighlightOverlay.show(drawnRect, label: label, onScreenAt: screenIndex, seconds: seconds)
+            }
         }
+        response["pointer"] = pointer
 
         response["ok"] = true
         Self.attachFrame(elementFrame, to: &response, key: "elementFrame")
         Self.attachFrame(drawnRect, to: &response, key: "drawnRect")
         response["screen"] = screenIndex
         response["seconds"] = seconds
+        audit(request, dryRun: dryRun, kernel: "n/a", outcome: "highlighted", startedAt: startedAt)
+        return response
+    }
+
+    /// The voice loop's approximate ring: nothing nameable at the point the
+    /// model gave, so a dashed ring there, said to be approximate. Same guards
+    /// as any read of the app in front: not Clicky, and `expectApp` holds.
+    private func approximateRingResponse(_ request: HarnessRequest, at point: CGPoint, dryRun: Bool, startedAt: Date,
+                                         into response: inout [String: Any]) -> [String: Any] {
+        let frontmost = AccessibilityTreeWalker.frontmost().application
+        if let refusal = frontmostChangedRefusal(request, name: frontmost?.localizedName, bundleIdentifier: frontmost?.bundleIdentifier,
+                                                 dryRun: dryRun, startedAt: startedAt) {
+            response.merge(refusal) { _, new in new }
+            return response
+        }
+        let side = ElementPointer.approximateSidePoints
+        let ring = CGRect(x: point.x - side / 2, y: point.y - side / 2, width: side, height: side)
+        guard CompanionScreenCaptureUtility.bestDisplayIndex(for: ring, among: DispatchQueue.main.sync { NSScreen.screens.map(\.frame) }) != nil else {
+            response["ok"] = false
+            response["error"] = "targetNotOnScreen"
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "targetNotOnScreen", startedAt: startedAt)
+            return response
+        }
+        phaseTiming.actionStarting()
+        let seconds = request.highlightSeconds, speechHold = request.speechHold
+        DispatchQueue.main.async { ElementPointer.show(ring, role: "", seconds: seconds, approximate: true, followSpeech: speechHold) }
+        response["ok"] = true
+        response["pointer"] = true
+        response["approximate"] = true
+        Self.attachFrame(ring, to: &response, key: "drawnRect")
         audit(request, dryRun: dryRun, kernel: "n/a", outcome: "highlighted", startedAt: startedAt)
         return response
     }
@@ -1904,6 +2095,17 @@ final class HarnessServer {
                 audit(request, dryRun: dryRun, kernel: "n/a", outcome: "ambiguous", startedAt: startedAt)
                 return nil
             }
+        }
+        // press_element (and the pointer, in `pointerRefusal`): the element the
+        // name resolved to must be the one at the point that was aimed at.
+        if request.requireAtPoint, let moved = HarnessPolicy.movedRefusal(
+            resolvedFrame: resolvedNode.frameInAppKitCoordinates, nearPoint: request.nearPoint
+        ) {
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: moved.code, startedAt: startedAt)
+            response["ok"] = false
+            response["error"] = moved.code
+            response["message"] = moved.message
+            return nil
         }
         return (snapshot, rootNode, intent, resolvedNode)
     }
@@ -2471,9 +2673,14 @@ final class HarnessServer {
     /// nothing — and it is the thing a planner needs before it can plan.
     private func menusResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
         var response: [String: Any] = ["pathPrefix": request.path]
-        guard let (_, bar) = menuBar(
+        guard let (application, bar) = menuBar(
             for: request, dryRun: dryRun, startedAt: startedAt, into: &response
         ) else { return response }
+        if let reason = HarnessPolicy.modelReadRefusal(forModel: request.forModel, bundleIdentifier: application.bundleIdentifier,
+                                                       policy: loadedPolicy) {
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "policyRefused", startedAt: startedAt)
+            return ["ok": false, "error": "policyRefused", "message": reason]
+        }
 
         // The prefix genuinely scopes the read: resolve it one level at a time,
         // then enumerate from there. Never list 591 items and filter.

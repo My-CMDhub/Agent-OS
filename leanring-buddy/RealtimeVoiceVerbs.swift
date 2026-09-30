@@ -27,7 +27,27 @@ nonisolated enum RealtimeVoiceVerbs {
     static let focusAppName = "focus_app"
     static let findMenuItemsName = "find_menu_items"
     static let pressMenuName = "press_menu"
-    static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName]
+    /// The window's own elements (`RealtimeScreenVerbs`, 2026-09-30; slice 1b).
+    static let findOnScreenName = "find_on_screen"
+    static let pointAtName = "point_at"
+    static let pressElementName = "press_element"
+    static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName,
+                                            findOnScreenName, pointAtName, pressElementName]
+
+    /// Read-only: they look or point and change nothing in any app, so they skip
+    /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
+    /// on reads) and default to the app in front when the call names none.
+    static let readOnlyToolNames: Set<String> = [findMenuItemsName, findOnScreenName, pointAtName]
+
+    /// The tools that aim at an element on screen, by name, position or pointer.
+    static func isScreenTargetTool(_ toolName: String) -> Bool {
+        toolName == pointAtName || toolName == pressElementName
+    }
+
+    /// Tools whose app may be omitted: the app in front is meant.
+    static func takesFrontmostApp(_ toolName: String) -> Bool {
+        readOnlyToolNames.contains(toolName) || toolName == pressElementName
+    }
 
     /// Enough to hold every View-menu toggle of a native app and short enough
     /// that a chooser reads the list, not skims it.
@@ -35,9 +55,12 @@ nonisolated enum RealtimeVoiceVerbs {
 
     // MARK: Declarations
 
+    private enum Kind { case text, list, number, flag }
+
     private struct Parameter {
         let name: String
-        let isList: Bool
+        var kind: Kind = .text
+        var required = true
         let description: String
     }
 
@@ -47,24 +70,64 @@ nonisolated enum RealtimeVoiceVerbs {
         let parameters: [Parameter]
     }
 
+    private static let appInFront = Parameter(name: "app", required: false,
+                                              description: "The app in front, for example \"Cursor\". Leave it out to mean the app in front.")
+    private static let positionParameters = [
+        Parameter(name: "name", required: false, description: "The element's name exactly as find_on_screen returned it."),
+        Parameter(name: "x", kind: .number, required: false,
+                  description: "Where it is in the screenshot you were given this turn, across, as a fraction from 0 (left edge) to 1 (right edge)."),
+        Parameter(name: "y", kind: .number, required: false,
+                  description: "Where it is in that screenshot, down, as a fraction from 0 (top edge) to 1 (bottom edge)."),
+        Parameter(name: "underPointer", kind: .flag, required: false,
+                  description: "true for the element under the owner's mouse pointer (\"this one\", \"where my cursor is\").")
+    ]
+
     private static let declarations = [
         Declaration(name: focusAppName,
                     description: "Brings an app that is already running to the front. Use its name as shown in the Dock, for example \"Finder\".",
-                    parameters: [Parameter(name: "name", isList: false, description: "The running app's name, for example \"Finder\".")]),
+                    parameters: [Parameter(name: "name", description: "The running app's name, for example \"Finder\".")]),
         Declaration(name: findMenuItemsName,
                     description: "Looks through the menu bar of the app in front for items matching a few words, and returns up to "
-                        + "\(maximumCandidates) exact menu paths that can be pressed. The app must be in front; call focus_app first if it is not.",
+                        + "\(maximumCandidates) exact menu paths that can be pressed. Changes nothing.",
                     parameters: [
-                        Parameter(name: "app", isList: false, description: "The app whose menus to search, for example \"Finder\"."),
-                        Parameter(name: "words", isList: false, description: "A few words for the command, for example \"list view\" or \"new window\".")
+                        Parameter(name: "app", required: false, description: "The app whose menus to search, for example \"Finder\". Leave it out to mean the app in front."),
+                        Parameter(name: "words", description: "A few words for the command, for example \"list view\" or \"new window\".")
                     ]),
         Declaration(name: pressMenuName,
                     description: "Presses one menu item of the app in front. The path must be one that find_menu_items returned in this turn, copied exactly.",
                     parameters: [
-                        Parameter(name: "app", isList: false, description: "The app in front, for example \"Finder\"."),
-                        Parameter(name: "path", isList: true, description: "The menu path exactly as find_menu_items returned it, for example [\"View\", \"as List\"].")
-                    ])
+                        Parameter(name: "app", description: "The app in front, for example \"Finder\"."),
+                        Parameter(name: "path", kind: .list, description: "The menu path exactly as find_menu_items returned it, for example [\"View\", \"as List\"].")
+                    ]),
+        Declaration(name: findOnScreenName,
+                    description: "Looks through the window of the app in front for what the owner can see there — buttons, tabs, rows, links, labels, "
+                        + "text — matching a few words, and returns up to \(RealtimeScreenVerbs.maximumScreenCandidates), each with its exact name, what "
+                        + "kind it is and where it is. Changes nothing. Use the words printed on screen, for example \"models\" or \"new agent\".",
+                    parameters: [
+                        Parameter(name: "app", required: false, description: "The app whose window to search. Leave it out to mean the app in front."),
+                        Parameter(name: "words", description: "A few words for the element, as printed on screen, for example \"models\".")
+                    ]),
+        Declaration(name: pointAtName,
+                    description: "Moves the on-screen pointer to one element and highlights it, so the owner can see it. Changes nothing. Give its "
+                        + "name as find_on_screen returned it, OR its position in the screenshot as x and y fractions, OR underPointer. The result "
+                        + "says what was actually pointed at and where; say that. If it says approximate, say it is approximate.",
+                    parameters: [appInFront] + positionParameters),
+        Declaration(name: pressElementName,
+                    description: "Presses (clicks) one element in the window of the app in front. Aim it exactly as point_at: a name find_on_screen "
+                        + "returned, OR x and y fractions of the screenshot, OR underPointer. Safety checks run first; a destructive press shows the "
+                        + "owner a card to approve, and some things are refused. The result says what was pressed and whether it was verified.",
+                    parameters: [appInFront] + positionParameters)
     ]
+
+    private static func property(_ parameter: Parameter, gemini: Bool) -> [String: Any] {
+        func type(_ name: String) -> String { gemini ? name.uppercased() : name }
+        switch parameter.kind {
+        case .list: return ["type": type("array"), "items": ["type": type("string")], "description": parameter.description]
+        case .number: return ["type": type("number"), "description": parameter.description]
+        case .flag: return ["type": type("boolean"), "description": parameter.description]
+        case .text: return ["type": type("string"), "description": parameter.description]
+        }
+    }
 
     /// OpenAI Realtime GA `session.tools`: open_app first, then these.
     static var openAIDeclarations: [[String: Any]] {
@@ -73,12 +136,8 @@ nonisolated enum RealtimeVoiceVerbs {
                 "type": "function", "name": declaration.name, "description": declaration.description,
                 "parameters": [
                     "type": "object",
-                    "properties": Dictionary(uniqueKeysWithValues: declaration.parameters.map { parameter in
-                        (parameter.name, parameter.isList
-                            ? ["type": "array", "items": ["type": "string"], "description": parameter.description] as [String: Any]
-                            : ["type": "string", "description": parameter.description])
-                    }),
-                    "required": declaration.parameters.map(\.name)
+                    "properties": Dictionary(uniqueKeysWithValues: declaration.parameters.map { ($0.name, property($0, gemini: false)) }),
+                    "required": declaration.parameters.filter(\.required).map(\.name)
                 ] as [String: Any]
             ]
         }
@@ -92,12 +151,8 @@ nonisolated enum RealtimeVoiceVerbs {
                 "name": declaration.name, "description": declaration.description,
                 "parameters": [
                     "type": "OBJECT",
-                    "properties": Dictionary(uniqueKeysWithValues: declaration.parameters.map { parameter in
-                        (parameter.name, parameter.isList
-                            ? ["type": "ARRAY", "items": ["type": "STRING"], "description": parameter.description] as [String: Any]
-                            : ["type": "STRING", "description": parameter.description])
-                    }),
-                    "required": declaration.parameters.map(\.name)
+                    "properties": Dictionary(uniqueKeysWithValues: declaration.parameters.map { ($0.name, property($0, gemini: true)) }),
+                    "required": declaration.parameters.filter(\.required).map(\.name)
                 ] as [String: Any]
             ] as [String: Any]
         }]
@@ -219,8 +274,10 @@ nonisolated enum RealtimeVoiceVerbs {
     /// VS Code's menus offered for "new window in cursor", Jev and Haiku both
     /// chose File › New Window at 0.92-0.99 — no confidence threshold catches the
     /// right command in the wrong app, so the app is checked before any chooser.
+    /// The screen pair is scoped the same way (2026-09-30): a control is read
+    /// and pointed at only in the app the call named.
     static func isAppScopedMenuTool(_ toolName: String) -> Bool {
-        toolName == findMenuItemsName || toolName == pressMenuName
+        [findMenuItemsName, pressMenuName, findOnScreenName, pointAtName, pressElementName].contains(toolName)
     }
 
     /// One name an app answers to: its file name in an Applications folder, or
@@ -350,6 +407,13 @@ nonisolated enum RealtimeVoiceVerbs {
             return "Looking for \u{2018}\(words)\u{2019} in \(app ?? "the app")\u{2019}s menus\u{2026}"
         case pressMenuName:
             return "\(menuPathCaption(call.path ?? []))\u{2026}"
+        case findOnScreenName:
+            let words = call.words.map(RealtimeOpenAppTool.captionName) ?? "a control"
+            return "Looking for \u{2018}\(words)\u{2019} in \(app ?? "the app")\u{2026}"
+        case pointAtName:
+            return "Finding \(call.elementName.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2026}"
+        case pressElementName:
+            return "Pressing \(call.elementName.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2026}"
         default:
             return "Working\u{2026}"
         }
@@ -357,7 +421,7 @@ nonisolated enum RealtimeVoiceVerbs {
 
     /// Only these count as the receipt for completion words: a find is a read.
     static func isActingTool(_ toolName: String) -> Bool {
-        toolName != findMenuItemsName
+        toolName != findMenuItemsName && toolName != findOnScreenName
     }
 }
 
@@ -378,12 +442,15 @@ nonisolated struct RealtimeMenuOffer: Equatable, Sendable {
     let listingIncomplete: Bool
 }
 
-/// A turn's latest finished find_menu_items: its candidates, the bundle that
-/// find resolved to, and when it finished — what a press is judged against.
+/// A turn's latest finished find: its candidates, the bundle that find
+/// resolved to, and when it finished — what a press or a point is judged
+/// against. A find_menu_items offer holds `candidates`, a find_on_screen offer
+/// `elements`; each kind of find replaces only its own kind.
 nonisolated struct RealtimeStandingOffer: Sendable {
     let candidates: [RealtimeMenuCandidate]
     let app: String?
     let uptime: TimeInterval
+    var elements: [RealtimeScreenCandidate] = []
 }
 
 /// One tool call as the turn saw it: what was asked, what the model had been
@@ -397,8 +464,12 @@ nonisolated struct RealtimeToolDecision {
     /// arrival-time offer until then. nil: none.
     var offeredBeforeCall: [RealtimeMenuCandidate]?
     var dispatch: RealtimeToolDispatch?
-    /// press_menu that passed the notOffered gate: whose offer let it through.
+    /// press_menu or point_at that passed the notOffered gate: whose offer let it through.
     var offerSource: RealtimeOpenAppTool.OfferSource? = nil
+    /// point_at's `offeredBeforeCall`: the controls it was judged against.
+    var offeredElementsBeforeCall: [RealtimeScreenCandidate]? = nil
+    /// point_at / press_element: which rung named the target (trace `snappedBy`).
+    var snappedBy: String? = nil
 }
 
 // MARK: - Decision trace
@@ -466,10 +537,25 @@ nonisolated struct RealtimeToolDecision {
 ///   offerSource       press_menu that passed the notOffered gate (added
 ///                     2026-09-30, schema 6): thisTurn | previousTurnConfirmedByWords
 ///                     (`RealtimeOpenAppTool.pressOffer`). null when refused
-///                     notOffered, stopped before the gate, or not a press
+///                     notOffered, stopped before the gate, or not a press.
+///                     Schema 7: also point_at, and previousTurnConfirmedByYes
+///                     (`confirmedByPlainYes`)
+///   Schema 7 (2026-09-30): find_on_screen fills offered ([{name, role, where}]),
+///                     offeredCount, privacyDroppedCount and listingIncomplete
+///                     (enabledItemCount stays menus-only, null); point_at's args
+///                     are {app, name} and its choseFromOffered is judged against
+///                     the controls offered
+///   Schema 8 (2026-09-30, slice 1b): find_on_screen offers every named VISIBLE
+///                     element (any role); point_at and press_element args add
+///                     x, y (screenshot fractions) and underPointer; their
+///                     offerSource adds screenshotPoint | underPointer
+///   Schema 9 (2026-09-30 review): snappedBy — point_at / press_element, which
+///                     rung named the target: thisTurn | previousTurn… |
+///                     underPointer (the offer or the key-down pointer), walk |
+///                     ax (a screenshot position), none (nothing there); else null
 nonisolated enum RealtimeDecisionTrace {
     static let fileName = "voice-decisions.log"
-    static let schemaVersion = 6
+    static let schemaVersion = 9
     static let privatePathPlaceholder = ["<private>"]
 
     static func choseFromOffered(path: [String]?, offered: [RealtimeMenuCandidate]?) -> Bool? {
@@ -505,9 +591,43 @@ nonisolated enum RealtimeDecisionTrace {
         guard !spoken.contains(where: followUpVetoWords.contains),
               !heard.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?") else { return false }
         let label = RealtimeVoiceVerbs.foldedTokens(path?.last ?? "").filter { $0.count >= 4 }
-        return spoken.contains { word in
-            label.contains { word == $0 || (min(word.count, $0.count) >= 4 && (word.hasPrefix($0) || $0.hasPrefix(word))) }
+        return spoken.contains { word in label.contains { labelWordMatches(spoken: word, label: $0) } }
+    }
+
+    /// Said in full, or by a 4+ letter prefix either way ("symbols" / "symbol").
+    static func labelWordMatches(spoken: String, label: String) -> Bool {
+        spoken == label || (min(spoken.count, label.count) >= 4 && (spoken.hasPrefix(label) || label.hasPrefix(spoken)))
+    }
+
+    /// How a plain yes starts (live 2026-09-30: "Yes, to"). Not "please": it
+    /// opens requests ("please open Safari") as often as agreements.
+    static let plainYesOpeners: [[String]] = [["yes"], ["yeah"], ["yep"], ["sure"], ["ok"], ["okay"], ["go", "ahead"], ["do", "it"]]
+    /// A yes is the opener and at most this many words ("Yes, to"; "go ahead please").
+    static let plainYesMaximumTrailingWords = 2
+    /// Hedges that ride on an opener (review 2026-09-30): "yeah nah", "okay, hang on", "sure, skip it".
+    static let plainYesVetoWords: Set<String> = followUpVetoWords.union(["nah", "nope", "hang", "hold", "skip", "later", "actually", "instead"])
+
+    /// The plain-"yes" follow-up: the owner's reply is a bare affirmative (no
+    /// veto word, not a question) AND the previous answer, as spoken, named
+    /// exactly ONE of the previous offer's items — every 4+ letter word of its
+    /// label — and that item is `label`. Live 2026-09-30: "You could try adding
+    /// a symbol to a new chat, sir… May I press that?" / "Yes, to" named Add
+    /// Symbol to New Chat and not Add Symbol to Current Chat. `offeredLabels`
+    /// keeps duplicates: two "Zoom"s are two items, and a yes to one is a yes to
+    /// neither. Precision over recall: a miss only means the owner says the name.
+    static func confirmedByPlainYes(heard: String?, previousSaid: String?, offeredLabels: [String], label: String?) -> Bool {
+        guard let heard, let previousSaid, let label else { return false }
+        let spoken = RealtimeVoiceVerbs.foldedTokens(heard)
+        guard !spoken.contains(where: plainYesVetoWords.contains),
+              !heard.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?"),
+              let opener = plainYesOpeners.first(where: { spoken.starts(with: $0) }),
+              spoken.count - opener.count <= plainYesMaximumTrailingWords else { return false }
+        let said = RealtimeVoiceVerbs.foldedTokens(previousSaid)
+        let named = offeredLabels.filter { offered in
+            let words = RealtimeVoiceVerbs.foldedTokens(offered).filter { $0.count >= 4 }
+            return !words.isEmpty && words.allSatisfy { word in said.contains { labelWordMatches(spoken: $0, label: word) } }
         }
+        return named == [label]
     }
 
     static func loggedArguments(for call: RealtimeToolCall) -> [String: Any] {
@@ -516,6 +636,12 @@ nonisolated enum RealtimeDecisionTrace {
             arguments[call.name == RealtimeOpenAppTool.name || call.name == RealtimeVoiceVerbs.focusAppName ? "name" : "app"] = appName
         }
         if let words = call.words { arguments["words"] = words }
+        if let elementName = call.elementName {
+            arguments["name"] = RealtimeScreenVerbs.isPrivateName(elementName) ? privatePathPlaceholder[0] : elementName
+        }
+        if let x = call.x { arguments["x"] = x }
+        if let y = call.y { arguments["y"] = y }
+        if call.underPointer { arguments["underPointer"] = true }
         if let path = call.path { arguments["path"] = RealtimeVoiceVerbs.isPrivateMenuPath(path) ? privatePathPlaceholder : path }
         return arguments
     }
@@ -528,7 +654,13 @@ nonisolated enum RealtimeDecisionTrace {
         func value(_ optional: Any?) -> Any { optional ?? NSNull() }
         let dispatch = decision.dispatch
         let offer = dispatch?.menuOffer
+        let screenOffer = dispatch?.screenOffer
         let isPress = decision.call.name == RealtimeVoiceVerbs.pressMenuName
+        let isPoint = RealtimeVoiceVerbs.isScreenTargetTool(decision.call.name)
+        let chose: Bool? = isPress ? choseFromOffered(path: decision.call.path, offered: decision.offeredBeforeCall)
+            : isPoint && decision.call.elementName != nil
+                ? decision.offeredElementsBeforeCall.map { offered in offered.contains { $0.name == decision.call.elementName } }
+            : nil
         return [
             "kind": "toolCall", "schema": schemaVersion, "source": source,
             "turnId": turnID, "stack": stack, "probeId": value(probeID), "fixture": value(fixture),
@@ -538,19 +670,20 @@ nonisolated enum RealtimeDecisionTrace {
             "ok": value(dispatch.map(\.harnessConfirmed)),
             "harnessError": value(dispatch?.result["error"] as? String),
             "verification": value((dispatch?.result["verification"] as? String) ?? (dispatch?.result["status"] as? String)),
-            "offered": value(offer.map { $0.candidates.map(\.jsonObject) }),
-            "offeredCount": value(offer?.candidates.count),
+            "offered": value(offer.map { $0.candidates.map(\.jsonObject) } ?? screenOffer.map { $0.candidates.map(\.jsonObject) }),
+            "offeredCount": value(offer?.candidates.count ?? screenOffer?.candidates.count),
             "correctOffered": value(expectedPath.flatMap { expected in offer.map { $0.candidates.contains { $0.path == expected } } }),
             "enabledItemCount": value(offer?.enabledItemCount),
-            "privacyDroppedCount": value(offer?.privacyDroppedCount),
-            "listingIncomplete": value(offer?.listingIncomplete),
-            "choseFromOffered": value(isPress ? choseFromOffered(path: decision.call.path, offered: decision.offeredBeforeCall) : nil),
+            "privacyDroppedCount": value(offer?.privacyDroppedCount ?? screenOffer?.privacyDroppedCount),
+            "listingIncomplete": value(offer?.listingIncomplete ?? screenOffer?.listingIncomplete),
+            "choseFromOffered": value(chose),
             "independentCheck": value(independentCheck),
             "appCheck": value(dispatch?.appCheck),
             "heardCheck": value(dispatch?.heardCheck),
             "autoFocus": value(dispatch?.autoFocus),
             "heardOverlapsLabel": value(isPress ? dispatch?.heardOverlapsLabel : nil),
-            "offerSource": value(isPress ? decision.offerSource?.rawValue : nil)
+            "offerSource": value(isPress || isPoint ? decision.offerSource?.rawValue : nil),
+            "snappedBy": value(decision.snappedBy)
         ]
     }
 

@@ -96,6 +96,17 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // find_on_screen + point_at on the app in front, no model and no audio:
+        // up to five pointers, each checked against the window server, then
+        // quits. Needs --harness-dry-run and 120 s of owner idle.
+        if CommandLine.arguments.contains("--point-probe") {
+            Task { @MainActor in
+                await PointProbe.run(harness: self.harnessServer)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // Walks Finder / System Settings / Cursor on main and on a background
         // queue, writes ~/Library/Logs/Clicky/ax-thread-probe.log, then quits.
         if CommandLine.arguments.contains("--ax-thread-probe") {

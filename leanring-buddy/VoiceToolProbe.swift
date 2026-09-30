@@ -21,6 +21,12 @@
 //  `--voice-tool-probe-no-frontmost-line` (the before of a before/after). Whether
 //  it ended up frontmost is read from NSWorkspace, not from the verb's own
 //  AX-based verification: a verb that marks its own homework proves nothing.
+//  So is the key-down "element under the owner's mouse" line (slice 1b).
+//  `--voice-tool-probe-keep-apps` sends the screenshot but neither quits nor
+//  pre-opens System Settings (the screen tools' fixtures act on what is up);
+//  it refuses to run without --harness-dry-run and 120 s of owner idle.
+//  `--voice-tool-probe-chain=a,b` runs several fixtures as consecutive turns on
+//  ONE connection, so a follow-up ("the second one") has its first turn behind it.
 //
 //  One JSON line per run to ~/Library/Logs/Clicky/voice-tool-probe.log (timings,
 //  tool args, harness status); what the model SAID goes only to a 0600
@@ -78,7 +84,22 @@ enum VoiceToolProbe {
             return
         }
 
-        let preOpen = CommandLine.arguments.contains("--voice-tool-probe-preopen")
+        let keepApps = CommandLine.arguments.contains("--voice-tool-probe-keep-apps")
+        // Keep-apps leaves the owner's apps up for the screen tools, which can
+        // press_element in them: only as a dry run, and only with the owner away.
+        if keepApps {
+            let idle = await Task.detached { NotchProbe.hidIdleSeconds() }.value
+            guard CommandLine.arguments.contains("--harness-dry-run"), let idle, idle >= NotchProbe.requiredIdleSeconds else {
+                appendLine(["kind": "refused", "probeId": probeID, "reason": "keep-apps needs --harness-dry-run and 120 s of owner idle",
+                            "hidIdleSeconds": idle ?? NSNull()])
+                print("🧪 voice tool probe: keep-apps refused (needs --harness-dry-run and owner idle) -> \(logPath)")
+                return
+            }
+        }
+        let preOpen = !keepApps && CommandLine.arguments.contains("--voice-tool-probe-preopen")
+        // `--voice-tool-probe-chain=a,b`: the fixtures after the first, as follow-up turns.
+        let chainFixtures = CommandLine.arguments.first { $0.hasPrefix("--voice-tool-probe-chain=") }
+            .map { $0.dropFirst("--voice-tool-probe-chain=".count).split(separator: ",").map { String($0) + ".wav" } } ?? []
         let runsPerStack = runsPerStackArgument(default: defaultRunsPerStack)
         let harnessAnswer: @Sendable (String) -> String = { line in harness.answer(line: line) }
         let noScreen = CommandLine.arguments.contains("--voice-tool-probe-no-screen")
@@ -93,6 +114,7 @@ enum VoiceToolProbe {
 
         // One screenshot for every run, as the bench does — none with --voice-tool-probe-no-screen.
         var screenshotJPEG: Data?
+        var screenshotDisplay: CGRect?
         if !noScreen {
             guard let screenshot = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first(where: \.isCursorScreen) else {
                 appendLine(["kind": "captureFailed", "probeId": probeID])
@@ -100,11 +122,13 @@ enum VoiceToolProbe {
                 return
             }
             screenshotJPEG = screenshot.imageData
+            screenshotDisplay = screenshot.displayFrame
         }
 
         appendLine([
             "kind": "start", "probeId": probeID, "fixture": fixtureFileName, "runsPerStack": runsPerStack,
-            "mode": preOpen ? "preOpen" : "quitFirst", "appNameOverride": appNameOverride ?? NSNull(),
+            "mode": keepApps ? "keepApps" : preOpen ? "preOpen" : "quitFirst", "appNameOverride": appNameOverride ?? NSNull(),
+            "chain": chainFixtures,
             "openAICostCapUSD": openAICostCapUSD, "imageBytes": screenshotJPEG?.count ?? 0, "noScreen": noScreen,
             "frontmostLine": !CommandLine.arguments.contains("--voice-tool-probe-no-frontmost-line"),
             "harnessSession": HarnessServer.sessionIdentifier
@@ -124,18 +148,29 @@ enum VoiceToolProbe {
             for stack in order where selectedStacks.contains(stack) {
                 if stack == .openAIRealtime, openAISpentUSD > openAICostCapUSD { continue }
                 let clip = stack == .openAIRealtime ? clip24k : clip16k
-                let (line, transcript, heard, spentUSD) = await measureOneRun(
-                    stack: stack, runNumber: runNumber, probeID: probeID, fixture: fixtureFileName, clip: clip, preOpen: preOpen, appNameOverride: appNameOverride,
-                    screenshotJPEG: screenshotJPEG, harnessAnswer: harnessAnswer)
-                if stack == .openAIRealtime { openAISpentUSD += spentUSD }
-                appendLine(line)
-                runLines[stack, default: []].append(line)
-                answers[stack, default: []].append(transcript)
-                if let answersFile, let answerLine = MeasurementLogFile.jsonLine([
-                    "probeId": probeID, "fixture": fixtureFileName, "stack": stack.rawValue, "run": runNumber, "said": transcript, "heard": heard
-                ]) {
-                    try? answersFile.write(contentsOf: Data((answerLine + "\n").utf8))
+                let turns = await measureOneRun(
+                    stack: stack, runNumber: runNumber, probeID: probeID, fixture: fixtureFileName, chain: chainFixtures, clip: clip, preOpen: preOpen,
+                    keepApps: keepApps, appNameOverride: appNameOverride, screenshotJPEG: screenshotJPEG, screenshotDisplay: screenshotDisplay,
+                    harnessAnswer: harnessAnswer)
+                for (chainIndex, turn) in turns.enumerated() {
+                    var line = turn.line
+                    // The element's NAME goes only to the 0600 answers file.
+                    let pointerName = line.removeValue(forKey: "underPointerName")
+                    if stack == .openAIRealtime { openAISpentUSD += turn.spentUSD }
+                    appendLine(line)
+                    // The summary reads the first turn of a chain: the one the fixture is.
+                    if chainIndex == 0 {
+                        runLines[stack, default: []].append(line)
+                        answers[stack, default: []].append(turn.transcript)
+                    }
+                    if let answersFile, let answerLine = MeasurementLogFile.jsonLine([
+                        "probeId": probeID, "fixture": line["fixture"] ?? fixtureFileName, "stack": stack.rawValue, "run": runNumber,
+                        "chainIndex": chainIndex, "said": turn.transcript, "heard": turn.heard, "underPointerName": pointerName ?? NSNull()
+                    ]) {
+                        try? answersFile.write(contentsOf: Data((answerLine + "\n").utf8))
+                    }
                 }
+                let line = turns.first?.line ?? [:]
                 print("🧪 voice tool probe: \(stack.rawValue) #\(runNumber) \(line["errorKind"] ?? "ok") tool=\(line["toolCalled"] ?? "-") status=\(line["harnessStatus"] ?? "-")")
             }
         }
@@ -171,13 +206,16 @@ enum VoiceToolProbe {
 
     // MARK: One run
 
+    /// One run: the fixture's turn, then each chained fixture as a follow-up
+    /// turn on the same connection. One entry per turn, in order.
     private static func measureOneRun(
-        stack: VoiceStackChoice, runNumber: Int, probeID: String, fixture fixtureFileName: String, clip: VoiceBenchPCMClip, preOpen: Bool,
-        appNameOverride: String?, screenshotJPEG: Data?, harnessAnswer: @escaping @Sendable (String) -> String
-    ) async -> (line: [String: Any], transcript: String, heard: String, spentUSD: Double) {
+        stack: VoiceStackChoice, runNumber: Int, probeID: String, fixture fixtureFileName: String, chain: [String], clip: VoiceBenchPCMClip,
+        preOpen: Bool, keepApps: Bool, appNameOverride: String?, screenshotJPEG: Data?, screenshotDisplay: CGRect?,
+        harnessAnswer: @escaping @Sendable (String) -> String
+    ) async -> [(line: [String: Any], transcript: String, heard: String, spentUSD: Double)] {
         var line: [String: Any] = ["kind": "run", "probeId": probeID, "fixture": fixtureFileName, "stack": stack.rawValue, "run": runNumber]
-        if screenshotJPEG == nil {
-            // --voice-tool-probe-no-screen: the owner's apps are left as they are.
+        if screenshotJPEG == nil || keepApps {
+            // --voice-tool-probe-no-screen / -keep-apps: the owner's apps are left as they are.
         } else if preOpen {
             line["systemSettingsPreOpened"] = await openSystemSettings(harnessAnswer: harnessAnswer)
         } else {
@@ -187,7 +225,7 @@ enum VoiceToolProbe {
         let connection = RealtimeVoiceConnection(stack: stack, harnessAnswer: harnessAnswer)
         connection.appNameOverride = appNameOverride
         defer { connection.close() }
-        let facts = await runTurn(on: connection, clip: clip, screenshotJPEG: screenshotJPEG)
+        let facts = await runTurn(on: connection, clip: clip, screenshotJPEG: screenshotJPEG, screenshotDisplay: screenshotDisplay)
         line.merge(facts) { _, new in new }
 
         let frontmostBundleIdentifier = line["frontmostBundleIdentifier"] as? String
@@ -201,26 +239,50 @@ enum VoiceToolProbe {
                                "actual": frontmostBundleIdentifier ?? NSNull(), "passed": frontmostBundleIdentifier == systemSettingsBundleIdentifier])
         // The fixture is always an open request, so no call is a skipped tool.
         line["toolSkipped"] = connection.turn.toolCalls.isEmpty
-        let spentUSD = stack == .openAIRealtime ? connection.estimatedOpenAIUSD : 0
-        if stack == .openAIRealtime { line["estimatedCostUSD"] = spentUSD }
-        return (line, connection.turn.transcript, connection.turn.heardText, spentUSD)
+        var spentSoFar = stack == .openAIRealtime ? connection.estimatedOpenAIUSD : 0
+        if stack == .openAIRealtime { line["estimatedCostUSD"] = spentSoFar }
+        var turns = [(line, connection.turn.transcript, connection.turn.heardText, spentSoFar)]
+        for (index, followUp) in chain.enumerated() {
+            guard let (followUp16k, followUp24k) = clips(forFixture: followUp) else {
+                turns.append((["kind": "run", "probeId": probeID, "fixture": followUp, "stack": stack.rawValue, "run": runNumber,
+                               "chainIndex": index + 1, "errorKind": "fixtureUnreadable"], "", "", 0))
+                break
+            }
+            var followLine: [String: Any] = ["kind": "run", "probeId": probeID, "fixture": followUp, "stack": stack.rawValue, "run": runNumber,
+                                             "chainIndex": index + 1]
+            // Nothing is played aloud, so nothing was cut off: the previous answer counts as heard.
+            followLine.merge(await runTurn(on: connection, clip: stack == .openAIRealtime ? followUp24k : followUp16k,
+                                           screenshotJPEG: screenshotJPEG, screenshotDisplay: screenshotDisplay, followUp: true)) { _, new in new }
+            let followTurnID = UUID().uuidString
+            followLine["turnId"] = followTurnID
+            RealtimeDecisionTrace.append(connection.turn.decisions, turnID: followTurnID, stack: stack.rawValue, source: "probe",
+                                         releasedUptime: connection.turn.lastAudioSentUptime, probeID: probeID, fixture: followUp)
+            let spentNow = stack == .openAIRealtime ? connection.estimatedOpenAIUSD : 0
+            turns.append((followLine, connection.turn.transcript, connection.turn.heardText, spentNow - spentSoFar))
+            spentSoFar = spentNow
+        }
+        return turns
     }
 
     /// One fixture turn on an open-to-be connection, and everything the turn
     /// did that does not depend on which fixture it was: marks, tool calls and
     /// results, the notch's order, the honesty checks, frontmost after.
-    static func runTurn(on connection: RealtimeVoiceConnection, clip: VoiceBenchPCMClip, screenshotJPEG: Data?) async -> [String: Any] {
+    static func runTurn(on connection: RealtimeVoiceConnection, clip: VoiceBenchPCMClip, screenshotJPEG: Data?,
+                        screenshotDisplay: CGRect? = nil, followUp: Bool = false) async -> [String: Any] {
         var line: [String: Any] = [:]
         let runStartUptime = uptime
         var marks: [String: Any] = [:]
+        let pointerShown = ProbeUptimeBox()
+        defer { ElementPointer.onVisibilityChange = nil }
         var errorKind: String?
         var frontmost: NSRunningApplication?
         do {
             let setupStart = uptime
-            try await connection.connect()
+            if !followUp { try await connection.connect() }
             if let screenshotJPEG { try await connection.sendScreenshot(screenshotJPEG) }
             marks["sessionSetupMs"] = milliseconds(from: setupStart, to: uptime)
-            try await connection.beginTurn()
+            try await connection.beginTurn(previousReplyWasHeard: followUp)
+            connection.turn.screenshotDisplayFrame = screenshotDisplay
             // As live sends it (`RealtimeVoiceSession.runTurn`); the probe reads it on main.
             frontmost = AccessibilityTreeWalker.focusedApplication()
             if !CommandLine.arguments.contains("--voice-tool-probe-no-frontmost-line"),
@@ -230,6 +292,25 @@ enum VoiceToolProbe {
                 line["frontmostLineSent"] = true
             }
             line["frontmostAtKeyDown"] = frontmost?.bundleIdentifier ?? NSNull()
+            // The element under the owner's mouse, as live sends it. Counts-only
+            // here: its role word and a boolean; the name goes to the answers file.
+            let mouse = NSEvent.mouseLocation
+            let screens = NSScreen.screens.map(\.frame)
+            let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+            // The live session's own read (`keyDownPointerHit`), so the probe measures what live sends.
+            let hit: RealtimeScreenHit? = await RealtimeVoiceSession.keyDownPointerHit(mouse: mouse, screens: screens, primaryDisplayHeight: primaryHeight)
+            line["underPointerLineSent"] = false
+            if case .element(let candidate, let app)? = hit {
+                connection.turn.keyDownPointer = RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY),
+                                                                      app: app, source: .underPointer)
+                let appName = app.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first?.localizedName }
+                try await connection.sendContextText(RealtimeOpenAppTool.pointerContextLine(candidate: candidate, appName: appName))
+                line["underPointerLineSent"] = true
+                line["underPointerRole"] = candidate.roleWord
+                line["underPointerName"] = candidate.name
+            }
+            // When the pointer first appears this turn, for `pointerShownMs`.
+            ElementPointer.onVisibilityChange = { visible, at in if visible, pointerShown.uptime == nil { pointerShown.uptime = at } }
             // The fixture stands in for the held hotkey, and its own level drives the bars.
             JarvisNotch.shared.handle(.hotkeyDown)
             let clock = ContinuousClock()
@@ -271,6 +352,7 @@ enum VoiceToolProbe {
         marks["freshLookArrivedAfterSpeechStartMs"] = turn.freshLookArrivedAfterSpeechStartMs
         marks["followUpFirstAudioMs"] = milliseconds(from: turn.toolResultSentUptime, to: turn.followUpFirstAudioUptime)
         marks["totalToFirstSpokenResultMs"] = milliseconds(from: released, to: turn.followUpFirstAudioUptime)
+        marks["pointerShownMs"] = milliseconds(from: released, to: pointerShown.uptime)
         marks["intentLeadMs"] = milliseconds(from: turn.intentShownUptime, to: firstDispatch?.firstRequestSentUptime)
         // The heard check: when the owner's transcript was complete, and how long calls waited for it.
         marks["heardArrivalMs"] = milliseconds(from: released, to: turn.heardCompletedUptime(now: uptime))
@@ -421,4 +503,9 @@ enum VoiceToolProbe {
             "estimatedCostUSD": spentUSD ?? NSNull()
         ]
     }
+}
+
+/// The probe's "when did the pointer first show", written from the pointer's callback.
+@MainActor private final class ProbeUptimeBox {
+    var uptime: TimeInterval?
 }

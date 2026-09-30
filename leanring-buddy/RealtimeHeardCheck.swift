@@ -84,7 +84,10 @@ nonisolated enum RealtimeHeardCheck {
         "app", "apps", "google", "microsoft", "system", "utility", "assistant", "player", "center", "centre",
         "editor", "script", "classic", "handler", "image", "photo", "screen", "sharing", "information",
         "capture", "font", "book", "time", "machine", "control", "file", "exchange", "audio", "setup", "print",
-        "color", "digital", "meter", "word", "flow", "toolbox", "zoom", "window", "store", "memos", "mirroring"
+        "color", "digital", "meter", "word", "flow", "toolbox", "zoom", "window", "store", "memos", "mirroring",
+        // Every app's own UI words (live 2026-09-30: "Cursor settings", "the
+        // general settings" were heard as System Settings four turns running).
+        "settings", "setting", "preferences", "general", "panel", "sidebar", "options", "option", "tab", "button", "menu"
     ]
 
     /// One-word app names that are also everyday words: they name an app only
@@ -392,12 +395,20 @@ nonisolated enum RealtimeHeardCheck {
     /// harness guard (policy, confirmation tickets for code-running apps), and
     /// refusing them would let a dropped transcription stop the voice loop.
     static func refusesWithoutTranscript(toolName: String, namedAppIsRunning: Bool) -> Bool {
-        toolName == RealtimeVoiceVerbs.pressMenuName || (toolName == RealtimeOpenAppTool.name && !namedAppIsRunning)
+        toolName == RealtimeVoiceVerbs.pressMenuName || toolName == RealtimeVoiceVerbs.pressElementName
+            || (toolName == RealtimeOpenAppTool.name && !namedAppIsRunning)
     }
 
     /// Whether this tool is checked at all: every tool that names an app.
     static func appliesTo(toolName: String) -> Bool {
         RealtimeVoiceVerbs.allToolNames.contains(toolName)
+    }
+
+    /// Whether the check may REFUSE the call. Reads never are (slice 1b: four
+    /// live turns were lost asking about "settings" on a read); their decision
+    /// is still made, because it is the witness `autoFocusGate` needs.
+    static func mayRefuse(toolName: String) -> Bool {
+        appliesTo(toolName: toolName) && !RealtimeVoiceVerbs.readOnlyToolNames.contains(toolName)
     }
 
     /// What the model is told instead of a harness answer. Display names only
