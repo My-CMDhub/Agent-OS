@@ -1670,6 +1670,10 @@ final class HarnessServer {
                 }
                 entry["parent"] = parent ?? NSNull()
                 entry["subroleReadFailed"] = node.subroleReadFailed
+                // Done-conditions ("Posts tab selected", "draft present"): a boolean
+                // and a COUNT, never the text; absent when not read, never false / 0.
+                if let selected = node.selected { entry["selected"] = selected }
+                if let valueLength = node.valueLength { entry["valueLength"] = valueLength }
                 listed.append(entry)
                 next = listed.count - 1
             }

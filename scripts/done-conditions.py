@@ -44,7 +44,7 @@ def element(raw):
     by_value = raw.get("nameSource") == "value"
     name = raw.get("name") or ""
     return {"role": raw.get("role"), "name": None if by_value else name,
-            # The harness publishes neither today; None is "not read", never False / 0.
+            # The harness omits either key when it did not read it; None is "not read", never False / 0.
             "selected": raw.get("selected"),
             "valueLength": len(name) if by_value else raw.get("valueLength")}
 

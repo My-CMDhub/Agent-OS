@@ -73,6 +73,14 @@ struct AccessibilityElementNode {
     /// `liveWindows`) — this time inside a security check.
     let subroleReadFailed: Bool
 
+    /// AXSelected — or, on a radio button / checkbox, its 0/1 AXValue — when the
+    /// element answered; nil when it did not or the read failed. Never false for
+    /// "unknown": a done-condition ("Posts tab selected") would read it as an answer.
+    let selected: Bool?
+    /// A text input's character COUNT, never its text; nil for every other role,
+    /// a secure (or subrole-unreadable) field, and a failed read.
+    let valueLength: Int?
+
     /// The live cross-process handle. Present only on nodes produced by a real
     /// walk — hand-built nodes in tests leave it nil.
     let accessibilityElement: AXUIElement?
@@ -89,6 +97,8 @@ struct AccessibilityElementNode {
         children: [AccessibilityElementNode],
         publishedActionNames: [String] = [],
         subroleReadFailed: Bool = false,
+        selected: Bool? = nil,
+        valueLength: Int? = nil,
         accessibilityElement: AXUIElement? = nil
     ) {
         self.role = role
@@ -104,7 +114,37 @@ struct AccessibilityElementNode {
         self.children = children
         self.publishedActionNames = publishedActionNames
         self.subroleReadFailed = subroleReadFailed
+        self.selected = selected
+        self.valueLength = valueLength
         self.accessibilityElement = accessibilityElement
+    }
+
+    /// `selected` and `valueLength` from raw reads. An error of `.success` means
+    /// the read answered; every other error omits the field — a failed read is
+    /// never "not selected" or "empty". Only `.noValue` on a text input is an
+    /// answer (System Settings' empty search field publishes no value): length 0.
+    static func observedState(
+        role: String, subrole: String?, subroleReadFailed: Bool,
+        value: AnyObject?, valueError: AXError,
+        selected: AnyObject?, selectedError: AXError
+    ) -> (selected: Bool?, valueLength: Int?) {
+        func flag(_ raw: AnyObject?) -> Bool? {
+            guard let number = raw as? NSNumber, number.doubleValue == 0 || number.doubleValue == 1 else { return nil }
+            return number.doubleValue == 1
+        }
+        // A radio button's or checkbox's state IS its AXValue (AppKit tabs, Chromium
+        // tab lists); AXSelected only where that is not a 0/1 number (a mixed checkbox is 2).
+        let toggle = role == "AXRadioButton" || role == "AXCheckBox"
+        let selectedState = (toggle && valueError == .success ? flag(value) : nil)
+            ?? (selectedError == .success ? flag(selected) : nil)
+
+        let secure = subrole == ActionSafetyKernel.secureFieldSubrole || role == ActionSafetyKernel.secureFieldSubrole
+        guard textInputRoles.contains(role), !secure, !subroleReadFailed else { return (selectedState, nil) }
+        switch valueError {
+        case .success: return (selectedState, (value as? String)?.count)
+        case .noValue: return (selectedState, 0)
+        default: return (selectedState, nil)
+        }
     }
 }
 
@@ -734,7 +774,7 @@ enum AccessibilityTreeWalker {
 
     // MARK: - Batched reads
 
-    /// The seven attributes every node needs, asked for in one call.
+    /// The eight attributes every node needs, asked for in one call.
     ///
     /// The walker used to make nine separate cross-process round trips per node:
     /// five strings, position, size, children, and the action list. Measured
@@ -747,7 +787,8 @@ enum AccessibilityTreeWalker {
     /// join the batch. Nine trips become two.
     private static let batchedAttributeNames: [String] = [
         kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute,
-        kAXValueAttribute, kAXDescriptionAttribute, "AXFrame", kAXChildrenAttribute
+        kAXValueAttribute, kAXDescriptionAttribute, "AXFrame", kAXChildrenAttribute,
+        kAXSelectedAttribute
     ]
 
     private struct BatchedNodeRead {
@@ -755,6 +796,10 @@ enum AccessibilityTreeWalker {
         var subrole: String?
         var title: String?
         var value: String?
+        var rawValue: AnyObject?
+        var valueError = AXError.success
+        var rawSelected: AnyObject?
+        var selectedError = AXError.success
         var elementDescription: String?
         var frame: CGRect?
         var children: [AXUIElement] = []
@@ -802,6 +847,11 @@ enum AccessibilityTreeWalker {
         read.subrole = string(at: 1)
         read.title = string(at: 2)
         read.value = string(at: 3)
+        // Raw beside the string: a checkbox's 0/1 and a field's "" are answers too.
+        read.rawValue = values[3]
+        read.valueError = errorCode(at: 3) ?? .success
+        read.rawSelected = values[7]
+        read.selectedError = errorCode(at: 7) ?? .success
         read.elementDescription = string(at: 4)
 
         if errorCode(at: 5) == nil, CFGetTypeID(values[5]) == AXValueGetTypeID() {
@@ -845,7 +895,7 @@ enum AccessibilityTreeWalker {
 
         deepestLevelReached = max(deepestLevelReached, depth)
 
-        // One batched call for all seven attributes; the individual reads remain as
+        // One batched call for all eight attributes; the individual reads remain as
         // the fallback for any app that refuses the batched API.
         let batched = batchedRead(from: element)
 
@@ -876,6 +926,15 @@ enum AccessibilityTreeWalker {
         // Only an anonymous text input pays for this read: its placeholder is its name.
         let placeholder = AccessibilityElementNode.textInputRoles.contains(role) && title == nil && elementDescription == nil
             ? copyStringAttribute(from: element, attribute: kAXPlaceholderValueAttribute) : nil
+
+        // From the batch only: the fallback path reads no AXSelected (no extra round
+        // trip per node), and its value read cannot tell "" from failed, so both omit.
+        let state = batched.map {
+            AccessibilityElementNode.observedState(
+                role: role, subrole: subrole, subroleReadFailed: subroleReadFailed,
+                value: $0.rawValue, valueError: $0.valueError,
+                selected: $0.rawSelected, selectedError: $0.selectedError)
+        }
 
         // AXFrame is not an SDK constant and not every app publishes it, so fall
         // back to position + size rather than reporting a frameless node.
@@ -989,6 +1048,8 @@ enum AccessibilityTreeWalker {
             children: childNodes,
             publishedActionNames: publishedActionNames,
             subroleReadFailed: subroleReadFailed,
+            selected: state?.selected,
+            valueLength: state?.valueLength,
             accessibilityElement: element
         )
     }
