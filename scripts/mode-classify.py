@@ -51,8 +51,13 @@ def model_mode(text):
 def score():
     rows = [r for r in csv.DictReader(open(LABELS)) if r["owner_label"]]
     for name, fn in (("cues", cue_mode), ("haiku", model_mode)):
-        hits = sum(fn(r["heard"]) == r["owner_label"] for r in rows)
-        print(name, f"{hits}/{len(rows)}")
+        pairs = [(r["owner_label"], fn(r["heard"])) for r in rows]
+        print(name, f"{sum(a == b for a, b in pairs)}/{len(pairs)}")
+        # Per class, because the sheet is ~92% commands: "always doing" alone would score ~92% overall.
+        for label in sorted({a for a, _ in pairs}):
+            got = [b for a, b in pairs if a == label]
+            misses = {b: got.count(b) for b in set(got) if b != label}
+            print(f"  {label}: {got.count(label)}/{len(got)} recalled; confused as {misses or '-'}")
 
 
 def selftest():
