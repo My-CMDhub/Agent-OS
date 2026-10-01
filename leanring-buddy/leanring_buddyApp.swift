@@ -131,6 +131,17 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // The session WATCH loop's cost on the app in front: a forModel snapshot,
+        // then a window-title read, every 0.5 s for 60 s each, then quits. Reads
+        // only. Needs --harness-dry-run and 120 s of owner idle.
+        if CommandLine.arguments.contains("--watch-probe") {
+            Task { @MainActor in
+                await WatchProbe.run(harness: self.harnessServer)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // Walks Finder / System Settings / Cursor on main and on a background
         // queue, writes ~/Library/Logs/Clicky/ax-thread-probe.log, then quits.
         if CommandLine.arguments.contains("--ax-thread-probe") {

@@ -93,7 +93,7 @@ enum AccessibilityThreadProbe {
 
     /// Posts to main every 16 ms from its own thread and records how late each
     /// block ran — `MainThreadStallRecorder`'s measurement, scoped to one walk.
-    private final class MainPinger: @unchecked Sendable {
+    final class MainPinger: @unchecked Sendable {
         private let shouldStop = OSAllocatedUnfairLock(initialState: false)
         private let finished = DispatchSemaphore(value: 0)
         private(set) var window = MainThreadStallRecorder.SummaryWindow(startedAtUptime: ProcessInfo.processInfo.systemUptime)
