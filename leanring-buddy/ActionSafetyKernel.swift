@@ -605,12 +605,12 @@ struct CaptureInspection {
             if window.subtreesLostToFailedReads > 0 {
                 gaps.append("lost \(window.subtreesLostToFailedReads) subtree(s) to failed children reads")
             }
-            // Only a text field can be a password box, so a failed subrole read
-            // on a button changes nothing — scoping it here is what keeps this
-            // rule from refusing every capture of a busy app.
-            let unreadableTextFields = window.nodes.filter {
-                ActionSafetyKernel.typeableRoles.contains($0.role) && $0.subroleReadFailed
-            }.count
+            // Only what might be a password box counts (the shared predicate:
+            // a text input, or an AXUnknown named by its value, whose subrole did
+            // not read), so a failed subrole read on a button changes nothing —
+            // that scoping keeps this rule from refusing every capture of a busy
+            // app. A known password box is `evaluateCapture`'s own refusal.
+            let unreadableTextFields = window.nodes.filter { $0.mightBeSecure && !$0.isSecure }.count
             if unreadableTextFields > 0 {
                 gaps.append("has \(unreadableTextFields) text field(s) whose subrole could not be read, "
                     + "any of which may be a password field")

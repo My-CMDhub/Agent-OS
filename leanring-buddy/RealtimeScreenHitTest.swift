@@ -46,6 +46,7 @@ nonisolated enum RealtimeScreenHitTest {
         }
 
         var chain: [RealtimeSnapNode] = []
+        var above: [RealtimeSnapNode] = []
         var windowFrame: CGRect?
         var current: AXUIElement? = landed
         var depth = 0
@@ -54,14 +55,11 @@ nonisolated enum RealtimeScreenHitTest {
             AXUIElementSetMessagingTimeout(element, messagingTimeoutSeconds)
             let role = string(element, kAXRoleAttribute) ?? ""
             if chain.count >= maximumAncestors, role != kAXWindowRole, role != kAXApplicationRole {
-                // Past the snap depth: a password box above still refuses; nothing else is read.
+                // Past the snap depth: role and subrole only, judged by `outcome`.
                 var subrole: CFTypeRef?
                 let subroleError = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
-                if AccessibilityElementNode.mightBeSecure(role: role, subrole: subrole as? String,
-                                                          subroleReadFailed: AccessibilityElementNode.subroleReadFailed(subroleError),
-                                                          namedByValue: false) {
-                    return .refused(error: "secureField")
-                }
+                above.append(RealtimeSnapNode(name: nil, role: role, subrole: subrole as? String, frame: .zero,
+                                              subroleReadFailed: AccessibilityElementNode.subroleReadFailed(subroleError)))
                 var parent: CFTypeRef?
                 guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parent) == .success,
                       let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
@@ -89,7 +87,7 @@ nonisolated enum RealtimeScreenHitTest {
             current = (parent as! AXUIElement)
         }
 
-        switch RealtimeScreenVerbs.snap(chain, windowFrame: windowFrame) {
+        switch outcome(chain, above: above, windowFrame: windowFrame) {
         case .secure: return .refused(error: "secureField")
         case .nothing: return .nothing
         case .element(let index):
@@ -109,6 +107,23 @@ nonisolated enum RealtimeScreenHitTest {
                                                     subrole: node.subrole, pressable: node.pressable, pressAncestor: ancestor),
                             app: application?.bundleIdentifier)
         }
+    }
+
+    /// `snap` over the named chain, with what sits past the snap depth (`above`,
+    /// read by role and subrole only) still deciding: a password box there
+    /// refuses, and a text input there means the hit is inside typed text — a
+    /// contenteditable 14 wrappers up made a draft's AXStaticText the name sent
+    /// to the voice model (review 2026-10-02). Same line as `hidesChildrenFromWire`.
+    static func outcome(_ chain: [RealtimeSnapNode], above: [RealtimeSnapNode], windowFrame: CGRect?) -> RealtimeSnapOutcome {
+        let snapped = RealtimeScreenVerbs.snap(chain, windowFrame: windowFrame)
+        if snapped == .secure || above.contains(where: {
+            AccessibilityElementNode.mightBeSecure(role: $0.role, subrole: $0.subrole, subroleReadFailed: $0.subroleReadFailed,
+                                                   namedByValue: false)
+        }) {
+            return .secure
+        }
+        if above.contains(where: { RealtimeScreenVerbs.textInputRoles.contains($0.role) }) { return .nothing }
+        return snapped
     }
 
     /// AXPress specifically: Chromium publishes AXScrollToVisible / AXShowMenu everywhere.

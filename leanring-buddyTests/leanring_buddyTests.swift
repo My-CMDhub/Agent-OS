@@ -2318,6 +2318,24 @@ private func menuItemNode(_ label: String) -> AccessibilityElementNode {
     #expect(ActionSafetyKernel.evaluateCapture(CaptureInspection(windows: [buttonWalk])) == .allow)
 }
 
+/// Review 2026-10-02: the capture count had its own copy of the predicate and
+/// missed the AXUnknown named by its value whose subrole did not read — the
+/// shape `mightBeSecure` withholds everywhere else.
+@Test func anUnknownElementNamedByValueWithAnUnreadableSubroleMakesTheCaptureCheckIncomplete() async throws {
+    var walk = CaptureInspection.WindowWalk()
+    walk.nodes = [AccessibilityElementNode(
+        role: "AXUnknown", subrole: nil, title: nil, value: "typed-SECRET",
+        frameInAppKitCoordinates: CGRect(x: 0, y: 0, width: 200, height: 24),
+        depth: 1, children: [], subroleReadFailed: true
+    )]
+    let decision = ActionSafetyKernel.evaluateCapture(CaptureInspection(windows: [walk]))
+    guard case .refuse(let reason) = decision else {
+        Issue.record("expected a refusal, got \(decision)")
+        return
+    }
+    #expect(reason.hasPrefix(ActionSafetyKernel.incompleteCaptureCheckRefusalPrefix))
+}
+
 @Test func aRegionWithOnlyTheDesktopHasNothingToPhotograph() async throws {
     // Finder's desktop is an AXScrollArea, and a one-app capture draws no
     // desktop — measured 2026-09-11 as an `ok: true` blank white image.

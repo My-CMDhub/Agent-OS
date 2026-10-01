@@ -176,6 +176,28 @@ struct RealtimeScreenVerbsTests {
         #expect(RealtimeScreenVerbs.snap([longName, row], windowFrame: window) == .element(1))
     }
 
+    /// Review 2026-10-02: past the snap depth (12) the hit test read only for a
+    /// password box, so a text input 14 levels up left a draft's AXStaticText
+    /// named — and that name went to the voice model.
+    @Test func anInputPastTheSnapDepthStillKeepsTheHitFromNamingTypedText() {
+        let window = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let wrapper = RealtimeSnapNode(name: nil, role: "AXGroup", subrole: nil, frame: CGRect(x: 20, y: 600, width: 400, height: 40))
+        func walked(leaf: RealtimeSnapNode, fourteenUp role: String, subrole: String? = nil) -> RealtimeSnapOutcome {
+            // As `hit` builds them: the leaf and 11 wrappers named-read, then role/subrole only.
+            let chain = [leaf] + Array(repeating: wrapper, count: RealtimeScreenHitTest.maximumAncestors - 1)
+            let deep = { (role: String, subrole: String?) in RealtimeSnapNode(name: nil, role: role, subrole: subrole, frame: .zero) }
+            return RealtimeScreenHitTest.outcome(chain, above: [deep("AXGroup", nil), deep("AXGroup", nil), deep(role, subrole)],
+                                                 windowFrame: window)
+        }
+        let draft = RealtimeSnapNode(name: "draft-SECRET", role: "AXStaticText", subrole: nil,
+                                     frame: CGRect(x: 40, y: 610, width: 120, height: 16), namedByValue: true)
+        #expect(walked(leaf: draft, fourteenUp: "AXTextArea") == .nothing)
+        #expect(walked(leaf: draft, fourteenUp: "AXSecureTextField") == .secure)
+        let send = RealtimeSnapNode(name: "Send", role: "AXButton", subrole: nil,
+                                    frame: CGRect(x: 40, y: 610, width: 60, height: 24), pressable: true)
+        #expect(walked(leaf: send, fourteenUp: "AXGroup") == .element(0))
+    }
+
     /// Probe 2026-09-30 (Claude Desktop): the AX hit test landed on "Primary
     /// pane" for 26 of 43 points inside the aimed element — Chromium answers a
     /// hit with a wrapper. The walk already holds every visible named element,
