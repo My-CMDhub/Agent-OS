@@ -278,8 +278,8 @@ import Testing
         let password = node("AXSecureTextField", value: bullets, actions: ["AXShowMenu"])
         let titledSecure = node("AXTextField", subrole: "AXSecureTextField", value: bullets, actions: ["AXShowMenu"])
         let window = node("AXWindow", title: "W", frame: CGRect(x: 0, y: 0, width: 500, height: 500), children: [typed, password, titledSecure])
-        // The snapshot answer's own expression for the non-forModel list.
-        let actionable = window.flattenedDescendants().filter(\.isActionable).map(HarnessServer.summarise)
+        // The snapshot answer's own list for the non-forModel answer.
+        let actionable = HarnessServer.actionableElements(in: window).map(HarnessServer.summarise)
         #expect(actionable.count == 3 && actionable.allSatisfy { $0["name"] is NSNull })
         let json = String(decoding: (try? JSONSerialization.data(withJSONObject: actionable)) ?? Data(), as: UTF8.self)
         #expect(!json.contains("hunter2") && !json.contains("SECRET") && !json.contains("\u{2022}\u{2022}"), "\(json)")
@@ -287,6 +287,26 @@ import Testing
         let search = AccessibilityElementNode(role: "AXSearchField", subrole: nil, title: nil, value: secret, placeholder: "Search people",
                                               frameInAppKitCoordinates: fieldFrame, depth: 1, children: [])
         #expect(HarnessServer.summarise(search)["name"] as? String == "Search people")
+    }
+
+    /// Chromium publishes a contenteditable's draft as child AXStaticText with
+    /// AXShowMenu, so it is `isActionable`: neither the plain snapshot nor the
+    /// window/display-rung candidates may walk inside a text box or a password box.
+    @Test func noListDescendsIntoATextBoxOrAPasswordBox() {
+        let draft = { self.node("AXStaticText", value: "draft-SECRET", actions: ["AXShowMenu"]) }
+        let window = node("AXWindow", title: "W", frame: CGRect(x: 0, y: 0, width: 500, height: 500), children: [
+            node("AXTextArea", title: "Message", actions: ["AXShowMenu"], children: [draft()]),
+            node("AXSecureTextField", title: "Password", actions: ["AXShowMenu"], children: [draft()]),
+            node("AXGroup", children: [node("AXButton", title: "Post", actions: ["AXPress"])])
+        ])
+        let plain = HarnessServer.actionableElements(in: window).map(HarnessServer.summarise)
+        let candidates = HarnessServer.regionCandidates(in: window, region: CGRect(x: 0, y: 0, width: 500, height: 500))
+            .map(HarnessServer.summarise)
+        for list in [plain, candidates] {
+            let json = String(decoding: (try? JSONSerialization.data(withJSONObject: list)) ?? Data(), as: UTF8.self)
+            #expect(!json.contains("SECRET"), "\(json)")
+            #expect(list.compactMap { $0["name"] as? String } == ["Message", "Post"], "\(json)")
+        }
     }
 
     /// An ambiguous answer's `suggestedWithinNamed` is a container's wire name,

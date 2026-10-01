@@ -1658,7 +1658,7 @@ final class HarnessServer {
             return ["ok": false, "error": "noRootNode", "message": "the walk produced no root element"]
         }
 
-        let actionable = rootNode.flattenedDescendants().filter(\.isActionable)
+        let actionable = Self.actionableElements(in: rootNode)
         audit(request, dryRun: dryRun, kernel: "n/a", outcome: "ok", startedAt: startedAt)
 
         return [
@@ -1683,6 +1683,12 @@ final class HarnessServer {
             // inside a button is that button (`RealtimeScreenVerbs.visiblePool`).
             "elements": request.forModel ? Self.namedElements(in: rootNode) : actionable.map(Self.summarise)
         ]
+    }
+
+    /// The plain snapshot's `elements` and `actionableCount`: actionable nodes,
+    /// never inside a text input or a secure field (`wireDescendants`).
+    static func actionableElements(in rootNode: AccessibilityElementNode) -> [AccessibilityElementNode] {
+        rootNode.wireDescendants().filter(\.isActionable)
     }
 
     /// Pre-order, every node with a name and a non-zero frame that can be SEEN:
@@ -1720,7 +1726,7 @@ final class HarnessServer {
                 listed.append(entry)
                 next = listed.count - 1
             }
-            if isTextInput || node.mightBeSecure { return }
+            if node.hidesChildrenFromWire { return }
             let scrolls = (node.role == "AXScrollArea" || node.role == "AXWebArea") && frame.width > 0 && frame.height > 0
             let childClip = scrolls ? clip.intersection(frame) : clip
             for child in node.children { visit(child, parent: next, clip: childClip) }
@@ -3563,7 +3569,6 @@ final class HarnessServer {
         }
         guard let region, region.width > 0, region.height > 0 else { return nil }
 
-        let inRegion = allNodes.filter { $0.frameInAppKitCoordinates.intersects(region) }
         return EscalationPlan(
             tier: choice.tier,
             reason: choice.reason,
@@ -3571,9 +3576,16 @@ final class HarnessServer {
             resolver: "elementName",
             // On the window and display rungs nothing was named, so the useful
             // list is what a caller could name instead.
-            candidates: choice.tier == .element ? candidates : inRegion.filter(\.isActionable),
+            candidates: choice.tier == .element ? candidates : Self.regionCandidates(in: rootNode, region: region),
             application: application
         )
+    }
+
+    /// The window and display rungs' "what you could name instead": actionable
+    /// nodes touching the region, never inside a text input or a secure field —
+    /// these reach the socket, the flight-recorder ring and anomaly dumps.
+    static func regionCandidates(in rootNode: AccessibilityElementNode?, region: CGRect) -> [AccessibilityElementNode] {
+        (rootNode?.wireDescendants() ?? []).filter { $0.isActionable && $0.frameInAppKitCoordinates.intersects(region) }
     }
 
     /// How many candidates a payload will describe.

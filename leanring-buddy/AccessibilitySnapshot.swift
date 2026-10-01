@@ -1324,4 +1324,19 @@ extension AccessibilityElementNode {
     func flattenedDescendants() -> [AccessibilityElementNode] {
         [self] + children.flatMap { $0.flattenedDescendants() }
     }
+
+    /// A text input's or a might-be-secure node's children are its CONTENTS —
+    /// Chromium publishes a contenteditable's draft as child AXStaticText that
+    /// carries AXShowMenu, so it reads as actionable — never labels.
+    var hidesChildrenFromWire: Bool {
+        Self.textInputRoles.contains(role) || mightBeSecure
+    }
+
+    /// `flattenedDescendants` for every list that leaves the process: the same
+    /// pre-order, never inside a text box or a password box (the box itself is
+    /// kept; `listedName` already withholds its contents). Resolver, kernel and
+    /// change-detection paths keep `flattenedDescendants` — they must see all.
+    func wireDescendants() -> [AccessibilityElementNode] {
+        [self] + (hidesChildrenFromWire ? [] : children.flatMap { $0.wireDescendants() })
+    }
 }
