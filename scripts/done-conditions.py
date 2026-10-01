@@ -11,8 +11,11 @@ Owner-present: the owner navigates Chrome to each stage; this only READS
 Stages, in order: feed, profile, activity-posts, composer-open, draft-typed, posted.
 Each capture is <DONE_CONDITIONS_DIR>/<stage>.json, 0600 in a 0700 directory
 (default ~/Library/Logs/Clicky/done-conditions). It keeps the window title and each
-element's role, name, selected and value LENGTH only: an element named by its
-value (what was typed, or page text) keeps no name, only its length.
+element's role, name, selected and value LENGTH only. The harness itself withholds
+a text input's typed contents and a secure field's bullets (`name: null`); a
+withheld text input keeps only its valueLength, a secure or subrole-unreadable one
+not even that. A static text named by its value keeps its name in the harness
+answer; this script still drops every value-named name (page text it does not need).
 
 `evaluate` mirrors leanring-buddy/DoneCondition.swift: for each step, the
 candidate conditions that hold in its own stage and NOT in the stage before it

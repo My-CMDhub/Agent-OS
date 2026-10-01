@@ -116,12 +116,9 @@ enum HarnessScroll {
     /// input's typed value, a document-length or implausible name.
     static func visibleNames(fromNamedElements elements: [[String: Any]], within bounds: CGRect) -> [(name: String, frame: CGRect)] {
         elements.compactMap { element in
-            guard let name = element["name"] as? String, let role = element["role"] as? String,
+            guard let name = element["name"] as? String, element["role"] is String,
                   let frame = RealtimeScreenVerbs.frame(element["frame"]), frame.intersects(bounds) else { return nil }
-            let subrole = element["subrole"] as? String
-            let typedValue = RealtimeScreenVerbs.textInputRoles.contains(role)
-                && (element["nameSource"] as? String == "value" || element["subroleReadFailed"] as? Bool == true)
-            guard subrole != ActionSafetyKernel.secureFieldSubrole, !typedValue,
+            guard !AccessibilityElementNode.withholdsName(entry: element),
                   name.count <= RealtimeScreenVerbs.documentLengthCharacters,
                   UntrustedText(name).isPlausibleControlLabel else { return nil }
             return (name, frame)

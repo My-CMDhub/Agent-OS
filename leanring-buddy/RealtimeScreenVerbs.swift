@@ -135,12 +135,8 @@ nonisolated enum RealtimeScreenVerbs {
             guard let role = element["role"] as? String, role != "AXWindow",
                   let frame = frame(element["frame"]), frame != window else { continue }
             let subrole = element["subrole"] as? String
-            let fromValue = element["nameSource"] as? String == "value"
             // The harness lists these with a null name (withheld at the source): counted, never named.
-            let withheld = subrole == ActionSafetyKernel.secureFieldSubrole || role == ActionSafetyKernel.secureFieldSubrole
-                || (textInputRoles.contains(role) && fromValue)
-                || ((textInputRoles.contains(role) || fromValue) && element["subroleReadFailed"] as? Bool == true)
-            if withheld { hidden += 1; continue }
+            if AccessibilityElementNode.withholdsName(entry: element) { hidden += 1; continue }
             guard let name = element["name"] as? String, !name.allSatisfy(\.isWhitespace) else { continue }
             if name.count > documentLengthCharacters || !UntrustedText(name).isPlausibleControlLabel {
                 hidden += 1
@@ -247,10 +243,7 @@ nonisolated enum RealtimeScreenVerbs {
         guard let window = visibleWindow(fromSnapshotResponse: snapshotResponse, screens: screens) else { return nil }
         // Over a password box: refused like the AX path, never its container.
         let overSecure = (snapshotResponse["elements"] as? [[String: Any]] ?? []).contains { element in
-            let role = element["role"] as? String ?? ""
-            guard element["subrole"] as? String == ActionSafetyKernel.secureFieldSubrole
-                    || (textInputRoles.contains(role) && element["subroleReadFailed"] as? Bool == true),
-                  let frame = frame(element["frame"]) else { return false }
+            guard AccessibilityElementNode.mightBeSecure(entry: element), let frame = frame(element["frame"]) else { return false }
             return frame.contains(point)
         }
         if overSecure { return .refused(error: "secureField") }
@@ -288,7 +281,10 @@ nonisolated enum RealtimeScreenVerbs {
         // The whole chain first (review 2026-09-30): a password box anywhere on
         // the way refuses, and whatever sits INSIDE a text input is typed text —
         // the input itself is the nearest thing that may be named.
-        if chain.contains(where: { $0.subrole == ActionSafetyKernel.secureFieldSubrole || (textInputRoles.contains($0.role) && $0.subroleReadFailed) }) {
+        if chain.contains(where: {
+            AccessibilityElementNode.mightBeSecure(role: $0.role, subrole: $0.subrole, subroleReadFailed: $0.subroleReadFailed,
+                                                   namedByValue: $0.namedByValue)
+        }) {
             return .secure
         }
         let firstInput = chain.firstIndex { textInputRoles.contains($0.role) } ?? 0
@@ -376,6 +372,8 @@ nonisolated struct RealtimeSnapNode: Equatable, Sendable {
     let frame: CGRect
     var subroleReadFailed = false
     var pressable = false
+    /// `name` is its AXValue (no title or description).
+    var namedByValue = false
 }
 
 nonisolated enum RealtimeSnapOutcome: Equatable, Sendable {

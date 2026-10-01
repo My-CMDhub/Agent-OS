@@ -155,4 +155,127 @@ import Testing
         let row = AccessibilityTreeWalker.batchedStateReads(batch(value: failed, selected: kCFBooleanTrue))
         #expect(row.valueError == .attributeUnsupported && row.selectedError == .success && (row.selected as? Bool) == true)
     }
+
+    // MARK: One predicate behind every answer (review 2026-10-02, round 2)
+
+    private let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    private let bullets = String(repeating: "\u{2022}", count: 8)
+
+    /// The forModel answer a consumer receives for `children` inside a 500 pt window.
+    private func snapshot(_ children: [AccessibilityElementNode]) -> [String: Any] {
+        let frame = CGRect(x: 0, y: 0, width: 500, height: 500)
+        let window = AccessibilityElementNode(role: "AXWindow", subrole: nil, title: "W", value: nil,
+                                              frameInAppKitCoordinates: frame, depth: 0, children: children)
+        return ["ok": true, "walkStopReasons": [String](), "elements": HarnessServer.namedElements(in: window),
+                "windowFrame": ["x": frame.minX, "y": frame.minY, "w": frame.width, "h": frame.height]]
+    }
+
+    private func node(_ role: String, subrole: String? = nil, title: String? = nil, value: String? = nil, frame: CGRect? = nil,
+                      actions: [String] = [], subroleReadFailed: Bool = false,
+                      children: [AccessibilityElementNode] = []) -> AccessibilityElementNode {
+        AccessibilityElementNode(role: role, subrole: subrole, title: title, value: value,
+                                 frameInAppKitCoordinates: frame ?? fieldFrame, depth: 1, children: children,
+                                 publishedActionNames: actions, subroleReadFailed: subroleReadFailed)
+    }
+
+    /// A null-named secure entry and a null-named typed field are COUNTED hidden,
+    /// not skipped as nameless, and neither reaches the pool.
+    @Test func withheldEntriesAreCountedHiddenAndNeverOffered() {
+        let response = snapshot([
+            node("AXSecureTextField", value: bullets, frame: CGRect(x: 10, y: 10, width: 100, height: 20)),
+            node("AXTextField", value: secret, frame: CGRect(x: 10, y: 40, width: 100, height: 20)),
+            node("AXButton", title: "Post", frame: CGRect(x: 10, y: 70, width: 60, height: 20), actions: ["AXPress"])
+        ])
+        let (pool, hidden) = RealtimeScreenVerbs.visiblePool(fromSnapshotResponse: response, screens: [screen])
+        #expect(hidden == 2 && pool.map(\.name) == ["Post"])
+        let offer = RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: response, words: "hunter2 secret post", screens: [screen])
+        #expect(offer.privacyDroppedCount == 2 && offer.candidates.map(\.name) == ["Post"])
+    }
+
+    /// The unknown-role clause is narrow: a static text whose subrole timed out
+    /// keeps its value name; an AXUnknown one named by value does not; a TITLED
+    /// text field whose subrole did not read may still be a password box.
+    @Test func aFailedSubroleWithholdsOnlyWhatMightBeAPasswordBox() {
+        #expect(listed(field("AXUnknown", subroleReadFailed: true)).entry["name"] is NSNull)
+        #expect(listed(field("AXStaticText", subroleReadFailed: true)).entry["name"] as? String == secret)
+        #expect(listed(field("AXTextField", title: "Search", subroleReadFailed: true)).entry["name"] is NSNull)
+    }
+
+    @Test func nothingInsideAFieldSecureByRoleOnlyIsListed() {
+        let box = node("AXSecureTextField", title: "Password", children: [node("AXStaticText", value: secret)])
+        let entries = snapshot([box])["elements"] as? [[String: Any]] ?? []
+        #expect(entries.count == 2 && entries[1]["name"] is NSNull)
+        let json = String(decoding: (try? JSONSerialization.data(withJSONObject: entries)) ?? Data(), as: UTF8.self)
+        #expect(!json.contains("hunter2"))
+    }
+
+    /// `summarise` is what `actionable`, `resolved` and `candidates` all send:
+    /// an anonymous field (Chromium publishes AXShowMenu, so it is actionable)
+    /// goes out with no name, never its text or its bullets.
+    @Test func summariseNeverSendsAFieldsContents() {
+        let typed = node("AXTextField", value: secret, actions: ["AXShowMenu"])
+        let password = node("AXSecureTextField", value: bullets, actions: ["AXShowMenu"])
+        let titledSecure = node("AXTextField", subrole: "AXSecureTextField", value: bullets, actions: ["AXShowMenu"])
+        let window = node("AXWindow", title: "W", frame: CGRect(x: 0, y: 0, width: 500, height: 500), children: [typed, password, titledSecure])
+        // The snapshot answer's own expression for the non-forModel list.
+        let actionable = window.flattenedDescendants().filter(\.isActionable).map(HarnessServer.summarise)
+        #expect(actionable.count == 3 && actionable.allSatisfy { $0["name"] is NSNull })
+        let json = String(decoding: (try? JSONSerialization.data(withJSONObject: actionable)) ?? Data(), as: UTF8.self)
+        #expect(!json.contains("hunter2") && !json.contains("SECRET") && !json.contains("\u{2022}\u{2022}"), "\(json)")
+        // A placeholder-labelled field goes out by its label, as the resolver matches it.
+        let search = AccessibilityElementNode(role: "AXSearchField", subrole: nil, title: nil, value: secret, placeholder: "Search people",
+                                              frameInAppKitCoordinates: fieldFrame, depth: 1, children: [])
+        #expect(HarnessServer.summarise(search)["name"] as? String == "Search people")
+    }
+
+    /// An ambiguous answer's `suggestedWithinNamed` is a container's wire name,
+    /// never the draft of a contenteditable the match sits inside.
+    @Test func aSuggestedContainerIsNeverAFieldsContents() {
+        let send = { (y: CGFloat) in self.node("AXButton", title: "Send", frame: CGRect(x: 10, y: y, width: 40, height: 20), actions: ["AXPress"]) }
+        let window = node("AXWindow", title: "W", frame: CGRect(x: 0, y: 0, width: 500, height: 500), children: [
+            node("AXTextArea", value: secret, children: [send(10)]),
+            node("AXGroup", title: "Toolbar", children: [send(100)])
+        ])
+        let suggestions = ElementActionIntentResolver.containerSuggestions(
+            for: ElementActionIntent(role: nil, title: "Send", action: .press), inTreeRootedAt: window)
+        #expect(suggestions.count == 2)
+        #expect(suggestions.map(\.suggestedWithinNamed) == [nil, "Toolbar"])
+    }
+
+    /// The pointer and a position in the screenshot both refuse a password box
+    /// that is one by ROLE alone (no AXSecureTextField subrole).
+    @Test func aPointOverAFieldSecureByRoleIsRefused() {
+        let response = snapshot([
+            node("AXGroup", title: "Login", frame: CGRect(x: 0, y: 0, width: 200, height: 100), children: [
+                node("AXSecureTextField", title: "Password", frame: CGRect(x: 10, y: 10, width: 100, height: 20))
+            ])
+        ])
+        #expect(RealtimeScreenVerbs.structuralHit(at: CGPoint(x: 50, y: 20), snapshotResponse: response, screens: [screen])
+            == .refused(error: "secureField"))
+        #expect(HarnessPolicy.pointerRefusal(resolvedFrame: fieldFrame, nearPoint: CGPoint(x: 5, y: 5), role: "AXSecureTextField",
+                                             subrole: nil, subroleReadFailed: false)?.code == "secureField")
+        let snapped = RealtimeSnapNode(name: "Password", role: "AXSecureTextField", subrole: nil, frame: fieldFrame)
+        #expect(RealtimeScreenVerbs.snap([snapped], windowFrame: CGRect(x: 0, y: 0, width: 500, height: 500)) == .secure)
+    }
+
+    /// The node form and the wire-entry form are one predicate: every listed
+    /// entry answers both questions as the node it came from does.
+    @Test func theNodeAndWireFormsOfThePredicateAgree() {
+        var nodes: [AccessibilityElementNode] = []
+        for role in ["AXTextField", "AXTextArea", "AXSecureTextField", "AXStaticText", "AXUnknown", "AXButton"] {
+            for subrole in [nil, "AXSecureTextField"] {
+                for failed in [false, true] {
+                    nodes.append(node(role, subrole: subrole, value: secret, subroleReadFailed: failed))
+                    nodes.append(node(role, subrole: subrole, title: "Label", value: secret, subroleReadFailed: failed))
+                }
+            }
+        }
+        for item in nodes {
+            let entry = listed(item).entry
+            let label = "\(item.role) \(item.subrole ?? "-") failed=\(item.subroleReadFailed) title=\(item.title != nil)"
+            #expect(AccessibilityElementNode.withholdsName(entry: entry) == item.withholdsName, "\(label)")
+            #expect(AccessibilityElementNode.mightBeSecure(entry: entry) == item.mightBeSecure, "\(label)")
+            #expect((entry["name"] is NSNull) == item.withholdsName, "\(label)")
+        }
+    }
 }

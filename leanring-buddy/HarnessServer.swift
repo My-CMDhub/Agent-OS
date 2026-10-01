@@ -493,13 +493,14 @@ enum HarnessPolicy {
     static let defaultHighlightSeconds = 2.0
 
     /// The voice loop's pointer, after the resolver: never onto a password box
-    /// (by SUBROLE — secure fields are AXTextField/AXSecureTextField — or a text
-    /// field whose subrole did not read), and only where the offer saw it. A
-    /// single match skips the resolver's `nearPoint` narrowing, so a control
-    /// that is gone and a same-named one elsewhere would otherwise be pointed at.
+    /// or what may be one (`AccessibilityElementNode.mightBeSecure`), and only
+    /// where the offer saw it. A single match skips the resolver's `nearPoint`
+    /// narrowing, so a control that is gone and a same-named one elsewhere would
+    /// otherwise be pointed at.
     static func pointerRefusal(resolvedFrame: CGRect, nearPoint: CGPoint?, role: String, subrole: String?,
-                               subroleReadFailed: Bool) -> (code: String, message: String)? {
-        if subrole == ActionSafetyKernel.secureFieldSubrole || (role == "AXTextField" && subroleReadFailed) {
+                               subroleReadFailed: Bool, namedByValue: Bool = false) -> (code: String, message: String)? {
+        if AccessibilityElementNode.mightBeSecure(role: role, subrole: subrole, subroleReadFailed: subroleReadFailed,
+                                                  namedByValue: namedByValue) {
             return ("secureField", "the element is a secure text field (or a text field whose subrole could not be read); nothing is pointed at")
         }
         return movedRefusal(resolvedFrame: resolvedFrame, nearPoint: nearPoint)
@@ -1654,45 +1655,29 @@ final class HarnessServer {
     ///  - nothing INSIDE a text input or a secure field is listed: Chromium
     ///    publishes a contenteditable's draft (Cursor's chat box) as child
     ///    AXStaticText, and that is typed text, not a label.
+    /// A withheld element (`AccessibilityElementNode.withholdsName`) is listed
+    /// with a null name, so a consumer can count it hidden.
     static func namedElements(in rootNode: AccessibilityElementNode) -> [[String: Any]] {
         var listed: [[String: Any]] = []
         func visit(_ node: AccessibilityElementNode, parent: Int?, clip: CGRect) {
             let frame = node.frameInAppKitCoordinates
             var next = parent
-            // A text input is listed by what it is called (title, description,
-            // placeholder); only when it has none is its value the name, hidden later.
             let isTextInput = RealtimeScreenVerbs.textInputRoles.contains(node.role)
-            let secure = node.role == ActionSafetyKernel.secureFieldSubrole || node.subrole == ActionSafetyKernel.secureFieldSubrole
-            let fieldLabel = isTextInput ? node.fieldLabel : nil
-            if node.displayName != nil || fieldLabel != nil, frame.width > 0, frame.height > 0, !frame.intersection(clip).isEmpty {
+            if node.displayName != nil || (isTextInput && node.fieldLabel != nil), frame.width > 0, frame.height > 0,
+               !frame.intersection(clip).isEmpty {
                 var entry = summarise(node)
-                let nameSource = node.title != nil ? "title" : node.elementDescription != nil ? "description"
-                    : fieldLabel != nil ? "placeholder" : "value"
-                entry["nameSource"] = nameSource
-                if let fieldLabel {
-                    entry["name"] = fieldLabel.raw
-                    entry["nameIsPlausibleLabel"] = fieldLabel.isPlausibleControlLabel
-                }
-                // Withheld at the source (review 2026-10-02): a text input named by
-                // its value carries what was typed, a secure field's value is its
-                // bullets (its length), and an unreadable subrole may be either.
-                // Listed so a consumer can count it hidden; never named. A static
-                // text named by its value stays named: that is how System Settings labels.
-                let fromValue = nameSource == "value"
-                if secure || (isTextInput && (fromValue || node.subroleReadFailed)) || (node.subroleReadFailed && fromValue) {
-                    entry["name"] = NSNull()
-                    entry["nameIsPlausibleLabel"] = false
-                }
+                entry["nameSource"] = node.title != nil ? "title" : node.elementDescription != nil ? "description"
+                    : isTextInput && node.placeholder != nil ? "placeholder" : "value"
                 entry["parent"] = parent ?? NSNull()
                 entry["subroleReadFailed"] = node.subroleReadFailed
                 // Done-conditions ("Posts tab selected", "draft present"): a boolean
                 // and a COUNT, never the text; absent when not read, never false / 0.
                 if let selected = node.selected { entry["selected"] = selected }
-                if let valueLength = node.valueLength, !secure, !node.subroleReadFailed { entry["valueLength"] = valueLength }
+                if let valueLength = node.valueLength, !node.mightBeSecure { entry["valueLength"] = valueLength }
                 listed.append(entry)
                 next = listed.count - 1
             }
-            if isTextInput || secure { return }
+            if isTextInput || node.mightBeSecure { return }
             let scrolls = (node.role == "AXScrollArea" || node.role == "AXWebArea") && frame.width > 0 && frame.height > 0
             let childClip = scrolls ? clip.intersection(frame) : clip
             for child in node.children { visit(child, parent: next, clip: childClip) }
@@ -1701,15 +1686,18 @@ final class HarnessServer {
         return listed
     }
 
-    /// The wire form of an element. `name` is raw because JSON encoding is the
-    /// escaping — but `nameIsPlausibleLabel` travels beside it so the caller
-    /// knows whether the app published a label or a document.
+    /// The wire form of an element — every socket answer that names an element
+    /// routes through here, so the name is `listedName`: never a field's
+    /// contents, never a password box's bullets. `name` is raw because JSON
+    /// encoding is the escaping — but `nameIsPlausibleLabel` travels beside it
+    /// so the caller knows whether the app published a label or a document.
     static func summarise(_ node: AccessibilityElementNode) -> [String: Any] {
+        let name = node.listedName
         var entry: [String: Any] = [
             "role": node.role,
             "subrole": node.subrole ?? NSNull(),
-            "name": node.displayName?.raw ?? NSNull(),
-            "nameIsPlausibleLabel": node.displayName?.isPlausibleControlLabel ?? false,
+            "name": name?.raw ?? NSNull(),
+            "nameIsPlausibleLabel": name?.isPlausibleControlLabel ?? false,
             "actions": node.publishedActionNames
         ]
         Self.attachFrame(node.frameInAppKitCoordinates, to: &entry)
@@ -2004,7 +1992,7 @@ final class HarnessServer {
         let resolvedRole = target.node.role
         if request.pointer, let refusal = HarnessPolicy.pointerRefusal(
             resolvedFrame: target.node.frameInAppKitCoordinates, nearPoint: request.nearPoint, role: resolvedRole,
-            subrole: target.node.subrole, subroleReadFailed: target.node.subroleReadFailed
+            subrole: target.node.subrole, subroleReadFailed: target.node.subroleReadFailed, namedByValue: target.node.namedByValue
         ) {
             return refuse(refusal.code, refusal.message)
         }
@@ -3637,8 +3625,8 @@ final class HarnessServer {
     /// a caller can re-issue the intent with; an anonymous element in this list
     /// is context, not an option.
     private static func summariseCandidates(_ all: [AccessibilityElementNode]) -> [[String: Any]] {
-        let named = all.filter { $0.displayName?.isPlausibleControlLabel == true }
-        let anonymous = all.filter { $0.displayName?.isPlausibleControlLabel != true }
+        let named = all.filter { $0.listedName?.isPlausibleControlLabel == true }
+        let anonymous = all.filter { $0.listedName?.isPlausibleControlLabel != true }
         let nodes = Array((named + anonymous).prefix(maximumCandidates))
         let frames = nodes.map(\.frameInAppKitCoordinates)
         return nodes.indices.map { index in

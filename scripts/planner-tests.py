@@ -118,6 +118,12 @@ class Run:
         snapshot = self.call({"verb": "snapshot"}, note="checker read")
         return {e["name"] for e in (snapshot.get("elements") or []) if e.get("nameIsPlausibleLabel")}
 
+    def typed_lengths(self):
+        """Character counts of the front window's text inputs, never their text:
+        every snapshot answer withholds a field's contents (2026-10-02)."""
+        snapshot = self.call({"verb": "snapshot", "forModel": True}, note="checker read")
+        return [e["valueLength"] for e in (snapshot.get("elements") or []) if "valueLength" in e]
+
     def window_titles(self, app):
         windows = self.call({"verb": "windows", "app": app}, note="checker read")
         return [w["title"] for w in (windows.get("windows") or []) if w.get("role") == "AXWindow"]
@@ -290,7 +296,8 @@ def task_settings_search_typing(run, failures):
         response = run.call({"verb": "type", "target": "focused", "text": "Night Shift", "mode": "replace"})
         run.rungs.append("focus" if response.get("ok") else f"refused:{response.get('error')}")
         time.sleep(1.0)
-        check("Night Shift" in run.names(), "search field does not hold the typed text", failures)
+        # A count, not the text: the field started empty and replace mode leaves exactly these 11.
+        check(len("Night Shift") in run.typed_lengths(), "search field does not hold the typed text", failures)
     finally:
         close_settings()
 

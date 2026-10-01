@@ -55,7 +55,10 @@ nonisolated enum RealtimeScreenHitTest {
             let role = string(element, kAXRoleAttribute) ?? ""
             if chain.count >= maximumAncestors, role != kAXWindowRole, role != kAXApplicationRole {
                 // Past the snap depth: a password box above still refuses; nothing else is read.
-                if string(element, kAXSubroleAttribute) == ActionSafetyKernel.secureFieldSubrole { return .refused(error: "secureField") }
+                if AccessibilityElementNode.mightBeSecure(role: role, subrole: string(element, kAXSubroleAttribute),
+                                                          subroleReadFailed: false, namedByValue: false) {
+                    return .refused(error: "secureField")
+                }
                 var parent: CFTypeRef?
                 guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parent) == .success,
                       let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
@@ -71,11 +74,12 @@ nonisolated enum RealtimeScreenHitTest {
             let subroleError = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleValue)
             // A text field's AXValue is what the owner typed: never its name.
             let value = RealtimeScreenVerbs.textInputRoles.contains(role) ? nil : string(element, kAXValueAttribute)
+            let label = string(element, kAXTitleAttribute) ?? string(element, kAXDescriptionAttribute)
             chain.append(RealtimeSnapNode(
-                name: string(element, kAXTitleAttribute) ?? string(element, kAXDescriptionAttribute) ?? value,
+                name: label ?? value,
                 role: role, subrole: subroleValue as? String, frame: frame ?? .zero,
                 subroleReadFailed: ![.success, .noValue, .attributeUnsupported].contains(subroleError),
-                pressable: publishesPress(element)))
+                pressable: publishesPress(element), namedByValue: label == nil && value != nil))
             var parent: CFTypeRef?
             guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parent) == .success,
                   let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }

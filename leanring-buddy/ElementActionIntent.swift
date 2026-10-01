@@ -279,7 +279,9 @@ enum ElementActionIntentResolver {
             matches.append((node, ancestorNames))
         }
 
-        let chainBelow = name.map { ancestorNames + [$0] } ?? ancestorNames
+        // A container is named only as it may be on the wire (`suggestedWithinNamed`
+        // goes out on an ambiguous answer): never a field's contents.
+        let chainBelow = node.listedName.map { ancestorNames + [$0.raw] } ?? ancestorNames
         for child in node.children {
             collectMatches(in: child, ancestorNames: chainBelow, for: intent, into: &matches)
         }

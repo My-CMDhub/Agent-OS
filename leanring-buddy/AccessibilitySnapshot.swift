@@ -35,6 +35,61 @@ struct AccessibilityElementNode {
 
     static let textInputRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
 
+    // MARK: What may leave the app — ONE predicate (review 2026-10-02)
+    //
+    // A copy per caller drifted: `summarise` named a password box by its bullets
+    // and a label-less field by what was typed in it on four socket answers, and
+    // the pointer's copy missed a secure ROLE. Node and wire-entry forms below
+    // both call these two; a test holds them in agreement.
+
+    /// A password box (by role or subrole), or what may be one: a text input, or
+    /// an unknown-role element named by its value, whose subrole did not read.
+    /// Never pointed at, never named. A static text whose subrole timed out keeps
+    /// its name — that is how System Settings labels rows.
+    nonisolated static func mightBeSecure(role: String, subrole: String?, subroleReadFailed: Bool, namedByValue: Bool) -> Bool {
+        let secure = ActionSafetyKernel.secureFieldSubrole
+        return role == secure || subrole == secure
+            || (subroleReadFailed && (textInputRoles.contains(role) || (role == "AXUnknown" && namedByValue)))
+    }
+
+    /// Never named on any answer: what might be secure, and a text input whose
+    /// only name is its contents (what the owner typed).
+    nonisolated static func withholdsName(role: String, subrole: String?, subroleReadFailed: Bool, namedByValue: Bool) -> Bool {
+        mightBeSecure(role: role, subrole: subrole, subroleReadFailed: subroleReadFailed, namedByValue: namedByValue)
+            || (textInputRoles.contains(role) && namedByValue)
+    }
+
+    /// The same two questions of a `HarnessServer.namedElements` entry (the wire form).
+    nonisolated static func mightBeSecure(entry: [String: Any]) -> Bool {
+        mightBeSecure(role: entry["role"] as? String ?? "", subrole: entry["subrole"] as? String,
+                      subroleReadFailed: entry["subroleReadFailed"] as? Bool == true, namedByValue: entry["nameSource"] as? String == "value")
+    }
+
+    nonisolated static func withholdsName(entry: [String: Any]) -> Bool {
+        withholdsName(role: entry["role"] as? String ?? "", subrole: entry["subrole"] as? String,
+                      subroleReadFailed: entry["subroleReadFailed"] as? Bool == true, namedByValue: entry["nameSource"] as? String == "value")
+    }
+
+    /// Its only name is its AXValue: a text input with no title, description or
+    /// placeholder; anything else with no title or description.
+    var namedByValue: Bool {
+        value != nil && (Self.textInputRoles.contains(role) ? fieldLabel == nil : title == nil && elementDescription == nil)
+    }
+
+    var mightBeSecure: Bool {
+        Self.mightBeSecure(role: role, subrole: subrole, subroleReadFailed: subroleReadFailed, namedByValue: namedByValue)
+    }
+
+    var withholdsName: Bool {
+        Self.withholdsName(role: role, subrole: subrole, subroleReadFailed: subroleReadFailed, namedByValue: namedByValue)
+    }
+
+    /// The name that may go on the wire: a text input's label (never its
+    /// contents), anything else's `displayName`; nil when withheld.
+    var listedName: UntrustedText? {
+        withholdsName ? nil : Self.textInputRoles.contains(role) ? fieldLabel : displayName
+    }
+
     let frameInAppKitCoordinates: CGRect
     let depth: Int
     let children: [AccessibilityElementNode]
@@ -138,8 +193,9 @@ struct AccessibilityElementNode {
         let selectedState = (toggle && valueError == .success ? flag(value) : nil)
             ?? (selectedError == .success ? flag(selected) : nil)
 
-        let secure = subrole == ActionSafetyKernel.secureFieldSubrole || role == ActionSafetyKernel.secureFieldSubrole
-        guard textInputRoles.contains(role), !secure, !subroleReadFailed else { return (selectedState, nil) }
+        guard textInputRoles.contains(role),
+              !mightBeSecure(role: role, subrole: subrole, subroleReadFailed: subroleReadFailed, namedByValue: false)
+        else { return (selectedState, nil) }
         switch valueError {
         // UTF-16 units, not graphemes: no per-walk grapheme scan, and a done-condition only asks > 0.
         case .success: return (selectedState, (value as? NSString)?.length)
@@ -816,11 +872,6 @@ enum AccessibilityTreeWalker {
         var frameDidTimeOut = false
     }
 
-    /// A failed entry inside a batched result comes back as an `AXValue` wrapping
-    /// an `AXError`, not as a missing element — so "the app has no children" and
-    /// "the children read failed" are still distinguishable, which the walker
-    /// depends on. Returns nil only when the batch call itself failed, so the
-    /// caller can fall back to individual reads.
     /// The AXError a batched entry wraps, or nil when the entry is a real value.
     static func batchedErrorCode(_ entry: AnyObject) -> AXError? {
         guard CFGetTypeID(entry) == AXValueGetTypeID() else { return nil }
@@ -838,6 +889,11 @@ enum AccessibilityTreeWalker {
         (values[3], batchedErrorCode(values[3]) ?? .success, values[7], batchedErrorCode(values[7]) ?? .success)
     }
 
+    /// A failed entry inside a batched result comes back as an `AXValue` wrapping
+    /// an `AXError`, not as a missing element — so "the app has no children" and
+    /// "the children read failed" are still distinguishable, which the walker
+    /// depends on. Returns nil only when the batch call itself failed, so the
+    /// caller can fall back to individual reads.
     private static func batchedRead(from element: AXUIElement) -> BatchedNodeRead? {
         var rawValues: CFArray?
         let result = AXUIElementCopyMultipleAttributeValues(
