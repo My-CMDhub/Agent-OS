@@ -120,6 +120,17 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // A turn the owner did not speak (beginSystemTurn): does each stack answer
+        // it, and does a press still cut it off? Spends OpenAI (capped) and Gemini
+        // credit. Needs --harness-dry-run and 120 s of owner idle; refuses every tool call.
+        if CommandLine.arguments.contains("--speak-probe") {
+            Task { @MainActor in
+                await SpeakProbe.run()
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // Walks Finder / System Settings / Cursor on main and on a background
         // queue, writes ~/Library/Logs/Clicky/ax-thread-probe.log, then quits.
         if CommandLine.arguments.contains("--ax-thread-probe") {

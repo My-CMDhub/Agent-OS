@@ -161,6 +161,9 @@ final class RealtimeTurnMarks {
     }
 }
 
+/// How a turn the owner did not speak is put to the provider (`systemTurnMessages`).
+enum RealtimeSystemTurnVariant: String, CaseIterable, Sendable { case textOnly, textThenCreate, clientContent }
+
 @MainActor
 final class RealtimeVoiceConnection {
     let stack: VoiceStackChoice
@@ -438,6 +441,37 @@ final class RealtimeVoiceConnection {
                     "item": ["type": "message", "role": "user", "content": [["type": "input_text", "text": text]]]]
         case .geminiLive:
             return ["realtimeInput": ["text": text]]
+        }
+    }
+
+    /// A turn the owner did not speak: the session engine's "step 2 done; say the next step".
+    /// Which variant makes each provider answer is what `--speak-probe` measures (2026-10-01).
+    nonisolated static func systemTurnMessages(stack: VoiceStackChoice, text: String,
+                                               variant: RealtimeSystemTurnVariant) -> [[String: Any]] {
+        switch (stack, variant) {
+        case (.openAIRealtime, .textThenCreate):
+            return [contextTextMessage(stack: stack, text: text), ["type": "response.create"]]
+        case (.openAIRealtime, _):
+            return [contextTextMessage(stack: stack, text: text)]
+        case (.geminiLive, .clientContent):
+            return [["clientContent": ["turns": [["role": "user", "parts": [["text": text]]]], "turnComplete": true]]]
+        case (.geminiLive, _):
+            return [contextTextMessage(stack: stack, text: text)]
+        }
+    }
+
+    /// Fresh marks whose release is now, so the reply's audio counts for this turn.
+    /// Never claims `turnAwaitingCommit`: no audio is committed, and an owner turn
+    /// whose commit is still in flight must keep its own transcript.
+    func beginSystemTurn(text: String, variant: RealtimeSystemTurnVariant) async throws {
+        turn = RealtimeTurnMarks()
+        turn.lastAudioSentUptime = uptime   // nothing after this is "before the release"
+        for message in Self.systemTurnMessages(stack: stack, text: text, variant: variant) {
+            if message["type"] as? String == "response.create" {
+                try await sendResponseCreate(for: turn)
+            } else {
+                try await socket?.sendJSON(message)
+            }
         }
     }
 
