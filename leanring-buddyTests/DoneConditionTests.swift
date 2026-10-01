@@ -180,16 +180,75 @@ import Testing
 
     /// A null-named secure entry and a null-named typed field are COUNTED hidden,
     /// not skipped as nameless, and neither reaches the pool.
+    /// Also holds the pool to the SHARED predicate: its old hand copy withheld a
+    /// value-named static text whose subrole timed out, and a Finder file name.
     @Test func withheldEntriesAreCountedHiddenAndNeverOffered() {
         let response = snapshot([
             node("AXSecureTextField", value: bullets, frame: CGRect(x: 10, y: 10, width: 100, height: 20)),
             node("AXTextField", value: secret, frame: CGRect(x: 10, y: 40, width: 100, height: 20)),
-            node("AXButton", title: "Post", frame: CGRect(x: 10, y: 70, width: 60, height: 20), actions: ["AXPress"])
+            node("AXButton", title: "Post", frame: CGRect(x: 10, y: 70, width: 60, height: 20), actions: ["AXPress"]),
+            node("AXStaticText", value: "Wi-Fi", frame: CGRect(x: 10, y: 100, width: 60, height: 20), subroleReadFailed: true),
+            node("AXTextField", value: "Report.pdf", frame: CGRect(x: 10, y: 130, width: 100, height: 20), actions: ["AXOpen"])
         ])
         let (pool, hidden) = RealtimeScreenVerbs.visiblePool(fromSnapshotResponse: response, screens: [screen])
-        #expect(hidden == 2 && pool.map(\.name) == ["Post"])
+        #expect(hidden == 2 && pool.map(\.name) == ["Post", "Wi-Fi", "Report.pdf"])
         let offer = RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: response, words: "hunter2 secret post", screens: [screen])
         #expect(offer.privacyDroppedCount == 2 && offer.candidates.map(\.name) == ["Post"])
+    }
+
+    // MARK: Round 3 (review 2026-10-02)
+
+    /// Finder's list view: a file name is a label-less AXTextField named by its
+    /// value that publishes AXOpen — visible, not typed, so named. The same field
+    /// without AXOpen is typed text; a secure one is never named.
+    @Test func aFileLabelThatOpensIsNamedAndATypedFieldIsNot() {
+        let file = { (actions: [String], subrole: String?) in
+            self.node("AXRow", frame: CGRect(x: 0, y: 0, width: 400, height: 20), children: [
+                self.node("AXCell", frame: CGRect(x: 0, y: 0, width: 200, height: 20), children: [
+                    self.node("AXTextField", subrole: subrole, value: "Report.pdf", actions: actions)])])
+        }
+        func entry(_ row: AccessibilityElementNode) -> [String: Any] {
+            (snapshot([row])["elements"] as? [[String: Any]] ?? []).first { $0["role"] as? String == "AXTextField" } ?? [:]
+        }
+        #expect(entry(file(["AXOpen"], nil))["name"] as? String == "Report.pdf")
+        #expect(HarnessServer.summarise(file(["AXOpen"], nil).children[0].children[0])["name"] as? String == "Report.pdf")
+        #expect(entry(file([], nil))["name"] is NSNull)
+        #expect(entry(file(["AXOpen"], "AXSecureTextField"))["name"] is NSNull)
+        // The voice offer: `point_at "Report.pdf"` is offered again.
+        let offer = RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: snapshot([file(["AXOpen"], nil)]), words: "report pdf", screens: [screen])
+        #expect(offer.candidates.map(\.name) == ["Report.pdf"] && offer.privacyDroppedCount == 0)
+    }
+
+    /// `appeared` is post-action evidence: only names this listing would send.
+    @Test func appearedNamesPassTheSamePredicate() {
+        let window = { (children: [AccessibilityElementNode]) in
+            self.node("AXWindow", title: "W", frame: CGRect(x: 0, y: 0, width: 500, height: 500), children: children)
+        }
+        let before = window([node("AXButton", title: "Post", actions: ["AXPress"])])
+        let after = window([
+            node("AXButton", title: "Post", actions: ["AXPress"]),
+            node("AXButton", title: "Sent", frame: CGRect(x: 10, y: 40, width: 60, height: 20), actions: ["AXPress"]),
+            node("AXTextField", value: secret, frame: CGRect(x: 10, y: 70, width: 100, height: 20)),
+            node("AXTextArea", title: "Message", frame: CGRect(x: 10, y: 100, width: 200, height: 40),
+                 children: [node("AXStaticText", value: "draft-SECRET", frame: CGRect(x: 12, y: 102, width: 100, height: 20))]),
+            node("AXSecureTextField", value: bullets, frame: CGRect(x: 10, y: 150, width: 100, height: 20))
+        ])
+        let namesBefore = AccessibilityDumpRunner.namedElementFingerprint(in: before)
+        // Change detection still sees everything.
+        #expect(AccessibilityDumpRunner.namedElementFingerprint(in: after).contains(secret))
+        #expect(HarnessServer.appearedNames(in: after, since: namesBefore) == ["Message", "Sent"])
+    }
+
+    /// An empty, anonymous password box is listed (name null), so a point over
+    /// it refuses instead of landing on its container.
+    @Test func anEmptyAnonymousPasswordBoxStillRefusesThePointer() {
+        let response = snapshot([
+            node("AXGroup", title: "Login", frame: CGRect(x: 0, y: 0, width: 200, height: 100), children: [
+                node("AXSecureTextField", frame: CGRect(x: 10, y: 10, width: 100, height: 20))
+            ])
+        ])
+        #expect(RealtimeScreenVerbs.structuralHit(at: CGPoint(x: 50, y: 20), snapshotResponse: response, screens: [screen])
+            == .refused(error: "secureField"))
     }
 
     /// The unknown-role clause is narrow: a static text whose subrole timed out
@@ -265,14 +324,16 @@ import Testing
         for role in ["AXTextField", "AXTextArea", "AXSecureTextField", "AXStaticText", "AXUnknown", "AXButton"] {
             for subrole in [nil, "AXSecureTextField"] {
                 for failed in [false, true] {
-                    nodes.append(node(role, subrole: subrole, value: secret, subroleReadFailed: failed))
-                    nodes.append(node(role, subrole: subrole, title: "Label", value: secret, subroleReadFailed: failed))
+                    for actions in [[], ["AXOpen"]] {
+                        nodes.append(node(role, subrole: subrole, value: secret, actions: actions, subroleReadFailed: failed))
+                        nodes.append(node(role, subrole: subrole, title: "Label", value: secret, actions: actions, subroleReadFailed: failed))
+                    }
                 }
             }
         }
         for item in nodes {
             let entry = listed(item).entry
-            let label = "\(item.role) \(item.subrole ?? "-") failed=\(item.subroleReadFailed) title=\(item.title != nil)"
+            let label = "\(item.role) \(item.subrole ?? "-") failed=\(item.subroleReadFailed) title=\(item.title != nil) actions=\(item.publishedActionNames)"
             #expect(AccessibilityElementNode.withholdsName(entry: entry) == item.withholdsName, "\(label)")
             #expect(AccessibilityElementNode.mightBeSecure(entry: entry) == item.mightBeSecure, "\(label)")
             #expect((entry["name"] is NSNull) == item.withholdsName, "\(label)")

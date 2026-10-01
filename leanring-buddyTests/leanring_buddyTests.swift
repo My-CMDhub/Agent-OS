@@ -1061,12 +1061,41 @@ private func typeDecision(into node: AccessibilityElementNode) -> SafetyDecision
 }
 
 @Test func typeNeverReadsTheValueOfWhatMightBeASecureField() async throws {
-    // `actResponse` reads the live field's value only when this says so.
-    #expect(!HarnessPolicy.readsTypingContext(verb: .type, of: secureCandidate(role: "AXSecureTextField")))
-    #expect(!HarnessPolicy.readsTypingContext(verb: .type, of: secureCandidate(role: "AXTextField", subrole: "AXSecureTextField")))
-    #expect(!HarnessPolicy.readsTypingContext(verb: .type, of: secureCandidate(role: "AXTextField", subroleReadFailed: true)))
-    #expect(HarnessPolicy.readsTypingContext(verb: .type, of: secureCandidate(role: "AXTextField")))
-    #expect(!HarnessPolicy.readsTypingContext(verb: .press, of: secureCandidate(role: "AXTextField")))
+    // `actResponse`'s own call: the value closure is the live read.
+    func valueReads(_ verb: HarnessVerb, _ node: AccessibilityElementNode) -> (reads: Int, context: Bool) {
+        var reads = 0
+        let typing = HarnessPolicy.typingContext(verb: verb, mode: .insert, aimedByFocus: true, of: node,
+                                                 settable: { ["AXValue"] }, value: { reads += 1; return "hunter2" })
+        return (reads, typing != nil)
+    }
+    for node in [secureCandidate(role: "AXSecureTextField"),
+                 secureCandidate(role: "AXTextField", subrole: "AXSecureTextField"),
+                 secureCandidate(role: "AXTextField", subroleReadFailed: true)] {
+        #expect(valueReads(.type, node) == (0, false), "\(node.role) \(node.subrole ?? "-")")
+    }
+    #expect(valueReads(.press, secureCandidate(role: "AXTextField")) == (0, false))
+    // The control: an ordinary field is read once, and its `field` carries a length, never the text.
+    #expect(valueReads(.type, secureCandidate(role: "AXTextField")) == (1, true))
+    let field = HarnessPolicy.typingContext(verb: .type, mode: .insert, aimedByFocus: false, of: secureCandidate(role: "AXTextField"),
+                                            settable: { [] }, value: { "hunter2" })?.field ?? [:]
+    #expect(field["valueLength"] as? Int == 7 && !"\(field)".contains("hunter2"))
+}
+
+@Test func typeEvidenceCarriesLengthsNeverTheFieldsContents() async throws {
+    let outcome = AccessibilityTypePerformer.Outcome(attributeWritten: "AXSelectedText", error: .success, milliseconds: 3,
+                                                     valueLengthBefore: 8, valueAfter: "draft so far hello")
+    let (performed, contains) = HarnessPolicy.typedEvidence(outcome, wrote: "hello")
+    #expect(contains && performed["readBackContainsText"] as? Bool == true && performed["valueLengthAfter"] as? Int == 18)
+    let json = String(decoding: (try? JSONSerialization.data(withJSONObject: performed)) ?? Data(), as: UTF8.self)
+    #expect(!json.contains("draft"), "\(json)")
+}
+
+@Test func aFocusedElementWhoseSubroleDidNotReadIsMarkedSo() async throws {
+    // No such process: every read fails, and a failed subrole read is not "no subrole".
+    let element = AXUIElementCreateApplication(pid_t(Int32.max))
+    AXUIElementSetMessagingTimeout(element, 0.5)
+    let node = AccessibilityTypePerformer.node(describing: element)
+    #expect(node.subrole == nil && node.subroleReadFailed)
 }
 
 @Test func aRegionHoldingAFieldSecureByRoleAloneIsNotPhotographed() async throws {

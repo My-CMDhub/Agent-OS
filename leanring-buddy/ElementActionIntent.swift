@@ -603,8 +603,14 @@ enum AccessibilityTypePerformer {
         ) == .success,
             let focusedValue,
             CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else { return nil }
-        let element = focusedValue as! AXUIElement
+        return node(describing: focusedValue as! AXUIElement)
+    }
 
+    /// `focusedNode`'s reads of one element. The subrole keeps its error, as the
+    /// walker's does: a timed-out read is not "no subrole", or `type
+    /// target:focused` read the value of what may be a password box and the
+    /// kernel let it be typed into (review 2026-10-02).
+    static func node(describing element: AXUIElement) -> AccessibilityElementNode {
         func string(_ attribute: String) -> String? {
             var out: AnyObject?
             guard AXUIElementCopyAttributeValue(element, attribute as CFString, &out) == .success,
@@ -615,9 +621,12 @@ enum AccessibilityTypePerformer {
         let primaryDisplayHeight = CGDisplayBounds(CGMainDisplayID()).height
         let accessibilityFrame = frame(of: element) ?? .zero
 
+        var subrole: AnyObject?
+        let subroleError = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+
         return AccessibilityElementNode(
             role: string(kAXRoleAttribute) ?? "AXUnknown",
-            subrole: string(kAXSubroleAttribute),
+            subrole: (subrole as? String).flatMap { $0.isEmpty ? nil : $0 },
             title: string(kAXTitleAttribute),
             value: string(kAXValueAttribute),
             elementDescription: string(kAXDescriptionAttribute),
@@ -628,6 +637,7 @@ enum AccessibilityTypePerformer {
             depth: 0,
             children: [],
             publishedActionNames: AccessibilityTreeWalker.copyActionNames(from: element),
+            subroleReadFailed: AccessibilityElementNode.subroleReadFailed(subroleError),
             accessibilityElement: element
         )
     }

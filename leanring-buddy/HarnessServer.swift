@@ -513,6 +513,39 @@ enum HarnessPolicy {
         verb == .type && !node.mightBeSecure
     }
 
+    /// `actResponse`'s look before the kernel — the call site itself, so a test
+    /// holds that `value` is never asked of what might be a password box. Also
+    /// the `field` the answer carries: what it is called, never its value.
+    static func typingContext(verb: HarnessVerb, mode: TypeMode, aimedByFocus: Bool, of node: AccessibilityElementNode,
+                              settable: () -> Set<String>, value: () -> String?)
+        -> (context: ActionSafetyKernel.TypingContext, field: [String: Any])? {
+        guard readsTypingContext(verb: verb, of: node) else { return nil }
+        let settableAttributes = settable()
+        let valueLength = (value() ?? "").count
+        let label = node.fieldLabel?.isPlausibleControlLabel == true ? node.fieldLabel?.raw : nil
+        return (ActionSafetyKernel.TypingContext(mode: mode, settableAttributes: settableAttributes,
+                                                 currentValueLength: valueLength, aimedByFocus: aimedByFocus),
+                ["settableAttributes": settableAttributes.sorted(), "valueLength": valueLength,
+                 "mode": mode.rawValue, "label": label ?? NSNull()])
+    }
+
+    /// `type`'s own evidence: lengths, and whether the text read back — never
+    /// the field's contents (review 2026-10-02: `valueAfter` echoed them onto
+    /// the socket and the flight recorder).
+    static func typedEvidence(_ outcome: AccessibilityTypePerformer.Outcome, wrote text: String)
+        -> (performed: [String: Any], containsText: Bool) {
+        let containsText = outcome.valueAfter?.contains(text) ?? false
+        return ([
+            "status": outcome.error == .success ? "sent" : "failed",
+            "attributeWritten": outcome.attributeWritten,
+            "axErrorRawValue": outcome.error.rawValue,
+            "milliseconds": outcome.milliseconds,
+            "valueLengthBefore": outcome.valueLengthBefore,
+            "valueLengthAfter": outcome.valueAfter?.count ?? NSNull(),
+            "readBackContainsText": containsText
+        ], containsText)
+    }
+
     /// `requireAtPoint`'s check, shared by the pointer and press_element.
     /// May an app's names go to the model? The policy file read once, failing
     /// closed: unreadable refuses, missing allows, `refuse` refuses.
@@ -1670,7 +1703,10 @@ final class HarnessServer {
             let frame = node.frameInAppKitCoordinates
             var next = parent
             let isTextInput = RealtimeScreenVerbs.textInputRoles.contains(node.role)
-            if node.displayName != nil || (isTextInput && node.fieldLabel != nil), frame.width > 0, frame.height > 0,
+            // A password box is listed even empty and anonymous (name null), so the
+            // pointer's `structuralHit` can see it and refuse rather than land on its container.
+            if node.displayName != nil || (isTextInput && node.fieldLabel != nil) || node.mightBeSecure,
+               frame.width > 0, frame.height > 0,
                !frame.intersection(clip).isEmpty {
                 var entry = summarise(node)
                 entry["nameSource"] = node.title != nil ? "title" : node.elementDescription != nil ? "description"
@@ -1691,6 +1727,19 @@ final class HarnessServer {
         }
         visit(rootNode, parent: nil, clip: rootNode.frameInAppKitCoordinates)
         return listed
+    }
+
+    /// `verification.appeared`: names new since `namesBefore` (the full
+    /// fingerprint — change detection must see everything) that this listing
+    /// would also send. Post-action evidence passes the same predicate as every
+    /// other answer: a draft typed into a label-less field, a contenteditable's
+    /// child AXStaticText, a password box revealed by a press are not names.
+    /// ponytail: a draft under a contenteditable Chromium publishes as AXGroup /
+    /// AXWebArea rather than a text input is still listed — no structural tell.
+    static func appearedNames(in laterRoot: AccessibilityElementNode, since namesBefore: Set<String>) -> [String] {
+        let listed = Set(namedElements(in: laterRoot).compactMap { ($0["name"] as? String).map { UntrustedText($0).forDisplay } })
+        return Array(AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot)
+            .subtracting(namesBefore).intersection(listed).sorted().prefix(12))
     }
 
     /// The wire form of an element — every socket answer that names an element
@@ -2353,25 +2402,14 @@ final class HarnessServer {
         // one element — never a per-node cost — and skipped entirely for what
         // might be a secure field (role, subrole, or an unreadable subrole),
         // which the kernel refuses without its value.
-        var typingContext: ActionSafetyKernel.TypingContext?
-        if HarnessPolicy.readsTypingContext(verb: request.verb, of: resolvedNode) {
-            let element = resolvedNode.accessibilityElement
-            let settable = element.map(AccessibilityTypePerformer.settableAttributes) ?? []
-            let currentValue = element.flatMap(AccessibilityTypePerformer.stringValue) ?? ""
-            typingContext = ActionSafetyKernel.TypingContext(
-                mode: request.mode,
-                settableAttributes: settable,
-                currentValueLength: currentValue.count,
-                aimedByFocus: request.aimAtFocus
-            )
-            response["field"] = [
-                "settableAttributes": settable.sorted(),
-                "valueLength": currentValue.count,
-                "mode": request.mode.rawValue,
-                // What the field is called, so a caller can say where it typed — never its value.
-                "label": (resolvedNode.fieldLabel?.isPlausibleControlLabel == true ? resolvedNode.fieldLabel?.raw : nil) ?? NSNull()
-            ]
-        }
+        let liveElement = resolvedNode.accessibilityElement
+        let typing = HarnessPolicy.typingContext(
+            verb: request.verb, mode: request.mode, aimedByFocus: request.aimAtFocus, of: resolvedNode,
+            settable: { liveElement.map(AccessibilityTypePerformer.settableAttributes) ?? [] },
+            value: { liveElement.flatMap(AccessibilityTypePerformer.stringValue) }
+        )
+        let typingContext = typing?.context
+        if let field = typing?.field { response["field"] = field }
 
         let decision = applyAppPolicy(
             to: ActionSafetyKernel.evaluate(
@@ -2513,19 +2551,8 @@ final class HarnessServer {
             // effect. The fingerprint below says whether the app *reacted*,
             // which is a different question, and they are reported separately
             // on purpose.
-            let containsWhatWeWrote = outcome.valueAfter?.contains(request.text) ?? false
-            response["performed"] = [
-                "status": outcome.error == .success ? "sent" : "failed",
-                "attributeWritten": outcome.attributeWritten,
-                "axErrorRawValue": outcome.error.rawValue,
-                "milliseconds": outcome.milliseconds,
-                "valueLengthBefore": outcome.valueLengthBefore,
-                "valueLengthAfter": outcome.valueAfter?.count ?? NSNull(),
-                // App-written text going into a log and a response: escaped and
-                // capped, like every other name this harness prints.
-                "valueAfter": outcome.valueAfter.map { UntrustedText($0).forDisplay } ?? NSNull(),
-                "readBackContainsText": containsWhatWeWrote
-            ]
+            let (performed, containsWhatWeWrote) = HarnessPolicy.typedEvidence(outcome, wrote: request.text)
+            response["performed"] = performed
             // `.success` on a write that changed nothing has been measured three
             // times in this repo. The field's own text is what decides here.
             performedOK = outcome.error == .success && containsWhatWeWrote
@@ -2577,10 +2604,7 @@ final class HarnessServer {
                 confirming: confirmingSnapshot, walks: verifyWalks,
                 walkAgain: { try? AccessibilityTreeWalker.snapshotFocusedWindow() }
             )?.rootNode {
-                appeared = Array(
-                    AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot)
-                        .subtracting(namesBefore).sorted().prefix(12)
-                )
+                appeared = Self.appearedNames(in: laterRoot, since: namesBefore)
             }
             response["verification"] = [
                 "status": "confirmed", "evidence": "named elements changed",

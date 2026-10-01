@@ -55,8 +55,11 @@ nonisolated enum RealtimeScreenHitTest {
             let role = string(element, kAXRoleAttribute) ?? ""
             if chain.count >= maximumAncestors, role != kAXWindowRole, role != kAXApplicationRole {
                 // Past the snap depth: a password box above still refuses; nothing else is read.
-                if AccessibilityElementNode.mightBeSecure(role: role, subrole: string(element, kAXSubroleAttribute),
-                                                          subroleReadFailed: false, namedByValue: false) {
+                var subrole: CFTypeRef?
+                let subroleError = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+                if AccessibilityElementNode.mightBeSecure(role: role, subrole: subrole as? String,
+                                                          subroleReadFailed: AccessibilityElementNode.subroleReadFailed(subroleError),
+                                                          namedByValue: false) {
                     return .refused(error: "secureField")
                 }
                 var parent: CFTypeRef?
@@ -78,7 +81,7 @@ nonisolated enum RealtimeScreenHitTest {
             chain.append(RealtimeSnapNode(
                 name: label ?? value,
                 role: role, subrole: subroleValue as? String, frame: frame ?? .zero,
-                subroleReadFailed: ![.success, .noValue, .attributeUnsupported].contains(subroleError),
+                subroleReadFailed: AccessibilityElementNode.subroleReadFailed(subroleError),
                 pressable: publishesPress(element), namedByValue: label == nil && value != nil))
             var parent: CFTypeRef?
             guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parent) == .success,

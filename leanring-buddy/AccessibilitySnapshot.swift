@@ -60,10 +60,20 @@ struct AccessibilityElementNode {
     }
 
     /// Never named on any answer: what might be secure, and a text input whose
-    /// only name is its contents (what the owner typed).
-    nonisolated static func withholdsName(role: String, subrole: String?, subroleReadFailed: Bool, namedByValue: Bool) -> Bool {
+    /// only name is its contents (what the owner typed) — unless it publishes
+    /// `AXOpen`: Finder's list-view file names are label-less AXTextFields named
+    /// by value, a label on screen, not typed text. Editable fields do not
+    /// publish AXOpen (owner's ruling 2026-10-02: the privacy line is visibility).
+    nonisolated static func withholdsName(role: String, subrole: String?, subroleReadFailed: Bool, namedByValue: Bool,
+                                          opens: Bool) -> Bool {
         mightBeSecure(role: role, subrole: subrole, subroleReadFailed: subroleReadFailed, namedByValue: namedByValue)
-            || (textInputRoles.contains(role) && namedByValue)
+            || (textInputRoles.contains(role) && namedByValue && !opens)
+    }
+
+    /// A read failure is never absence: only `.noValue` / `.attributeUnsupported`
+    /// mean "no subrole" (`subroleReadFailed`).
+    nonisolated static func subroleReadFailed(_ error: AXError) -> Bool {
+        !(error == .success || error == .noValue || error == .attributeUnsupported)
     }
 
     /// The same two questions of a `HarnessServer.namedElements` entry (the wire form).
@@ -74,7 +84,8 @@ struct AccessibilityElementNode {
 
     nonisolated static func withholdsName(entry: [String: Any]) -> Bool {
         withholdsName(role: entry["role"] as? String ?? "", subrole: entry["subrole"] as? String,
-                      subroleReadFailed: entry["subroleReadFailed"] as? Bool == true, namedByValue: entry["nameSource"] as? String == "value")
+                      subroleReadFailed: entry["subroleReadFailed"] as? Bool == true, namedByValue: entry["nameSource"] as? String == "value",
+                      opens: (entry["actions"] as? [String])?.contains("AXOpen") == true)
     }
 
     /// Its only name is its AXValue: a text input with no title, description or
@@ -90,13 +101,15 @@ struct AccessibilityElementNode {
     }
 
     var withholdsName: Bool {
-        Self.withholdsName(role: role, subrole: subrole, subroleReadFailed: subroleReadFailed, namedByValue: namedByValue)
+        Self.withholdsName(role: role, subrole: subrole, subroleReadFailed: subroleReadFailed, namedByValue: namedByValue,
+                           opens: publishedActionNames.contains("AXOpen"))
     }
 
-    /// The name that may go on the wire: a text input's label (never its
-    /// contents), anything else's `displayName`; nil when withheld.
+    /// The name that may go on the wire: a text input's label (its value only
+    /// when that is a file label — see `withholdsName`), anything else's
+    /// `displayName`; nil when withheld.
     var listedName: UntrustedText? {
-        withholdsName ? nil : Self.textInputRoles.contains(role) ? fieldLabel : displayName
+        withholdsName ? nil : Self.textInputRoles.contains(role) ? fieldLabel ?? value : displayName
     }
 
     let frameInAppKitCoordinates: CGRect
@@ -998,7 +1011,7 @@ enum AccessibilityTreeWalker {
             if subroleError == .success {
                 subrole = (rawSubrole as? String).flatMap { $0.isEmpty ? nil : $0 }
             } else {
-                subroleReadFailed = !(subroleError == .noValue || subroleError == .attributeUnsupported)
+                subroleReadFailed = AccessibilityElementNode.subroleReadFailed(subroleError)
             }
         }
         let title = batched?.title ?? copyStringAttribute(from: element, attribute: kAXTitleAttribute)

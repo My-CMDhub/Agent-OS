@@ -297,7 +297,10 @@ def task_settings_search_typing(run, failures):
         run.rungs.append("focus" if response.get("ok") else f"refused:{response.get('error')}")
         time.sleep(1.0)
         # A count, not the text: the field started empty and replace mode leaves exactly these 11.
-        check(len("Night Shift") in run.typed_lengths(), "search field does not hold the typed text", failures)
+        lengths = run.typed_lengths()
+        check(len("Night Shift") in lengths,
+              "search field does not hold the typed text" if lengths
+              else "valueLength unavailable (nodesReadWithoutBatch > 0?)", failures)
     finally:
         close_settings()
 
