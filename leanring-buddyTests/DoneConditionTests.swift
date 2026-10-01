@@ -234,9 +234,11 @@ import Testing
             node("AXSecureTextField", value: bullets, frame: CGRect(x: 10, y: 150, width: 100, height: 20))
         ])
         let namesBefore = AccessibilityDumpRunner.namedElementFingerprint(in: before)
-        // Change detection still sees everything.
-        #expect(AccessibilityDumpRunner.namedElementFingerprint(in: after).contains(secret))
-        #expect(HarnessServer.appearedNames(in: after, since: namesBefore) == ["Message", "Sent"])
+        // Change detection still sees everything (the fingerprint holds display forms, quotes included).
+        #expect(AccessibilityDumpRunner.namedElementFingerprint(in: after).contains(UntrustedText(secret).forDisplay))
+        let appeared = HarnessServer.appearedNames(in: after, since: namesBefore)
+        #expect(appeared == ["Message", "Sent"].map { UntrustedText($0).forDisplay })
+        #expect(!appeared.joined().contains("SECRET") && !appeared.joined().contains("•"))
     }
 
     /// An empty, anonymous password box is listed (name null), so a point over
