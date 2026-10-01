@@ -111,6 +111,17 @@ enum ActionSafetyKernel {
         "refusing to type into a secure field (subrole \(subrole)) — the agent does not enter credentials, and this refusal has no confirmed path past it"
     }
 
+    /// The same refusal for a field that is AXSecureTextField by ROLE alone.
+    static func secureFieldRefusalReason(role: String) -> String {
+        "refusing to type into a secure field (role \(role)) — the agent does not enter credentials, and this refusal has no confirmed path past it"
+    }
+
+    /// A text input whose subrole read failed may be a password box: refused,
+    /// not guessed (read failures are never absence). Unlike the two above it
+    /// may pass on a retry once the app answers.
+    static let unreadableSubroleTypeRefusalReason =
+        "refusing to type: this text field's subrole could not be read, so it may be a secure field — the agent does not enter credentials"
+
     /// Whether a refusal says something tried to do a thing it should not, as
     /// opposed to a thing it could not.
     ///
@@ -123,6 +134,7 @@ enum ActionSafetyKernel {
         reason == implausibleNameRefusalReason
             || reason == secureStatusItemRefusalReason
             || reason.hasPrefix("refusing to type into a secure field")
+            || reason == unreadableSubroleTypeRefusalReason
             || reason.hasPrefix(secureFieldCaptureRefusalPrefix)
             || reason.hasPrefix(incompleteCaptureCheckRefusalPrefix)
             || reason.hasPrefix(irreversibleRefusalPrefix)
@@ -338,7 +350,7 @@ enum ActionSafetyKernel {
     /// go and check.
     ///
     /// Note what is NOT checked: the field's value. The kernel decides on the
-    /// subrole alone and never reads the text it is protecting.
+    /// role or subrole alone and never reads the text it is protecting.
     ///
     /// **An incomplete check is a refusal, not a pass.** An empty or partial
     /// element list and a genuinely safe region both produce `.allow` — the
@@ -350,10 +362,9 @@ enum ActionSafetyKernel {
     static func evaluateCapture(_ inspection: CaptureInspection) -> SafetyDecision {
         // First, and even inside a walk that then stopped: a secure field that
         // was seen is refused as one, whatever else went unseen.
-        if inspection.windows.contains(where: { window in
-            window.nodes.contains(where: { $0.subrole == secureFieldSubrole })
-        }) {
-            return .refuse(reason: "\(secureFieldCaptureRefusalPrefix) (subrole \(secureFieldSubrole))")
+        if let secure = inspection.windows.lazy.flatMap(\.nodes).first(where: \.isSecure) {
+            let marker = secure.subrole == secureFieldSubrole ? "subrole" : "role"
+            return .refuse(reason: "\(secureFieldCaptureRefusalPrefix) (\(marker) \(secureFieldSubrole))")
         }
         if let incomplete = inspection.incompleteReason {
             return .refuse(reason: incomplete)
@@ -380,9 +391,16 @@ enum ActionSafetyKernel {
         // and no `confirmed: true` that makes this an allow, so it is not a
         // question. It is one of exactly two rules this kernel may not be
         // argued out of — see `irreversibleTitleKeywords` for the other.
-        if case .type = intent.action,
-           let subrole = resolvedNode.subrole, subrole == secureFieldSubrole {
-            return .refuse(reason: secureFieldRefusalReason(subrole: subrole))
+        // By role OR subrole (review 2026-10-02: a role-only field passed), and
+        // a text input whose subrole did not read is refused too — distinctly.
+        if case .type = intent.action, resolvedNode.mightBeSecure {
+            if resolvedNode.subrole == secureFieldSubrole {
+                return .refuse(reason: secureFieldRefusalReason(subrole: secureFieldSubrole))
+            }
+            if resolvedNode.role == secureFieldSubrole {
+                return .refuse(reason: secureFieldRefusalReason(role: secureFieldSubrole))
+            }
+            return .refuse(reason: unreadableSubroleTypeRefusalReason)
         }
 
         // The other rule with no confirmed path past it, and it is checked here

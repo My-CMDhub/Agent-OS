@@ -1021,6 +1021,61 @@ private let wholeScreen = CGRect(x: 0, y: 0, width: 1920, height: 1200)
     #expect(HarnessPolicy.executableWithoutAHuman(decision) == false)
 }
 
+/// Review 2026-10-02: the kernel knew a password box only by its SUBROLE, so a
+/// field that is AXSecureTextField by role alone reached the typing checks.
+private func secureCandidate(role: String, subrole: String? = nil, subroleReadFailed: Bool = false) -> AccessibilityElementNode {
+    AccessibilityElementNode(
+        role: role, subrole: subrole, title: "Password", value: nil,
+        frameInAppKitCoordinates: CGRect(x: 100, y: 100, width: 200, height: 24),
+        depth: 2, children: [], subroleReadFailed: subroleReadFailed
+    )
+}
+
+private func typeDecision(into node: AccessibilityElementNode) -> SafetyDecision {
+    ActionSafetyKernel.evaluate(
+        intent: ElementActionIntent(role: nil, title: "Password", action: .type),
+        resolvedNode: node, matchCount: 1, visibleBounds: wholeScreen,
+        typing: ActionSafetyKernel.TypingContext(
+            mode: .replace,
+            settableAttributes: ["AXValue", "AXSelectedText", "AXSelectedTextRange", "AXFocused"],
+            currentValueLength: 0, aimedByFocus: false
+        )
+    )
+}
+
+@Test func aFieldThatIsSecureByRoleAloneIsRefusedTyping() async throws {
+    let decision = typeDecision(into: secureCandidate(role: "AXSecureTextField"))
+    #expect(decision == .refuse(reason: ActionSafetyKernel.secureFieldRefusalReason(role: "AXSecureTextField")))
+    #expect(HarnessPolicy.executableWithoutAHuman(decision) == false)
+    if case .refuse(let reason) = decision { #expect(ActionSafetyKernel.isSecurityRefusal(reason: reason)) }
+}
+
+@Test func aTextFieldWhoseSubroleCouldNotBeReadIsNotTypedInto() async throws {
+    // Read failures are never absence: an unreadable subrole may be the
+    // AXSecureTextField one. Refused with its own reason — it may pass on a retry.
+    let decision = typeDecision(into: secureCandidate(role: "AXTextField", subroleReadFailed: true))
+    #expect(decision == .refuse(reason: ActionSafetyKernel.unreadableSubroleTypeRefusalReason))
+    #expect(ActionSafetyKernel.isSecurityRefusal(reason: ActionSafetyKernel.unreadableSubroleTypeRefusalReason))
+    // The control: the same field with a subrole that read as absent is not refused for it.
+    #expect(typeDecision(into: secureCandidate(role: "AXTextField")) != decision)
+}
+
+@Test func typeNeverReadsTheValueOfWhatMightBeASecureField() async throws {
+    // `actResponse` reads the live field's value only when this says so.
+    #expect(!HarnessPolicy.readsTypingContext(verb: .type, of: secureCandidate(role: "AXSecureTextField")))
+    #expect(!HarnessPolicy.readsTypingContext(verb: .type, of: secureCandidate(role: "AXTextField", subrole: "AXSecureTextField")))
+    #expect(!HarnessPolicy.readsTypingContext(verb: .type, of: secureCandidate(role: "AXTextField", subroleReadFailed: true)))
+    #expect(HarnessPolicy.readsTypingContext(verb: .type, of: secureCandidate(role: "AXTextField")))
+    #expect(!HarnessPolicy.readsTypingContext(verb: .press, of: secureCandidate(role: "AXTextField")))
+}
+
+@Test func aRegionHoldingAFieldSecureByRoleAloneIsNotPhotographed() async throws {
+    let decision = ActionSafetyKernel.evaluateCapture(CaptureInspection(windows: [
+        .init(nodes: [typingNode(role: "AXButton", name: "Sign In"), secureCandidate(role: "AXSecureTextField")])
+    ]))
+    #expect(decision == .refuse(reason: "\(ActionSafetyKernel.secureFieldCaptureRefusalPrefix) (role AXSecureTextField)"))
+}
+
 @Test func aRoleThatDoesNotAcceptTextIsRefusedRatherThanAskedAbout() async throws {
     let decision = ActionSafetyKernel.evaluate(
         intent: ElementActionIntent(role: nil, title: "About", action: .type),

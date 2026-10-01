@@ -47,9 +47,16 @@ struct AccessibilityElementNode {
     /// Never pointed at, never named. A static text whose subrole timed out keeps
     /// its name — that is how System Settings labels rows.
     nonisolated static func mightBeSecure(role: String, subrole: String?, subroleReadFailed: Bool, namedByValue: Bool) -> Bool {
+        isSecure(role: role, subrole: subrole)
+            || (subroleReadFailed && (textInputRoles.contains(role) || (role == "AXUnknown" && namedByValue)))
+    }
+
+    /// Known to be a password box: AXSecureTextField as the ROLE or the subrole.
+    /// The kernel's refusals key on this; an unreadable subrole is each caller's
+    /// own question (review 2026-10-02: role-only fields passed three checks).
+    nonisolated static func isSecure(role: String, subrole: String?) -> Bool {
         let secure = ActionSafetyKernel.secureFieldSubrole
         return role == secure || subrole == secure
-            || (subroleReadFailed && (textInputRoles.contains(role) || (role == "AXUnknown" && namedByValue)))
     }
 
     /// Never named on any answer: what might be secure, and a text input whose
@@ -75,6 +82,8 @@ struct AccessibilityElementNode {
     var namedByValue: Bool {
         value != nil && (Self.textInputRoles.contains(role) ? fieldLabel == nil : title == nil && elementDescription == nil)
     }
+
+    var isSecure: Bool { Self.isSecure(role: role, subrole: subrole) }
 
     var mightBeSecure: Bool {
         Self.mightBeSecure(role: role, subrole: subrole, subroleReadFailed: subroleReadFailed, namedByValue: namedByValue)

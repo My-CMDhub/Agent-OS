@@ -506,6 +506,13 @@ enum HarnessPolicy {
         return movedRefusal(resolvedFrame: resolvedFrame, nearPoint: nearPoint)
     }
 
+    /// Whether `type` asks the live element its four questions — one of them its
+    /// VALUE. Never for what might be a password box (role, subrole, or a text
+    /// input whose subrole did not read): the kernel refuses those unread.
+    static func readsTypingContext(verb: HarnessVerb, of node: AccessibilityElementNode) -> Bool {
+        verb == .type && !node.mightBeSecure
+    }
+
     /// `requireAtPoint`'s check, shared by the pointer and press_element.
     /// May an app's names go to the model? The policy file read once, failing
     /// closed: unreadable refuses, missing allows, `refuse` refuses.
@@ -2343,10 +2350,11 @@ final class HarnessServer {
         response["resolved"] = Self.summarise(resolvedNode)
 
         // What the element itself says about being typed into. Four reads on
-        // one element — never a per-node cost — and skipped entirely for a
-        // secure field, which is refused on its subrole alone.
+        // one element — never a per-node cost — and skipped entirely for what
+        // might be a secure field (role, subrole, or an unreadable subrole),
+        // which the kernel refuses without its value.
         var typingContext: ActionSafetyKernel.TypingContext?
-        if request.verb == .type, resolvedNode.subrole != ActionSafetyKernel.secureFieldSubrole {
+        if HarnessPolicy.readsTypingContext(verb: request.verb, of: resolvedNode) {
             let element = resolvedNode.accessibilityElement
             let settable = element.map(AccessibilityTypePerformer.settableAttributes) ?? []
             let currentValue = element.flatMap(AccessibilityTypePerformer.stringValue) ?? ""
