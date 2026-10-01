@@ -1631,6 +1631,8 @@ final class HarnessServer {
             "walkStopReasons": snapshot.walkStopReasons.map(\.rawValue).sorted(),
             "focusChangedDuringWalk": snapshot.focusChangedDuringWalk,
             "frontmostSource": snapshot.frontmostSource?.rawValue ?? NSNull(),
+            // Nodes with no batched read carry no `selected` / `valueLength`: say so.
+            "nodesReadWithoutBatch": snapshot.nodesReadWithoutBatch,
             "actionableCount": actionable.count,
             // The window itself (AppKit): what `highlight` checks reachability
             // against, so a caller offering elements can check the same.
@@ -1659,25 +1661,38 @@ final class HarnessServer {
             var next = parent
             // A text input is listed by what it is called (title, description,
             // placeholder); only when it has none is its value the name, hidden later.
-            let fieldLabel = RealtimeScreenVerbs.textInputRoles.contains(node.role) ? node.fieldLabel : nil
+            let isTextInput = RealtimeScreenVerbs.textInputRoles.contains(node.role)
+            let secure = node.role == ActionSafetyKernel.secureFieldSubrole || node.subrole == ActionSafetyKernel.secureFieldSubrole
+            let fieldLabel = isTextInput ? node.fieldLabel : nil
             if node.displayName != nil || fieldLabel != nil, frame.width > 0, frame.height > 0, !frame.intersection(clip).isEmpty {
                 var entry = summarise(node)
-                entry["nameSource"] = node.title != nil ? "title" : node.elementDescription != nil ? "description"
+                let nameSource = node.title != nil ? "title" : node.elementDescription != nil ? "description"
                     : fieldLabel != nil ? "placeholder" : "value"
+                entry["nameSource"] = nameSource
                 if let fieldLabel {
                     entry["name"] = fieldLabel.raw
                     entry["nameIsPlausibleLabel"] = fieldLabel.isPlausibleControlLabel
+                }
+                // Withheld at the source (review 2026-10-02): a text input named by
+                // its value carries what was typed, a secure field's value is its
+                // bullets (its length), and an unreadable subrole may be either.
+                // Listed so a consumer can count it hidden; never named. A static
+                // text named by its value stays named: that is how System Settings labels.
+                let fromValue = nameSource == "value"
+                if secure || (isTextInput && (fromValue || node.subroleReadFailed)) || (node.subroleReadFailed && fromValue) {
+                    entry["name"] = NSNull()
+                    entry["nameIsPlausibleLabel"] = false
                 }
                 entry["parent"] = parent ?? NSNull()
                 entry["subroleReadFailed"] = node.subroleReadFailed
                 // Done-conditions ("Posts tab selected", "draft present"): a boolean
                 // and a COUNT, never the text; absent when not read, never false / 0.
                 if let selected = node.selected { entry["selected"] = selected }
-                if let valueLength = node.valueLength { entry["valueLength"] = valueLength }
+                if let valueLength = node.valueLength, !secure, !node.subroleReadFailed { entry["valueLength"] = valueLength }
                 listed.append(entry)
                 next = listed.count - 1
             }
-            if RealtimeScreenVerbs.textInputRoles.contains(node.role) || node.subrole == ActionSafetyKernel.secureFieldSubrole { return }
+            if isTextInput || secure { return }
             let scrolls = (node.role == "AXScrollArea" || node.role == "AXWebArea") && frame.width > 0 && frame.height > 0
             let childClip = scrolls ? clip.intersection(frame) : clip
             for child in node.children { visit(child, parent: next, clip: childClip) }

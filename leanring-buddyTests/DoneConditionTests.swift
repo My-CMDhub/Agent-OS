@@ -69,4 +69,90 @@ import Testing
         #expect(listed[1]["selected"] as? Bool == true && listed[1]["valueLength"] == nil)
         #expect(listed[2]["valueLength"] as? Int == 5 && listed[2]["selected"] == nil)
     }
+
+    // MARK: The forModel listing never names a field by what is in it
+
+    private let secret = "hunter2-SECRET"
+    private let fieldFrame = CGRect(x: 0, y: 0, width: 100, height: 20)
+
+    /// The one listed entry for `field` inside a window, and its JSON text.
+    private func listed(_ field: AccessibilityElementNode) -> (entry: [String: Any], json: String) {
+        let window = AccessibilityElementNode(role: "AXWindow", subrole: nil, title: "W", value: nil,
+                                              frameInAppKitCoordinates: CGRect(x: 0, y: 0, width: 500, height: 500), depth: 0, children: [field])
+        let entry = HarnessServer.namedElements(in: window).last ?? [:]
+        let data = (try? JSONSerialization.data(withJSONObject: entry)) ?? Data()
+        return (entry, String(decoding: data, as: UTF8.self))
+    }
+
+    private func field(_ role: String, subrole: String? = nil, title: String? = nil, placeholder: String? = nil,
+                       subroleReadFailed: Bool = false, selected: Bool? = nil, valueLength: Int? = nil) -> AccessibilityElementNode {
+        AccessibilityElementNode(role: role, subrole: subrole, title: title, value: secret, placeholder: placeholder,
+                                 frameInAppKitCoordinates: fieldFrame, depth: 1, children: [],
+                                 subroleReadFailed: subroleReadFailed, selected: selected, valueLength: valueLength)
+    }
+
+    @Test func aLabelledElementKeepsItsNameAndState() {
+        let button = listed(AccessibilityElementNode(role: "AXButton", subrole: nil, title: "Post", value: nil,
+                                                     frameInAppKitCoordinates: fieldFrame, depth: 1, children: []))
+        #expect(button.entry["name"] as? String == "Post" && button.entry["nameSource"] as? String == "title")
+        let titled = listed(field("AXTextArea", title: "Editor", valueLength: 14))
+        #expect(titled.entry["name"] as? String == "Editor" && titled.entry["valueLength"] as? Int == 14)
+        let searched = listed(field("AXTextField", placeholder: "Search people", valueLength: 14))
+        #expect(searched.entry["name"] as? String == "Search people" && searched.entry["nameSource"] as? String == "placeholder")
+        #expect(searched.entry["valueLength"] as? Int == 14 && !searched.json.contains("hunter2"))
+        let tab = listed(AccessibilityElementNode(role: "AXRadioButton", subrole: "AXTabButton", title: "Posts", value: nil,
+                                                  frameInAppKitCoordinates: fieldFrame, depth: 1, children: [], selected: true))
+        #expect(tab.entry["selected"] as? Bool == true)
+    }
+
+    /// A label-less field is listed (counted hidden by its consumers) with a null
+    /// name and its length; the typed text appears nowhere in the wire form.
+    @Test func aLabelLessFieldIsListedWithANullNameAndALength() {
+        let typed = listed(field("AXTextField", valueLength: 14))
+        #expect(typed.entry["name"] is NSNull && typed.entry["nameSource"] as? String == "value")
+        #expect(typed.entry["valueLength"] as? Int == 14)
+        #expect(!typed.json.contains("hunter2") && !typed.json.contains("SECRET"))
+    }
+
+    /// Secure by role, secure by subrole, or a subrole that did not read: no
+    /// name, no length — even when a hand-built node carries one — and no text.
+    @Test func aSecureOrUnknownFieldHasNoNameNoLengthAndNoText() {
+        for node in [field("AXSecureTextField", valueLength: 14),
+                     field("AXTextField", subrole: "AXSecureTextField", valueLength: 14),
+                     field("AXTextField", subroleReadFailed: true, valueLength: 14),
+                     field("AXTextField", subrole: "AXSecureTextField", title: "Password", valueLength: 14)] {
+            let (entry, json) = listed(node)
+            #expect(entry["name"] is NSNull, "\(node.role) \(node.subrole ?? "-")")
+            #expect(entry["valueLength"] == nil && !json.contains("hunter2"), "\(json)")
+        }
+        // A static text named by its value stays named: System Settings' sidebar labels.
+        let label = listed(AccessibilityElementNode(role: "AXStaticText", subrole: nil, title: nil, value: "Wi-Fi",
+                                                    frameInAppKitCoordinates: fieldFrame, depth: 1, children: []))
+        #expect(label.entry["name"] as? String == "Wi-Fi")
+    }
+
+    @Test func noValueIsALengthOnlyForAReadableNonSecureTextInput() {
+        #expect(state("AXTextField", subrole: "AXSecureTextField", valueError: .noValue).valueLength == nil)
+        #expect(state("AXSecureTextField", valueError: .noValue).valueLength == nil)
+        #expect(state("AXButton", valueError: .noValue).valueLength == nil)
+        #expect(state("AXStaticText", valueError: .noValue).valueLength == nil)
+        // A toggle whose AXValue failed still answers through AXSelected.
+        #expect(state("AXCheckBox", valueError: .cannotComplete, selected: kCFBooleanTrue, selectedError: .success).selected == true)
+    }
+
+    /// The batch's AXValue and AXSelected entries are read at their names'
+    /// positions: an index that drifts off its attribute fails here.
+    @Test func batchedStateIsReadAtTheValueAndSelectedPositions() {
+        var unsupported = AXError.attributeUnsupported
+        let failed = AXValueCreate(.axError, &unsupported)!
+        func batch(value: AnyObject, selected: AnyObject) -> [AnyObject] {
+            AccessibilityTreeWalker.batchedAttributeNames.map { name in
+                name == kAXValueAttribute ? value : name == kAXSelectedAttribute ? selected : NSNull()
+            }
+        }
+        let field = AccessibilityTreeWalker.batchedStateReads(batch(value: "hunter2" as NSString, selected: failed))
+        #expect(field.value as? String == "hunter2" && field.valueError == .success && field.selectedError == .attributeUnsupported)
+        let row = AccessibilityTreeWalker.batchedStateReads(batch(value: failed, selected: kCFBooleanTrue))
+        #expect(row.valueError == .attributeUnsupported && row.selectedError == .success && (row.selected as? Bool) == true)
+    }
 }

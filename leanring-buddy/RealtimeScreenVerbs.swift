@@ -133,13 +133,16 @@ nonisolated enum RealtimeScreenVerbs {
         var hidden = 0
         for element in elements {
             guard let role = element["role"] as? String, role != "AXWindow",
-                  let name = element["name"] as? String, !name.allSatisfy(\.isWhitespace),
                   let frame = frame(element["frame"]), frame != window else { continue }
             let subrole = element["subrole"] as? String
             let fromValue = element["nameSource"] as? String == "value"
-            if subrole == ActionSafetyKernel.secureFieldSubrole || (textInputRoles.contains(role) && fromValue)
-                || (textInputRoles.contains(role) && element["subroleReadFailed"] as? Bool == true)
-                || name.count > documentLengthCharacters || !UntrustedText(name).isPlausibleControlLabel {
+            // The harness lists these with a null name (withheld at the source): counted, never named.
+            let withheld = subrole == ActionSafetyKernel.secureFieldSubrole || role == ActionSafetyKernel.secureFieldSubrole
+                || (textInputRoles.contains(role) && fromValue)
+                || ((textInputRoles.contains(role) || fromValue) && element["subroleReadFailed"] as? Bool == true)
+            if withheld { hidden += 1; continue }
+            guard let name = element["name"] as? String, !name.allSatisfy(\.isWhitespace) else { continue }
+            if name.count > documentLengthCharacters || !UntrustedText(name).isPlausibleControlLabel {
                 hidden += 1
                 continue
             }

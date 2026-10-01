@@ -141,7 +141,8 @@ struct AccessibilityElementNode {
         let secure = subrole == ActionSafetyKernel.secureFieldSubrole || role == ActionSafetyKernel.secureFieldSubrole
         guard textInputRoles.contains(role), !secure, !subroleReadFailed else { return (selectedState, nil) }
         switch valueError {
-        case .success: return (selectedState, (value as? String)?.count)
+        // UTF-16 units, not graphemes: no per-walk grapheme scan, and a done-condition only asks > 0.
+        case .success: return (selectedState, (value as? NSString)?.length)
         case .noValue: return (selectedState, 0)
         default: return (selectedState, nil)
         }
@@ -288,6 +289,11 @@ struct AccessibilityWindowSnapshot {
     /// one of them then resolved as ambiguous, which is why nothing in Chrome
     /// was addressable.
     let duplicateElementsSkipped: Int
+
+    /// Nodes the batched read refused, read one attribute at a time instead.
+    /// Those carry no `selected` and no `valueLength` (the fallback reads neither),
+    /// so a missing key there is this, not the app's answer.
+    let nodesReadWithoutBatch: Int
 
     /// True when the frontmost application changed while the walk was running.
     ///
@@ -698,6 +704,7 @@ enum AccessibilityTreeWalker {
         var containersReducedToVisibleChildren = 0
         var childrenElidedByVisibleSubset = 0
         var duplicateElementsSkipped = 0
+        var nodesReadWithoutBatch = 0
         var visitedElements: Set<AccessibilityElementKey> = [
             AccessibilityElementKey(element: windowElement)
         ]
@@ -739,7 +746,8 @@ enum AccessibilityTreeWalker {
             containersReducedToVisibleChildren: &containersReducedToVisibleChildren,
             childrenElidedByVisibleSubset: &childrenElidedByVisibleSubset,
             visitedElements: &visitedElements,
-            duplicateElementsSkipped: &duplicateElementsSkipped
+            duplicateElementsSkipped: &duplicateElementsSkipped,
+            nodesReadWithoutBatch: &nodesReadWithoutBatch
         )
         let walkDurationInSeconds = Date().timeIntervalSince(walkStartedAt)
 
@@ -767,6 +775,7 @@ enum AccessibilityTreeWalker {
             containersReducedToVisibleChildren: containersReducedToVisibleChildren,
             childrenElidedByVisibleSubset: childrenElidedByVisibleSubset,
             duplicateElementsSkipped: duplicateElementsSkipped,
+            nodesReadWithoutBatch: nodesReadWithoutBatch,
             focusChangedDuringWalk: focusChangedDuringWalk,
             application: application
         )
@@ -785,7 +794,7 @@ enum AccessibilityTreeWalker {
     ///
     /// `AXActionNames` is a separate API rather than an attribute, so it cannot
     /// join the batch. Nine trips become two.
-    private static let batchedAttributeNames: [String] = [
+    static let batchedAttributeNames: [String] = [
         kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute,
         kAXValueAttribute, kAXDescriptionAttribute, "AXFrame", kAXChildrenAttribute,
         kAXSelectedAttribute
@@ -812,6 +821,23 @@ enum AccessibilityTreeWalker {
     /// "the children read failed" are still distinguishable, which the walker
     /// depends on. Returns nil only when the batch call itself failed, so the
     /// caller can fall back to individual reads.
+    /// The AXError a batched entry wraps, or nil when the entry is a real value.
+    static func batchedErrorCode(_ entry: AnyObject) -> AXError? {
+        guard CFGetTypeID(entry) == AXValueGetTypeID() else { return nil }
+        let axValue = entry as! AXValue
+        guard AXValueGetType(axValue) == .axError else { return nil }
+        var code = AXError.success
+        guard AXValueGetValue(axValue, .axError, &code) else { return nil }
+        return code
+    }
+
+    /// AXValue (index 3) and AXSelected (index 7) of a batched result, raw, with
+    /// each one's error. Pure, so a test fails if an index drifts off its name.
+    static func batchedStateReads(_ values: [AnyObject])
+        -> (value: AnyObject?, valueError: AXError, selected: AnyObject?, selectedError: AXError) {
+        (values[3], batchedErrorCode(values[3]) ?? .success, values[7], batchedErrorCode(values[7]) ?? .success)
+    }
+
     private static func batchedRead(from element: AXUIElement) -> BatchedNodeRead? {
         var rawValues: CFArray?
         let result = AXUIElementCopyMultipleAttributeValues(
@@ -826,15 +852,7 @@ enum AccessibilityTreeWalker {
             return nil
         }
 
-        func errorCode(at index: Int) -> AXError? {
-            let entry = values[index]
-            guard CFGetTypeID(entry) == AXValueGetTypeID() else { return nil }
-            let axValue = entry as! AXValue
-            guard AXValueGetType(axValue) == .axError else { return nil }
-            var code = AXError.success
-            guard AXValueGetValue(axValue, .axError, &code) else { return nil }
-            return code
-        }
+        func errorCode(at index: Int) -> AXError? { batchedErrorCode(values[index]) }
 
         func string(at index: Int) -> String? {
             guard errorCode(at: index) == nil,
@@ -848,10 +866,7 @@ enum AccessibilityTreeWalker {
         read.title = string(at: 2)
         read.value = string(at: 3)
         // Raw beside the string: a checkbox's 0/1 and a field's "" are answers too.
-        read.rawValue = values[3]
-        read.valueError = errorCode(at: 3) ?? .success
-        read.rawSelected = values[7]
-        read.selectedError = errorCode(at: 7) ?? .success
+        (read.rawValue, read.valueError, read.rawSelected, read.selectedError) = batchedStateReads(values)
         read.elementDescription = string(at: 4)
 
         if errorCode(at: 5) == nil, CFGetTypeID(values[5]) == AXValueGetTypeID() {
@@ -889,7 +904,8 @@ enum AccessibilityTreeWalker {
         containersReducedToVisibleChildren: inout Int,
         childrenElidedByVisibleSubset: inout Int,
         visitedElements: inout Set<AccessibilityElementKey>,
-        duplicateElementsSkipped: inout Int
+        duplicateElementsSkipped: inout Int,
+        nodesReadWithoutBatch: inout Int
     ) -> AccessibilityElementNode? {
         guard budget.claimSlot(atDepth: depth) else { return nil }
 
@@ -898,6 +914,7 @@ enum AccessibilityTreeWalker {
         // One batched call for all eight attributes; the individual reads remain as
         // the fallback for any app that refuses the batched API.
         let batched = batchedRead(from: element)
+        if batched == nil { nodesReadWithoutBatch += 1 }
 
         let role = batched?.role
             ?? copyStringAttribute(from: element, attribute: kAXRoleAttribute)
@@ -1015,7 +1032,8 @@ enum AccessibilityTreeWalker {
                 containersReducedToVisibleChildren: &containersReducedToVisibleChildren,
                 childrenElidedByVisibleSubset: &childrenElidedByVisibleSubset,
                 visitedElements: &visitedElements,
-                duplicateElementsSkipped: &duplicateElementsSkipped
+                duplicateElementsSkipped: &duplicateElementsSkipped,
+                nodesReadWithoutBatch: &nodesReadWithoutBatch
             ) else { break }
 
             childNodes.append(childNode)

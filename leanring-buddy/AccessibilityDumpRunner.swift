@@ -357,6 +357,7 @@ enum AccessibilityDumpRunner {
         skipped far off-screen \(snapshot.subtreesSkippedFarOffScreen) subtrees, \(snapshot.nodesSkippedFarOffScreen) direct children not walked
         visible-subset window  \(snapshot.containersReducedToVisibleChildren) containers, \(snapshot.childrenElidedByVisibleSubset) children elided
         duplicate elements     \(snapshot.duplicateElementsSkipped) skipped (already in the tree by another path)
+        read without batch     \(snapshot.nodesReadWithoutBatch) nodes (no selected / valueLength on these)
         focus changed mid-walk \(snapshot.focusChangedDuringWalk)
         ACTIONABLE elements    \(actionableElementCount)
 

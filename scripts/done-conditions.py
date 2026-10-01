@@ -6,6 +6,7 @@ Owner-present: the owner navigates Chrome to each stage; this only READS
 
     python3 scripts/done-conditions.py capture <stage>   # after each stage
     python3 scripts/done-conditions.py evaluate          # once all are captured
+    python3 scripts/done-conditions.py selftest          # no harness needed
 
 Stages, in order: feed, profile, activity-posts, composer-open, draft-typed, posted.
 Each capture is <DONE_CONDITIONS_DIR>/<stage>.json, 0600 in a 0700 directory
@@ -44,9 +45,25 @@ def element(raw):
     by_value = raw.get("nameSource") == "value"
     name = raw.get("name") or ""
     return {"role": raw.get("role"), "name": None if by_value else name,
-            # The harness omits either key when it did not read it; None is "not read", never False / 0.
+            # The harness omits either key when it did not read it OR withholds it (a secure or
+            # subrole-unreadable field); None is "not read", never False / 0 — and never re-derived here.
             "selected": raw.get("selected"),
-            "valueLength": len(name) if by_value else raw.get("valueLength")}
+            "valueLength": raw.get("valueLength")}
+
+
+def selftest():
+    secret = "hunter2-SECRET"
+    typed = element({"role": "AXTextField", "name": secret, "nameSource": "value", "valueLength": 14})
+    assert typed["name"] is None and typed["valueLength"] == 14, typed
+    # A withheld length stays withheld: the name is never measured instead.
+    for raw in ({"role": "AXTextField", "subrole": "AXSecureTextField", "name": secret, "nameSource": "value"},
+                {"role": "AXTextField", "name": secret, "nameSource": "value", "subroleReadFailed": True},
+                {"role": "AXTextField", "name": None, "nameSource": "value"}):
+        got = element(raw)
+        assert got["valueLength"] is None and secret not in json.dumps(got), got
+    labelled = element({"role": "AXTextArea", "name": "Editor", "nameSource": "title", "valueLength": 5, "selected": True})
+    assert labelled == {"role": "AXTextArea", "name": "Editor", "selected": True, "valueLength": 5}, labelled
+    print("selftest: ok")
 
 
 def capture(stage):
@@ -117,4 +134,5 @@ def evaluate():
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "capture": capture(sys.argv[2])
     elif len(sys.argv) == 2 and sys.argv[1] == "evaluate": evaluate()
+    elif len(sys.argv) == 2 and sys.argv[1] == "selftest": selftest()
     else: sys.exit(__doc__)
