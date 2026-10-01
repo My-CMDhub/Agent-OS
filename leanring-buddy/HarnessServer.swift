@@ -79,6 +79,11 @@ struct HarnessRawRequest: Decodable {
     let requireAtPoint: Bool?
     /// highlight + pointer only: see `HarnessRequest.speechHold`.
     let speechHold: Bool?
+    /// press only: see `HarnessRequest.labelTitle`.
+    let labelTitle: String?
+    /// scroll only: up / down / left / right, and how many pages (default 1).
+    let direction: String?
+    let amount: Double?
 }
 
 struct HarnessPoint: Decodable {
@@ -128,13 +133,16 @@ enum HarnessVerb: String, CaseIterable {
     /// nothing, so like `snapshot` it survives the kill switch.
     case highlight
 
+    /// Scroll the frontmost window (or a named / pointed-at area of it).
+    case scroll
+
     /// Whether this verb can change the world. The kill switch stops these and
     /// leaves the read-only pair working, so an operator who tripped it can
     /// still look at the machine and find out why.
     var isMutating: Bool {
         switch self {
         case .ping, .snapshot, .menus, .windows, .look, .status, .highlight: return false
-        case .press, .select, .type, .open, .menu, .focus, .launch: return true
+        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll: return true
         }
     }
 
@@ -157,7 +165,7 @@ enum HarnessVerb: String, CaseIterable {
         // a name only to find out how many things carry it.
         // `launch` targets an application, not an element: `evaluateLaunch`.
         // `highlight` resolves exactly like a press but performs nothing — see `highlightResponse`.
-        case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight: return nil
+        case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight, .scroll: return nil
         }
     }
 }
@@ -260,6 +268,12 @@ struct HarnessRequest: Equatable {
     /// highlight + pointer only: the voice loop's pointer, held while its reply
     /// plays (`ElementPointer.holdWhile`); without it the request's `seconds` hold.
     var speechHold: Bool = false
+    /// press only: the name of the label the voice loop aimed at when it presses
+    /// that label's pressable ancestor (`title`). The kernel word-checks both.
+    var labelTitle: String? = nil
+    /// scroll only.
+    var scrollDirection: ScrollDirection? = nil
+    var scrollPages: Double = 1
 }
 
 // MARK: - Pure decision logic
@@ -393,9 +407,35 @@ enum HarnessPolicy {
         if raw.speechHold == true, verb != .highlight || raw.pointer != true {
             return .failure(.invalidField(field: "speechHold", value: "true"))
         }
+        // A label's own words, checked by the kernel beside the ancestor pressed for it.
+        if let labelTitle = raw.labelTitle {
+            guard verb == .press, UntrustedText(labelTitle).isPlausibleControlLabel else {
+                return .failure(.invalidField(field: "labelTitle", value: UntrustedText(labelTitle).forDisplay))
+            }
+        }
         if raw.requireAtPoint == true {
-            guard verb == .press else { return .failure(.invalidField(field: "requireAtPoint", value: "true")) }
+            // type_text aims like press_element: the named field must be the one at the point.
+            guard verb == .press || verb == .type else { return .failure(.invalidField(field: "requireAtPoint", value: "true")) }
             guard raw.nearPoint != nil else { return .failure(.missingField("nearPoint")) }
+        }
+
+        // A direction is the scroll's whole aim; on any other verb it is a typo.
+        var scrollDirection: ScrollDirection?
+        var scrollPages = 1.0
+        if verb == .scroll {
+            guard let requested = raw.direction else { return .failure(.missingField("direction")) }
+            guard let parsed = ScrollDirection(rawValue: requested) else {
+                return .failure(.invalidField(field: "direction", value: requested))
+            }
+            scrollDirection = parsed
+            if let amount = raw.amount {
+                guard amount > 0, amount <= HarnessScroll.maximumPages else {
+                    return .failure(.invalidField(field: "amount", value: String(amount)))
+                }
+                scrollPages = amount
+            }
+        } else if let stray = raw.direction ?? raw.amount.map({ String($0) }) {
+            return .failure(.invalidField(field: raw.direction != nil ? "direction" : "amount", value: stray))
         }
 
         var mode = TypeMode.insert
@@ -443,7 +483,10 @@ enum HarnessPolicy {
             forModel: raw.forModel ?? false,
             requireAtPoint: raw.requireAtPoint ?? false,
             aimAtPoint: aimAtPoint,
-            speechHold: raw.speechHold ?? false
+            speechHold: raw.speechHold ?? false,
+            labelTitle: raw.labelTitle,
+            scrollDirection: scrollDirection,
+            scrollPages: scrollPages
         ))
     }
 
@@ -698,6 +741,10 @@ enum HarnessObservability {
         // says which rule fired. Only a refusal on SECURITY grounds is worth a
         // dump — see `kernelReason` below.
         "kernelRefused",
+        // A scroll at the end of its content: an answer, not an anomaly.
+        "atEnd",
+        // An insert that would have typed over the owner's selection.
+        "selectionNotEmpty",
         // The per-app policy refusing a capture is the file doing its job.
         "policyRefused",
         // An app with no ordinary on-screen window — measured 2026-09-11,
@@ -1528,6 +1575,9 @@ final class HarnessServer {
 
         case .highlight:
             return highlightResponse(request, dryRun: dryRun, startedAt: startedAt)
+
+        case .scroll:
+            return scrollResponse(request, dryRun: dryRun, startedAt: startedAt)
         }
     }
 
@@ -1607,9 +1657,17 @@ final class HarnessServer {
         func visit(_ node: AccessibilityElementNode, parent: Int?, clip: CGRect) {
             let frame = node.frameInAppKitCoordinates
             var next = parent
-            if node.displayName != nil, frame.width > 0, frame.height > 0, !frame.intersection(clip).isEmpty {
+            // A text input is listed by what it is called (title, description,
+            // placeholder); only when it has none is its value the name, hidden later.
+            let fieldLabel = RealtimeScreenVerbs.textInputRoles.contains(node.role) ? node.fieldLabel : nil
+            if node.displayName != nil || fieldLabel != nil, frame.width > 0, frame.height > 0, !frame.intersection(clip).isEmpty {
                 var entry = summarise(node)
-                entry["nameSource"] = node.title != nil ? "title" : node.elementDescription != nil ? "description" : "value"
+                entry["nameSource"] = node.title != nil ? "title" : node.elementDescription != nil ? "description"
+                    : fieldLabel != nil ? "placeholder" : "value"
+                if let fieldLabel {
+                    entry["name"] = fieldLabel.raw
+                    entry["nameIsPlausibleLabel"] = fieldLabel.isPlausibleControlLabel
+                }
                 entry["parent"] = parent ?? NSNull()
                 entry["subroleReadFailed"] = node.subroleReadFailed
                 listed.append(entry)
@@ -1954,6 +2012,161 @@ final class HarnessServer {
         return response
     }
 
+    // MARK: scroll
+
+    /// Scroll the frontmost window — a named area of it, the area under a point,
+    /// or its largest scrolling area — and say what came into view. See
+    /// `HarnessScroll`. No kernel question (it moves what is on screen, no data);
+    /// the app policy, kill switch, `expectApp` and Clicky-itself refusals hold.
+    private func scrollResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        var response: [String: Any] = ["dryRun": dryRun, "direction": request.scrollDirection?.rawValue ?? NSNull(),
+                                       "amount": request.scrollPages]
+        func fail(_ code: String, _ message: String, kernel: String = "n/a") -> [String: Any] {
+            response["ok"] = false
+            response["error"] = code
+            response["message"] = message
+            audit(request, dryRun: dryRun, kernel: kernel, outcome: code, startedAt: startedAt)
+            return response
+        }
+        // `decode` guarantees it; a nil here is our bug, not a default.
+        guard let direction = request.scrollDirection else { return fail("missingField", "missing required field \"direction\"") }
+        let snapshot: AccessibilityWindowSnapshot
+        do {
+            snapshot = try AccessibilityTreeWalker.snapshotFocusedWindow()
+        } catch {
+            return fail(Self.errorCode(for: error), String(describing: error))
+        }
+        if let refusal = frontmostChangedRefusal(
+            request, name: snapshot.applicationName, bundleIdentifier: snapshot.bundleIdentifier, dryRun: dryRun, startedAt: startedAt
+        ) { return response.merging(refusal) { _, new in new } }
+        guard let rootNode = snapshot.rootNode else { return fail("noRootNode", "the walk produced no root element") }
+        response["application"] = snapshot.applicationName
+        response["bundleIdentifier"] = snapshot.bundleIdentifier
+        response["walkMilliseconds"] = Int(snapshot.walkDurationInSeconds * 1000)
+
+        var targetChain: [AccessibilityElementNode]?
+        if !request.title.isEmpty {
+            let intent = ElementActionIntent(role: request.role, title: request.title, action: .press,
+                                             nearPoint: request.nearPoint, withinNamed: request.withinNamed)
+            switch ElementActionIntentResolver.resolve(intent, inTreeRootedAt: rootNode) {
+            case .resolved(let node): targetChain = ElementReachability.ancestorChain(to: node, from: rootNode)
+            case .notFound: return fail("notFound", "nothing named \(UntrustedText(request.title).forDisplay) is in the window")
+            case .ambiguous(let count): return fail("ambiguous", "\(count) elements in the window have that name")
+            }
+        }
+        let container = HarnessScroll.container(in: rootNode, targetChain: targetChain, point: targetChain == nil ? request.nearPoint : nil)
+        let windowFrame = rootNode.frameInAppKitCoordinates
+        let bounds = (container?.frameInAppKitCoordinates ?? windowFrame).intersection(windowFrame)
+        guard !bounds.isNull, bounds.width > 0, bounds.height > 0 else {
+            return fail("targetNotOnScreen", "the area to scroll is not inside the window")
+        }
+        var containerEntry: [String: Any] = ["role": container?.role ?? "AXWindow"]
+        Self.attachFrame(bounds, to: &containerEntry)
+        response["container"] = containerEntry
+
+        let decision = applyAppPolicy(to: .allow, bundleIdentifier: snapshot.bundleIdentifier, into: &response)
+        let gated = gate(decision, request: request, appName: snapshot.applicationName,
+                         bundleIdentifier: snapshot.bundleIdentifier, dryRun: dryRun, into: &response)
+        guard gated.executable else { return fail(gated.outcome, "app policy: \(gated.note ?? gated.outcome)", kernel: gated.decision) }
+        guard !dryRun else {
+            response["ok"] = true
+            response["performed"] = ["status": "skipped", "reason": "dry run — nothing was performed"]
+            audit(request, dryRun: dryRun, kernel: gated.decision, outcome: "dryRun", startedAt: startedAt)
+            return response
+        }
+
+        let before = HarnessScroll.visibleNames(fromNamedElements: Self.namedElements(in: rootNode), within: bounds)
+        let barBefore = HarnessScroll.scrollBarValue(of: container?.accessibilityElement, horizontal: direction.isHorizontal)
+        // Re-walk until the content moved (an animated page takes a few hundred ms), ~1 s at most.
+        func observe() -> (outcome: ScrollOutcome, newlyVisible: [String]) {
+            var last: (outcome: ScrollOutcome, newlyVisible: [String]) = (.notObserved, [])
+            for attempt in 0..<5 {
+                Thread.sleep(forTimeInterval: attempt == 0 ? 0.15 : 0.2)
+                let barAfter = HarnessScroll.scrollBarValue(of: container?.accessibilityElement, horizontal: direction.isHorizontal)
+                guard let later = try? AccessibilityTreeWalker.snapshotFocusedWindow(),
+                      later.bundleIdentifier == snapshot.bundleIdentifier, let laterRoot = later.rootNode else { continue }
+                let change = HarnessScroll.change(
+                    before: before, after: HarnessScroll.visibleNames(fromNamedElements: Self.namedElements(in: laterRoot), within: bounds))
+                last = (HarnessScroll.outcome(moved: change.moved, barBefore: barBefore, barAfter: barAfter, direction: direction),
+                        change.newlyVisible)
+                if last.outcome == .moved { return last }
+            }
+            return last
+        }
+
+        phaseTiming.actionStarting()
+        var method = "none"
+        var axErrors: [Int] = []
+        var observed: (outcome: ScrollOutcome, newlyVisible: [String])?
+        // The container's own page verb first — published is not implemented
+        // (the About pane's four all failed -25204), so a re-read decides.
+        // A page verb that reported success is NOT followed by a wheel (review
+        // 2026-10-01): a page that moved only unnamed content would scroll twice.
+        let pageAction = direction.pageDirection.accessibilityActionName
+        if let container, let element = container.accessibilityElement, container.publishedActionNames.contains(pageAction) {
+            for _ in 0..<Int(request.scrollPages.rounded(.up)) {
+                let result = AccessibilityActionPerformer.perform(pageAction, on: element)
+                axErrors.append(Int(result.error.rawValue))
+                guard result.error == .success else { break }
+            }
+            if axErrors.allSatisfy({ $0 == 0 }) {
+                method = "axAction"
+                observed = observe()
+            }
+        }
+        // Otherwise the wheel, at the container's own rectangle (or the caller's point inside it).
+        if observed == nil {
+            let point = request.nearPoint.flatMap { bounds.contains($0) ? $0 : nil } ?? CGPoint(x: bounds.midX, y: bounds.midY)
+            let topLeft = SyntheticScroller.topLeftCentre(ofAppKitFrame: CGRect(origin: point, size: .zero),
+                                                          primaryDisplayHeightInPoints: CGDisplayBounds(CGMainDisplayID()).height)
+            // A wheel event goes to whatever window is under the point: only ever this app's.
+            guard let processIdentifier = snapshot.application?.processIdentifier, Self.processIdentifier(at: topLeft) == processIdentifier else {
+                phaseTiming.actionReturned()
+                return fail("wheelTargetObscured", "another window covers that point, or it could not be checked; nothing more was scrolled",
+                            kernel: gated.decision)
+            }
+            let extent = direction.isHorizontal ? bounds.width : bounds.height
+            SyntheticScroller.scroll(atTopLeftPoint: topLeft, wheelDelta: direction.pageDirection.syntheticWheelDelta,
+                                     steps: HarnessScroll.wheelSteps(pages: request.scrollPages, extent: extent),
+                                     horizontal: direction.isHorizontal)
+            method = "wheel"
+            observed = observe()
+        }
+        phaseTiming.actionReturned()
+        response["performed"] = ["method": method, "axErrorRawValues": axErrors]
+        let outcome = observed?.outcome ?? .notObserved
+        switch outcome {
+        case .moved:
+            response["verification"] = ["status": "confirmed", "evidence": "elements in view moved, or the scroll bar did"]
+            response["ok"] = true
+        case .atEnd:
+            response["verification"] = ["status": "atEnd", "evidence": "the scroll bar is already at that end"]
+            response["ok"] = false
+            response["error"] = "atEnd"
+            response["message"] = "already at the end; there is nothing further to scroll that way"
+        case .notObserved:
+            response["verification"] = ["status": "notObserved", "evidence": "nothing in view moved"]
+            response["ok"] = false
+            response["error"] = "notVerified"
+            response["message"] = "nothing in view moved — the area may not scroll that way"
+        }
+        response["newlyVisible"] = observed?.newlyVisible ?? []
+        audit(request, dryRun: dryRun, kernel: gated.decision,
+              outcome: outcome == .moved ? "confirmed" : outcome.rawValue, startedAt: startedAt)
+        return response
+    }
+
+    /// The process owning what is drawn at a global top-left point, or nil.
+    private static func processIdentifier(at topLeftPoint: CGPoint) -> pid_t? {
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, RealtimeScreenHitTest.messagingTimeoutSeconds)
+        var element: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(systemWide, Float(topLeftPoint.x), Float(topLeftPoint.y), &element) == .success,
+              let element else { return nil }
+        var processIdentifier: pid_t = 0
+        return AXUIElementGetPid(element, &processIdentifier) == .success ? processIdentifier : nil
+    }
+
     /// The voice loop's approximate ring: nothing nameable at the point the
     /// model gave, so a dashed ring there, said to be approximate. Same guards
     /// as any read of the app in front: not Clicky, and `expectApp` holds.
@@ -2139,7 +2352,9 @@ final class HarnessServer {
             response["field"] = [
                 "settableAttributes": settable.sorted(),
                 "valueLength": currentValue.count,
-                "mode": request.mode.rawValue
+                "mode": request.mode.rawValue,
+                // What the field is called, so a caller can say where it typed — never its value.
+                "label": (resolvedNode.fieldLabel?.isPlausibleControlLabel == true ? resolvedNode.fieldLabel?.raw : nil) ?? NSNull()
             ]
         }
 
@@ -2149,7 +2364,8 @@ final class HarnessServer {
                 resolvedNode: resolvedNode,
                 matchCount: 1,
                 visibleBounds: rootNode.frameInAppKitCoordinates,
-                typing: typingContext
+                typing: typingContext,
+                labelTitle: request.labelTitle
             ),
             bundleIdentifier: snapshot.bundleIdentifier, into: &response
         )
@@ -2268,6 +2484,15 @@ final class HarnessServer {
 
             phaseTiming.actionStarting()
             let outcome = AccessibilityTypePerformer.type(request.text, mode: request.mode, into: element)
+            // Nothing was written: a selection the owner made still stands.
+            if let refusal = outcome.refusal {
+                phaseTiming.actionReturned()
+                response["ok"] = false
+                response["error"] = "selectionNotEmpty"
+                response["message"] = refusal
+                audit(request, dryRun: dryRun, kernel: described.decision, outcome: "selectionNotEmpty", startedAt: startedAt)
+                return response
+            }
 
             // For typing, the read-back IS the evidence — the text is the
             // effect. The fingerprint below says whether the app *reacted*,

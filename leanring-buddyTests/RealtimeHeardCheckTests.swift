@@ -139,6 +139,60 @@ struct RealtimeHeardCheckTests {
         #expect(mismatch.refusalError == "heardNamedMismatch")
     }
 
+    // The owner's live test 2026-09-30 12:41-12:46Z: eight turns refused because a
+    // word that names an app ("terminal", "LinkedIn") named a thing INSIDE the app
+    // in front. Each utterance below is the logged transcript, verbatim.
+    @Test func aWordForSomethingInsideTheAppInFrontIsNotAnotherApp() {
+        let apps = installed + [app("/System/Applications/Utilities/Terminal.app"), app("/System/Applications/Utilities/Console.app"),
+                                app("/Users/o/Applications/LinkedIn.app")]
+        let cursor = URL(fileURLWithPath: "/Applications/Cursor.app", isDirectory: true)
+        let vsCode = URL(fileURLWithPath: "/Applications/Visual Studio Code.app", isDirectory: true)
+        func outcome(_ transcript: String, named: String = "Cursor", tool: String, target: [String] = [],
+                     frontmost: URL? = cursor) -> RealtimeHeardCheck.Outcome {
+            RealtimeHeardCheck.decide(transcript: transcript, named: named, among: apps, toolName: tool,
+                                      targetWords: RealtimeVoiceVerbs.foldedTokens(target.joined(separator: " ")), frontmostApp: frontmost).outcome
+        }
+        let terminalOffer = ["Terminal (⌃`)", "Kill Terminal", "Split Terminal (⌘\\)"]
+        // 90CF8D: an x,y press; the recent find_on_screen offered Cursor's own terminal controls.
+        #expect(outcome("Okay, it's all right. Let's close the agent panel and close terminal both.", tool: "press_element",
+                        target: terminalOffer) == .noAppHeard)
+        // 97C352 / 41A97A / 5E1733: the owner said where the terminal is.
+        #expect(outcome("Ah, yes. The terminal in Cursor and the Agent Panel both close it.", tool: "press_element") == .match)
+        #expect(outcome("Yes, I said the terminal inside Cursor, which you can see on the right-hand side.", tool: "focus_app") == .match)
+        #expect(outcome("Yes, I said the terminal inside Cursor, which you can see on the right-hand side.", tool: "press_menu",
+                        target: ["View", "Terminal"]) == .match)
+        #expect(outcome("Hey, can you kill the terminal in this cursor?", tool: "press_menu", target: ["View", "Terminal"]) == .match)
+        // 211C1F: the target itself is "Kill Terminal".
+        #expect(outcome("Sorry but I said terminal in I am saying terminal the terminal in front of me. You can see it is open right "
+                        + "there inside cursor application then why you are misunderstanding it?", tool: "press_element",
+                        target: ["Kill Terminal"]) == .match)
+        // CE967C: "not Terminal" names nothing to act in.
+        #expect(outcome("Yes, so that's what I asked for. Open Agent Panel, not Terminal.", tool: "press_menu",
+                        target: ["View", "Appearance", "Panel"]) == .noAppHeard)
+        // 523DB0: two apps named, the call opens one of them, and LinkedIn is "on Chrome".
+        #expect(outcome("That's alright, leave it. Open Chrome and open LinkedIn on Chrome.", named: "Google Chrome", tool: "open_app",
+                        frontmost: cursor) == .match)
+        #expect(outcome("open cursor and chrome", tool: "open_app") == .match)
+        #expect(outcome("open cursor and chrome", tool: "focus_app", frontmost: nil) == .match)
+
+        // The other direction. 3DC292: "inside console" puts Console in the app slot — still asked.
+        #expect(outcome("Yeah, also close the terminal inside console. Here you can see.", tool: "press_element",
+                        target: ["Kill Terminal"]) == .heardNamedMismatch)
+        // No evidence the word is inside Cursor: still asked.
+        #expect(outcome("Okay, it's all right. Let's close the agent panel and close terminal both.", tool: "press_element") == .heardNamedMismatch)
+        // Cursor is not in front and was not named: Terminal still counts.
+        let chrome = URL(fileURLWithPath: "/Applications/Google Chrome.app", isDirectory: true)
+        #expect(outcome("close terminal", tool: "press_element", target: terminalOffer, frontmost: chrome) == .heardNamedMismatch)
+        // "open terminal" puts Terminal in the app slot: the owner may mean the app.
+        #expect(outcome("open terminal", tool: "press_menu", target: ["View", "Terminal"]) == .heardNamedMismatch)
+        // D66FC598 kept: VS Code in front, an offer that mentions cursors, the owner said "in cursor".
+        #expect(outcome("open a new window in cursor", named: "Visual Studio Code", tool: "press_menu",
+                        target: ["File", "New Window", "Add Cursor Above"], frontmost: vsCode) == .heardNamedMismatch)
+        // Two apps for a menu press is still a question; a word that fits two apps is still a question.
+        #expect(outcome("open cursor and chrome", tool: "press_menu") == .ambiguousApp)
+        #expect(outcome("open code and chrome", named: "Visual Studio Code", tool: "open_app", frontmost: nil) == .ambiguousApp)
+    }
+
     @Test func anUncaughtNameInTheAppSlotAsksBeforeAMenuToolAndIsLogged() {
         func decide(_ transcript: String, tool: String, menuWords: [String] = []) -> RealtimeHeardCheck.Decision {
             RealtimeHeardCheck.decide(transcript: transcript, named: "Cursor", among: installed, toolName: tool, menuWords: menuWords)

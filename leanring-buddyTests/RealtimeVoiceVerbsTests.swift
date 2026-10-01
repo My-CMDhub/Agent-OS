@@ -310,14 +310,25 @@ struct RealtimeVoiceVerbsTests {
         #expect(pressError(addSymbol, expectApp: cursorBundle, chosen: chosen.offer) == "notOffered")
     }
 
-    @Test func thePreviousTurnsOfferLastsSixtySecondsAndNeedsATranscript() {
+    @Test func theRecentOfferLastsNinetySecondsAndNeedsATranscript() {
         let heard = "the secondary side bar please"
-        #expect(choose(secondarySideBar, heard: heard, previous: [secondarySideBar], age: 60).source == .previousTurnConfirmedByWords)
-        #expect(choose(secondarySideBar, heard: heard, previous: [secondarySideBar], age: 60.5).source == nil)
+        #expect(choose(secondarySideBar, heard: heard, previous: [secondarySideBar], age: 90).source == .previousTurnConfirmedByWords)
+        #expect(choose(secondarySideBar, heard: heard, previous: [secondarySideBar], age: 90.5).source == nil)
         // No transcript: overlap is unknown, never a yes.
         #expect(choose(secondarySideBar, heard: nil, previous: [secondarySideBar]).source == nil)
-        // Nothing offered last turn (an offer two turns back is not carried).
+        // Nothing offered recently.
         #expect(choose(secondarySideBar, heard: heard, previous: nil).source == nil)
+    }
+
+    /// Live 2026-09-30 (9B8FBA -> 92F6F2): Xcode's find offered "Edit Scheme…",
+    /// two turns of pointing went by, then "All right, I want to edit." — 51 s
+    /// after the find, refused notOffered because the offer was three turns back.
+    @Test func anOfferThreeTurnsBackIsPressedWhenTheOwnerNamesIt() {
+        let scheme = [["Product", "Scheme", "Choose Scheme"], ["Product", "Scheme", "Edit Scheme\u{2026}"],
+                      ["Product", "Scheme", "New Scheme\u{2026}"], ["Product", "Scheme", "Manage Schemes\u{2026}"]]
+        let edit = ["Product", "Scheme", "Edit Scheme\u{2026}"]
+        #expect(choose(edit, heard: "All right, I want to edit.", previous: scheme, age: 51).source == .previousTurnConfirmedByWords)
+        #expect(choose(edit, heard: "what does that do", previous: scheme, age: 51).source == nil)
     }
 
     /// Review 2026-09-30: one shared, prefix-matched word opened the gate on a
@@ -654,7 +665,7 @@ struct RealtimeVoiceVerbsTests {
                                                    independentCheck: ["kind": "menuMark", "passed": true])
         #expect(Set(findLine.keys) == keys)
         #expect(Set(pressLine.keys) == keys)
-        #expect(findLine["schema"] as? Int == 9)
+        #expect(findLine["schema"] as? Int == 10)
         #expect(findLine["offerSource"] is NSNull)
         #expect(pressLine["offerSource"] as? String == "previousTurnConfirmedByWords")
         #expect(findLine["appCheck"] is NSNull)

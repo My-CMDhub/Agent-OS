@@ -335,15 +335,20 @@ struct RealtimeTurnCompletionTests {
         #expect(connection.turn.previousTurnMenuOffer == nil)
     }
 
-    /// Only one turn back: a turn in between with no find leaves nothing to confirm.
-    @Test func anOfferTwoTurnsBackIsNeverPressed() async throws {
+    /// The most recent find of its kind within 90 s, any number of turns back
+    /// (live 2026-09-30: Xcode's "Edit Scheme…", three turns back) — still only
+    /// when the owner's own words name the item.
+    @Test func anOfferTwoTurnsBackIsPressedOnlyWhenTheOwnerNamesIt() async throws {
         let harness = MenuHarness()
         let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { harness.answer($0) })
         _ = try await heardTurn(connection, calls: [findNewWindow])
         _ = try await heardTurn(connection, calls: [], heard: "thanks")
-        let third = try await heardTurn(connection, calls: [pressNewWindow], heard: "yes, a new finder window")
-        #expect(third.dispatches.first?.result["error"] as? String == "notOffered")
+        let unnamed = try await heardTurn(connection, calls: [pressNewWindow], heard: "go on then")
+        #expect(unnamed.dispatches.first?.result["error"] as? String == "notOffered")
         #expect(harness.menuPresses == 0)
+        let third = try await heardTurn(connection, calls: [pressNewWindow], heard: "yes, a new finder window")
+        #expect(third.dispatches.first?.result["error"] == nil || third.dispatches.first?.result["error"] is NSNull)
+        #expect(harness.menuPresses == 1)
     }
 
     /// A cut-off answer's words, still arriving while the key is held, are not

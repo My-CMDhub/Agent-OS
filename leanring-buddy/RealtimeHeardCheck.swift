@@ -351,12 +351,14 @@ nonisolated enum RealtimeHeardCheck {
     /// `menuWords`: the call's own query words and path, which an app slot may
     /// hold ("hide the minimap").
     static func decide(transcript: String?, named: String, among names: [RealtimeVoiceVerbs.AppName],
-                       afterHeardRefusal: Bool = false, toolName: String = "", menuWords: [String] = []) -> Decision {
+                       afterHeardRefusal: Bool = false, toolName: String = "", menuWords: [String] = [],
+                       targetWords: [String] = [], frontmostApp: URL? = nil) -> Decision {
         guard let transcript, !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return Decision(outcome: .transcriptMissing, heardApps: [], tier: nil)
         }
         let slot = readSlot(RealtimeVoiceVerbs.foldedTokens(transcript), among: names, menuWords: menuWords)
-        var decision = decideHeard(transcript: transcript, named: named, among: names, afterHeardRefusal: afterHeardRefusal)
+        var decision = decideHeard(transcript: transcript, named: named, among: names, afterHeardRefusal: afterHeardRefusal,
+                                   toolName: toolName, targetWords: targetWords, frontmostApp: frontmostApp)
         // noAppHeard fails OPEN to the model's name, so a menu tool asks when a
         // name-like word sat where the app goes and matched nothing.
         if decision.outcome == .noAppHeard, RealtimeVoiceVerbs.isAppScopedMenuTool(toolName), !slot.unrecognised.isEmpty {
@@ -367,25 +369,119 @@ nonisolated enum RealtimeHeardCheck {
     }
 
     private static func decideHeard(transcript: String, named: String, among names: [RealtimeVoiceVerbs.AppName],
-                                    afterHeardRefusal: Bool) -> Decision {
-        let heard = appsMentioned(in: transcript, among: names)
+                                    afterHeardRefusal: Bool, toolName: String, targetWords: [String], frontmostApp: URL?) -> Decision {
+        func path(_ url: URL) -> String { url.standardizedFileURL.path }
+        let namedPaths: Set<String>
+        switch RealtimeVoiceVerbs.resolveApp(named: named, among: names) {
+        case .resolved(let url): namedPaths = [path(url)]
+        // The existing identity check still asks about an ambiguous name downstream.
+        case .ambiguous(let urls): namedPaths = Set(urls.map(path))
+        case .notInstalled: namedPaths = []
+        }
+        var heard = appsMentioned(in: transcript, among: names)
+        heard = withoutWordsInsideTheNamedApp(heard, transcript: transcript, namedPaths: namedPaths, among: names,
+                                              targetWords: targetWords, frontmostApp: frontmostApp)
         let heardNames = heard.apps.map(RealtimeVoiceVerbs.displayName)
         guard let only = heard.apps.first else { return Decision(outcome: .noAppHeard, heardApps: [], tier: nil) }
-        guard heard.apps.count == 1, !heard.ambiguousWord else {
+        // Two apps said ("open Chrome and open LinkedIn"), and this call opens or
+        // focuses one of them: that call is not ambiguous. A word that fits two
+        // apps ("code") still is.
+        // Unless the owner put the named app INSIDE the other one: "open terminal
+        // in cursor" is Cursor's terminal, never a launch of Terminal (review 2026-10-01).
+        func words(of url: URL) -> [[String]] {
+            names.filter { path($0.url) == path(url) }.map { RealtimeVoiceVerbs.foldedTokens($0.name) }
+        }
+        let namedNames = heard.apps.filter { namedPaths.contains(path($0)) }.flatMap(words)
+        let otherWords = Set(heard.apps.filter { !namedPaths.contains(path($0)) }.flatMap(words).joined()
+            .filter { !genericNameWords.contains($0) })
+        let spoken = RealtimeVoiceVerbs.foldedTokens(transcript)
+        let opensOneOfThem = [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName].contains(toolName)
+            && !heard.ambiguousWord && heard.apps.contains { namedPaths.contains(path($0)) }
+            && !placesInside(namedNames + namedNames.joined().filter { $0.count >= 4 && !genericNameWords.contains($0) }.map { [$0] },
+                             containerWords: otherWords, spoken: spoken)
+        guard (heard.apps.count == 1 && !heard.ambiguousWord) || opensOneOfThem else {
             return Decision(outcome: .ambiguousApp, heardApps: heardNames, tier: heard.tier)
         }
-        let samePath = { (url: URL) in url.standardizedFileURL.path == only.standardizedFileURL.path }
-        let agrees: Bool
-        switch RealtimeVoiceVerbs.resolveApp(named: named, among: names) {
-        case .resolved(let url): agrees = samePath(url)
-        // The existing identity check still asks about an ambiguous name downstream.
-        case .ambiguous(let urls): agrees = urls.contains(where: samePath)
-        case .notInstalled: agrees = false
-        }
+        let agrees = opensOneOfThem || namedPaths.contains(path(only))
         if agrees, afterHeardRefusal, heard.tier?.confirmsARetry != true {
             return Decision(outcome: .unconfirmedRetry, heardApps: heardNames, tier: heard.tier)
         }
         return Decision(outcome: agrees ? .match : .heardNamedMismatch, heardApps: heardNames, tier: heard.tier)
+    }
+
+    // MARK: A word for something inside the app (pure)
+
+    /// Where the owner names an app: right after one of these. Narrower than
+    /// `appSlotLeadWords` ("the" is not here): "close the terminal" names a
+    /// panel, "open terminal" or "in console" may name an app.
+    static let namingLeadWords: Set<String> = ["in", "into", "on", "inside", "within", "from", "to", "open", "launch", "focus", "switch", "use"]
+    /// "the terminal in this cursor": skipped between the preposition and the app.
+    static let containerFillerWords: Set<String> = ["the", "this", "my", "a", "that"]
+    static let containerPrepositions: Set<String> = ["in", "on", "inside", "within"]
+
+    /// Whether the words say "<one of `innerNames`> in/on/inside/within [the] <a container word>".
+    static func placesInside(_ innerNames: [[String]], containerWords: Set<String>, spoken: [String]) -> Bool {
+        innerNames.contains { name in
+            !name.isEmpty && spoken.indices.contains { start in
+                guard spoken[start...].starts(with: name) else { return false }
+                var next = start + name.count
+                guard next < spoken.count, containerPrepositions.contains(spoken[next]) else { return false }
+                next += 1
+                while next < spoken.count, containerFillerWords.contains(spoken[next]) { next += 1 }
+                return next < spoken.count && containerWords.contains(spoken[next])
+            }
+        }
+    }
+    /// Not "no" (review 2026-10-01): "no, Terminal" is a correction that NAMES Terminal.
+    static let negationWords: Set<String> = ["not", "never", "without"]
+
+    /// The owner's live test 2026-09-30: "close the terminal" with Cursor in
+    /// front, "the terminal in Cursor", "LinkedIn on Chrome" — eight turns
+    /// refused because a word that names an app named a thing INSIDE the app the
+    /// call acts in. Only when that app is in front or the owner named it, an
+    /// app X other than the call's is dropped from what was heard when:
+    ///  - every mention of X is negated ("not Terminal"), or
+    ///  - no mention of X sits where an app is named (`namingLeadWords`) and X's
+    ///    name is a word of the call's own target — element name, menu path,
+    ///    find words, recently offered labels (`targetWords`, folded) — or
+    ///  - the owner said X is inside the call's app: "X in/on/inside [the] <app>".
+    /// D66FC598 stays asked: "a new window in cursor" with VS Code in front puts
+    /// Cursor right after "in".
+    static func withoutWordsInsideTheNamedApp(_ heard: HeardApps, transcript: String, namedPaths: Set<String>,
+                                              among names: [RealtimeVoiceVerbs.AppName], targetWords: [String],
+                                              frontmostApp: URL?) -> HeardApps {
+        func path(_ url: URL) -> String { url.standardizedFileURL.path }
+        let namedIsFrontmost = frontmostApp.map { namedPaths.contains(path($0)) } ?? false
+        guard !namedPaths.isEmpty, namedIsFrontmost || heard.apps.contains(where: { namedPaths.contains(path($0)) }) else { return heard }
+        let spoken = RealtimeVoiceVerbs.foldedTokens(transcript)
+        let target = Set(targetWords)
+        func tokens(of url: URL) -> [[String]] {
+            names.filter { path($0.url) == path(url) }.map { RealtimeVoiceVerbs.foldedTokens($0.name) }.filter { !$0.isEmpty }
+        }
+        let namedWords = Set(names.filter { namedPaths.contains(path($0.url)) }
+            .flatMap { RealtimeVoiceVerbs.foldedTokens($0.name) }.filter { !genericNameWords.contains($0) })
+        /// Each mention: where it starts and where it ends (exclusive).
+        func mentions(of url: URL) -> [Range<Int>] {
+            tokens(of: url).flatMap { name -> [Range<Int>] in
+                spoken.indices.compactMap { start -> Range<Int>? in
+                    if spoken[start...].starts(with: name) { return start..<(start + name.count) }
+                    if name.count > 1, name.contains(spoken[start]), spoken[start].count >= 4,
+                       !genericNameWords.contains(spoken[start]) { return start..<(start + 1) }
+                    return nil
+                }
+            }
+        }
+        let kept = heard.apps.filter { app in
+            guard !namedPaths.contains(path(app)) else { return true }
+            let said = mentions(of: app)
+            guard !said.isEmpty else { return true }
+            if said.allSatisfy({ $0.lowerBound > 0 && negationWords.contains(spoken[$0.lowerBound - 1]) }) { return false }
+            let named = said.contains { $0.lowerBound > 0 && namingLeadWords.contains(spoken[$0.lowerBound - 1]) }
+            if !named, tokens(of: app).contains(where: { name in name.allSatisfy(target.contains) }) { return false }
+            return !said.contains { mention in placesInside([Array(spoken[mention])], containerWords: namedWords, spoken: spoken) }
+        }
+        guard kept.count != heard.apps.count else { return heard }
+        return HeardApps(apps: kept, ambiguousWord: heard.ambiguousWord, tier: kept.isEmpty ? nil : heard.tier)
     }
 
     /// With no transcript: a PRESS refuses, and so does an open_app of an app
@@ -394,8 +490,12 @@ nonisolated enum RealtimeHeardCheck {
     /// open_app of a running app, only change which app is in front, keep every
     /// harness guard (policy, confirmation tickets for code-running apps), and
     /// refusing them would let a dropped transcription stop the voice loop.
+    /// type_text and close joined 2026-10-01 (review): typing puts text in an
+    /// app and quitting ends one — neither on a model's word alone. A scroll
+    /// changes only the view, so it keeps the checks it has.
     static func refusesWithoutTranscript(toolName: String, namedAppIsRunning: Bool) -> Bool {
-        toolName == RealtimeVoiceVerbs.pressMenuName || toolName == RealtimeVoiceVerbs.pressElementName
+        [RealtimeVoiceVerbs.pressMenuName, RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.typeTextName,
+         RealtimeVoiceVerbs.closeName].contains(toolName)
             || (toolName == RealtimeOpenAppTool.name && !namedAppIsRunning)
     }
 
@@ -439,7 +539,8 @@ nonisolated enum RealtimeHeardCheck {
                         + "is not confirmed. Nothing was searched or pressed. Ask them to say the app's name again."]
         case .transcriptMissing where refusesWithoutTranscript(toolName: toolName, namedAppIsRunning: namedAppIsRunning):
             let nothing = toolName == RealtimeOpenAppTool.name ? "Nothing was opened: \(shownNamed) is not running, and opening it would launch it."
-                : "Nothing was pressed."
+                : toolName == RealtimeVoiceVerbs.typeTextName ? "Nothing was typed."
+                : toolName == RealtimeVoiceVerbs.closeName ? "Nothing was closed." : "Nothing was pressed."
             return ["ok": false, "status": NSNull(), "error": unavailableError, "named": named,
                     "message": "the owner's words were not transcribed in time to confirm which app they meant. "
                         + nothing + " Ask them to say the app's name again."]

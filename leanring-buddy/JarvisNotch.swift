@@ -223,7 +223,19 @@ nonisolated enum JarvisNotchReason {
         "missingElementName": "no control was named",
         "secureField": "that\u{2019}s a password field",
         "targetNotOnScreen": "it\u{2019}s not on screen",
-        "frameUnreadable": "its position didn\u{2019}t read"
+        "frameUnreadable": "its position didn\u{2019}t read",
+        // scroll / type_text / close (2026-10-01).
+        "nothingAtPoint": "nothing there to act on",
+        "missingText": "no text was given",
+        "controlCharacterInText": "no line breaks, I don\u{2019}t press Enter",
+        "invalidDirection": "no direction was given",
+        "invalidMode": "insert or replace only",
+        "invalidWhat": "tab, window or app only",
+        "noCloseItem": "its menus have no close for that",
+        "appStillRunning": "it\u{2019}s still running",
+        "wheelTargetObscured": "another window is in the way",
+        "atEnd": "already at the end",
+        "selectionNotEmpty": "text is selected there, left alone"
     ]
 
     /// `subject` is the app HEARD for a heard-vs-named mismatch ("heard

@@ -510,7 +510,7 @@ struct RealtimeScreenVerbsTests {
         let find = RealtimeToolDecision(call: RealtimeToolCall(callID: "a", name: "find_on_screen", appName: "Cursor", words: "agent"),
                                         callUptime: 1, offeredBeforeCall: nil, dispatch: findDispatch)
         let findLine = RealtimeDecisionTrace.line(decision: find, sequence: 1, turnID: "T", stack: "geminiLive", source: "live", releasedUptime: 0)
-        #expect(findLine["schema"] as? Int == 9)
+        #expect(findLine["schema"] as? Int == 10)
         #expect((findLine["offered"] as? [[String: Any]])?.first?["name"] as? String == offered.candidates[0].name)
         var point = RealtimeToolDecision(call: RealtimeToolCall(callID: "b", name: "point_at", appName: "Cursor", x: 0.5, y: 0.5),
                                          callUptime: 2, offeredBeforeCall: nil)
@@ -606,9 +606,11 @@ struct RealtimeScreenVerbsTests {
         #expect(press.source == .previousTurnConfirmedByYes)
         #expect(RealtimeOpenAppTool.pressOffer(path: addSymbolNew, thisTurn: nil, previousTurn: previous, followUpConfirmed: false,
                                                confirmedByYes: false, now: 1_000).source == nil)
-        // Same 60 s.
+        // Same 90 s.
         #expect(RealtimeOpenAppTool.pressOffer(path: addSymbolNew, thisTurn: nil, previousTurn: previous, followUpConfirmed: false,
-                                               confirmedByYes: true, now: 1_041).source == nil)
+                                               confirmedByYes: true, now: 1_069).source == .previousTurnConfirmedByYes)
+        #expect(RealtimeOpenAppTool.pressOffer(path: addSymbolNew, thisTurn: nil, previousTurn: previous, followUpConfirmed: false,
+                                               confirmedByYes: true, now: 1_071).source == nil)
         let screenOffer = RealtimeStandingOffer(candidates: [], app: cursorBundle, uptime: 980, elements: offer("agent").candidates)
         let point = RealtimeOpenAppTool.pointOffer(name: "New Agent (\u{21E7}\u{2318}L)", thisTurn: nil, previousTurn: screenOffer,
                                                    followUpConfirmed: false, confirmedByYes: true, now: 1_000)

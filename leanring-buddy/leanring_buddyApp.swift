@@ -107,6 +107,19 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // The pointing format A/B (RealtimePointFormat): "point at the <label>"
+        // spoken into both stacks in both formats, raw aims scored against AX,
+        // then quits. Spends OpenAI (capped) and Gemini credit. Needs
+        // --harness-dry-run, 120 s of owner idle and Cursor / Finder / System
+        // Settings / Chrome in front.
+        if CommandLine.arguments.contains("--point-format-probe") {
+            Task { @MainActor in
+                await PointFormatProbe.run(harness: self.harnessServer)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // Walks Finder / System Settings / Cursor on main and on a background
         // queue, writes ~/Library/Logs/Clicky/ax-thread-probe.log, then quits.
         if CommandLine.arguments.contains("--ax-thread-probe") {

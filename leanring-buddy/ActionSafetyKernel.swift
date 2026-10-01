@@ -27,8 +27,17 @@ enum SafetyDecision: Equatable {
 enum ActionSafetyKernel {
 
     /// Roles for which a press is ordinary navigation on this machine.
-    /// Deliberately short — it grows only when a measured case demands it.
-    static let navigationalPressRoles: Set<String> = ["AXButton", "AXRow", "AXCell"]
+    /// Grows only when a measured case demands it. Owner's ruling 2026-10-01
+    /// (Kernel A): the live test of 2026-09-30 put a card in front of Cursor's
+    /// "Toggle Agents" group, links and tabs — ordinary controls. What a press
+    /// DOES is still judged first, on the words: destructive asks, irreversible
+    /// refuses, publishing asks, whatever the role.
+    static let navigationalPressRoles: Set<String> = [
+        "AXButton", "AXRow", "AXCell", "AXGroup", "AXLink", "AXRadioButton", "AXDisclosureTriangle",
+        "AXMenuButton", "AXPopUpButton", "AXCheckBox"
+    ]
+    /// A tab is a subrole (Chromium and AppKit put it on AXRadioButton, but a role is a convention).
+    static let navigationalPressSubroles: Set<String> = ["AXTabButton"]
 
     /// Roles for which writing a selection is ordinary navigation.
     ///
@@ -228,6 +237,33 @@ enum ActionSafetyKernel {
         "move to bin"
     ]
 
+    /// Phrases asked about like the list above (`destructive: true`: answered
+    /// once, never "always"), matched as WHOLE words in order — a sidebar's
+    /// "Shared", a tab's "Posts" or "Comments" are navigation — and never for
+    /// `type`: typing into "Add a comment" publishes nothing, pressing Post does.
+    /// Owner's standing ruling (2026-09-30/10-01): destructive or publishing ->
+    /// a card; the review of 2026-10-01 added the rest.
+    static let confirmTitlePhrases = [
+        // Publishing: the owner's words in front of other people.
+        "post", "publish", "share", "submit", "reply", "comment", "repost", "retweet", "tweet", "reshare",
+        // Destructive words the substring list above does not reach.
+        "deletion", "removal", "discard", "unsubscribe", "sign out", "leave", "deactivate", "uninstall", "revoke",
+        "disconnect", "cancel subscription",
+        // Security approvals: a "yes" someone else is waiting for.
+        "approve", "authorize", "authorise", "allow access", "yes it was me",
+        // System Settings sharing and remote-access switches.
+        "remote login", "screen sharing", "file sharing", "remote management", "remote apple events"
+    ]
+
+    /// The first confirm phrase `title` holds as whole words, in order.
+    static func confirmPhrase(in title: String) -> String? {
+        let words = title.lowercased().split { !$0.isLetter }.map(String.init)
+        return confirmTitlePhrases.first { phrase in
+            let wanted = phrase.split(separator: " ").map(String.init)
+            return words.count >= wanted.count && (0...(words.count - wanted.count)).contains { Array(words[$0..<($0 + wanted.count)]) == wanted }
+        }
+    }
+
     /// Focus: the only verb here that is not evaluated by `evaluate`.
     ///
     /// It has no `ElementActionIntent`, no published action to require and no
@@ -334,7 +370,8 @@ enum ActionSafetyKernel {
         matchCount: Int,
         visibleBounds: CGRect,
         typing: TypingContext? = nil,
-        menuItemEnabled: Bool? = nil
+        menuItemEnabled: Bool? = nil,
+        labelTitle: String? = nil
     ) -> SafetyDecision {
         // Order matters. Every refusal is checked before any permission.
 
@@ -361,12 +398,22 @@ enum ActionSafetyKernel {
         //
         // The same title may also match both keyword lists ("Empty Trash"
         // contains "trash"), so the stronger answer has to be the one reached.
-        if intent.action.irreversibleNamesAreRefused,
-           typing?.aimedByFocus != true,
-           let name = resolvedNode.displayName {
-            let lowercased = name.raw.lowercased()
-            if let matchedKeyword = irreversibleTitleKeywords.first(where: { lowercased.contains($0) }) {
-                return .refuse(reason: irreversibleRefusalReason(keyword: matchedKeyword))
+        //
+        // `labelTitle`: a label pressed through its pressable ancestor (review
+        // 2026-10-01) — "Buy now" inside an "Order #123" group. The press goes to
+        // the group, so the group's name is the target, but the words the owner
+        // and the model saw are the label's, and they are checked too.
+        // A text input is judged by what it is CALLED (title, description,
+        // placeholder), not by the text in it (review 2026-10-01).
+        let targetName = (AccessibilityElementNode.textInputRoles.contains(resolvedNode.role) ? resolvedNode.fieldLabel : nil)
+            ?? resolvedNode.displayName
+        let wordCheckedNames = [typing?.aimedByFocus == true ? nil : targetName?.raw, labelTitle].compactMap { $0 }
+        if intent.action.irreversibleNamesAreRefused {
+            for name in wordCheckedNames {
+                let lowercased = name.lowercased()
+                if let matchedKeyword = irreversibleTitleKeywords.first(where: { lowercased.contains($0) }) {
+                    return .refuse(reason: irreversibleRefusalReason(keyword: matchedKeyword))
+                }
             }
         }
 
@@ -448,16 +495,19 @@ enum ActionSafetyKernel {
         // 2026-09-10: System Settings' search field publishes no title, no
         // description and an empty value.
         if typing?.aimedByFocus != true {
-            guard let name = resolvedNode.displayName, name.isPlausibleControlLabel else {
+            // A text field may be named only by its placeholder (review 2026-10-01).
+            guard let name = targetName, name.isPlausibleControlLabel else {
                 return .refuse(reason: implausibleNameRefusalReason)
             }
-
-            // App-written text may only ever make the decision *more* cautious.
-            // A keyword here escalates to a question; nothing an app publishes can
-            // turn a question into an allow.
-            let lowercasedTitle = name.raw.lowercased()
-
-            if let matchedKeyword = destructiveTitleKeywords.first(where: { lowercasedTitle.contains($0) }) {
+        }
+        // App-written text may only ever make the decision *more* cautious.
+        // A keyword here escalates to a question; nothing an app publishes can
+        // turn a question into an allow.
+        for name in wordCheckedNames {
+            let lowercasedTitle = name.lowercased()
+            let phrase: String?
+            if case .type = intent.action { phrase = nil } else { phrase = confirmPhrase(in: name) }
+            if let matchedKeyword = destructiveTitleKeywords.first(where: { lowercasedTitle.contains($0) }) ?? phrase {
                 return .requireConfirmation(reason: "\(destructiveActionReasonPrefix)\(matchedKeyword)", destructive: true)
             }
         }
@@ -472,7 +522,8 @@ enum ActionSafetyKernel {
             )
         }
 
-        guard navigationalRoles(for: intent.action).contains(resolvedNode.role) else {
+        guard navigationalRoles(for: intent.action).contains(resolvedNode.role)
+                || (intent.action == .press && resolvedNode.subrole.map(navigationalPressSubroles.contains) == true) else {
             return .requireConfirmation(reason: "unrecognised role \(resolvedNode.role)")
         }
 

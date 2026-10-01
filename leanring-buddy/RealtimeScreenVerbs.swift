@@ -61,7 +61,7 @@ nonisolated enum RealtimeScreenVerbs {
 
     /// Text inputs whose AXValue is what the owner typed: that value is never a
     /// name to offer (a field's own title or description still is).
-    static let textInputRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
+    static let textInputRoles = AccessibilityElementNode.textInputRoles
 
     /// Nouns every app puts on everything. They rank only as part of the
     /// query's exact name or phrase, never on their own (live 2026-09-30:

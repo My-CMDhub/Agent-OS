@@ -271,7 +271,11 @@ enum ElementActionIntentResolver {
         // for. The intent's title came from a planner, so this is our string
         // being matched against theirs, never theirs being trusted.
         let name = node.displayName?.raw
-        if name == intent.title, intent.role == nil || node.role == intent.role {
+        // A text field also answers to what it is called — title, description,
+        // placeholder (review 2026-10-01) — whatever its typed value is.
+        let calledByIntent = name == intent.title || (AccessibilityElementNode.textInputRoles.contains(node.role)
+            && [node.title, node.elementDescription, node.placeholder].contains { $0?.raw == intent.title })
+        if calledByIntent, intent.role == nil || node.role == intent.role {
             matches.append((node, ancestorNames))
         }
 
@@ -521,6 +525,30 @@ enum AccessibilityTypePerformer {
         kAXSelectedTextRangeAttribute, kAXFocusedAttribute
     ]
 
+    /// Why an insert must not be written, or nil. Writing `AXSelectedText`
+    /// replaces the selection, so the caret is put at the end first — and if
+    /// a selection still stands after that (the write failed, or the app kept
+    /// it), typing would overwrite text the owner selected, silently. An
+    /// unreadable range is not an empty one (review 2026-10-01).
+    static func insertRefusal(caretWriteError: AXError, selectedRangeAfter: CFRange?) -> String? {
+        guard let range = selectedRangeAfter else {
+            return "the field's selection could not be read, so typing might replace selected text; nothing was typed"
+        }
+        guard range.length == 0 else {
+            return "\(range.length) characters are selected in the field "
+                + "(caret write AXError \(caretWriteError.rawValue)); typing would replace them, so nothing was typed"
+        }
+        return nil
+    }
+
+    static func selectedRange(of element: AXUIElement) -> CFRange? {
+        var out: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &out) == .success,
+              let out, CFGetTypeID(out) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        return AXValueGetValue(out as! AXValue, .cfRange, &range) ? range : nil
+    }
+
     struct Outcome: Equatable {
         let attributeWritten: String
         let error: AXError
@@ -529,6 +557,8 @@ enum AccessibilityTypePerformer {
         /// nil when the field would not answer at all after the write, which is
         /// a different fact from "it answered with the old text".
         let valueAfter: String?
+        /// insert only: why nothing was written (`insertRefusal`), or nil.
+        var refusal: String? = nil
     }
 
     /// The element's current text, or nil when it publishes none.
@@ -589,6 +619,7 @@ enum AccessibilityTypePerformer {
             title: string(kAXTitleAttribute),
             value: string(kAXValueAttribute),
             elementDescription: string(kAXDescriptionAttribute),
+            placeholder: string(kAXPlaceholderValueAttribute),
             frameInAppKitCoordinates: AccessibilityTreeWalker.convertAccessibilityFrameToAppKitFrame(
                 accessibilityFrame, primaryDisplayHeightInPoints: primaryDisplayHeight
             ),
@@ -647,10 +678,16 @@ enum AccessibilityTypePerformer {
             error = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFString)
         case .insert:
             var caret = CFRange(location: valueBefore.utf16.count, length: 0)
+            var caretError = AXError.failure
             if let caretValue = AXValueCreate(.cfRange, &caret) {
-                AXUIElementSetAttributeValue(
+                caretError = AXUIElementSetAttributeValue(
                     element, kAXSelectedTextRangeAttribute as CFString, caretValue
                 )
+            }
+            if let refusal = insertRefusal(caretWriteError: caretError, selectedRangeAfter: selectedRange(of: element)) {
+                return Outcome(attributeWritten: mode.settableAttributeRequired, error: .cannotComplete,
+                               milliseconds: Int(Date().timeIntervalSince(startedAt) * 1000), valueLengthBefore: valueBefore.count,
+                               valueAfter: valueBefore, refusal: refusal)
             }
             error = AXUIElementSetAttributeValue(
                 element, kAXSelectedTextAttribute as CFString, text as CFString
@@ -696,12 +733,14 @@ enum SyntheticScroller {
     }
 
     /// Negative `wheelDelta` scrolls the content down (the gesture that reveals
-    /// what is below), matching `AXScrollDownByPage`.
+    /// what is below), matching `AXScrollDownByPage`. `horizontal` puts it on
+    /// the second wheel axis, where negative reveals what is to the right.
     @discardableResult
     static func scroll(
         atTopLeftPoint point: CGPoint,
         wheelDelta: Int32,
-        steps: Int = 6
+        steps: Int = 6,
+        horizontal: Bool = false
     ) -> Bool {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
 
@@ -709,9 +748,9 @@ enum SyntheticScroller {
             guard let event = CGEvent(
                 scrollWheelEvent2Source: source,
                 units: .pixel,
-                wheelCount: 1,
-                wheel1: wheelDelta,
-                wheel2: 0,
+                wheelCount: horizontal ? 2 : 1,
+                wheel1: horizontal ? 0 : wheelDelta,
+                wheel2: horizontal ? wheelDelta : 0,
                 wheel3: 0
             ) else { return false }
 

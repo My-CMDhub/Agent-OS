@@ -31,8 +31,12 @@ nonisolated enum RealtimeVoiceVerbs {
     static let findOnScreenName = "find_on_screen"
     static let pointAtName = "point_at"
     static let pressElementName = "press_element"
+    /// The hands (`RealtimeHandsVerbs`, owner's target level 2026-10-01).
+    static let scrollName = "scroll"
+    static let typeTextName = "type_text"
+    static let closeName = "close"
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName,
-                                            findOnScreenName, pointAtName, pressElementName]
+                                            findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
@@ -44,9 +48,16 @@ nonisolated enum RealtimeVoiceVerbs {
         toolName == pointAtName || toolName == pressElementName
     }
 
+    /// Tools that take an element's name, a screenshot position or the
+    /// owner's pointer: point_at and press_element must have one; scroll and
+    /// type_text may leave it out (the main area, the focused field).
+    static func aimsAtScreen(_ toolName: String) -> Bool {
+        isScreenTargetTool(toolName) || toolName == scrollName || toolName == typeTextName
+    }
+
     /// Tools whose app may be omitted: the app in front is meant.
     static func takesFrontmostApp(_ toolName: String) -> Bool {
-        readOnlyToolNames.contains(toolName) || toolName == pressElementName
+        readOnlyToolNames.contains(toolName) || [pressElementName, scrollName, typeTextName, closeName].contains(toolName)
     }
 
     /// Enough to hold every View-menu toggle of a native app and short enough
@@ -55,13 +66,15 @@ nonisolated enum RealtimeVoiceVerbs {
 
     // MARK: Declarations
 
-    private enum Kind { case text, list, number, flag }
+    private enum Kind { case text, list, number, flag, numberList }
 
     private struct Parameter {
         let name: String
         var kind: Kind = .text
         var required = true
         let description: String
+        /// A text parameter's only values, declared as the schema's `enum`.
+        var options: [String] = []
     }
 
     private struct Declaration {
@@ -72,17 +85,41 @@ nonisolated enum RealtimeVoiceVerbs {
 
     private static let appInFront = Parameter(name: "app", required: false,
                                               description: "The app in front, for example \"Cursor\". Leave it out to mean the app in front.")
-    private static let positionParameters = [
-        Parameter(name: "name", required: false, description: "The element's name exactly as find_on_screen returned it."),
-        Parameter(name: "x", kind: .number, required: false,
-                  description: "Where it is in the screenshot you were given this turn, across, as a fraction from 0 (left edge) to 1 (right edge)."),
-        Parameter(name: "y", kind: .number, required: false,
-                  description: "Where it is in that screenshot, down, as a fraction from 0 (top edge) to 1 (bottom edge)."),
-        Parameter(name: "underPointer", kind: .flag, required: false,
-                  description: "true for the element under the owner's mouse pointer (\"this one\", \"where my cursor is\").")
-    ]
+    /// How a position in the screenshot is asked for (`RealtimePointFormat`).
+    private static func positionParameters(_ format: RealtimePointFormat, gemini: Bool) -> [Parameter] {
+        let name = Parameter(name: "name", required: false, description: "The element's name exactly as find_on_screen returned it.")
+        let underPointer = Parameter(name: "underPointer", kind: .flag, required: false,
+                                     description: "true for the element under the owner's mouse pointer (\"this one\", \"where my cursor is\").")
+        switch (format, gemini) {
+        case (.fractions, _):
+            return [name,
+                    Parameter(name: "x", kind: .number, required: false,
+                              description: "Where it is in the screenshot you were given this turn, across, as a fraction from 0 (left edge) to 1 (right edge)."),
+                    Parameter(name: "y", kind: .number, required: false,
+                              description: "Where it is in that screenshot, down, as a fraction from 0 (top edge) to 1 (bottom edge)."),
+                    underPointer]
+        case (.native, true):
+            // Gemini's trained pointing format: a [y, x] point normalised to 0-1000.
+            return [name,
+                    Parameter(name: "point", kind: .numberList, required: false,
+                              description: "Where it is in the screenshot you were given this turn, as [y, x], each normalized to 0-1000 "
+                                + "(0,0 is the top-left of the image, 1000,1000 the bottom-right)."),
+                    underPointer]
+        case (.native, false):
+            // OpenAI's: pixels of the image it was shown.
+            return [name,
+                    Parameter(name: "x", kind: .number, required: false,
+                              description: "Where it is in the screenshot you were given this turn, across, in pixels from its left edge "
+                                + "(its size in pixels is given in a system line)."),
+                    Parameter(name: "y", kind: .number, required: false,
+                              description: "Where it is in that screenshot, down, in pixels from its top edge."),
+                    underPointer]
+        }
+    }
 
-    private static let declarations = [
+    private static func declarations(_ format: RealtimePointFormat, gemini: Bool) -> [Declaration] {
+        let positionParameters = positionParameters(format, gemini: gemini)
+        return [
         Declaration(name: focusAppName,
                     description: "Brings an app that is already running to the front. Use its name as shown in the Dock, for example \"Finder\".",
                     parameters: [Parameter(name: "name", description: "The running app's name, for example \"Finder\".")]),
@@ -116,22 +153,51 @@ nonisolated enum RealtimeVoiceVerbs {
                     description: "Presses (clicks) one element in the window of the app in front. Aim it exactly as point_at: a name find_on_screen "
                         + "returned, OR x and y fractions of the screenshot, OR underPointer. Safety checks run first; a destructive press shows the "
                         + "owner a card to approve, and some things are refused. The result says what was pressed and whether it was verified.",
-                    parameters: [appInFront] + positionParameters)
-    ]
+                    parameters: [appInFront] + positionParameters),
+        Declaration(name: scrollName,
+                    description: "Scrolls the window of the app in front, as a trackpad would. Aim it at an area by a name find_on_screen "
+                        + "returned, x and y fractions of the screenshot, or underPointer; leave them out for the window's main area. The "
+                        + "result says whether anything moved and names what came into view.",
+                    parameters: [appInFront,
+                                 Parameter(name: "direction", description: "Which way the content moves into view.",
+                                           options: ScrollDirection.allCases.map(\.rawValue)),
+                                 Parameter(name: "amount", kind: .number, required: false,
+                                           description: "How far, in pages (screens). Default 1.")] + positionParameters),
+        Declaration(name: typeTextName,
+                    description: "Types text into a field of the app in front, as if from the keyboard. Never presses Enter or sends anything. "
+                        + "Aim it at the field by a name find_on_screen returned, x and y, or underPointer; leave them out for the field "
+                        + "that has keyboard focus. Password fields are refused; replacing text already in a field asks the owner on a card.",
+                    parameters: [appInFront,
+                                 Parameter(name: "text", description: "Exactly the text to type, as the owner gave it."),
+                                 Parameter(name: "mode", required: false,
+                                           description: "insert (default) adds at the end of what is there; replace swaps the whole field.",
+                                           options: TypeMode.allCases.map(\.rawValue))] + positionParameters),
+        Declaration(name: closeName,
+                    description: "Closes the tab or the window in front, or quits the app in front, through the app's own menu. Quitting "
+                        + "shows the owner a card first; the app may still ask to save, and that answer is the owner's.",
+                    parameters: [Parameter(name: "what", description: "tab, window, or app (quit it).", options: RealtimeHandsVerbs.closeTargets),
+                                 appInFront])
+        ]
+    }
 
     private static func property(_ parameter: Parameter, gemini: Bool) -> [String: Any] {
         func type(_ name: String) -> String { gemini ? name.uppercased() : name }
         switch parameter.kind {
         case .list: return ["type": type("array"), "items": ["type": type("string")], "description": parameter.description]
+        case .numberList: return ["type": type("array"), "items": ["type": type("number")], "description": parameter.description]
         case .number: return ["type": type("number"), "description": parameter.description]
         case .flag: return ["type": type("boolean"), "description": parameter.description]
-        case .text: return ["type": type("string"), "description": parameter.description]
+        case .text:
+            guard !parameter.options.isEmpty else { return ["type": type("string"), "description": parameter.description] }
+            return ["type": type("string"), "description": parameter.description, "enum": parameter.options]
         }
     }
 
     /// OpenAI Realtime GA `session.tools`: open_app first, then these.
-    static var openAIDeclarations: [[String: Any]] {
-        [RealtimeOpenAppTool.openAIDeclaration] + declarations.map { declaration in
+    static var openAIDeclarations: [[String: Any]] { openAIDeclarations(pointFormat: .live) }
+
+    static func openAIDeclarations(pointFormat: RealtimePointFormat) -> [[String: Any]] {
+        [RealtimeOpenAppTool.openAIDeclaration] + declarations(pointFormat, gemini: false).map { declaration in
             [
                 "type": "function", "name": declaration.name, "description": declaration.description,
                 "parameters": [
@@ -144,9 +210,11 @@ nonisolated enum RealtimeVoiceVerbs {
     }
 
     /// Gemini Live `setup.tools` entry: one object holding every function.
-    static var geminiDeclaration: [String: Any] {
+    static var geminiDeclaration: [String: Any] { geminiDeclaration(pointFormat: .live) }
+
+    static func geminiDeclaration(pointFormat: RealtimePointFormat) -> [String: Any] {
         let openApp = (RealtimeOpenAppTool.geminiDeclaration["functionDeclarations"] as? [[String: Any]]) ?? []
-        return ["functionDeclarations": openApp + declarations.map { declaration in
+        return ["functionDeclarations": openApp + declarations(pointFormat, gemini: true).map { declaration in
             [
                 "name": declaration.name, "description": declaration.description,
                 "parameters": [
@@ -277,7 +345,7 @@ nonisolated enum RealtimeVoiceVerbs {
     /// The screen pair is scoped the same way (2026-09-30): a control is read
     /// and pointed at only in the app the call named.
     static func isAppScopedMenuTool(_ toolName: String) -> Bool {
-        [findMenuItemsName, pressMenuName, findOnScreenName, pointAtName, pressElementName].contains(toolName)
+        [findMenuItemsName, pressMenuName, findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName].contains(toolName)
     }
 
     /// One name an app answers to: its file name in an Applications folder, or
@@ -414,6 +482,17 @@ nonisolated enum RealtimeVoiceVerbs {
             return "Finding \(call.elementName.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2026}"
         case pressElementName:
             return "Pressing \(call.elementName.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2026}"
+        case scrollName:
+            let way = call.direction.flatMap(ScrollDirection.init(rawValue:)).map { " \($0.rawValue)" } ?? ""
+            return "Scrolling\(way)\u{2026}"
+        case typeTextName:
+            return "Typing\u{2026}"
+        case closeName:
+            switch call.what {
+            case "tab": return "Closing the tab\u{2026}"
+            case "window": return "Closing the window\u{2026}"
+            default: return "Quitting \(app ?? "the app")\u{2026}"
+            }
         default:
             return "Working\u{2026}"
         }
@@ -422,6 +501,46 @@ nonisolated enum RealtimeVoiceVerbs {
     /// Only these count as the receipt for completion words: a find is a read.
     static func isActingTool(_ toolName: String) -> Bool {
         toolName != findMenuItemsName && toolName != findOnScreenName
+    }
+}
+
+/// How a realtime model gives a position in the screenshot. F1 `fractions`
+/// (live since 2026-09-30): x, y from 0 to 1 on both stacks. F2 `native`: the
+/// format each was trained on — Gemini a [y, x] point normalised to 0-1000
+/// (its computer-use and detection outputs), OpenAI pixels of the image.
+/// Either way the call becomes fractions here, and the local snap is unchanged.
+/// `--point-format-probe` measures which aims better; `live` is the switch.
+nonisolated enum RealtimePointFormat: String, CaseIterable, Sendable {
+    case fractions
+    case native
+
+    static let live: RealtimePointFormat = .fractions
+
+    /// The call with x, y as fractions of the screenshot; a position that
+    /// cannot be read (pixels with no known image size, a point that is not
+    /// two numbers) is dropped, never guessed.
+    static func normalised(_ call: RealtimeToolCall, format: RealtimePointFormat, stack: VoiceStackChoice,
+                           screenshotPixels: CGSize?) -> RealtimeToolCall {
+        guard format == .native, RealtimeVoiceVerbs.aimsAtScreen(call.name) else { return call }
+        var normalised = call
+        switch stack {
+        case .geminiLive:
+            normalised.x = nil
+            normalised.y = nil
+            if let point = call.point, point.count == 2 {
+                normalised.x = point[1] / 1000
+                normalised.y = point[0] / 1000
+            }
+        case .openAIRealtime:
+            guard let x = call.x, let y = call.y, let size = screenshotPixels, size.width > 0, size.height > 0 else {
+                normalised.x = nil
+                normalised.y = nil
+                break
+            }
+            normalised.x = x / Double(size.width)
+            normalised.y = y / Double(size.height)
+        }
+        return normalised
     }
 }
 
@@ -549,13 +668,15 @@ nonisolated struct RealtimeToolDecision {
 ///                     element (any role); point_at and press_element args add
 ///                     x, y (screenshot fractions) and underPointer; their
 ///                     offerSource adds screenshotPoint | underPointer
+///   Schema 10 (2026-10-01): scroll / type_text / close; args add direction,
+///                     amount, mode, what and textLength (never the text)
 ///   Schema 9 (2026-09-30 review): snappedBy — point_at / press_element, which
 ///                     rung named the target: thisTurn | previousTurn… |
 ///                     underPointer (the offer or the key-down pointer), walk |
 ///                     ax (a screenshot position), none (nothing there); else null
 nonisolated enum RealtimeDecisionTrace {
     static let fileName = "voice-decisions.log"
-    static let schemaVersion = 9
+    static let schemaVersion = 10
     static let privatePathPlaceholder = ["<private>"]
 
     static func choseFromOffered(path: [String]?, offered: [RealtimeMenuCandidate]?) -> Bool? {
@@ -643,6 +764,12 @@ nonisolated enum RealtimeDecisionTrace {
         if let y = call.y { arguments["y"] = y }
         if call.underPointer { arguments["underPointer"] = true }
         if let path = call.path { arguments["path"] = RealtimeVoiceVerbs.isPrivateMenuPath(path) ? privatePathPlaceholder : path }
+        if let direction = call.direction { arguments["direction"] = direction }
+        if let amount = call.amount { arguments["amount"] = amount }
+        // The text is the owner's: its length only, never the words.
+        if let text = call.text { arguments["textLength"] = text.count }
+        if let mode = call.mode { arguments["mode"] = mode }
+        if let what = call.what { arguments["what"] = what }
         return arguments
     }
 

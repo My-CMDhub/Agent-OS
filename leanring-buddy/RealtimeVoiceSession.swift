@@ -331,9 +331,11 @@ final class RealtimeVoiceSession {
             let connection = try await readyConnection()
             if liveTurn?.line.sessionWasWarm == false { liveTurn?.line.sessionSetupMs = Self.milliseconds(from: setupStart, to: uptime) }
             var screenshotDisplayFrame: CGRect?
+            var screenshotPixelSize: CGSize?
             if let screenshot = try? await screenshotTask.value {
                 try await connection.sendScreenshot(screenshot.imageData)
                 screenshotDisplayFrame = screenshot.displayFrame
+                screenshotPixelSize = CGSize(width: screenshot.screenshotWidthInPixels, height: screenshot.screenshotHeightInPixels)
             }
             // A press since this one owns the connection now: its `beginTurn` must not be replaced by ours.
             guard !Task.isCancelled else { return }
@@ -343,11 +345,15 @@ final class RealtimeVoiceSession {
             let marks = connection.turn
             liveTurn?.marks = marks
             marks.screenshotDisplayFrame = screenshotDisplayFrame
+            marks.screenshotPixelSize = screenshotPixelSize
             // Beside the audio, never ahead of it; before the release, so on Gemini
             // it stays inside the owner's activity. Not into a turn that replaced this one.
             let contextSend = Task { @MainActor in
                 if let frontmostLine = await frontmostLineTask.value, connection.turn === marks {
                     try? await connection.sendContextText(frontmostLine)
+                }
+                if connection.pointFormat == .native, connection.stack == .openAIRealtime, let screenshotPixelSize, connection.turn === marks {
+                    try? await connection.sendContextText(RealtimeOpenAppTool.screenshotSizeContextLine(pixels: screenshotPixelSize))
                 }
                 guard case .element(let candidate, let app)? = await pointerTask.value, connection.turn === marks else { return }
                 marks.keyDownPointer = RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY),

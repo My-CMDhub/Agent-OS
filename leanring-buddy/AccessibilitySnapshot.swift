@@ -24,6 +24,16 @@ struct AccessibilityElementNode {
     /// title and no value — measured 2026-09-07, all 14 came back anonymous
     /// until this attribute was read.
     let elementDescription: UntrustedText?
+    /// AXPlaceholderValue, read for text inputs with no title or description
+    /// only (one read per such field, never per node). Review 2026-10-01: a
+    /// search box named only "Search people" could not be aimed at by name.
+    let placeholder: UntrustedText?
+
+    /// What a text field is CALLED — title, description or placeholder — never
+    /// its value, which is what the owner typed.
+    var fieldLabel: UntrustedText? { title ?? elementDescription ?? placeholder }
+
+    static let textInputRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
 
     let frameInAppKitCoordinates: CGRect
     let depth: Int
@@ -73,6 +83,7 @@ struct AccessibilityElementNode {
         title: String?,
         value: String?,
         elementDescription: String? = nil,
+        placeholder: String? = nil,
         frameInAppKitCoordinates: CGRect,
         depth: Int,
         children: [AccessibilityElementNode],
@@ -87,6 +98,7 @@ struct AccessibilityElementNode {
         self.title = title.map(UntrustedText.init)
         self.value = value.map(UntrustedText.init)
         self.elementDescription = elementDescription.map(UntrustedText.init)
+        self.placeholder = placeholder.map(UntrustedText.init)
         self.frameInAppKitCoordinates = frameInAppKitCoordinates
         self.depth = depth
         self.children = children
@@ -861,6 +873,9 @@ enum AccessibilityTreeWalker {
         let value = batched?.value ?? copyStringAttribute(from: element, attribute: kAXValueAttribute)
         let elementDescription = batched?.elementDescription
             ?? copyStringAttribute(from: element, attribute: kAXDescriptionAttribute)
+        // Only an anonymous text input pays for this read: its placeholder is its name.
+        let placeholder = AccessibilityElementNode.textInputRoles.contains(role) && title == nil && elementDescription == nil
+            ? copyStringAttribute(from: element, attribute: kAXPlaceholderValueAttribute) : nil
 
         // AXFrame is not an SDK constant and not every app publishes it, so fall
         // back to position + size rather than reporting a frameless node.
@@ -968,6 +983,7 @@ enum AccessibilityTreeWalker {
             title: title,
             value: value,
             elementDescription: elementDescription,
+            placeholder: placeholder,
             frameInAppKitCoordinates: appKitFrame,
             depth: depth,
             children: childNodes,

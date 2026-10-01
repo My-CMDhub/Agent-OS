@@ -36,14 +36,17 @@ final class RealtimeTurnMarks {
     /// The latest finished find_menu_items' candidates, the bundle it resolved
     /// to (an offer is pressed only in its own app) and when: what a press chose from.
     var latestMenuOffer: RealtimeStandingOffer?
-    /// The previous turn's `latestMenuOffer`, carried at `beginTurn` and never
-    /// further: a press may use it only as `RealtimeOpenAppTool.pressOffer` allows.
+    /// The most recent earlier turn's `latestMenuOffer`, carried at `beginTurn`
+    /// across turns that made none: a press may use it only as
+    /// `RealtimeOpenAppTool.pressOffer` allows (90 s, the owner's words).
     var previousTurnMenuOffer: RealtimeStandingOffer?
     /// The same pair for find_on_screen's controls (`RealtimeOpenAppTool.pointOffer`).
     var latestScreenOffer: RealtimeStandingOffer?
     var previousTurnScreenOffer: RealtimeStandingOffer?
     /// The key-down screenshot's display (AppKit): what point_at's x and y are fractions of.
     var screenshotDisplayFrame: CGRect?
+    /// That screenshot's size in pixels: what a native OpenAI position is in (`RealtimePointFormat`).
+    var screenshotPixelSize: CGSize?
     /// The element under the owner's mouse at key-down (`underPointer`).
     var keyDownPointer: RealtimeScreenTarget?
     /// What the previous answer SAID (`transcript`), carried only when the owner
@@ -190,6 +193,8 @@ final class RealtimeVoiceConnection {
     /// Probe only: the menu fixtures turn the post-launch look off, so a probe
     /// that brings the owner's Chrome or TextEdit forward never photographs it.
     var sendsFreshLook = true
+    /// How positions are asked for and read (`RealtimePointFormat`); set before `connect`.
+    var pointFormat = RealtimePointFormat.live
 
     /// PCM16 mono 24 kHz, as it arrives.
     var onAudio: ((Data) -> Void)?
@@ -255,10 +260,10 @@ final class RealtimeVoiceConnection {
                 "type": "session.update",
                 "session": [
                     "type": "realtime",
-                    "instructions": RealtimeOpenAppTool.systemPrompt,
+                    "instructions": RealtimeOpenAppTool.systemPrompt(pointFormat: pointFormat, stack: stack),
                     "output_modalities": ["audio"],
                     "max_output_tokens": Self.openAIMaxOutputTokens,
-                    "tools": RealtimeVoiceVerbs.openAIDeclarations,
+                    "tools": RealtimeVoiceVerbs.openAIDeclarations(pointFormat: pointFormat),
                     "tool_choice": "auto",
                     "audio": [
                         // Push-to-talk: we commit, the server's VAD does not decide.
@@ -286,8 +291,8 @@ final class RealtimeVoiceConnection {
                         "responseModalities": ["AUDIO"], "thinkingConfig": ["thinkingLevel": "MINIMAL"],
                         "speechConfig": ["voiceConfig": ["prebuiltVoiceConfig": ["voiceName": Self.geminiVoice]]]
                     ],
-                    "systemInstruction": ["parts": [["text": RealtimeOpenAppTool.systemPrompt]]],
-                    "tools": [RealtimeVoiceVerbs.geminiDeclaration],
+                    "systemInstruction": ["parts": [["text": RealtimeOpenAppTool.systemPrompt(pointFormat: pointFormat, stack: stack)]]],
+                    "tools": [RealtimeVoiceVerbs.geminiDeclaration(pointFormat: pointFormat)],
                     "realtimeInputConfig": ["automaticActivityDetection": ["disabled": true]],
                     // What the model said, for the probe's answers file and the honesty check.
                     "outputAudioTranscription": [String: Any](),
@@ -354,14 +359,16 @@ final class RealtimeVoiceConnection {
     func beginTurn(previousReplyWasHeard: Bool = false) async throws {
         let previous = turn
         turn = RealtimeTurnMarks()
-        turn.previousTurnScreenOffer = previous.latestScreenOffer
+        // The most recent offer of each kind, however many turns back: its age
+        // (`previousTurnOfferMaximumAgeSeconds`) and the owner's words decide.
+        turn.previousTurnScreenOffer = previous.latestScreenOffer ?? previous.previousTurnScreenOffer
         if previousReplyWasHeard, !previous.transcript.isEmpty { turn.previousTurnSaid = previous.transcript }
         // Also a barged-in turn's: barging in is how an owner says "yes, that one"
         // while the question is still being asked. But only a find that finished
         // BEFORE the press made an offer: one cut off before it ran, or still
         // running when the owner pressed, never set `latestMenuOffer`, because
         // the model never got its result.
-        turn.previousTurnMenuOffer = previous.latestMenuOffer
+        turn.previousTurnMenuOffer = previous.latestMenuOffer ?? previous.previousTurnMenuOffer
         turnInputAudioBytes = 0
         if stack == .geminiLive, previous.lastAudioSentUptime != nil, previous.heardCompletedUptime(now: uptime) == nil {
             turn.staleHeardPiecesUntilUptime = uptime + Self.geminiStaleHeardPieceSeconds
@@ -655,7 +662,9 @@ final class RealtimeVoiceConnection {
         let turn = self.turn
         if turn.toolCallUptime == nil { turn.toolCallUptime = arrivalUptime }
         for providerCall in calls {
-            let call = appNameOverride.map { RealtimeToolCall(callID: providerCall.callID, name: providerCall.name, appName: $0) } ?? providerCall
+            // Every pointing format becomes fractions of the screenshot here.
+            let readCall = RealtimePointFormat.normalised(providerCall, format: pointFormat, stack: stack, screenshotPixels: turn.screenshotPixelSize)
+            let call = appNameOverride.map { RealtimeToolCall(callID: readCall.callID, name: readCall.name, appName: $0) } ?? readCall
             turn.toolCalls.append(call)
             let decisionIndex = turn.decisions.count
             turn.decisions.append(RealtimeToolDecision(call: call, callUptime: arrivalUptime, offeredBeforeCall: turn.latestMenuOffer?.candidates,
@@ -691,7 +700,11 @@ final class RealtimeVoiceConnection {
                     // turn's when the owner's own words name the item. The trace records it.
                     // point_at / press_element: a name from the offer, a screenshot
                     // position (hit-tested) or the owner's pointer, resolved here.
+                    // scroll / type_text resolve a target only when they were given one
+                    // (none: the main area, the focused field).
                     let isScreenTarget = RealtimeVoiceVerbs.isScreenTargetTool(call.name)
+                        || (RealtimeVoiceVerbs.aimsAtScreen(call.name)
+                            && (call.elementName != nil || call.x != nil || call.y != nil || call.underPointer))
                     let chosen = RealtimeOpenAppTool.pressOffer(path: call.path, thisTurn: thisTurnOffer, previousTurn: turn.previousTurnMenuOffer,
                                                                 followUpConfirmed: heard?.followUpConfirmed, confirmedByYes: heard?.confirmedByYes == true,
                                                                 now: ProcessInfo.processInfo.systemUptime)
@@ -851,15 +864,30 @@ final class RealtimeVoiceConnection {
             return name
         }.value
         let waitStart = ProcessInfo.processInfo.systemUptime
+        // Which app is in front, bounded like the key-down line: a word for
+        // something inside it is not another app (`withoutWordsInsideTheNamedApp`).
+        async let frontmostApp = RealtimeVoiceSession.value(within: RealtimeVoiceSession.frontmostReadDeadlineSeconds) {
+            AccessibilityTreeWalker.focusedApplication()?.bundleURL
+        }
+        // The labels recently offered to the model (the offer memory's window), per app.
+        let recentOffers = [turn.latestMenuOffer, turn.previousTurnMenuOffer, turn.latestScreenOffer, turn.previousTurnScreenOffer]
+            .compactMap { $0 }.filter { waitStart - $0.uptime <= RealtimeOpenAppTool.previousTurnOfferMaximumAgeSeconds }
+            .map { (app: $0.app, labels: $0.candidates.flatMap(\.path) + $0.elements.map(\.name)) }
         let released = turn.lastAudioSentUptime ?? waitStart
         let transcript = await turn.waitForHeard(until: released + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds)
         let waitedMs = Int(((ProcessInfo.processInfo.systemUptime - waitStart) * 1000).rounded())
         // The app list reads the file system: off main.
         let afterHeardRefusal = turn.heardRefusals > 0
         let menuWords = RealtimeVoiceVerbs.foldedTokens(([call.words ?? "", call.elementName ?? ""] + (call.path ?? [])).joined(separator: " "))
+        let frontmost = await frontmostApp
         let (decision, namedAppIsRunning) = await Task.detached { () -> (RealtimeHeardCheck.Decision, Bool) in
+            var callBundle: String?
+            if case .resolved(let bundleIdentifier, _) = RealtimeVoiceVerbs.appIdentity(named: appName) { callBundle = bundleIdentifier }
+            let offered = recentOffers.filter { $0.app != nil && $0.app == callBundle }.flatMap(\.labels)
             let decision = RealtimeHeardCheck.decide(transcript: transcript, named: named, among: RealtimeVoiceVerbs.installedAppNames(),
-                                                     afterHeardRefusal: afterHeardRefusal, toolName: call.name, menuWords: menuWords)
+                                                     afterHeardRefusal: afterHeardRefusal, toolName: call.name, menuWords: menuWords,
+                                                     targetWords: menuWords + RealtimeVoiceVerbs.foldedTokens(offered.joined(separator: " ")),
+                                                     frontmostApp: frontmost)
             // Only asked when it decides: open_app with no transcript.
             guard decision.outcome == .transcriptMissing, call.name == RealtimeOpenAppTool.name else { return (decision, true) }
             return (decision, RealtimeVoiceVerbs.isRunning(named: named))

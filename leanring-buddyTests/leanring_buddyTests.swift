@@ -304,13 +304,60 @@ struct leanring_buddyTests {
 
     @Test func safetyKernelAsksWhenItDoesNotRecogniseTheRole() async throws {
         let decision = ActionSafetyKernel.evaluate(
-            intent: ElementActionIntent(role: "AXDisclosureTriangle", title: "More", action: .press),
-            resolvedNode: nodeForSafetyTest(role: "AXDisclosureTriangle", title: "More"),
+            intent: ElementActionIntent(role: "AXImage", title: "More", action: .press),
+            resolvedNode: nodeForSafetyTest(role: "AXImage", title: "More"),
             matchCount: 1,
             visibleBounds: CGRect(x: 0, y: 0, width: 1440, height: 900)
         )
 
-        #expect(decision == .requireConfirmation(reason: "unrecognised role AXDisclosureTriangle", destructive: false))
+        #expect(decision == .requireConfirmation(reason: "unrecognised role AXImage", destructive: false))
+    }
+
+    // Owner's ruling 2026-10-01 (Kernel A): a non-destructive press on an ordinary
+    // control happens without a card. Live 2026-09-30, Cursor's "Toggle Agents"
+    // and Xcode's sheet controls were groups, links and tabs — every one a card.
+    @Test func safetyKernelPressesOrdinaryControlRolesWithoutAsking() async throws {
+        for role in ["AXGroup", "AXLink", "AXRadioButton", "AXDisclosureTriangle", "AXMenuButton", "AXPopUpButton", "AXCheckBox"] {
+            let decision = ActionSafetyKernel.evaluate(
+                intent: ElementActionIntent(role: role, title: "Sidebar", action: .press),
+                resolvedNode: nodeForSafetyTest(role: role, title: "Sidebar"),
+                matchCount: 1,
+                visibleBounds: CGRect(x: 0, y: 0, width: 1440, height: 900)
+            )
+            #expect(decision == .allow, "\(role)")
+        }
+        let tab = AccessibilityElementNode(role: "AXFakeTabRole", subrole: "AXTabButton", title: "Models", value: nil,
+                                           frameInAppKitCoordinates: CGRect(x: 0, y: 100, width: 80, height: 28), depth: 1,
+                                           children: [], publishedActionNames: [kAXPressAction])
+        #expect(ActionSafetyKernel.evaluate(intent: ElementActionIntent(role: nil, title: "Models", action: .press), resolvedNode: tab,
+                                            matchCount: 1, visibleBounds: CGRect(x: 0, y: 0, width: 1440, height: 900)) == .allow)
+    }
+
+    @Test func safetyKernelStillAsksOrRefusesOnTheWordsWhateverTheRole() async throws {
+        let bounds = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        func decide(_ title: String, role: String = "AXGroup") -> SafetyDecision {
+            ActionSafetyKernel.evaluate(intent: ElementActionIntent(role: role, title: title, action: .press),
+                                        resolvedNode: nodeForSafetyTest(role: role, title: title), matchCount: 1, visibleBounds: bounds)
+        }
+        #expect(decide("Delete") == .requireConfirmation(reason: "title suggests a destructive action: delete", destructive: true))
+        #expect(decide("Empty Trash") == .refuse(reason: ActionSafetyKernel.irreversibleRefusalReason(keyword: "empty trash")))
+        // Publishing puts the owner's words in front of other people: a card, every role.
+        for (title, word) in [("Post", "post"), ("Send", "send"), ("Publish", "publish"), ("Share…", "share"),
+                              ("Submit", "submit"), ("Reply All", "reply"), ("Comment", "comment")] {
+            #expect(decide(title, role: "AXButton") == .requireConfirmation(reason: "title suggests a destructive action: \(word)", destructive: true),
+                    "\(title)")
+        }
+        // Whole words: a sidebar's "Shared" and a tab's "Posts" or "Comments" are navigation.
+        for title in ["Shared", "Posts", "Comments"] { #expect(decide(title, role: "AXRow") == .allow, "\(title)") }
+        // Typing into "Add a comment" is not publishing; pressing Post is.
+        let commentBox = AccessibilityElementNode(role: "AXTextArea", subrole: nil, title: "Add a comment", value: nil,
+                                                  frameInAppKitCoordinates: CGRect(x: 0, y: 100, width: 300, height: 60), depth: 1,
+                                                  children: [], publishedActionNames: [])
+        #expect(ActionSafetyKernel.evaluate(
+            intent: ElementActionIntent(role: nil, title: "Add a comment", action: .type), resolvedNode: commentBox, matchCount: 1,
+            visibleBounds: bounds,
+            typing: ActionSafetyKernel.TypingContext(mode: .insert, settableAttributes: [kAXSelectedTextAttribute], currentValueLength: 0,
+                                                     aimedByFocus: false)) == .allow)
     }
 
     // MARK: - SettleClock
@@ -1471,7 +1518,8 @@ private func menuItemNode(_ label: String) -> AccessibilityElementNode {
     // what the kernel does — and the reassuring list is the one people read.
     for irreversible in ActionSafetyKernel.irreversibleTitleKeywords {
         #expect(
-            !ActionSafetyKernel.destructiveTitleKeywords.contains(irreversible),
+            !ActionSafetyKernel.destructiveTitleKeywords.contains(irreversible)
+                && !ActionSafetyKernel.confirmTitlePhrases.contains(irreversible),
             "\(irreversible) is in both lists"
         )
     }
