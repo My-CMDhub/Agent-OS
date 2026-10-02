@@ -340,7 +340,10 @@ nonisolated enum ScreenSecretGuard {
                 "kind": "capture", "outcome": outcome, "reason": reason ?? NSNull(),
                 "app": inspection?.app ?? NSNull(), "walkMs": inspection.map { $0.milliseconds as Any } ?? NSNull(),
                 "nodeCount": inspection?.nodeCount ?? 0, "excludedWindowCount": excludedWindowCount,
-                "redactionsFound": inspection?.redactions.count ?? 0, "drawnRectCount": drawn.count,
+                "redactionsFound": inspection?.redactions.count ?? 0,
+                // How often the app answered AXBoundsForRange (`range`) vs the element frame.
+                "foundBySource": Dictionary((inspection?.redactions ?? []).map { ($0.source, 1) }, uniquingKeysWith: +),
+                "unlocatedSecrets": inspection?.unlocatedSecrets ?? 0, "drawnRectCount": drawn.count,
                 "drawnByKind": Dictionary(drawn.map { ($0.kind, 1) }, uniquingKeysWith: +)
             ]
             if let secureInput { line["secureInput"] = secureInput.jsonObject }

@@ -120,6 +120,17 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // The credential guard on the real capture path: the redacted screenshot(s)
+        // and a JSON summary, 0600, to ~/Library/Logs/Clicky/secret-guard-probe/,
+        // then quits. Needs --harness-dry-run; no idle gate (owner-approved 2026-10-02).
+        if CommandLine.arguments.contains("--secret-guard-probe") {
+            Task { @MainActor in
+                await SecretGuardProbe.run()
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // A turn the owner did not speak (beginSystemTurn): does each stack answer
         // it, and does a press still cut it off? Spends OpenAI (capped) and Gemini
         // credit. Needs --harness-dry-run and 120 s of owner idle; refuses every tool call.
