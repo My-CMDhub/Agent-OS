@@ -199,6 +199,22 @@ struct HarnessHandsTests {
         #expect(HarnessHands.keystrokeEvidence(valueLengthBefore: 0, valueLengthAfter: nil, typedCount: 5, fingerprintChanged: false) == nil)
     }
 
+    // H1 probe 2026-10-02: the AX write never took in a Chrome page and cost ~3 s before the keystrokes that did.
+    @Test func webFieldsGoStraightToKeystrokesAndNativeFieldsKeepTheWriteFirst() {
+        #expect(HarnessHands.typeStartsWithKeystrokes(forced: nil, inWebContent: true))
+        #expect(!HarnessHands.typeStartsWithKeystrokes(forced: nil, inWebContent: false))
+        #expect(HarnessHands.typeStartsWithKeystrokes(forced: .keystrokes, inWebContent: false))
+        #expect(!HarnessHands.typeStartsWithKeystrokes(forced: .axWrite, inWebContent: true))   // the probe's forced write still runs
+        #expect(HarnessHands.isWebHost(bundleIdentifier: "com.google.Chrome", frameworkNames: ["Google Chrome Framework.framework"]))
+        #expect(HarnessHands.isWebHost(bundleIdentifier: "com.todesktop.230313mzl4w4u92",
+                                       frameworkNames: ["Cursor Helper.app", "Electron Framework.framework", "Squirrel.framework"]))
+        #expect(HarnessHands.isWebHost(bundleIdentifier: "com.apple.Safari", frameworkNames: []))
+        #expect(HarnessHands.isWebHost(bundleIdentifier: "com.apple.Safari.WebApp.3AD71A25-F059-469E-91A4-1A7E10464C02", frameworkNames: []))
+        #expect(!HarnessHands.isWebHost(bundleIdentifier: "com.apple.TextEdit", frameworkNames: []))
+        #expect(!HarnessHands.isWebHost(bundleIdentifier: "com.apple.mail", frameworkNames: ["Sparkle.framework"]))
+        #expect(!HarnessHands.isWebHost(bundleIdentifier: nil, frameworkNames: []))
+    }
+
     // MARK: openURL
 
     @Test func openURLTakesHttpAndHttpsPagesOnly() {

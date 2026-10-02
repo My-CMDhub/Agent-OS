@@ -2644,7 +2644,11 @@ final class HarnessServer {
                 focusSettable: typingContext?.settableAttributes.contains(kAXFocusedAttribute) == true)
 
             var afterWrite = HarnessHands.AfterWrite.keystrokes
-            if request.forcedTypeMethod != .keystrokes {
+            let keystrokesFirst = HarnessHands.typeStartsWithKeystrokes(
+                forced: request.forcedTypeMethod,
+                inWebContent: request.forcedTypeMethod == nil && HarnessHands.isWebContent(element, application: snapshot.application))
+            if keystrokesFirst, request.forcedTypeMethod == nil { response["axWriteSkipped"] = "webContent" }
+            if !keystrokesFirst {
                 // Read apart from the performer's, which collapses "no value" into "": unreadable is not empty.
                 let valueLengthBefore = AccessibilityTypePerformer.stringValue(of: element)?.count
                 let outcome = AccessibilityTypePerformer.type(request.text, mode: request.mode, into: element)

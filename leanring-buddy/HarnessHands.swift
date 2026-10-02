@@ -158,6 +158,29 @@ enum HarnessHands {
         }
     }
 
+    /// Web content takes keystrokes first, never the AX write: `--hands-probe`
+    /// 2026-10-02 (Chrome, its own page) — a forced AX write came back
+    /// performFailed in every page input, keystrokes landed in every one
+    /// (contenteditable included), and the write tried first cost ~3 s per
+    /// `type` (3.4-3.7 s against 0.4 s forced keystrokes). Native fields keep
+    /// the write first: it replaces, keystrokes only insert.
+    static func typeStartsWithKeystrokes(forced: TypeMethod?, inWebContent: Bool) -> Bool {
+        forced == .keystrokes || (forced == nil && inWebContent)
+    }
+
+    /// Safari and its web apps (`com.apple.Safari.WebApp.<UUID>` — LinkedIn on
+    /// this Mac), and anything shipping a Chromium framework: Chrome-family
+    /// browsers name it "<Product> Framework.framework", Electron "Electron
+    /// Framework.framework". ponytail: a name suffix, not a Chromium check; a
+    /// non-web app with such a framework only gets keystrokes first, which are
+    /// still verified by the field's own value.
+    static func isWebHost(bundleIdentifier: String?, frameworkNames: [String]) -> Bool {
+        if let bundleIdentifier, bundleIdentifier == "com.apple.Safari" || bundleIdentifier.hasPrefix("com.apple.Safari.WebApp.") {
+            return true
+        }
+        return frameworkNames.contains { $0.hasSuffix(" Framework.framework") }
+    }
+
     /// Return, Tab and the like are keys that act (submit, move focus), not text.
     /// v1 types none of them (design: "No Return/Enter in v1").
     static func containsControlCharacters(_ text: String) -> Bool {
@@ -279,6 +302,26 @@ enum HarnessHands {
         for _ in 0..<ancestorWalkLimit {
             guard let node = current else { return false }
             if CFEqual(node, target) { return true }
+            var parent: AnyObject?
+            guard AXUIElementCopyAttributeValue(node, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
+            current = (parent as! AXUIElement)
+        }
+        return false
+    }
+
+    /// A field inside a web page: the app is a web host, or an `AXWebArea`
+    /// holds the field (a WebKit view in a native app — Mail's compose body).
+    static func isWebContent(_ element: AXUIElement, application: NSRunningApplication?) -> Bool {
+        let frameworks = application?.bundleURL.flatMap { url in
+            try? FileManager.default.contentsOfDirectory(atPath: url.appendingPathComponent("Contents/Frameworks").path)
+        } ?? []
+        if isWebHost(bundleIdentifier: application?.bundleIdentifier, frameworkNames: frameworks) { return true }
+        var current: AXUIElement? = element
+        for _ in 0..<ancestorWalkLimit {
+            guard let node = current else { return false }
+            var role: AnyObject?
+            if AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &role) == .success, role as? String == "AXWebArea" { return true }
             var parent: AnyObject?
             guard AXUIElementCopyAttributeValue(node, kAXParentAttribute as CFString, &parent) == .success,
                   let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
