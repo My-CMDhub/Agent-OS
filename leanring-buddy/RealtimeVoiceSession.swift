@@ -90,6 +90,9 @@ final class RealtimeVoiceSession {
     /// busy pool threads lost the race to a 2 s read under a 0.1 s deadline (test run 2026-09-30).
     /// The read runs on its OWN thread (review 2026-09-30): a stuck AX read
     /// never holds a GCD worker the deadline's timer needs.
+    /// The hand-over at key-down: a password being typed is never photographed.
+    nonisolated static func photographsThisTurn(_ secureInput: SecureInputState) -> Bool { !secureInput.isOn }
+
     nonisolated static func value<T: Sendable>(within seconds: Double, _ read: @escaping @Sendable () -> T?) async -> T? {
         await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
             let once = ResumeOnce(continuation)
@@ -309,7 +312,7 @@ final class RealtimeVoiceSession {
                     try await Task.sleep(for: .milliseconds(Self.probeCaptureStandInMilliseconds))
                     return nil
                 }
-                guard !secureInput.isOn else { return nil }
+                guard Self.photographsThisTurn(secureInput) else { return nil }
                 return try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first(where: \.isCursorScreen)
             }
             // The app in front, from structure — the harness's own read, off main

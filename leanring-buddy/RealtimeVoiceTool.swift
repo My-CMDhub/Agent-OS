@@ -1081,10 +1081,20 @@ nonisolated enum RealtimeOpenAppTool {
             + "be checked for secrets in time. say you cannot see the screen right now; never guess what is on it."
     }
 
-    /// The holder's name is app-written, so quoted and escaped.
+    /// The holder's name is app-written, so quoted and escaped. A holder that is
+    /// not the app in front is a flag left on (Terminal's Secure Keyboard Entry,
+    /// an app that never released it): there is nothing for the owner to type,
+    /// so the model says what is holding it and that the owner can switch it off.
     static func secureInputContextLine(_ state: SecureInputState) -> String {
         let holder = state.holderName.flatMap { $0.allSatisfy(\.isWhitespace) ? nil : UntrustedText($0).forDisplay }
-        let place = holder.map { state.holderIsFrontmost == false ? " (held by \($0), which is not the app in front)" : " in \($0)" } ?? ""
+        if state.holderIsFrontmost == false {
+            let who = holder ?? "an app that is not in front"
+            return "system context, not the owner's words: secure typing is held by \(who), which is not the app in front, "
+                + "so no screenshot is taken while it is on. never ask for, read or type a password or any other secret. "
+                + "tell the owner plainly that you cannot see the screen because \(who) is holding secure typing on "
+                + "(for example Terminal's Secure Keyboard Entry), and that they can turn it off there."
+        }
+        let place = holder.map { " in \($0)" } ?? ""
         return "system context, not the owner's words: secure typing is on\(place), so no screenshot was taken this turn. "
             + "never ask for, read or type a password or any other secret. tell the owner it is their turn to type it; "
             + "you may point at the field."
