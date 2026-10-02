@@ -320,6 +320,41 @@ struct HandsVoiceTests {
         #expect(!honest.correctionSent && honest.pointed == "notFound" && !order.steps.contains("x"))
     }
 
+    // Review 2026-10-02: a spoken correction reset the turn, so "yes, that one" after it
+    // lost the offer and was judged against the correction's own words.
+    @Test func aSystemTurnCarriesTheOwnerTurnsOffersAndWords() async throws {
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { _ in "{}" })
+        try await connection.beginTurn()
+        try await connection.endTurn()
+        let owner = connection.turn
+        let logIn = RealtimeScreenCandidate(name: "Log In", role: "AXButton", frame: CGRect(x: 1, y: 1, width: 9, height: 9), position: "x")
+        owner.latestScreenOffer = RealtimeStandingOffer(candidates: [], app: chromeBundle, uptime: 1, elements: [logIn])
+        owner.latestMenuOffer = RealtimeStandingOffer(candidates: [], app: chromeBundle, uptime: 2)
+        owner.transcript = "I found Log In. Shall I press it?"
+        owner.heardCompleteUptime = ProcessInfo.processInfo.systemUptime
+        try await connection.beginSystemTurn(text: "correction", variant: .textOnly)
+        let system = connection.turn
+        #expect(system !== owner && system.isSystemTurn)
+        #expect(system.previousTurnScreenOffer?.elements == [logIn] && system.previousTurnMenuOffer?.uptime == 2)
+        // The owner said nothing in it: a late piece is never its heard text.
+        connection.handle(["serverContent": ["inputTranscription": ["text": "late"]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+        #expect(system.heardText.isEmpty)
+        system.transcript = "Correction: that didn't go through."
+        // The next owner turn reads through the system turn to the owner turn.
+        try await connection.beginTurn(previousReplyWasHeard: true)
+        #expect(connection.turn.previousTurnSaid == "I found Log In. Shall I press it?")
+        #expect(connection.turn.previousTurnScreenOffer?.elements == [logIn] && connection.turn.previousTurnMenuOffer?.uptime == 2)
+        #expect(connection.turn.staleHeardPiecesUntilUptime == nil)
+        // Two system turns in a row still stand for the same owner turn.
+        connection.turn.transcript = "Opening it now."
+        try await connection.beginSystemTurn(text: "one", variant: .textOnly)
+        connection.turn.transcript = "Correction one."
+        try await connection.beginSystemTurn(text: "two", variant: .textOnly)
+        connection.turn.transcript = "Correction two."
+        try await connection.beginTurn(previousReplyWasHeard: true)
+        #expect(connection.turn.previousTurnSaid == "Opening it now.")
+    }
+
     // MARK: 6. Point when telling (row 31)
 
     @Test func aReplyThatSaysClickNamesWhatToPointAt() {

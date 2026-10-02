@@ -52,6 +52,11 @@ final class RealtimeTurnMarks {
     /// What the previous answer SAID (`transcript`), carried only when the owner
     /// heard all of it — the plain-yes gate reads it (`confirmedByPlainYes`).
     var previousTurnSaid: String?
+    /// A turn the owner did not speak (`beginSystemTurn`): it carries the owner
+    /// turn's offers, and the next owner turn reads the OWNER turn's words through
+    /// it (`ownerTurnTranscript`), never the system turn's own reply.
+    var isSystemTurn = false
+    var ownerTurnTranscript = ""
     var toolResultSentUptime: TimeInterval?
     /// First audio after the LATEST tool result — with find -> press, the words
     /// about the press, not a "one moment" between the two calls.
@@ -368,7 +373,9 @@ final class RealtimeVoiceConnection {
         // The most recent offer of each kind, however many turns back: its age
         // (`previousTurnOfferMaximumAgeSeconds`) and the owner's words decide.
         turn.previousTurnScreenOffer = previous.latestScreenOffer ?? previous.previousTurnScreenOffer
-        if previousReplyWasHeard, !previous.transcript.isEmpty { turn.previousTurnSaid = previous.transcript }
+        // A system turn (a spoken correction) stands for the owner turn before it.
+        let said = previous.isSystemTurn ? previous.ownerTurnTranscript : previous.transcript
+        if previousReplyWasHeard, !said.isEmpty { turn.previousTurnSaid = said }
         // Also a barged-in turn's: barging in is how an owner says "yes, that one"
         // while the question is still being asked. But only a find that finished
         // BEFORE the press made an offer: one cut off before it ran, or still
@@ -376,7 +383,7 @@ final class RealtimeVoiceConnection {
         // the model never got its result.
         turn.previousTurnMenuOffer = previous.latestMenuOffer ?? previous.previousTurnMenuOffer
         turnInputAudioBytes = 0
-        if stack == .geminiLive, previous.lastAudioSentUptime != nil, previous.heardCompletedUptime(now: uptime) == nil {
+        if stack == .geminiLive, !previous.isSystemTurn, previous.lastAudioSentUptime != nil, previous.heardCompletedUptime(now: uptime) == nil {
             turn.staleHeardPiecesUntilUptime = uptime + Self.geminiStaleHeardPieceSeconds
         }
         switch stack {
@@ -471,8 +478,18 @@ final class RealtimeVoiceConnection {
     /// Fresh marks whose release is now, so the reply's audio counts for this turn.
     /// Never claims `turnAwaitingCommit`: no audio is committed, and an owner turn
     /// whose commit is still in flight must keep its own transcript.
+    /// It inherits the owner turn's standing offers, as `beginTurn` carries them
+    /// (review 2026-10-02: a correction between "find X" and "yes, that one" lost
+    /// the offer), and takes no heard piece: the owner said nothing in it, so a
+    /// late Gemini piece is the owner turn's.
     func beginSystemTurn(text: String, variant: RealtimeSystemTurnVariant) async throws {
+        let previous = turn
         turn = RealtimeTurnMarks()
+        turn.isSystemTurn = true
+        turn.ownerTurnTranscript = previous.isSystemTurn ? previous.ownerTurnTranscript : previous.transcript
+        turn.previousTurnScreenOffer = previous.latestScreenOffer ?? previous.previousTurnScreenOffer
+        turn.previousTurnMenuOffer = previous.latestMenuOffer ?? previous.previousTurnMenuOffer
+        turn.staleHeardPiecesUntilUptime = .infinity
         turn.lastAudioSentUptime = uptime   // nothing after this is "before the release"
         for message in Self.systemTurnMessages(stack: stack, text: text, variant: variant) {
             if message["type"] as? String == "response.create" {
