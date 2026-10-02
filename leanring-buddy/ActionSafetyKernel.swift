@@ -85,6 +85,8 @@ enum ActionSafetyKernel {
         case .type: return typeableRoles
         case .open: return navigationalOpenRoles
         case .menu: return navigationalMenuRoles
+        // Clicking a field is how a human focuses it, so a text input is navigation too.
+        case .click: return navigationalPressRoles.union(AccessibilityElementNode.textInputRoles)
         }
     }
 
@@ -135,10 +137,16 @@ enum ActionSafetyKernel {
             || reason == secureStatusItemRefusalReason
             || reason.hasPrefix("refusing to type into a secure field")
             || reason == unreadableSubroleTypeRefusalReason
+            || reason == secureFieldClickRefusalReason
             || reason.hasPrefix(secureFieldCaptureRefusalPrefix)
             || reason.hasPrefix(incompleteCaptureCheckRefusalPrefix)
             || reason.hasPrefix(irreversibleRefusalPrefix)
     }
+
+    /// A click into a password box would hand its focus to us; the pointer refuses
+    /// one for the same reason (`HarnessPolicy.pointerRefusal`). The owner clicks it.
+    static let secureFieldClickRefusalReason =
+        "refusing to click a secure field (or a text field whose subrole could not be read) — a password is the owner's to type"
 
     static func nonTextRoleRefusalReason(role: String) -> String {
         "role \(role) does not accept text — only \(typeableRoles.sorted().joined(separator: ", ")) may be typed into"
@@ -402,6 +410,9 @@ enum ActionSafetyKernel {
             }
             return .refuse(reason: unreadableSubroleTypeRefusalReason)
         }
+        if case .click = intent.action, resolvedNode.mightBeSecure {
+            return .refuse(reason: secureFieldClickRefusalReason)
+        }
 
         // The other rule with no confirmed path past it, and it is checked here
         // — above reachability, above the menu-enabled check — because those
@@ -541,7 +552,8 @@ enum ActionSafetyKernel {
         }
 
         guard navigationalRoles(for: intent.action).contains(resolvedNode.role)
-                || (intent.action == .press && resolvedNode.subrole.map(navigationalPressSubroles.contains) == true) else {
+                || ((intent.action == .press || intent.action == .click)
+                    && resolvedNode.subrole.map(navigationalPressSubroles.contains) == true) else {
             return .requireConfirmation(reason: "unrecognised role \(resolvedNode.role)")
         }
 

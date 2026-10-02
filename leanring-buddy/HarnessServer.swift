@@ -84,6 +84,11 @@ struct HarnessRawRequest: Decodable {
     /// scroll only: up / down / left / right, and how many pages (default 1).
     let direction: String?
     let amount: Double?
+    /// openURL only: the http/https page to open (`HarnessHands.validatedWebURL`).
+    let url: String?
+    /// click (`axPress` / `click`) and type (`axWrite` / `keystrokes`) only: run
+    /// that one method and no fallback — how the hands probe measures each.
+    let method: String?
 }
 
 struct HarnessPoint: Decodable {
@@ -136,13 +141,20 @@ enum HarnessVerb: String, CaseIterable {
     /// Scroll the frontmost window (or a named / pointed-at area of it).
     case scroll
 
+    /// Press like a human: `AXPress`, or a real left click at the element's
+    /// visible centre when that is what works (`HarnessHands`). Kernel as `press`.
+    case click
+
+    /// Open an http/https page in the default or a named browser.
+    case openURL
+
     /// Whether this verb can change the world. The kill switch stops these and
     /// leaves the read-only pair working, so an operator who tripped it can
     /// still look at the machine and find out why.
     var isMutating: Bool {
         switch self {
         case .ping, .snapshot, .menus, .windows, .look, .status, .highlight: return false
-        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll: return true
+        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL: return true
         }
     }
 
@@ -152,6 +164,7 @@ enum HarnessVerb: String, CaseIterable {
         case .select: return .select
         case .type: return .type
         case .open: return .open
+        case .click: return .click
         // `menu` acts, but it does not resolve a name in the focused window, so
         // it does not go through the name-resolving path at all. Returning nil
         // here is what keeps the "an acting verb needs a title" rule honest —
@@ -165,7 +178,8 @@ enum HarnessVerb: String, CaseIterable {
         // a name only to find out how many things carry it.
         // `launch` targets an application, not an element: `evaluateLaunch`.
         // `highlight` resolves exactly like a press but performs nothing — see `highlightResponse`.
-        case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight, .scroll: return nil
+        // `openURL` targets a page in a browser, not an element: `openURLResponse`.
+        case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight, .scroll, .openURL: return nil
         }
     }
 }
@@ -274,6 +288,11 @@ struct HarnessRequest: Equatable {
     /// scroll only.
     var scrollDirection: ScrollDirection? = nil
     var scrollPages: Double = 1
+    /// click / type only: the one method to run, no fallback (the hands probe).
+    var forcedClickMethod: ClickMethod? = nil
+    var forcedTypeMethod: TypeMethod? = nil
+    /// openURL only, validated by `decode`.
+    var url: URL? = nil
 }
 
 // MARK: - Pure decision logic
@@ -415,7 +434,7 @@ enum HarnessPolicy {
         }
         if raw.requireAtPoint == true {
             // type_text aims like press_element: the named field must be the one at the point.
-            guard verb == .press || verb == .type else { return .failure(.invalidField(field: "requireAtPoint", value: "true")) }
+            guard verb == .press || verb == .type || verb == .click else { return .failure(.invalidField(field: "requireAtPoint", value: "true")) }
             guard raw.nearPoint != nil else { return .failure(.missingField("nearPoint")) }
         }
 
@@ -436,6 +455,34 @@ enum HarnessPolicy {
             }
         } else if let stray = raw.direction ?? raw.amount.map({ String($0) }) {
             return .failure(.invalidField(field: raw.direction != nil ? "direction" : "amount", value: stray))
+        }
+
+        // A forced method belongs to the verb that has it; anywhere else it is a typo.
+        var forcedClickMethod: ClickMethod?
+        var forcedTypeMethod: TypeMethod?
+        if let requested = raw.method {
+            switch verb {
+            case .click: forcedClickMethod = ClickMethod(rawValue: requested)
+            case .type: forcedTypeMethod = TypeMethod(rawValue: requested)
+            default: break
+            }
+            guard forcedClickMethod != nil || forcedTypeMethod != nil else {
+                return .failure(.invalidField(field: "method", value: requested))
+            }
+        }
+
+        // openURL: http/https only — `file:` and `javascript:` are not pages.
+        var url: URL?
+        if verb == .openURL {
+            guard let requested = raw.url, !requested.isEmpty else { return .failure(.missingField("url")) }
+            guard let valid = HarnessHands.validatedWebURL(requested) else {
+                return .failure(.invalidField(field: "url", value: UntrustedText(requested).forDisplay))
+            }
+            // Like `launch`: an app by name or bundle identifier, never a path.
+            if let app = raw.app, app.contains("/") { return .failure(.invalidField(field: "app", value: app)) }
+            url = valid
+        } else if let stray = raw.url {
+            return .failure(.invalidField(field: "url", value: UntrustedText(stray).forDisplay))
         }
 
         var mode = TypeMode.insert
@@ -459,7 +506,8 @@ enum HarnessPolicy {
             // a second field only two verbs would ever set.
             title: (verb == .menu || verb == .menus) && !path.isEmpty
                 ? path.joined(separator: " > ")
-                : (statusItem ?? raw.title ?? ""),
+                // openURL's target is its page, so the audit line and a ticket name it.
+                : (statusItem ?? url?.absoluteString ?? raw.title ?? ""),
             role: raw.role,
             withinNamed: raw.withinNamed,
             nearPoint: raw.nearPoint?.cgPoint,
@@ -486,7 +534,10 @@ enum HarnessPolicy {
             speechHold: raw.speechHold ?? false,
             labelTitle: raw.labelTitle,
             scrollDirection: scrollDirection,
-            scrollPages: scrollPages
+            scrollPages: scrollPages,
+            forcedClickMethod: forcedClickMethod,
+            forcedTypeMethod: forcedTypeMethod,
+            url: url
         ))
     }
 
@@ -1617,8 +1668,11 @@ final class HarnessServer {
         case .snapshot:
             return snapshotResponse(request, dryRun: dryRun, startedAt: startedAt)
 
-        case .press, .select, .type, .open:
+        case .press, .select, .type, .open, .click:
             return actResponse(request, dryRun: dryRun, startedAt: startedAt)
+
+        case .openURL:
+            return openURLResponse(request, dryRun: dryRun, startedAt: startedAt)
 
         case .menu:
             return request.statusItem != nil
@@ -2487,6 +2541,11 @@ final class HarnessServer {
 
         let performedOK: Bool
         switch action {
+        case .click:
+            // Its own act and look (AXPress or a real click, focus or names as evidence).
+            return clickAct(request, node: resolvedNode, rootNode: rootNode, snapshot: snapshot, namesBefore: namesBefore,
+                            kernel: described.decision, dryRun: dryRun, startedAt: startedAt, response: response)
+
         case .press, .open, .menu:
             guard let element = resolvedNode.accessibilityElement else {
                 response["ok"] = false
@@ -2571,26 +2630,94 @@ final class HarnessServer {
             }
 
             phaseTiming.actionStarting()
-            let outcome = AccessibilityTypePerformer.type(request.text, mode: request.mode, into: element)
-            // Nothing was written: a selection the owner made still stands.
-            if let refusal = outcome.refusal {
+            guard let processIdentifier = snapshot.application?.processIdentifier else {
                 phaseTiming.actionReturned()
                 response["ok"] = false
-                response["error"] = "selectionNotEmpty"
-                response["message"] = refusal
-                audit(request, dryRun: dryRun, kernel: described.decision, outcome: "selectionNotEmpty", startedAt: startedAt)
+                response["error"] = "noLiveElement"
+                audit(request, dryRun: dryRun, kernel: described.decision, outcome: "noLiveElement", startedAt: startedAt)
                 return response
             }
+            // Focus first (hands design, H1 item 2): keystrokes need it, and it is
+            // what a human does. Not fatal to the AX write, which needs no focus.
+            response["focus"] = HarnessHands.focusForTyping(
+                element, windowFrame: rootNode.frameInAppKitCoordinates, processIdentifier: processIdentifier,
+                focusSettable: typingContext?.settableAttributes.contains(kAXFocusedAttribute) == true)
 
-            // For typing, the read-back IS the evidence — the text is the
-            // effect. The fingerprint below says whether the app *reacted*,
-            // which is a different question, and they are reported separately
-            // on purpose.
-            let (performed, containsWhatWeWrote) = HarnessPolicy.typedEvidence(outcome, wrote: request.text)
-            response["performed"] = performed
-            // `.success` on a write that changed nothing has been measured three
-            // times in this repo. The field's own text is what decides here.
-            performedOK = outcome.error == .success && containsWhatWeWrote
+            var afterWrite = HarnessHands.AfterWrite.keystrokes
+            if request.forcedTypeMethod != .keystrokes {
+                // Read apart from the performer's, which collapses "no value" into "": unreadable is not empty.
+                let valueLengthBefore = AccessibilityTypePerformer.stringValue(of: element)?.count
+                let outcome = AccessibilityTypePerformer.type(request.text, mode: request.mode, into: element)
+                // Nothing was written: a selection the owner made still stands.
+                if let refusal = outcome.refusal {
+                    phaseTiming.actionReturned()
+                    response["ok"] = false
+                    response["error"] = "selectionNotEmpty"
+                    response["message"] = refusal
+                    audit(request, dryRun: dryRun, kernel: described.decision, outcome: "selectionNotEmpty", startedAt: startedAt)
+                    return response
+                }
+
+                // For typing, the read-back IS the evidence — the text is the
+                // effect. The fingerprint below says whether the app *reacted*,
+                // which is a different question, and they are reported separately
+                // on purpose.
+                var (performed, containsWhatWeWrote) = HarnessPolicy.typedEvidence(outcome, wrote: request.text)
+                var valueLengthAfter = outcome.valueAfter?.count
+                // A web field may apply the write a beat later: look again before deciding to type it twice.
+                if outcome.error == .success, !containsWhatWeWrote {
+                    HarnessHands.waitUntil(seconds: 0.3) {
+                        let value = AccessibilityTypePerformer.stringValue(of: element)
+                        valueLengthAfter = value?.count
+                        containsWhatWeWrote = value?.contains(request.text) ?? false
+                        return containsWhatWeWrote
+                    }
+                    performed["valueLengthAfter"] = valueLengthAfter ?? NSNull()
+                    performed["readBackContainsText"] = containsWhatWeWrote
+                }
+                performed["method"] = TypeMethod.axWrite.rawValue
+                response["performed"] = performed
+                // `.success` on a write that changed nothing has been measured three
+                // times in this repo. The field's own text is what decides here.
+                afterWrite = HarnessHands.afterAXWrite(
+                    forced: request.forcedTypeMethod, axError: outcome.error, valueLengthBefore: valueLengthBefore,
+                    valueLengthAfter: valueLengthAfter, containsText: containsWhatWeWrote, typedCount: request.text.count)
+            }
+
+            switch afterWrite {
+            case .done:
+                performedOK = true
+                response["method"] = TypeMethod.axWrite.rawValue
+            case .failed:
+                performedOK = false
+            case .refuse(let refusal):
+                phaseTiming.actionReturned()
+                response["ok"] = false
+                response["error"] = refusal.code
+                response["message"] = refusal.message
+                audit(request, dryRun: dryRun, kernel: described.decision, outcome: refusal.code, startedAt: startedAt)
+                return response
+            case .keystrokes:
+                // The AX write did not take (Chrome's New Tab box, a contenteditable
+                // composer — live 2026-10-02): type it as key events instead.
+                switch HarnessHands.typeByKeystrokes(request.text, mode: request.mode, into: element,
+                                                     processIdentifier: processIdentifier, fingerprintBefore: namesBefore,
+                                                     secureInput: secureInputRead) {
+                case .refused(let refusal):
+                    phaseTiming.actionReturned()
+                    response["ok"] = false
+                    response["error"] = refusal.code
+                    response["message"] = refusal.message
+                    audit(request, dryRun: dryRun, kernel: described.decision, outcome: refusal.code, startedAt: startedAt)
+                    return response
+                case .posted(var payload, let evidence):
+                    if let axWrite = response["performed"] { payload["axWrite"] = axWrite }
+                    payload["evidence"] = evidence ?? NSNull()
+                    response["performed"] = payload
+                    response["method"] = TypeMethod.keystrokes.rawValue
+                    performedOK = evidence != nil
+                }
+            }
 
             if request.thenConfirm {
                 // A missing AXConfirm is never a failure of the type — measured
@@ -2682,6 +2809,103 @@ final class HarnessServer {
         }
 
         return response
+    }
+
+    // MARK: click
+
+    /// `click` after the kernel and the gate: `AXPress` when the element publishes
+    /// it and is not a text input, a real left click at its visible centre
+    /// otherwise — or when the press went in and nothing could be seen to change
+    /// (never on a toggle, which a second activation would undo). Each method is
+    /// looked at before the next is tried; `method` says which one worked.
+    private func clickAct(_ request: HarnessRequest, node: AccessibilityElementNode, rootNode: AccessibilityElementNode,
+                          snapshot: AccessibilityWindowSnapshot, namesBefore: Set<String>, kernel: String,
+                          dryRun: Bool, startedAt: Date, response initial: [String: Any]) -> [String: Any] {
+        var response = initial
+        func finish(_ outcome: String, error: String? = nil, message: String? = nil) -> [String: Any] {
+            response["ok"] = error == nil
+            if let error { response["error"] = error }
+            if let message { response["message"] = message }
+            audit(request, dryRun: dryRun, kernel: kernel, outcome: outcome, startedAt: startedAt)
+            return response
+        }
+        guard let element = node.accessibilityElement, let processIdentifier = snapshot.application?.processIdentifier else {
+            return finish("noLiveElement", error: "noLiveElement")
+        }
+        let methods = HarnessHands.clickMethods(publishesPress: node.publishedActionNames.contains(kAXPressAction),
+                                                role: node.role, forced: request.forcedClickMethod)
+        guard !methods.isEmpty else {
+            return finish("pressNotPublished", error: "pressNotPublished",
+                          message: "the element does not publish AXPress, so a forced axPress has nothing to send")
+        }
+        let focusedBefore = HarnessHands.focusIsOn(element, processIdentifier: processIdentifier)
+        var attempts: [[String: Any]] = []
+        var evidence: String?
+        var walks = 0
+
+        // Re-walks until the names change or focus arrives on the element.
+        func look() -> String? {
+            var seen: String?
+            let (outcome, used, _) = ActionVerifier.verifyCountingWalks { later in
+                guard let laterRoot = later.rootNode else { return false }
+                seen = HarnessHands.clickEvidence(
+                    fingerprintChanged: AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot) != namesBefore,
+                    focusedBefore: focusedBefore,
+                    focusedNow: HarnessHands.focusIsOn(element, processIdentifier: processIdentifier))
+                return seen != nil
+            }
+            walks += used
+            if case .windowGone = outcome { return "the focused window closed" }
+            return seen
+        }
+
+        phaseTiming.actionStarting()
+        for method in methods {
+            var attempt: [String: Any] = ["method": method.rawValue]
+            switch method {
+            case .axPress:
+                let result = AccessibilityActionPerformer.perform(kAXPressAction, on: element)
+                phaseTiming.actionReturned()
+                // The raw code AND the clock: -25204 in 2 ms and at 5,000 ms are opposite problems.
+                attempt["axErrorRawValue"] = Int(result.error.rawValue)
+                attempt["milliseconds"] = result.milliseconds
+                guard HarnessHands.afterPress(error: result.error) == .verify else {
+                    attempts.append(attempt)
+                    continue
+                }
+            case .click:
+                switch HarnessHands.clickElement(element, windowFrame: rootNode.frameInAppKitCoordinates,
+                                                 processIdentifier: processIdentifier) {
+                case .failure(let refusal):
+                    phaseTiming.actionReturned()
+                    attempt["refused"] = refusal.code
+                    attempts.append(attempt)
+                    response["performed"] = ["attempts": attempts]
+                    return finish(refusal.code, error: refusal.code, message: refusal.message)
+                case .success(let topLeft):
+                    phaseTiming.actionReturned()
+                    attempt["pointTopLeft"] = Self.pointJSON(topLeft).point
+                }
+            }
+            evidence = look()
+            attempt["verified"] = evidence != nil
+            attempts.append(attempt)
+            if evidence != nil {
+                response["method"] = method.rawValue
+                break
+            }
+            // A press that took and showed nothing: clicking a toggle would flip it back.
+            if method == .axPress, !HarnessHands.clickAfterUnverifiedPress(role: node.role, subrole: node.subrole) { break }
+        }
+        phaseTiming.verified(walks: walks, path: "poll")
+        response["performed"] = ["attempts": attempts]
+
+        guard let evidence else {
+            response["verification"] = ["status": "notObserved", "evidence": "names did not change and focus did not arrive"]
+            return finish("notObserved", error: "notVerified")
+        }
+        response["verification"] = ["status": "confirmed", "evidence": evidence]
+        return finish("confirmed")
     }
 
     // MARK: menu / menus
@@ -3498,6 +3722,114 @@ final class HarnessServer {
                 kernel: described.decision
             )
         }
+    }
+
+    // MARK: openURL
+
+    /// Open an http/https page in the named browser or the default one. Allowed
+    /// without a card (it reads a page and destroys nothing), but the per-app
+    /// policy is asked about the BROWSER, so a refused browser stays refused.
+    /// Verified by the browser coming forward with a new or retitled window.
+    private func openURLResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        var response: [String: Any] = ["dryRun": dryRun, "url": request.url?.absoluteString ?? NSNull()]
+        func fail(_ code: String, _ message: String, kernel: String = "n/a") -> [String: Any] {
+            response["ok"] = false
+            response["error"] = code
+            response["message"] = message
+            audit(request, dryRun: dryRun, kernel: kernel, outcome: code, startedAt: startedAt)
+            return response
+        }
+        // `decode` guarantees it; a nil here is our bug, not a default.
+        guard let url = request.url else { return fail("missingField", "missing required field \"url\"") }
+        guard !LockScreenGuard.isLockScreen(Self.frontmostBundleIdentifier()) else {
+            return fail("screenIsLocked", "the screen is locked — nothing can be opened into it")
+        }
+
+        let browserURL: URL
+        if let app = request.app {
+            switch ApplicationLauncher.resolve(app) {
+            case .resolved(let resolvedURL, _): browserURL = resolvedURL
+            case .notFound: return fail("notFound", "no installed application matches \(UntrustedText(app).forDisplay)")
+            case .ambiguous(let candidates):
+                response["candidates"] = candidates.map(\.path)
+                return fail("ambiguous", "\(candidates.count) installed applications match \(UntrustedText(app).forDisplay)")
+            }
+        } else {
+            guard let defaultBrowser = NSWorkspace.shared.urlForApplication(toOpen: url) else {
+                return fail("noBrowser", "no application is set to open http/https pages")
+            }
+            browserURL = defaultBrowser
+        }
+        // A web handler, or not a browser at all ("open https://… in Terminal").
+        let webHandlers = NSWorkspace.shared.urlsForApplications(toOpen: URL(string: "https://example.com")!)
+        guard HarnessHands.handlesWeb(appURL: browserURL, webHandlers: webHandlers) else {
+            return fail("notABrowser", "\(browserURL.deletingPathExtension().lastPathComponent) does not open web pages")
+        }
+        let bundleIdentifier = Bundle(url: browserURL)?.bundleIdentifier
+        guard !Self.isHarnessItself(bundleIdentifier: bundleIdentifier) else {
+            return fail("targetIsHarnessItself", Self.harnessItselfMessage)
+        }
+        let browserName = browserURL.deletingPathExtension().lastPathComponent
+        response["application"] = browserName
+        response["bundleIdentifier"] = bundleIdentifier ?? NSNull()
+
+        let decision = applyAppPolicy(to: .allow, bundleIdentifier: bundleIdentifier, into: &response)
+        let gated = gate(decision, request: request, appName: browserName, bundleIdentifier: bundleIdentifier,
+                         dryRun: dryRun, into: &response)
+        guard gated.executable else {
+            response["ok"] = false
+            response["error"] = gated.outcome
+            if response["message"] == nil { response["message"] = gated.note ?? gated.outcome }
+            audit(request, dryRun: dryRun, kernel: gated.decision, outcome: gated.outcome, startedAt: startedAt)
+            return response
+        }
+        guard !dryRun else {
+            response["ok"] = true
+            response["performed"] = ["status": "skipped", "reason": "dry run — nothing was opened"]
+            audit(request, dryRun: dryRun, kernel: gated.decision, outcome: "dryRun", startedAt: startedAt)
+            return response
+        }
+
+        // Read BEFORE opening: the browser's front window and its title, if it runs.
+        let before = bundleIdentifier
+            .flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first }
+            .map { HarnessHands.browserWindow(processIdentifier: $0.processIdentifier) }
+
+        phaseTiming.actionStarting()
+        let application: NSRunningApplication
+        switch HarnessHands.open(url, withApplicationAt: browserURL) {
+        case .failure(let refusal):
+            phaseTiming.actionReturned()
+            return fail(refusal.code, refusal.message, kernel: gated.decision)
+        case .success(let opened): application = opened
+        }
+        phaseTiming.actionReturned()
+
+        var evidence: String?
+        var polls = 0
+        let verifyStartedAt = Date()
+        HarnessHands.waitUntil(seconds: HarnessHands.openURLDeadlineSeconds) {
+            polls += 1
+            let after = HarnessHands.browserWindow(processIdentifier: application.processIdentifier)
+            let windowChanged = after.window.map { window in before?.window.map { !CFEqual($0, window) } ?? true } ?? false
+            evidence = HarnessHands.openURLEvidence(frontmost: after.frontmost, windowChanged: windowChanged,
+                                                    titleBefore: before?.title, titleAfter: after.title)
+            if evidence != nil, let title = after.title { response["title"] = UntrustedText(title).forDisplay }
+            return evidence != nil
+        }
+        phaseTiming.verified(walks: polls, path: "poll")
+        response["performed"] = ["status": "sent", "browserWasRunning": before != nil]
+        guard let evidence else {
+            response["verification"] = ["status": "notObserved",
+                                        "milliseconds": Int(Date().timeIntervalSince(verifyStartedAt) * 1000)]
+            return fail("notVerified", "the browser did not come forward with a new or retitled window within "
+                        + "\(Int(HarnessHands.openURLDeadlineSeconds)) s", kernel: gated.decision)
+        }
+        response["verification"] = ["status": "confirmed", "evidence": evidence,
+                                    "milliseconds": Int(Date().timeIntervalSince(verifyStartedAt) * 1000)]
+        response["ok"] = true
+        audit(request, dryRun: dryRun, kernel: gated.decision, outcome: "confirmed", startedAt: startedAt)
+        return response
     }
 
     // MARK: look / escalation

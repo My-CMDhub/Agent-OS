@@ -42,6 +42,13 @@ enum ElementAction {
     /// facts about its frame. See `AccessibilityMenu`.
     case menu
 
+    /// A press that does not need `AXPress`: the hands' click (`HarnessHands`).
+    /// Judged by the kernel exactly as a press — the same words, frame and role
+    /// checks — except that nothing has to be published, a text input is an
+    /// ordinary target (clicking a field is how a human focuses it), and a
+    /// password box is refused like the pointer refuses one.
+    case click
+
     /// The published action this needs, or nil when the verb is a property
     /// write and there is no action to look for.
     var accessibilityActionName: String? {
@@ -50,7 +57,7 @@ enum ElementAction {
             return kAXPressAction
         case .open:
             return "AXOpen"
-        case .select, .type:
+        case .select, .type, .click:
             return nil
         }
     }
@@ -70,7 +77,7 @@ enum ElementAction {
     /// one this agent must not fill in.
     var irreversibleNamesAreRefused: Bool {
         switch self {
-        case .press, .type, .open, .menu: return true
+        case .press, .type, .open, .menu, .click: return true
         case .select: return false
         }
     }
@@ -82,7 +89,7 @@ enum ElementAction {
     /// rather than assumed — see the note on the kernel's frame checks.
     var targetHasAnOnScreenFrame: Bool {
         switch self {
-        case .press, .select, .type, .open: return true
+        case .press, .select, .type, .open, .click: return true
         case .menu: return false
         }
     }
