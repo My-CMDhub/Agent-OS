@@ -329,7 +329,7 @@ struct RealtimeVoiceToolTests {
             "toolName", "toolCallMs", "harnessMs", "harnessStatus", "harnessError", "freshLook", "freshLookMs", "freshLookArrivedAfterSpeechStartMs",
             "followUpFirstAudioMs", "releaseToSpokenResultMs", "turnDoneMs", "bargedIn", "errorKind", "notchTransitions",
             "turnEndReason", "watchdogFired", "finishedMs", "staleCompletionsIgnored", "bargedInPreviousTurnId", "previousAudioWasPlaying", "eventTrail",
-            "claimedWithoutReceipt"
+            "claimedWithoutReceipt", "receiptCorrectionSent", "pointedWhenTelling"
         ])
     }
 }

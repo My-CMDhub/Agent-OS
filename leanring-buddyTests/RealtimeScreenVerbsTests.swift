@@ -338,7 +338,7 @@ struct RealtimeScreenVerbsTests {
         #expect(point["pointer"] as? Bool == true)
         #expect((point["nearPoint"] as? [String: Double])?["x"] == 1349)
         let press = object(try line("press_element", aimed).get())
-        #expect(press["verb"] as? String == "press")
+        #expect(press["verb"] as? String == "click")      // hands H2: AXPress where published, else a real click
         #expect(press["title"] as? String == newAgent.name)
         #expect(press["requireAtPoint"] as? Bool == true)
         #expect((press["nearPoint"] as? [String: Double])?["y"] == 883)
@@ -532,7 +532,7 @@ struct RealtimeScreenVerbsTests {
         let find = RealtimeToolDecision(call: RealtimeToolCall(callID: "a", name: "find_on_screen", appName: "Cursor", words: "agent"),
                                         callUptime: 1, offeredBeforeCall: nil, dispatch: findDispatch)
         let findLine = RealtimeDecisionTrace.line(decision: find, sequence: 1, turnID: "T", stack: "geminiLive", source: "live", releasedUptime: 0)
-        #expect(findLine["schema"] as? Int == 10)
+        #expect(findLine["schema"] as? Int == 11)
         #expect((findLine["offered"] as? [[String: Any]])?.first?["name"] as? String == offered.candidates[0].name)
         var point = RealtimeToolDecision(call: RealtimeToolCall(callID: "b", name: "point_at", appName: "Cursor", x: 0.5, y: 0.5),
                                          callUptime: 2, offeredBeforeCall: nil)

@@ -235,7 +235,16 @@ nonisolated enum JarvisNotchReason {
         "appStillRunning": "it\u{2019}s still running",
         "wheelTargetObscured": "another window is in the way",
         "atEnd": "already at the end",
-        "selectionNotEmpty": "text is selected there, left alone"
+        "selectionNotEmpty": "text is selected there, left alone",
+        // The hands, H2 (2026-10-02).
+        "missingURL": "no page was named",
+        "heardSiteMismatch": "heard another site, asking",
+        "underPointerNotSaid": "aimed by name, not the pointer",
+        "clickTargetObscured": "something else is in the way",
+        "pageHostDiffers": "it opened another site",
+        "ownerActive": "you\u{2019}re using the keyboard",
+        "caretNotAtEnd": "the caret is mid-text",
+        "fieldNotFocused": "couldn\u{2019}t focus the field"
     ]
 
     /// `subject` is the app HEARD for a heard-vs-named mismatch ("heard

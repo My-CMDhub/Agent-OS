@@ -665,7 +665,7 @@ struct RealtimeVoiceVerbsTests {
                                                    independentCheck: ["kind": "menuMark", "passed": true])
         #expect(Set(findLine.keys) == keys)
         #expect(Set(pressLine.keys) == keys)
-        #expect(findLine["schema"] as? Int == 10)
+        #expect(findLine["schema"] as? Int == 11)
         #expect(findLine["offerSource"] is NSNull)
         #expect(pressLine["offerSource"] as? String == "previousTurnConfirmedByWords")
         #expect(findLine["appCheck"] is NSNull)

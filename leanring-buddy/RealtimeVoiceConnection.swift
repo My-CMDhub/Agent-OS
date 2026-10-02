@@ -735,6 +735,16 @@ final class RealtimeVoiceConnection {
                     // The owner's words against the tool's app, before anything is focused,
                     // opened, searched or pressed.
                     let heard = await Self.heardCheck(for: call, in: turn)
+                    // The owner's words, once complete (the check above waited for them).
+                    let heardWords = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime) != nil ? turn.heardText : nil
+                    // open_url: the owner's words must name the site (hands design item 7).
+                    var siteRefusal: [String: Any]?
+                    if call.name == RealtimeVoiceVerbs.openURLName {
+                        let released = turn.lastAudioSentUptime ?? ProcessInfo.processInfo.systemUptime
+                        siteRefusal = RealtimeHeardCheck.siteRefusal(
+                            transcript: await turn.waitForHeard(until: released + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds),
+                            url: call.url)
+                    }
                     // Which offer the notOffered gate judges by: this turn's, or the previous
                     // turn's when the owner's own words name the item. The trace records it.
                     // point_at / press_element: a name from the offer, a screenshot
@@ -761,7 +771,18 @@ final class RealtimeVoiceConnection {
                             now: ProcessInfo.processInfo.systemUptime, screenshotDisplay: turn.screenshotDisplayFrame,
                             screenshotStale: RealtimeOpenAppTool.screenshotIsStale(decisions: Array(turn.decisions[..<decisionIndex]),
                                                                                   freshLookOutcome: turn.freshLookOutcome),
-                            keyDownPointer: turn.keyDownPointer) { point in
+                            keyDownPointer: turn.keyDownPointer, heard: heardWords,
+                            lookUp: { name in
+                                // By bundle, as `dispatch` aims: "Chrome" is Google Chrome's word, not its name.
+                                let appName = call.appName
+                                let app = await Task.detached { () -> String? in
+                                    guard let appName else { return nil }
+                                    if case .resolved(let bundle, _) = RealtimeVoiceVerbs.appIdentity(named: appName) { return bundle }
+                                    return appName
+                                }.value
+                                return await RealtimeOpenAppTool.liveLookup(named: name, app: app, answer: harnessAnswer, screens: screens,
+                                                                            screenshotDisplay: turn.screenshotDisplayFrame)
+                            }) { point in
                                 let answered = await RealtimeOpenAppTool.screenHit(at: point, app: call.appName, answer: harnessAnswer, screens: screens,
                                                                                    primaryDisplayHeight: primaryHeight,
                                                                                    deadlineSeconds: Self.hitTestDeadlineSeconds)
@@ -799,7 +820,7 @@ final class RealtimeVoiceConnection {
                         JarvisNotch.shared.handle(.toolCall(title: RealtimeVoiceVerbs.intentTitle(for: call)))
                         if turn.intentShownUptime == nil { turn.intentShownUptime = self?.uptime }
                     }
-                    if let refusal = heard?.refusal {
+                    if let refusal = heard?.refusal ?? siteRefusal {
                         dispatch = RealtimeToolDispatch(result: refusal, harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: nil)
                         JarvisNotch.shared.handle(.harnessAnswered(ok: false, subject: RealtimeOpenAppTool.captionName(heard?.heardApp ?? ""),
                                                                    error: refusal["error"] as? String))
@@ -919,14 +940,23 @@ final class RealtimeVoiceConnection {
         let afterHeardRefusal = turn.heardRefusals > 0
         let menuWords = RealtimeVoiceVerbs.foldedTokens(([call.words ?? "", call.elementName ?? ""] + (call.path ?? [])).joined(separator: " "))
         let frontmost = await frontmostApp
+        // What the call puts into the app is content, never the app meant: the text typed, the site opened.
+        let content = call.name == RealtimeVoiceVerbs.typeTextName ? (call.text ?? "")
+            : call.name == RealtimeVoiceVerbs.openURLName ? ([call.url.flatMap(RealtimeHeardCheck.siteName(of:)), call.url.flatMap { URL(string: $0)?.host }]
+                .compactMap { $0 }.joined(separator: " ")) : ""
         let (decision, namedAppIsRunning) = await Task.detached { () -> (RealtimeHeardCheck.Decision, Bool) in
             var callBundle: String?
             if case .resolved(let bundleIdentifier, _) = RealtimeVoiceVerbs.appIdentity(named: appName) { callBundle = bundleIdentifier }
             let offered = recentOffers.filter { $0.app != nil && $0.app == callBundle }.flatMap(\.labels)
+            // A browser named: "LinkedIn within this browser" is a page inside it.
+            let namedIsBrowser = callBundle.flatMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }.map { appURL in
+                HarnessHands.handlesWeb(appURL: appURL, webHandlers: NSWorkspace.shared.urlsForApplications(toOpen: URL(string: "https://example.com")!))
+            } ?? false
             let decision = RealtimeHeardCheck.decide(transcript: transcript, named: named, among: RealtimeVoiceVerbs.installedAppNames(),
                                                      afterHeardRefusal: afterHeardRefusal, toolName: call.name, menuWords: menuWords,
                                                      targetWords: menuWords + RealtimeVoiceVerbs.foldedTokens(offered.joined(separator: " ")),
-                                                     frontmostApp: frontmost)
+                                                     frontmostApp: frontmost, contentWords: RealtimeHeardCheck.contentTokens(content),
+                                                     namedIsBrowser: namedIsBrowser)
             // Only asked when it decides: open_app with no transcript.
             guard decision.outcome == .transcriptMissing, call.name == RealtimeOpenAppTool.name else { return (decision, true) }
             return (decision, RealtimeVoiceVerbs.isRunning(named: named))

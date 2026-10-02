@@ -350,15 +350,23 @@ nonisolated enum RealtimeHeardCheck {
     /// `afterHeardRefusal`: this check already refused a call this turn.
     /// `menuWords`: the call's own query words and path, which an app slot may
     /// hold ("hide the minimap").
+    /// `contentWords`: what the call puts INTO the app — type_text's text,
+    /// open_url's site — folded. An app named only by them is content, not the
+    /// app meant (live 2026-10-02 28B7: "search for LinkedIn" typed into
+    /// Chrome was refused as the LinkedIn web app). `namedIsBrowser`: the call's
+    /// app opens web pages, so "in this browser" is inside it (D30199AA).
     static func decide(transcript: String?, named: String, among names: [RealtimeVoiceVerbs.AppName],
                        afterHeardRefusal: Bool = false, toolName: String = "", menuWords: [String] = [],
-                       targetWords: [String] = [], frontmostApp: URL? = nil) -> Decision {
-        guard let transcript, !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                       targetWords: [String] = [], frontmostApp: URL? = nil,
+                       contentWords: [String] = [], namedIsBrowser: Bool = false) -> Decision {
+        guard let rawTranscript = transcript, !rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return Decision(outcome: .transcriptMissing, heardApps: [], tier: nil)
         }
+        let transcript = withoutWebAddresses(rawTranscript)
         let slot = readSlot(RealtimeVoiceVerbs.foldedTokens(transcript), among: names, menuWords: menuWords)
         var decision = decideHeard(transcript: transcript, named: named, among: names, afterHeardRefusal: afterHeardRefusal,
-                                   toolName: toolName, targetWords: targetWords, frontmostApp: frontmostApp)
+                                   toolName: toolName, targetWords: targetWords, frontmostApp: frontmostApp,
+                                   contentWords: contentWords, namedIsBrowser: namedIsBrowser)
         // noAppHeard fails OPEN to the model's name, so a menu tool asks when a
         // name-like word sat where the app goes and matched nothing.
         if decision.outcome == .noAppHeard, RealtimeVoiceVerbs.isAppScopedMenuTool(toolName), !slot.unrecognised.isEmpty {
@@ -369,7 +377,8 @@ nonisolated enum RealtimeHeardCheck {
     }
 
     private static func decideHeard(transcript: String, named: String, among names: [RealtimeVoiceVerbs.AppName],
-                                    afterHeardRefusal: Bool, toolName: String, targetWords: [String], frontmostApp: URL?) -> Decision {
+                                    afterHeardRefusal: Bool, toolName: String, targetWords: [String], frontmostApp: URL?,
+                                    contentWords: [String], namedIsBrowser: Bool) -> Decision {
         func path(_ url: URL) -> String { url.standardizedFileURL.path }
         let namedPaths: Set<String>
         switch RealtimeVoiceVerbs.resolveApp(named: named, among: names) {
@@ -378,9 +387,10 @@ nonisolated enum RealtimeHeardCheck {
         case .ambiguous(let urls): namedPaths = Set(urls.map(path))
         case .notInstalled: namedPaths = []
         }
-        var heard = appsMentioned(in: transcript, among: names)
+        var heard = withoutContent(appsMentioned(in: transcript, among: names), contentWords: contentWords,
+                                   namedPaths: namedPaths, among: names)
         heard = withoutWordsInsideTheNamedApp(heard, transcript: transcript, namedPaths: namedPaths, among: names,
-                                              targetWords: targetWords, frontmostApp: frontmostApp)
+                                              targetWords: targetWords, frontmostApp: frontmostApp, namedIsBrowser: namedIsBrowser)
         let heardNames = heard.apps.map(RealtimeVoiceVerbs.displayName)
         guard let only = heard.apps.first else { return Decision(outcome: .noAppHeard, heardApps: [], tier: nil) }
         // Two apps said ("open Chrome and open LinkedIn"), and this call opens or
@@ -407,6 +417,89 @@ nonisolated enum RealtimeHeardCheck {
             return Decision(outcome: .unconfirmedRetry, heardApps: heardNames, tier: heard.tier)
         }
         return Decision(outcome: agrees ? .match : .heardNamedMismatch, heardApps: heardNames, tier: heard.tier)
+    }
+
+    // MARK: Content and web addresses are not apps (pure)
+
+    /// Top-level domains a spoken or written address ends in.
+    static let webAddressSuffixes = ["com", "org", "net", "io", "ai", "co", "dev", "uk", "in", "au", "me", "tv", "gov", "edu"]
+
+    /// "linkedin.com" and "linkedin dot com" name a website, never an app (live
+    /// 2026-10-02 00768893: "type down linkedin.com" refused opening Chrome as
+    /// the LinkedIn web app). The address is dropped before apps are heard. A
+    /// written one only with no space around the dot: "Cursor. In the…" is two
+    /// sentences.
+    static func withoutWebAddresses(_ transcript: String) -> String {
+        let suffixes = webAddressSuffixes.joined(separator: "|")
+        return transcript.replacingOccurrences(of: #"(?i)\b[\p{L}\p{N}-]+(?:\.|\s+dot\s+)(?:"# + suffixes + #")\b"#, with: " ",
+                                               options: .regularExpression)
+    }
+
+    /// Words of a call's content, folded, with each adjacent pair run together
+    /// too ("linked in" is LinkedIn).
+    static func contentTokens(_ text: String) -> [String] {
+        let tokens = RealtimeVoiceVerbs.foldedTokens(text)
+        return tokens + zip(tokens, tokens.dropFirst()).map { $0 + $1 }
+    }
+
+    /// Drops every app other than the call's whose whole name is in the call's content.
+    static func withoutContent(_ heard: HeardApps, contentWords: [String], namedPaths: Set<String>,
+                               among names: [RealtimeVoiceVerbs.AppName]) -> HeardApps {
+        guard !contentWords.isEmpty else { return heard }
+        func path(_ url: URL) -> String { url.standardizedFileURL.path }
+        let content = Set(contentWords)
+        let kept = heard.apps.filter { app in
+            namedPaths.contains(path(app)) || !names.filter { path($0.url) == path(app) }.contains { name in
+                let tokens = RealtimeVoiceVerbs.foldedTokens(name.name)
+                return !tokens.isEmpty && (tokens.allSatisfy(content.contains) || content.contains(tokens.joined()))
+            }
+        }
+        guard kept.count != heard.apps.count else { return heard }
+        return HeardApps(apps: kept, ambiguousWord: heard.ambiguousWord, tier: kept.isEmpty ? nil : heard.tier)
+    }
+
+    // MARK: open_url's site (pure)
+
+    /// The site a URL names, as the owner would say it: the registrable label
+    /// of its host — "linkedin" for www.linkedin.com, "bbc" for bbc.co.uk.
+    static func siteName(of url: String) -> String? {
+        guard let host = URL(string: url)?.host?.lowercased() else { return nil }
+        var labels = host.split(separator: ".").map(String.init)
+        if labels.count > 2, ["www", "m"].contains(labels[0]) { labels.removeFirst() }
+        guard labels.count >= 2 else { return labels.first.map { RealtimeVoiceVerbs.foldedTokens($0).joined() } }
+        let secondLevel = ["co", "com", "org", "net", "ac", "gov", "edu"]
+        let index = labels.count >= 3 && labels.last?.count == 2 && secondLevel.contains(labels[labels.count - 2])
+            ? labels.count - 3 : labels.count - 2
+        let name = RealtimeVoiceVerbs.foldedTokens(labels[index]).joined()
+        return name.isEmpty ? nil : name
+    }
+
+    /// Whether the owner's words say the site: as one word, or run together
+    /// from consecutive words ("linked in"). Never letters inside a word.
+    static func heardSite(_ transcript: String, siteName: String) -> Bool {
+        let spoken = RealtimeVoiceVerbs.foldedTokens(transcript)
+        return spoken.indices.contains { start in
+            var joined = ""
+            for word in spoken[start...] {
+                joined += word
+                if joined == siteName { return true }
+                if !siteName.hasPrefix(joined) { return false }
+            }
+            return false
+        }
+    }
+
+    /// open_url's heard check: the owner's words must name the site, or nothing
+    /// is opened (a page the owner never mentioned is the model's idea). nil proceeds.
+    static func siteRefusal(transcript: String?, url: String?) -> [String: Any]? {
+        guard let url, let site = siteName(of: url) else { return nil }   // the harness refuses a bad URL itself
+        guard let transcript, !transcript.allSatisfy(\.isWhitespace) else {
+            return ["ok": false, "status": NSNull(), "error": unavailableError,
+                    "message": "the owner's words were not transcribed in time to confirm the site. Nothing was opened. Ask them to say it again."]
+        }
+        guard !heardSite(transcript, siteName: site) else { return nil }
+        return ["ok": false, "status": NSNull(), "error": "heardSiteMismatch", "site": site,
+                "message": "the owner's words do not name \(site). Nothing was opened. Ask the owner, briefly, which site they meant."]
     }
 
     // MARK: A word for something inside the app (pure)
@@ -449,7 +542,7 @@ nonisolated enum RealtimeHeardCheck {
     /// Cursor right after "in".
     static func withoutWordsInsideTheNamedApp(_ heard: HeardApps, transcript: String, namedPaths: Set<String>,
                                               among names: [RealtimeVoiceVerbs.AppName], targetWords: [String],
-                                              frontmostApp: URL?) -> HeardApps {
+                                              frontmostApp: URL?, namedIsBrowser: Bool = false) -> HeardApps {
         func path(_ url: URL) -> String { url.standardizedFileURL.path }
         let namedIsFrontmost = frontmostApp.map { namedPaths.contains(path($0)) } ?? false
         guard !namedPaths.isEmpty, namedIsFrontmost || heard.apps.contains(where: { namedPaths.contains(path($0)) }) else { return heard }
@@ -458,8 +551,10 @@ nonisolated enum RealtimeHeardCheck {
         func tokens(of url: URL) -> [[String]] {
             names.filter { path($0.url) == path(url) }.map { RealtimeVoiceVerbs.foldedTokens($0.name) }.filter { !$0.isEmpty }
         }
+        // "LinkedIn within this browser" with a browser named: inside it (live D30199AA).
         let namedWords = Set(names.filter { namedPaths.contains(path($0.url)) }
             .flatMap { RealtimeVoiceVerbs.foldedTokens($0.name) }.filter { !genericNameWords.contains($0) })
+            .union(namedIsBrowser ? ["browser"] : [])
         /// Each mention: where it starts and where it ends (exclusive).
         func mentions(of url: URL) -> [Range<Int>] {
             tokens(of: url).flatMap { name -> [Range<Int>] in

@@ -230,6 +230,41 @@ nonisolated enum RealtimeScreenVerbs {
             .prefix(limit).map(\.index)
     }
 
+    // MARK: A name on the live screen (pure)
+
+    /// A name as said: case, accents, spacing and punctuation dropped, and a
+    /// trailing "(⇧⌘L)" shortcut — "login" is "Log In", "new agent" is
+    /// "New Agent (⇧⌘L)", ASCII "wifi" is "Wi‑Fi".
+    static func normalisedName(_ name: String) -> String {
+        RealtimeVoiceVerbs.foldedTokens(name.replacingOccurrences(of: #"\s*\([^()]*\)\s*$"#, with: "", options: .regularExpression)).joined()
+    }
+
+    /// Which of `names` a spoken name means: the exact name if one is, else
+    /// every one equal once normalised. Never a partial match — "post" is not
+    /// "Start a post"; a miss says notFound and the model searches.
+    static func namedMatches(_ name: String, among names: [String]) -> [Int] {
+        let exact = names.indices.filter { names[$0] == name }
+        if !exact.isEmpty { return exact }
+        let wanted = normalisedName(name)
+        guard !wanted.isEmpty else { return [] }
+        return names.indices.filter { normalisedName(names[$0]) == wanted }
+    }
+
+    /// The visible elements of a `forModel` snapshot a spoken name means — the
+    /// same pool find_on_screen offers from, so nothing hidden is reachable by name.
+    static func liveCandidates(named name: String, fromSnapshotResponse response: [String: Any], screens: [CGRect],
+                               screenshotDisplay: CGRect? = nil) -> [RealtimeScreenCandidate] {
+        let (pool, _) = visiblePool(fromSnapshotResponse: response, screens: screens, screenshotDisplay: screenshotDisplay)
+        let display = visibleWindow(fromSnapshotResponse: response, screens: screens, screenshotDisplay: screenshotDisplay)
+            .map { [$0.display] } ?? screens
+        return namedMatches(name, among: pool.map(\.name)).map { index in
+            let element = pool[index]
+            return RealtimeScreenCandidate(name: element.name, role: element.role, frame: element.frame,
+                                           position: positionPhrase(of: element.frame, neighbours: [], screens: display),
+                                           subrole: element.subrole, pressable: element.pressable, pressAncestor: element.pressAncestor)
+        }
+    }
+
     // MARK: A position in the screenshot (pure)
 
     /// The SMALLEST visible named element holding `point`, no bigger than a
@@ -349,6 +384,17 @@ nonisolated struct RealtimeScreenCandidate: Equatable, Sendable {
 
     var roleWord: String { RealtimeScreenVerbs.roleWord(role: role, subrole: subrole) }
 
+    /// What press_element clicks (the harness's `click`): the element itself when
+    /// it publishes a press or the kernel takes a click on its role as ordinary
+    /// (a field is focused by clicking it — live 2026-10-02 row 23, "no
+    /// click-to-focus tool"); else the pressable element holding a label; else
+    /// nothing (a bare label is pointed at, never clicked: the kernel would ask).
+    var clickTarget: RealtimeScreenPressTarget? {
+        let clickable = pressable || ActionSafetyKernel.navigationalRoles(for: .click).contains(role)
+            || subrole.map(ActionSafetyKernel.navigationalPressSubroles.contains) == true
+        return clickable ? RealtimeScreenPressTarget(name: name, role: role, frame: frame) : pressAncestor
+    }
+
     var jsonObject: [String: Any] { ["name": name, "role": roleWord, "where": position] }
 
     /// "group \"Models\"": what was actually aimed at, for the model to repeat.
@@ -406,6 +452,12 @@ nonisolated struct RealtimeScreenTarget: Equatable, Sendable {
     let point: CGPoint
     let app: String?
     let source: RealtimeOpenAppTool.OfferSource
+}
+
+/// A name looked up on the live screen: the visible elements it means, and the app read.
+nonisolated struct RealtimeScreenLookup: Equatable, Sendable {
+    let candidates: [RealtimeScreenCandidate]
+    let app: String?
 }
 
 nonisolated struct RealtimeScreenOffer: Equatable, Sendable {

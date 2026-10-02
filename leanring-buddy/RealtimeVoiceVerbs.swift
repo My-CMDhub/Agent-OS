@@ -35,8 +35,11 @@ nonisolated enum RealtimeVoiceVerbs {
     static let scrollName = "scroll"
     static let typeTextName = "type_text"
     static let closeName = "close"
+    /// A web page in a browser (hands design item 7; live 2026-10-02: "no open-URL tool", rows 13, 14, 29).
+    static let openURLName = "open_url"
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName,
-                                            findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName]
+                                            findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
+                                            openURLName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
@@ -88,8 +91,10 @@ nonisolated enum RealtimeVoiceVerbs {
     /// How a position in the screenshot is asked for (`RealtimePointFormat`).
     private static func positionParameters(_ format: RealtimePointFormat, gemini: Bool) -> [Parameter] {
         let name = Parameter(name: "name", required: false, description: "The element's name exactly as find_on_screen returned it.")
+        // Live 2026-10-02 (rows 2, 19): the model sent underPointer for "let's point it" and "in Google Chrome".
         let underPointer = Parameter(name: "underPointer", kind: .flag, required: false,
-                                     description: "true for the element under the owner's mouse pointer (\"this one\", \"where my cursor is\").")
+                                     description: "Only when the owner says \"this one\", \"here\" or \"where my cursor is\": true for the "
+                                        + "element under their mouse pointer. Otherwise leave it out and aim by name; it is refused unless they said so.")
         switch (format, gemini) {
         case (.fractions, _):
             return [name,
@@ -172,6 +177,13 @@ nonisolated enum RealtimeVoiceVerbs {
                                  Parameter(name: "mode", required: false,
                                            description: "insert (default) adds at the end of what is there; replace swaps the whole field.",
                                            options: TypeMode.allCases.map(\.rawValue))] + positionParameters),
+        Declaration(name: openURLName,
+                    description: "Opens a web page in a browser: the one named, or the default browser. Use it for a website "
+                        + "(\"open LinkedIn in Chrome\" is https://www.linkedin.com/ in Google Chrome); open_app is for installed apps. "
+                        + "The owner's words must name the site.",
+                    parameters: [Parameter(name: "url", description: "The full http or https address, for example \"https://www.linkedin.com/\"."),
+                                 Parameter(name: "app", required: false,
+                                           description: "The browser, for example \"Google Chrome\". Leave it out for the default browser.")]),
         Declaration(name: closeName,
                     description: "Closes the tab or the window in front, or quits the app in front, through the app's own menu. Quitting "
                         + "shows the owner a card first; the app may still ask to save, and that answer is the owner's.",
@@ -487,6 +499,8 @@ nonisolated enum RealtimeVoiceVerbs {
             return "Scrolling\(way)\u{2026}"
         case typeTextName:
             return "Typing\u{2026}"
+        case openURLName:
+            return "Opening \(call.url.flatMap { URL(string: $0)?.host }.map(RealtimeOpenAppTool.captionName) ?? "the page")\u{2026}"
         case closeName:
             switch call.what {
             case "tab": return "Closing the tab\u{2026}"
@@ -670,13 +684,17 @@ nonisolated struct RealtimeToolDecision {
 ///                     offerSource adds screenshotPoint | underPointer
 ///   Schema 10 (2026-10-01): scroll / type_text / close; args add direction,
 ///                     amount, mode, what and textLength (never the text)
+///   Schema 11 (2026-10-02, hands H2): open_url, args add urlHost (never the
+///                     path or query); point_at / press_element / type_text by a
+///                     name no offer holds resolve on the live screen, offerSource
+///                     liveName
 ///   Schema 9 (2026-09-30 review): snappedBy — point_at / press_element, which
 ///                     rung named the target: thisTurn | previousTurn… |
 ///                     underPointer (the offer or the key-down pointer), walk |
 ///                     ax (a screenshot position), none (nothing there); else null
 nonisolated enum RealtimeDecisionTrace {
     static let fileName = "voice-decisions.log"
-    static let schemaVersion = 10
+    static let schemaVersion = 11
     static let privatePathPlaceholder = ["<private>"]
 
     static func choseFromOffered(path: [String]?, offered: [RealtimeMenuCandidate]?) -> Bool? {
@@ -770,6 +788,8 @@ nonisolated enum RealtimeDecisionTrace {
         if let text = call.text { arguments["textLength"] = text.count }
         if let mode = call.mode { arguments["mode"] = mode }
         if let what = call.what { arguments["what"] = what }
+        // A page's query can carry a search or an address: the host only.
+        if let url = call.url { arguments["urlHost"] = URL(string: url)?.host ?? "<unreadable>" }
         return arguments
     }
 

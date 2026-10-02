@@ -428,7 +428,7 @@ enum HarnessPolicy {
         }
         // A label's own words, checked by the kernel beside the ancestor pressed for it.
         if let labelTitle = raw.labelTitle {
-            guard verb == .press, UntrustedText(labelTitle).isPlausibleControlLabel else {
+            guard verb == .press || verb == .click, UntrustedText(labelTitle).isPlausibleControlLabel else {
                 return .failure(.invalidField(field: "labelTitle", value: UntrustedText(labelTitle).forDisplay))
             }
         }

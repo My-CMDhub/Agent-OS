@@ -397,6 +397,9 @@ final class RealtimeVoiceSession {
             defer { watchdog.cancel() }
             _ = try await connection.turn.finished.value(timeoutSeconds: Self.turnTimeoutSeconds, timeoutKind: "turnTimeout")
             await liveTurn?.marks?.waitForFreshLook()
+            if !probeMode, let liveTurn, self.liveTurn === liveTurn, let marks = liveTurn.marks, connection.turn === marks, !marks.supersededByPress {
+                await afterReply(liveTurn, marks: marks, connection: connection)
+            }
             if self.liveTurn === liveTurn { writeLiveTurnLine() }
         } catch {
             print("❌ realtime: turn failed: \(error)")
@@ -407,6 +410,22 @@ final class RealtimeVoiceSession {
             onStateChange?(.idle)
             prewarm()
         }
+    }
+
+    /// Once the reply is done (hands design items 9 and 10): a claim no receipt
+    /// backs is corrected aloud through a system turn; else a reply that told
+    /// the owner to click something nobody pointed at gets the pointer — never
+    /// a word, and nothing when the live screen does not name it exactly once.
+    private func afterReply(_ liveTurn: LiveTurn, marks: RealtimeTurnMarks, connection: RealtimeVoiceConnection) async {
+        if let correction = RealtimeOpenAppTool.receiptCorrection(transcript: marks.transcript, decisions: marks.decisions) {
+            liveTurn.line.receiptCorrectionSent = true
+            try? await connection.beginSystemTurn(text: correction, variant: RealtimeOpenAppTool.systemTurnVariant(for: connection.stack))
+            return
+        }
+        liveTurn.line.pointedWhenTelling = await RealtimeOpenAppTool.pointWhenTelling(
+            reply: marks.transcript, decisions: marks.decisions, answer: harnessAnswer,
+            screens: NSScreen.screens.map(\.frame), screenshotDisplay: marks.screenshotDisplayFrame,
+            stillCurrent: { [weak self] in self?.liveTurn === liveTurn })
     }
 
     private static func milliseconds(from start: TimeInterval?, to end: TimeInterval?) -> Int? {
@@ -603,6 +622,10 @@ nonisolated struct RealtimeLiveTurnLine {
     /// Counts-only: the model said done / pointed / clicked with no ok result
     /// of that kind this turn (`RealtimeOpenAppTool.claimedWithoutReceipt`).
     var claimedWithoutReceipt = false
+    /// That claim was corrected aloud (`RealtimeOpenAppTool.receiptCorrection`).
+    var receiptCorrectionSent = false
+    /// The reply told the owner to click something unpointed: pointed | notFound | noApp | an error code; nil when it did not.
+    var pointedWhenTelling: String?
 
     init(stack: String, turnID: String, sessionWasWarm: Bool) {
         self.stack = stack
@@ -626,7 +649,8 @@ nonisolated struct RealtimeLiveTurnLine {
             "turnDoneMs": value(turnDoneMs), "bargedIn": bargedIn, "errorKind": value(errorKind),
             "turnEndReason": value(turnEndReason), "watchdogFired": watchdogFired, "finishedMs": value(finishedMs), "staleCompletionsIgnored": staleCompletionsIgnored,
             "bargedInPreviousTurnId": value(bargedInPreviousTurnID), "previousAudioWasPlaying": previousAudioWasPlaying,
-            "eventTrail": eventTrail, "notchTransitions": notchTransitions, "claimedWithoutReceipt": claimedWithoutReceipt
+            "eventTrail": eventTrail, "notchTransitions": notchTransitions, "claimedWithoutReceipt": claimedWithoutReceipt,
+            "receiptCorrectionSent": receiptCorrectionSent, "pointedWhenTelling": value(pointedWhenTelling)
         ]
     }
 }
