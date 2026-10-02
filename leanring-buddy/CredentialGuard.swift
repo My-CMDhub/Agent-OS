@@ -25,8 +25,8 @@ import IOKit
 nonisolated enum SecretScanner {
     /// Most specific first: where two kinds overlap, the earlier one wins.
     enum Kind: String, CaseIterable, Sendable {
-        case privateKey, jwt, anthropicKey, openAIKey, stripeKey, githubToken, gitlabToken, slackToken,
-             awsAccessKey, googleAPIKey, npmToken, namedSecret, highEntropy
+        case privateKey, jwt, anthropicKey, openAIKey, stripeKey, githubToken, gitlabToken, slackToken, slackWebhook,
+             awsAccessKey, googleAPIKey, npmToken, onePasswordSecretKey, connectionString, namedSecret, highEntropy
     }
 
     /// `range` is UTF-16 (NSString / CFRange), so it can be handed to
@@ -51,7 +51,8 @@ nonisolated enum SecretScanner {
         let b = notMidToken
         return [
             // An END line off screen still leaves the body: redact to the end.
-            (.privateKey, regex("-----BEGIN[A-Z ]*PRIVATE KEY-----[\\s\\S]*?(?:-----END[A-Z ]*PRIVATE KEY-----|\\z)"), 0),
+            // PEM, and PGP's "PRIVATE KEY BLOCK".
+            (.privateKey, regex("-----BEGIN[A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\\s\\S]*?(?:-----END[A-Z ]*PRIVATE KEY(?: BLOCK)?-----|\\z)"), 0),
             (.jwt, regex("\(b)eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"), 0),
             (.anthropicKey, regex("\(b)sk-ant-[A-Za-z0-9_-]{20,}"), 0),
             (.openAIKey, regex("\(b)sk-(?:proj-|svcacct-|admin-)?([A-Za-z0-9_-]{20,})"), 0),
@@ -59,12 +60,20 @@ nonisolated enum SecretScanner {
             (.githubToken, regex("\(b)(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})"), 0),
             (.gitlabToken, regex("\(b)glpat-[A-Za-z0-9_-]{20,}"), 0),
             (.slackToken, regex("\(b)xox[abprs]-[A-Za-z0-9-]{10,}"), 0),
+            // The URL IS the credential: anyone holding it can post.
+            (.slackWebhook, regex("hooks\\.slack\\.com/(?:services|workflows|triggers)/[A-Za-z0-9/_-]{20,}"), 0),
             (.awsAccessKey, regex("(?<![A-Za-z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])"), 0),
             (.googleAPIKey, regex("\(b)AIza[0-9A-Za-z_-]{35}"), 0),
             (.npmToken, regex("\(b)npm_[A-Za-z0-9]{36}"), 0),
+            // 1Password's account Secret Key: A3-XXXXXX-XXXXXX-XXXXX-XXXXX-XXXXX-XXXXX.
+            (.onePasswordSecretKey, regex("(?<![A-Za-z0-9])A3-[A-Z0-9]{6}-[A-Z0-9]{6}(?:-[A-Z0-9]{5}){4}(?![A-Za-z0-9])"), 0),
+            // scheme://user:PASSWORD@host - postgres, mongodb+srv, redis (empty user), https. The password only.
+            (.connectionString, regex("(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\\s:/@]*:([^\\s:/@]+)@"), 1),
             // The value: a quoted string whole ("correct horse"), else one bare run.
+            // Starts only at a run boundary and the name's runs are bounded: unanchored
+            // `[...]*` restarted at every character, and 10k chars of "a.b-c_d." took 15 s.
             (.namedSecret, regex(
-                "(?<![A-Za-z0-9])[A-Za-z0-9_.-]*\(secretNamePattern)[A-Za-z0-9_.-]*[\"']?\\s*[:=]\\s*"
+                "(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]{0,40}\(secretNamePattern)[A-Za-z0-9_.-]{0,40}[\"']?\\s*[:=]\\s*"
                     + "(?:\"([^\"\\n]{1,200})\"|'([^'\\n]{1,200})'|((?:bearer\\s+|basic\\s+)?[^\\s\"',;}<>]{4,}))",
                 .caseInsensitive), 1),
             (.highEntropy, regex("(?<![A-Za-z0-9_+/=-])[A-Za-z0-9_+/=-]{32,}(?![A-Za-z0-9_+/=-])"), 0)
@@ -77,31 +86,75 @@ nonisolated enum SecretScanner {
     static let minimumHighEntropyLength = 32
     static let minimumHighEntropyBitsPerCharacter = 4.0
 
+    /// Long text (a terminal's scrollback is one AXValue) is scanned in windows,
+    /// so no pattern's worst case can grow with the whole string. The overlap is
+    /// longer than any match worth keeping whole (a JWT); matching sees past a
+    /// window's edges (`withTransparentBounds`), so a run cut by one is left to
+    /// the next window rather than matched short.
+    static let scanWindowLength = 8_192
+    static let scanWindowOverlap = 2_048
+
+    static func scanWindows(length: Int) -> [NSRange] {
+        guard length > scanWindowLength else { return [NSRange(location: 0, length: length)] }
+        return stride(from: 0, to: length - scanWindowOverlap, by: scanWindowLength - scanWindowOverlap).map {
+            NSRange(location: $0, length: min(scanWindowLength, length - $0))
+        }
+    }
+
     /// Every secret-shaped run in `text`, non-overlapping, in reading order.
     static func matches(in text: String) -> [Match] {
         let string = text as NSString
         let whole = NSRange(location: 0, length: string.length)
+        let windows = scanWindows(length: string.length)
         var accepted: [Match] = []
         for (kind, regex, group) in patterns {
-            for result in regex.matches(in: text, range: whole) {
-                let candidates = kind == .highEntropy
-                    ? highEntropyRanges(in: string, candidate: result.range)
-                    : [(group..<result.numberOfRanges).lazy.map { result.range(at: $0) }
-                        .first { $0.location != NSNotFound } ?? result.range]
-                for range in candidates where range.location != NSNotFound && range.length > 0 {
-                    if kind == .openAIKey, !string.substring(with: result.range(at: 1)).contains(where: \.isNumber) { continue }
-                    guard !accepted.contains(where: { NSIntersectionRange($0.range, range).length > 0 }) else { continue }
-                    accepted.append(Match(kind: kind, range: range))
+            // A PEM block is longer than a window; its pattern starts only at a literal BEGIN.
+            for window in kind == .privateKey ? [whole] : windows {
+                for result in regex.matches(in: text, options: [.withTransparentBounds, .withoutAnchoringBounds], range: window) {
+                    let candidates = kind == .highEntropy
+                        ? highEntropyRanges(in: string, candidate: result.range)
+                        : [(group..<result.numberOfRanges).lazy.map { result.range(at: $0) }
+                            .first { $0.location != NSNotFound } ?? result.range]
+                    for range in candidates where range.location != NSNotFound && range.length > 0 {
+                        if kind == .openAIKey, !string.substring(with: result.range(at: 1)).contains(where: \.isNumber) { continue }
+                        if kind == .namedSecret, !looksLikeSecretValue(string.substring(with: range)) { continue }
+                        guard !accepted.contains(where: { NSIntersectionRange($0.range, range).length > 0 }) else { continue }
+                        accepted.append(Match(kind: kind, range: range))
+                    }
                 }
             }
         }
         return accepted.sorted { $0.range.location < $1.range.location }
     }
 
-    /// A path ("/Users/…/DerivedData/…") is judged a segment at a time — a whole
-    /// path is long, mixed and high-entropy, and is not a secret.
+    /// A named value that is a label, a number or a reference is not a secret:
+    /// `max_tokens: 4096`, `Token: Copy`, `TOKEN=$API_KEY`, `process.env.X`,
+    /// `authorization:none`, `password: required`.
+    static func looksLikeSecretValue(_ value: String) -> Bool {
+        var value = value
+        if let scheme = value.range(of: "^(?:bearer|basic)\\s+", options: [.regularExpression, .caseInsensitive]) {
+            value.removeSubrange(scheme)
+        }
+        guard value.count >= 8, !value.allSatisfy(\.isNumber) else { return false }
+        let lowercased = value.lowercased()
+        if value.hasPrefix("$") || value.hasPrefix("%")
+            || ["process.env.", "os.environ", "env."].contains(where: lowercased.hasPrefix) { return false }
+        // One plain word, at most capitalised.
+        return value.range(of: "^[A-Za-z][a-z]*$", options: .regularExpression) == nil
+    }
+
+    /// Not judged at all: a run in a URL or a data: URI (preceded by "." or ":",
+    /// or in a word holding "://" / "data:") - a Docs id, a playlist id, an
+    /// image's base64 - and an integrity hash (`sha512-…`). A path
+    /// ("/Users/…/DerivedData/…") is judged a segment at a time — a whole path is
+    /// long, mixed and high-entropy, and is not a secret. "/" is NOT a separator
+    /// elsewhere: a bare AWS secret access key contains it.
+    /// ponytail: a token in a URL path (a Discord webhook, a Telegram bot token)
+    /// is a hole; give it a vendor pattern like `slackWebhook` when one matters.
     private static func highEntropyRanges(in string: NSString, candidate: NSRange) -> [NSRange] {
         let token = string.substring(with: candidate)
+        if token.range(of: "^sha[0-9]+-", options: .regularExpression) != nil
+            || isInsideURLOrDataURI(string, at: candidate.location) { return [] }
         guard token.hasPrefix("/") else { return looksRandom(token) ? [candidate] : [] }
         var ranges: [NSRange] = []
         var offset = candidate.location
@@ -129,6 +182,19 @@ nonisolated enum SecretScanner {
     }
 
     static let minimumClassSwitchRatio = 0.4
+
+    private static func isInsideURLOrDataURI(_ string: NSString, at location: Int) -> Bool {
+        guard location > 0 else { return false }
+        let before = string.character(at: location - 1)
+        if before == UInt16(UInt8(ascii: ".")) || before == UInt16(UInt8(ascii: ":")) { return true }
+        // The whitespace-delimited word up to here, at most one window back.
+        var start = location
+        while start > 0, location - start < scanWindowOverlap,
+              let scalar = Unicode.Scalar(string.character(at: start - 1)),
+              !CharacterSet.whitespacesAndNewlines.contains(scalar) { start -= 1 }
+        let word = string.substring(with: NSRange(location: start, length: location - start)).lowercased()
+        return word.contains("://") || word.contains("data:")
+    }
 
     /// Share of adjacent pairs whose class (upper, lower, digit, other) differs.
     static func classSwitchRatio(_ token: String) -> Double {
@@ -198,7 +264,13 @@ nonisolated enum CredentialGuard {
     static let passwordManagerBundleIdentifiers: Set<String> = [
         "com.agilebits.onepassword7", "com.1password.1password", "com.apple.Passwords",
         "com.apple.Passwords.MenuBarExtra", "com.apple.keychainaccess", "com.bitwarden.desktop",
-        "com.lastpass.LastPass", "org.keepassxc.keepassxc", "com.dashlane.Dashlane", "in.sinew.Enpass-Desktop"
+        "com.lastpass.LastPass", "org.keepassxc.keepassxc", "com.dashlane.Dashlane", "in.sinew.Enpass-Desktop",
+        // Verified 2026-10-02 (vendor FAQ / app catalogues): Strongbox, Strongbox Pro, MacPass.
+        "com.markmcguill.strongbox", "com.markmcguill.strongbox.pro", "com.markmcguill.strongbox.mac",
+        "com.hicknhacksoftware.MacPass",
+        // UNVERIFIED (none installed here, no published id found) - check with
+        // `defaults read /Applications/X.app/Contents/Info CFBundleIdentifier`.
+        "me.proton.pass.electron", "com.nordsec.nordpass", "com.callpod.keepermac.lite", "com.keepersecurity.passwordmanager"
     ]
 
     static func isPasswordManager(_ bundleIdentifier: String?) -> Bool {

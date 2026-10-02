@@ -38,6 +38,10 @@ struct CredentialGuardTests {
             (.googleAPIKey, "AIza" + "SyA1234567890abcdefghijklmnopqrstuv"),
             (.npmToken, "npm" + "_" + String(repeating: "x9Y", count: 12)),
             (.privateKey, "-----BEGIN RSA " + "PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----"),
+            (.privateKey, "-----BEGIN PGP " + "PRIVATE KEY BLOCK-----\nlQOYBF"),
+            (.slackWebhook, "https://hooks." + "slack.com/services/T0ABCDEF1/B0ABCDEF2/" + String(repeating: "aZ9", count: 8)),
+            (.onePasswordSecretKey, "A3" + "-ABC123-DEF456-GHJ78-KLM90-NPQ12-RST34"),
+            (.connectionString, "postgres://admin:" + "hunter2pass@db.example.com:5432/app"),
             (.jwt, "eyJ" + "hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9P"),
             (.namedSecret, "export API_KEY=hunter22"),
             (.namedSecret, #"{"password": "correct horse"}"#),
@@ -63,12 +67,51 @@ struct CredentialGuardTests {
             "QmFzZTY0TG9va2luZ1dvcmQ1",               // base64-looking, under 32
             "NSAccessibilityBoundsForRange2Parameterized", // a long identifier, not a key
             "sk-learn-is-a-python-library-for-ml",       // "sk-" with no digit
-            "task-abcdefghijklmnopqrstuvwxyz0123"        // "sk-" inside a word
+            "task-abcdefghijklmnopqrstuvwxyz0123",       // "sk-" inside a word
+            // Review 2026-10-02: ids in URLs, integrity hashes and data: URIs are not keys...
+            "https://github.com/getnewone/Heyclicky/commit/58ff491e2b0c7a9d3f1e6b5a4c3d2e1f0a9b8c7d",
+            "https://docs.google.com/document/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit",
+            "docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLx0sYbCqOb8TBPRdmBHs5Iftvv9TPboYG",
+            #""integrity": "sha512-z4PhNX7vuL3xVChQ1m2AB9Yg5AULVxXcg/SpIdNs6c5H0NE8XYXysP+DGNKHfuwvY7kxvUdBeoGlODJ6+SfaPg==""#,
+            "src=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+            // ...and a named value that is a number, a label or a reference is not one.
+            "max_tokens: 4096", "Token: Copy", "export TOKEN=$API_KEY", "TOKEN=${GITHUB_TOKEN}",
+            "apiKey: process.env.OPENAI_API_KEY", "authorization:none", "password: required"
         ]
         for text in negatives {
             #expect(SecretScanner.matches(in: text).isEmpty, "flagged: \(text)")
             #expect(SecretScanner.redact(text) == text)
         }
+    }
+
+    /// Every userinfo password goes, and only it; a bare AWS secret access key
+    /// (it contains "/") is still one token.
+    @Test func credentialsInsideURLsAreFound() {
+        #expect(SecretScanner.redact("mongodb+srv://u:" + "Pa55word@cluster0.x.mongodb.net/db")
+                == "mongodb+srv://u:[REDACTED:connectionString]@cluster0.x.mongodb.net/db")
+        #expect(SecretScanner.redact("redis://:" + "s3cretpw@cache:6379") == "redis://:[REDACTED:connectionString]@cache:6379")
+        #expect(SecretScanner.redact("https://user:" + "pass1234@example.com/x") == "https://user:[REDACTED:connectionString]@example.com/x")
+        #expect(kinds("wJalrXUtnFEMI/K7MDENG/" + "bPxRfiCYEXAMPLEKEY") == [.highEntropy])
+    }
+
+    /// The quadratic `namedSecret` took 15.3 s on this (2026-10-02); a window
+    /// bounds every pattern on long text, and a JWT across a window edge is kept whole.
+    @Test func adversarialTextScansFast() {
+        let adversarial = String(repeating: "a.b-c_d.", count: 1_250)
+        let milliseconds = (0..<3).map { _ -> Double in
+            let startedAt = Date()
+            _ = SecretScanner.matches(in: adversarial)
+            return Date().timeIntervalSince(startedAt) * 1000
+        }.min() ?? .infinity
+        #expect(milliseconds < 50, "\(milliseconds) ms")
+        #expect(SecretScanner.scanWindows(length: 100) == [NSRange(location: 0, length: 100)])
+        let windows = SecretScanner.scanWindows(length: 20_000)
+        #expect(windows.first?.location == 0 && windows.last.map(NSMaxRange) == 20_000)
+        #expect(zip(windows, windows.dropFirst()).allSatisfy { NSMaxRange($0) - $1.location == SecretScanner.scanWindowOverlap })
+        let jwt = "eyJ" + "hbGciOiJIUzI1NiJ9." + String(repeating: "eyJzdWIiOiIxMjM0NTY3ODkwIn0", count: 20) + ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9P"
+        let long = String(repeating: "x ", count: 4_000) + jwt + String(repeating: " y", count: 4_000)
+        #expect(SecretScanner.matches(in: long).map { (long as NSString).substring(with: $0.range) } == [jwt])
     }
 
     @Test func redactionReplacesOnlyTheSecret() {
@@ -114,6 +157,11 @@ struct CredentialGuardTests {
         #expect(CredentialGuard.isPasswordManager("com.1password.1password"))
         #expect(CredentialGuard.isPasswordManager("com.apple.Passwords"))
         #expect(CredentialGuard.isPasswordManager("COM.APPLE.KEYCHAINACCESS"))
+        // Review 2026-10-02: Strongbox and MacPass (verified ids), Proton Pass, NordPass, Keeper (best known).
+        for added in ["com.markmcguill.strongbox", "com.hicknhacksoftware.MacPass", "me.proton.pass.electron",
+                      "com.nordsec.nordpass", "com.callpod.keepermac.lite"] {
+            #expect(CredentialGuard.isPasswordManager(added), "\(added)")
+        }
         #expect(!CredentialGuard.isPasswordManager("com.google.Chrome"))
         #expect(!CredentialGuard.isPasswordManager(nil))
     }
