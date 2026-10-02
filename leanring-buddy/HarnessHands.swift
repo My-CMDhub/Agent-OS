@@ -370,8 +370,11 @@ enum HarnessHands {
         guard let valueLengthBefore, let valueLengthAfter else {
             return fingerprintChanged ? "the window's text changed (the field publishes no readable value)" : nil
         }
-        return valueLengthAfter == valueLengthBefore + typedCount ? "the field's value grew by the text's length" : nil
+        return valueLengthAfter == valueLengthBefore + typedCount ? valueGrewEvidence : nil
     }
+    /// The field itself, re-read after the keys, grew by exactly the text: the effect,
+    /// observed — so `type` reports it confirmed without the fingerprint poll.
+    static let valueGrewEvidence = "the field's value grew by the text's length"
 
     // MARK: openURL — pure
 

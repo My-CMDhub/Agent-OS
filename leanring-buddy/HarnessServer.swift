@@ -2542,6 +2542,7 @@ final class HarnessServer {
         let namesBefore = AccessibilityDumpRunner.namedElementFingerprint(in: rootNode)
 
         let performedOK: Bool
+        var keystrokesSawTheText = false
         switch action {
         case .click:
             // Its own act and look (AXPress or a real click, focus or names as evidence).
@@ -2721,6 +2722,7 @@ final class HarnessServer {
                     response["performed"] = payload
                     response["method"] = TypeMethod.keystrokes.rawValue
                     performedOK = evidence != nil
+                    keystrokesSawTheText = evidence == HarnessHands.valueGrewEvidence
                 }
             }
 
@@ -2748,6 +2750,19 @@ final class HarnessServer {
             response["ok"] = false
             response["error"] = "performFailed"
             audit(request, dryRun: dryRun, kernel: described.decision, outcome: "performFailed", startedAt: startedAt)
+            return response
+        }
+
+        // Keystrokes re-read the field and saw it grow by exactly the text: the effect
+        // itself. The fingerprint poll below cannot see a field's contents (names never
+        // carry them), so it only waited out its 3 s — 3.1 s of every typed field on
+        // the hands probe, 2026-10-02.
+        if keystrokesSawTheText {
+            phaseTiming.verified(walks: 0, path: "readBack")
+            response["verification"] = ["status": "confirmed", "evidence": HarnessHands.valueGrewEvidence,
+                                        "milliseconds": 0, "appeared": [String]()]
+            response["ok"] = true
+            audit(request, dryRun: dryRun, kernel: described.decision, outcome: "confirmed", startedAt: startedAt)
             return response
         }
 
