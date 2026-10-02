@@ -2072,6 +2072,8 @@ final class HarnessServer {
     /// app — a mutating verb whose record does not say what it acted on is
     /// half a record, and a ticket for it would authorise anything.
     nonisolated static func auditTarget(for request: HarnessRequest) -> String? {
+        // A page's query and fragment can carry a search, a token or an address (review of H1).
+        if request.verb == .openURL, let url = request.url { return HarnessHands.auditableURL(url) }
         if !request.title.isEmpty { return request.title }
         if !request.path.isEmpty { return request.path.joined(separator: " > ") }
         if let statusItem = request.statusItem, !statusItem.isEmpty { return statusItem }
@@ -2637,12 +2639,6 @@ final class HarnessServer {
                 audit(request, dryRun: dryRun, kernel: described.decision, outcome: "noLiveElement", startedAt: startedAt)
                 return response
             }
-            // Focus first (hands design, H1 item 2): keystrokes need it, and it is
-            // what a human does. Not fatal to the AX write, which needs no focus.
-            response["focus"] = HarnessHands.focusForTyping(
-                element, windowFrame: rootNode.frameInAppKitCoordinates, processIdentifier: processIdentifier,
-                focusSettable: typingContext?.settableAttributes.contains(kAXFocusedAttribute) == true)
-
             var afterWrite = HarnessHands.AfterWrite.keystrokes
             let keystrokesFirst = HarnessHands.typeStartsWithKeystrokes(
                 forced: request.forcedTypeMethod,
@@ -2704,6 +2700,11 @@ final class HarnessServer {
             case .keystrokes:
                 // The AX write did not take (Chrome's New Tab box, a contenteditable
                 // composer — live 2026-10-02): type it as key events instead.
+                // Focus first, here only (review of H1): keystrokes need it; the AX
+                // write does not, and a focusing click before it was input for nothing.
+                response["focus"] = HarnessHands.focusForTyping(
+                    element, windowFrame: rootNode.frameInAppKitCoordinates, processIdentifier: processIdentifier,
+                    focusSettable: typingContext?.settableAttributes.contains(kAXFocusedAttribute) == true)
                 switch HarnessHands.typeByKeystrokes(request.text, mode: request.mode, into: element,
                                                      processIdentifier: processIdentifier, fingerprintBefore: namesBefore,
                                                      secureInput: secureInputRead) {
@@ -2864,12 +2865,14 @@ final class HarnessServer {
         }
 
         phaseTiming.actionStarting()
+        var pressError: AXError?
         for method in methods {
             var attempt: [String: Any] = ["method": method.rawValue]
             switch method {
             case .axPress:
                 let result = AccessibilityActionPerformer.perform(kAXPressAction, on: element)
                 phaseTiming.actionReturned()
+                pressError = result.error
                 // The raw code AND the clock: -25204 in 2 ms and at 5,000 ms are opposite problems.
                 attempt["axErrorRawValue"] = Int(result.error.rawValue)
                 attempt["milliseconds"] = result.milliseconds
@@ -2898,8 +2901,8 @@ final class HarnessServer {
                 response["method"] = method.rawValue
                 break
             }
-            // A press that took and showed nothing: clicking a toggle would flip it back.
-            if method == .axPress, !HarnessHands.clickAfterUnverifiedPress(role: node.role, subrole: node.subrole) { break }
+            // A press that went in and showed nothing is not clicked again: a second activation.
+            if method == .axPress, let pressError, !HarnessHands.clickFollowsPress(error: pressError, verified: false) { break }
         }
         phaseTiming.verified(walks: walks, path: "poll")
         response["performed"] = ["attempts": attempts]
@@ -3777,7 +3780,8 @@ final class HarnessServer {
         response["application"] = browserName
         response["bundleIdentifier"] = bundleIdentifier ?? NSNull()
 
-        let decision = applyAppPolicy(to: .allow, bundleIdentifier: bundleIdentifier, into: &response)
+        // The address judged like a control's name, a private host asked about (review of H1).
+        let decision = applyAppPolicy(to: HarnessHands.openURLDecision(url), bundleIdentifier: bundleIdentifier, into: &response)
         let gated = gate(decision, request: request, appName: browserName, bundleIdentifier: bundleIdentifier,
                          dryRun: dryRun, into: &response)
         guard gated.executable else {
@@ -3810,27 +3814,41 @@ final class HarnessServer {
         phaseTiming.actionReturned()
 
         var evidence: String?
+        var pageHost: String?
+        var firstEvidenceAt: Date?
         var polls = 0
         let verifyStartedAt = Date()
+        let requestedHost = url.host ?? ""
         HarnessHands.waitUntil(seconds: HarnessHands.openURLDeadlineSeconds) {
             polls += 1
             let after = HarnessHands.browserWindow(processIdentifier: application.processIdentifier)
             let windowChanged = after.window.map { window in before?.window.map { !CFEqual($0, window) } ?? true } ?? false
             evidence = HarnessHands.openURLEvidence(frontmost: after.frontmost, windowChanged: windowChanged,
                                                     titleBefore: before?.title, titleAfter: after.title)
-            if evidence != nil, let title = after.title { response["title"] = UntrustedText(title).forDisplay }
-            return evidence != nil
+            guard evidence != nil else { return false }
+            if let title = after.title { response["title"] = UntrustedText(title).forDisplay }
+            // The page's own address names the host: confirmed. A page still loading gets a moment more.
+            pageHost = after.window.flatMap(HarnessHands.pageHost(inWindow:))
+            if let pageHost, HarnessHands.hostMatches(page: pageHost, requested: requestedHost) { return true }
+            if firstEvidenceAt == nil { firstEvidenceAt = Date() }
+            return Date().timeIntervalSince(firstEvidenceAt!) >= HarnessHands.openURLHostGraceSeconds
         }
         phaseTiming.verified(walks: polls, path: "poll")
         response["performed"] = ["status": "sent", "browserWasRunning": before != nil]
-        guard let evidence else {
-            response["verification"] = ["status": "notObserved",
-                                        "milliseconds": Int(Date().timeIntervalSince(verifyStartedAt) * 1000)]
+        let status = HarnessHands.openURLVerification(evidence: evidence, pageHost: pageHost, requestedHost: requestedHost)
+        var verification: [String: Any] = ["status": status, "milliseconds": Int(Date().timeIntervalSince(verifyStartedAt) * 1000)]
+        if let evidence { verification["evidence"] = evidence }
+        response["verification"] = verification
+        switch status {
+        case "notObserved":
             return fail("notVerified", "the browser did not come forward with a new or retitled window within "
                         + "\(Int(HarnessHands.openURLDeadlineSeconds)) s", kernel: gated.decision)
+        case "pageHostDiffers":
+            response["pageHost"] = UntrustedText(pageHost ?? "").forDisplay
+            return fail("pageHostDiffers", "the browser came forward, but its page is on another site", kernel: gated.decision)
+        default:
+            break
         }
-        response["verification"] = ["status": "confirmed", "evidence": evidence,
-                                    "milliseconds": Int(Date().timeIntervalSince(verifyStartedAt) * 1000)]
         response["ok"] = true
         audit(request, dryRun: dryRun, kernel: gated.decision, outcome: "confirmed", startedAt: startedAt)
         return response

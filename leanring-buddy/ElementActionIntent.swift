@@ -777,6 +777,7 @@ enum SyntheticScroller {
             // so the location is the whole targeting mechanism.
             event.location = point
             event.post(tap: .cghidEventTap)
+            HarnessHands.ownInput.mark()   // the owner-idle check discounts our own input
             Thread.sleep(forTimeInterval: 0.02)
         }
         return true

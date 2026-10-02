@@ -82,17 +82,79 @@ struct HarnessHandsTests {
         #expect(HarnessHands.clickMethods(publishesPress: false, role: "AXButton", forced: .axPress) == [])
     }
 
-    @Test func aPressIsLookedAtUnlessRefusedAndAToggleIsNeverClickedAfterIt() {
+    // Review of H1: a click after a press that went in is a second activation.
+    @Test func aPressIsLookedAtAndOnlyARefusedPressIsFollowedByAClick() {
         #expect(HarnessHands.afterPress(error: .success) == .verify)
         #expect(HarnessHands.afterPress(error: .cannotComplete) == .verify)     // may have worked (modal callback)
         #expect(HarnessHands.afterPress(error: .actionUnsupported) == .clickNow)
         #expect(HarnessHands.afterPress(error: .invalidUIElement) == .clickNow)
-        #expect(HarnessHands.clickAfterUnverifiedPress(role: "AXButton", subrole: nil))
-        #expect(HarnessHands.clickAfterUnverifiedPress(role: "AXLink", subrole: nil))
-        for role in ["AXCheckBox", "AXRadioButton", "AXDisclosureTriangle", "AXSwitch"] {
-            #expect(!HarnessHands.clickAfterUnverifiedPress(role: role, subrole: nil), "\(role)")
+        #expect(!HarnessHands.clickFollowsPress(error: .success, verified: false))
+        #expect(!HarnessHands.clickFollowsPress(error: .cannotComplete, verified: false))
+        #expect(!HarnessHands.clickFollowsPress(error: .success, verified: true))
+        #expect(HarnessHands.clickFollowsPress(error: .actionUnsupported, verified: false))
+        #expect(HarnessHands.clickFollowsPress(error: .invalidUIElement, verified: false))
+    }
+
+    // Review of H1 (blocking): a card group's centre may be its own "Buy now" child.
+    @Test func aClickPassesOnlyThroughInertElementsToItsTarget() {
+        typealias Node = HarnessHands.HitChainNode
+        #expect(HarnessHands.relation(hitChain: [], reachedTarget: true) == .target)
+        // A label inside the button (Chromium's text publishes AXPress too): through.
+        #expect(HarnessHands.relation(hitChain: [Node(role: "AXStaticText", name: "Log In")], reachedTarget: true) == .insideTarget)
+        #expect(HarnessHands.relation(hitChain: [Node(role: "AXStaticText", name: "Order #123"), Node(role: "AXGroup")],
+                                      reachedTarget: true) == .insideTarget)
+        let active: [[Node]] = [
+            [Node(role: "AXStaticText", name: "Buy"), Node(role: "AXButton", name: "Buy now")],
+            [Node(role: "AXLink", name: "Profile")],
+            [Node(role: "AXTextField")],
+            [Node(role: "AXTextField", subroleReadFailed: true)],
+            [Node(role: "AXGroup", subrole: "AXSecureTextField")],
+            [Node(role: "AXStaticText", name: "Buy now")],
+            [Node(role: "AXStaticText", name: "Delete draft")],
+            [Node(role: "AXGroup", name: "Post")],
+            [Node(role: "AXRadioButton", subrole: "AXTabButton", name: "Posts")],
+            [Node(role: "AXUnknown", subrole: "AXTabButton", name: "Posts")]
+        ]
+        for chain in active {
+            #expect(HarnessHands.relation(hitChain: chain, reachedTarget: true) == .activeInsideTarget, "\(chain)")
         }
-        #expect(!HarnessHands.clickAfterUnverifiedPress(role: "AXButton", subrole: "AXSwitch"))
+        #expect(HarnessHands.hitRefusal(.activeInsideTarget)?.code == "clickTargetObscured")
+        #expect(HarnessHands.relation(hitChain: [Node(role: "AXStaticText")], reachedTarget: false) == .otherElementSameApp)
+    }
+
+    // Review of H1: the click and every keystroke chunk need the target's app still in front.
+    @Test func nothingIsPostedOnceAnotherAppIsInFront() {
+        #expect(HarnessHands.postRefusal(frontmostIsTarget: false, hit: .target)?.code == "frontmostChanged")
+        #expect(HarnessHands.postRefusal(frontmostIsTarget: true, hit: .target) == nil)
+        #expect(HarnessHands.postRefusal(frontmostIsTarget: true, hit: .otherApp)?.code == "clickTargetObscured")
+        #expect(HarnessHands.chunkStopReason(secureInputOn: false, frontmostIsTarget: true, focusIsOnTarget: true, ownerIdle: true) == nil)
+        #expect(HarnessHands.chunkStopReason(secureInputOn: true, frontmostIsTarget: false, focusIsOnTarget: false, ownerIdle: false) == "handOver")
+        #expect(HarnessHands.chunkStopReason(secureInputOn: false, frontmostIsTarget: false, focusIsOnTarget: true, ownerIdle: true) == "frontmostChanged")
+        #expect(HarnessHands.chunkStopReason(secureInputOn: false, frontmostIsTarget: true, focusIsOnTarget: false, ownerIdle: true) == "focusMoved")
+        #expect(HarnessHands.chunkStopReason(secureInputOn: false, frontmostIsTarget: true, focusIsOnTarget: true, ownerIdle: false) == "ownerActive")
+        // The owner switches apps after the first chunk: the second is never posted.
+        final class Posted { var chunks: [String] = []; var asked: [Int] = [] }
+        let posted = Posted()
+        let outcome = HarnessHands.postChunks(["hello ", "world ", "again"], stopReason: { index in
+            posted.asked.append(index)
+            return HarnessHands.chunkStopReason(secureInputOn: false, frontmostIsTarget: index < 1, focusIsOnTarget: true, ownerIdle: true)
+        }, post: { posted.chunks.append($0); return true })
+        #expect(posted.chunks == ["hello "])
+        #expect(posted.asked == [0, 1])                          // asked before the FIRST chunk too
+        #expect(outcome.charactersPosted == 6 && outcome.stoppedBecause == "frontmostChanged")
+        let refusedAtOnce = HarnessHands.postChunks(["a"], stopReason: { _ in "frontmostChanged" }, post: { _ in Issue.record("posted"); return true })
+        #expect(refusedAtOnce.charactersPosted == 0 && refusedAtOnce.stoppedBecause == "frontmostChanged")
+        let failed = HarnessHands.postChunks(["a", "b"], stopReason: { _ in nil }, post: { $0 == "a" })
+        #expect(failed.charactersPosted == 1 && failed.stoppedBecause == "eventCreationFailed")
+    }
+
+    // Our own click or chunk resets every idle counter; the owner's input does not get discounted.
+    @Test func theOwnerIsIdleUnlessTheirInputIsNewerThanOurs() {
+        #expect(HarnessHands.ownerIsIdle(secondsSinceLastInput: 5, secondsSinceOurLastPost: nil))
+        #expect(!HarnessHands.ownerIsIdle(secondsSinceLastInput: 0.2, secondsSinceOurLastPost: nil))
+        #expect(HarnessHands.ownerIsIdle(secondsSinceLastInput: 0.2, secondsSinceOurLastPost: 0.25))     // the input was our click
+        #expect(!HarnessHands.ownerIsIdle(secondsSinceLastInput: 0.1, secondsSinceOurLastPost: 0.6))     // the owner moved after it
+        #expect(HarnessHands.ownerIsIdle(secondsSinceLastInput: 1.0, secondsSinceOurLastPost: 30))
     }
 
     @Test func theClickAimsAtTheVisibleCentreAndNeverOffTheWindow() {
@@ -156,9 +218,11 @@ struct HarnessHandsTests {
 
     @Test func keystrokesAreRefusedInTheOrderThatProtectsTheOwnerFirst() {
         func refusal(_ text: String = "hello", mode: TypeMode = .insert, before: Int? = 0, secure: Bool = false,
-                     focusedSecure: Bool = false, focused: Bool = true, selection: Int? = 0) -> String? {
+                     focusedSecure: Bool = false, focused: Bool = true, selection: Int? = 0, frontmost: Bool = true,
+                     idle: Bool = true, caret: Int? = nil, lengthUTF16: Int? = nil) -> String? {
             HarnessHands.keystrokeRefusal(text: text, mode: mode, valueLengthBefore: before, secureInputOn: secure,
-                                          focusedMightBeSecure: focusedSecure, focusedIsTarget: focused, selectionLength: selection)?.code
+                                          focusedMightBeSecure: focusedSecure, focusedIsTarget: focused, selectionLength: selection,
+                                          frontmostIsTarget: frontmost, ownerIdle: idle, caretLocation: caret, valueLengthUTF16: lengthUTF16)?.code
         }
         #expect(refusal() == nil)
         #expect(refusal(before: 7, selection: 0) == nil)
@@ -177,6 +241,15 @@ struct HarnessHandsTests {
         #expect(refusal(before: 7, selection: 3) == "selectionNotEmpty")
         // An emoji joiner and an accent are text, not keys.
         #expect(refusal("👩‍💻 café") == nil)
+        // Review of H1: another app in front, the owner typing, a caret mid-text, a character no event can carry.
+        #expect(refusal(frontmost: false) == "frontmostChanged")
+        #expect(refusal(secure: true, frontmost: false) == "handOver")
+        #expect(refusal(frontmost: false, idle: false) == "frontmostChanged")
+        #expect(refusal(idle: false) == "ownerActive")
+        #expect(refusal(before: 7, caret: 3, lengthUTF16: 7) == "caretNotAtEnd")
+        #expect(refusal(before: 7, caret: 7, lengthUTF16: 7) == nil)
+        #expect(refusal(mode: .replace, before: 0, caret: 0, lengthUTF16: 0) == nil)
+        #expect(refusal("a" + String(repeating: "\u{0301}", count: 25)) == "characterTooLong")
     }
 
     @Test func keystrokeChunksStayUnderTheEventLimitAndNeverSplitACharacter() {
@@ -223,9 +296,38 @@ struct HarnessHandsTests {
         }
         for bad in ["file:///etc/passwd", "javascript:alert(1)", "data:text/html,hi", "ftp://example.com", "https://", "example.com",
                     "https://bank.example@evil.example/", "https://user:pw@example.com", "https://exa mple.com", "https://example.com/\n",
+                    "https://bank.example%40evil.example/", "https://bank.example%40evil.example",
                     "x-apple.systempreferences:com.apple.preference.security", "https://" + String(repeating: "a", count: 2050) + ".com"] {
             #expect(HarnessHands.validatedWebURL(bad) == nil, "\(bad.prefix(60))")
         }
+    }
+
+    // Review of H1: an address is judged like a control's name, and the owner's own network is asked about.
+    @Test func openURLAsksAboutPrivateHostsAndRefusesIrreversibleAddresses() {
+        func decide(_ string: String) -> SafetyDecision? { HarnessHands.validatedWebURL(string).map(HarnessHands.openURLDecision) }
+        for page in ["https://www.linkedin.com/feed/", "https://example.com/", "https://www.google.com/search?q=linkedin",
+                     "https://fcbarcelona.com/", "https://172.32.0.1/", "https://8.8.8.8/"] {
+            #expect(decide(page) == .allow, "\(page)")
+        }
+        for page in ["http://localhost:3000/", "http://127.0.0.1/", "http://192.168.1.1/admin", "http://10.0.0.1/", "http://172.16.4.2/",
+                     "http://169.254.1.1/", "http://printer.local/", "http://[::1]:8080/", "http://app.localhost/"] {
+            guard case .requireConfirmation(_, false)? = decide(page) else { Issue.record("\(page) was not asked about"); continue }
+        }
+        guard case .refuse? = decide("https://shop.example/checkout/buy?item=1") else { Issue.record("buy was not refused"); return }
+        guard case .refuse? = decide("https://bank.example/transfer?action=pay") else { Issue.record("pay was not refused"); return }
+        guard case .requireConfirmation(_, true)? = decide("https://mail.example/messages/delete?id=4") else { Issue.record("delete not asked"); return }
+        guard case .requireConfirmation(_, true)? = decide("https://social.example/compose?then=post") else { Issue.record("post not asked"); return }
+        #expect(HarnessHands.auditableURL(URL(string: "https://www.google.com/search?q=my+address#frag")!) == "https://www.google.com/search")
+    }
+
+    // Review of H1: "confirmed" only from the page's own address.
+    @Test func openURLIsConfirmedOnlyByThePagesOwnHost() {
+        #expect(HarnessHands.openURLVerification(evidence: "x", pageHost: "www.linkedin.com", requestedHost: "linkedin.com") == "confirmed")
+        #expect(HarnessHands.openURLVerification(evidence: "x", pageHost: "accounts.google.com", requestedHost: "www.google.com") == "confirmed")
+        #expect(HarnessHands.openURLVerification(evidence: "x", pageHost: nil, requestedHost: "linkedin.com") == "browserReacted")
+        #expect(HarnessHands.openURLVerification(evidence: "x", pageHost: "evil.example", requestedHost: "linkedin.com") == "pageHostDiffers")
+        #expect(HarnessHands.openURLVerification(evidence: nil, pageHost: "linkedin.com", requestedHost: "linkedin.com") == "notObserved")
+        #expect(!HarnessHands.hostMatches(page: "notlinkedin.com", requested: "linkedin.com"))
     }
 
     @Test func openURLGoesOnlyToABrowserAndIsConfirmedByAWindowThatChanged() {
@@ -259,6 +361,10 @@ struct HarnessHandsTests {
         #expect(open.verb.isMutating && open.verb.elementAction == nil)
         #expect(open.url?.absoluteString == "https://www.linkedin.com/" && open.title == "https://www.linkedin.com/" && open.app == "Google Chrome")
         #expect(HarnessServer.auditTarget(for: open) == "https://www.linkedin.com/")
+        guard case .success(let searched) = decode(#"{"verb":"openURL","url":"https://www.google.com/search?q=secret"}"#) else {
+            Issue.record("openURL with a query did not decode"); return
+        }
+        #expect(HarnessServer.auditTarget(for: searched) == "https://www.google.com/search")
         guard case .success(let atPoint) = decode(#"{"verb":"click","title":"Log In","nearPoint":{"x":1,"y":2},"requireAtPoint":true}"#) else {
             Issue.record("click with requireAtPoint did not decode"); return
         }

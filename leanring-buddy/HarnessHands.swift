@@ -66,14 +66,13 @@ enum HarnessHands {
         error == .success || error == .cannotComplete ? .verify : .clickNow
     }
 
-    /// Controls a second activation would undo. A press that took and changed no
-    /// name is still a press; clicking a toggle after it flips it back.
-    static let toggleRoles: Set<String> = ["AXCheckBox", "AXRadioButton", "AXDisclosureTriangle", "AXSwitch"]
-    static let toggleSubroles: Set<String> = ["AXSwitch", "AXToggle"]
-
-    /// After a press nobody could see, whether a real click follows.
-    static func clickAfterUnverifiedPress(role: String, subrole: String?) -> Bool {
-        !toggleRoles.contains(role) && !(subrole.map(toggleSubroles.contains) ?? false)
+    /// Whether a real click follows an `AXPress`: only after one the app
+    /// REFUSED. A press that went in (or timed out, which may still have worked)
+    /// and showed nothing is reported notObserved — a click after it would be a
+    /// second activation of whatever the press did unseen (review of H1,
+    /// 2026-10-02: a toggle flipped back, a "Next" pressed twice).
+    static func clickFollowsPress(error: AXError, verified: Bool) -> Bool {
+        !verified && afterPress(error: error) == .clickNow
     }
 
     /// The point a synthetic click aims at: the centre of the part of the element
@@ -91,6 +90,49 @@ enum HarnessHands {
     /// What the system hit test found at the click point, relative to the target.
     enum HitRelation: String, Equatable {
         case target, insideTarget, otherElementSameApp, otherApp, harnessItself, unreadable
+        /// Inside the target, but under a control of its own: a button, link,
+        /// field or password box, or a name the kernel would ask or refuse about.
+        case activeInsideTarget
+    }
+
+    /// One element between the hit and the target, as read on the way up.
+    struct HitChainNode: Equatable {
+        let role: String
+        var subrole: String? = nil
+        var subroleReadFailed = false
+        /// Title, description, or a static text's value — never a field's.
+        var name: String? = nil
+    }
+
+    /// Roles a click lands ON rather than through: what the click would act on
+    /// instead of the target the kernel judged.
+    static let activeRoles: Set<String> = AccessibilityElementNode.textInputRoles.union([
+        "AXButton", "AXLink", "AXMenuButton", "AXPopUpButton", "AXCheckBox", "AXRadioButton", "AXSlider", "AXIncrementor",
+        "AXDisclosureTriangle", "AXSecureTextField", "AXMenuItem", "AXSwitch"])
+
+    /// Whether a click may pass through `node` to the target (review of H1,
+    /// 2026-10-02: a card group's centre may be its "Buy now" child). Not a
+    /// control, not what may be a password box, and no word the kernel refuses
+    /// or asks about. ponytail: publishing AXPress alone is NOT active —
+    /// Chromium gives text inside a button AXPress (its click-ancestor verb, per
+    /// Chromium's source, not measured here), so that rule would refuse every
+    /// real click on a web button; tighten if a probe shows a pressable non-control.
+    static func isInert(_ node: HitChainNode) -> Bool {
+        guard !activeRoles.contains(node.role), !(node.subrole.map(ActionSafetyKernel.navigationalPressSubroles.contains) ?? false),
+              !AccessibilityElementNode.mightBeSecure(role: node.role, subrole: node.subrole, subroleReadFailed: node.subroleReadFailed,
+                                                      namedByValue: false) else { return false }
+        guard let name = node.name?.lowercased(), !name.isEmpty else { return true }
+        return !ActionSafetyKernel.irreversibleTitleKeywords.contains(where: name.contains)
+            && !ActionSafetyKernel.destructiveTitleKeywords.contains(where: name.contains)
+            && ActionSafetyKernel.confirmPhrase(in: name) == nil
+    }
+
+    /// The hit, relative to the target, from the chain read walking up from it:
+    /// `chain[0]` is the hit, and the walk stopped at the target (`reachedTarget`).
+    static func relation(hitChain chain: [HitChainNode], reachedTarget: Bool) -> HitRelation {
+        guard reachedTarget else { return .otherElementSameApp }
+        if chain.isEmpty { return .target }
+        return chain.allSatisfy(isInert) ? .insideTarget : .activeInsideTarget
     }
 
     /// A synthetic click lands on whatever is drawn at the point, so it is posted
@@ -108,8 +150,21 @@ enum HarnessHands {
         case .unreadable:
             return HandsRefusal(code: "clickTargetObscured",
                                 message: "what is drawn at that point could not be checked; nothing was clicked")
+        case .activeInsideTarget:
+            return HandsRefusal(code: "clickTargetObscured",
+                                message: "a control of its own sits inside the element at that point, so a click there would press it instead; nothing was clicked")
         }
     }
+
+    /// Everything a posted click needs, in order: the target's app still in
+    /// front (the owner may have switched since the request was read), then the hit.
+    static func postRefusal(frontmostIsTarget: Bool, hit: HitRelation) -> HandsRefusal? {
+        guard frontmostIsTarget else { return frontmostChangedRefusal }
+        return hitRefusal(hit)
+    }
+
+    static let frontmostChangedRefusal = HandsRefusal(
+        code: "frontmostChanged", message: "the app is no longer in front, so input would land in another app; nothing more was posted")
 
     /// A click's evidence: the window's names changed, or focus moved onto the
     /// element (a field gains focus and nothing else changes). Focus that was
@@ -189,17 +244,33 @@ enum HarnessHands {
 
     /// Why keystrokes may not be posted into the field, or nil. Checked right
     /// before posting; secure input and focus are checked again per chunk.
+    /// `frontmostIsTarget`: the field's app is the one in front NOW — its own
+    /// focused element survives deactivation, so focus alone would type into
+    /// whatever came forward (review of H1, 2026-10-02). `ownerIdle`: no input of
+    /// the owner's for `ownerIdleSeconds`, our own discounted. `caretLocation` /
+    /// `valueLengthUTF16`: an insert goes at the END — a focusing click leaves
+    /// the caret where it landed, mid-text.
     static func keystrokeRefusal(text: String, mode: TypeMode, valueLengthBefore: Int?, secureInputOn: Bool,
-                                 focusedMightBeSecure: Bool, focusedIsTarget: Bool, selectionLength: Int?) -> HandsRefusal? {
+                                 focusedMightBeSecure: Bool, focusedIsTarget: Bool, selectionLength: Int?,
+                                 frontmostIsTarget: Bool, ownerIdle: Bool, caretLocation: Int?, valueLengthUTF16: Int?) -> HandsRefusal? {
         if secureInputOn {
             return HandsRefusal(code: "handOver", message: "secure typing is on — a password is the owner's to type; no keystrokes were posted")
         }
         if focusedMightBeSecure {
             return HandsRefusal(code: "secureField", message: ActionSafetyKernel.unreadableSubroleTypeRefusalReason)
         }
+        if !frontmostIsTarget { return frontmostChangedRefusal }
+        if !ownerIdle {
+            return HandsRefusal(code: "ownerActive",
+                                message: "the owner is using the keyboard or mouse, so keystrokes could mix with theirs; none were posted")
+        }
         if containsControlCharacters(text) {
             return HandsRefusal(code: "controlCharacters",
                                 message: "the text holds Return, Tab or another control character; keystrokes never send those in v1")
+        }
+        // One key event carries at most 20 UTF-16 units; a longer character would stop the text halfway.
+        if text.contains(where: { $0.utf16.count > maximumChunkUTF16 }) {
+            return HandsRefusal(code: "characterTooLong", message: "a character in the text is too long for one key event; none were posted")
         }
         // Unreadable is not empty: there may be text a replace would have to remove.
         if mode == .replace, valueLengthBefore != 0 {
@@ -220,7 +291,52 @@ enum HarnessHands {
             return HandsRefusal(code: "selectionNotEmpty",
                                 message: "\(selectionLength) characters are selected; keystrokes would replace them, so none were posted")
         }
+        if mode == .insert, let caretLocation, let valueLengthUTF16, caretLocation != valueLengthUTF16 {
+            return HandsRefusal(code: "caretNotAtEnd",
+                                message: "the caret is inside the existing text and could not be moved to its end; none were posted")
+        }
         return nil
+    }
+
+    /// Why typing stops before the next chunk, or nil. Read before EVERY chunk,
+    /// the first included: the owner may switch apps, click away or take the
+    /// keyboard, or a password box may take focus, and the rest must not follow.
+    static func chunkStopReason(secureInputOn: Bool, frontmostIsTarget: Bool, focusIsOnTarget: Bool, ownerIdle: Bool) -> String? {
+        if secureInputOn { return "handOver" }
+        if !frontmostIsTarget { return "frontmostChanged" }
+        if !focusIsOnTarget { return "focusMoved" }
+        if !ownerIdle { return "ownerActive" }
+        return nil
+    }
+
+    /// Posts `chunks` in order, asking `stopReason` (given the chunk's index)
+    /// before each one; stops at the first reason or failed post.
+    static func postChunks(_ chunks: [String], stopReason: (Int) -> String?, post: (String) -> Bool)
+        -> (charactersPosted: Int, stoppedBecause: String?) {
+        var posted = 0
+        for (index, chunk) in chunks.enumerated() {
+            if let reason = stopReason(index) { return (posted, reason) }
+            guard post(chunk) else { return (posted, "eventCreationFailed") }
+            posted += chunk.count
+        }
+        return (posted, nil)
+    }
+
+    /// How long the owner must have left the keyboard and mouse alone.
+    static let ownerIdleSeconds = 1.0
+    /// How long `type` waits for that before refusing: the push-to-talk key's
+    /// own release lands about a second before a voice call types.
+    static let ownerIdleWaitSeconds = 2.0
+    /// Our post and the system's counter of it differ by scheduling only.
+    static let ownInputToleranceSeconds = 0.15
+
+    /// Idle long enough, or the latest input is our own: every idle counter
+    /// resets on synthetic input too (CLAUDE.md, 2026-10-02), so a focusing
+    /// click or the previous chunk must not read as the owner.
+    static func ownerIsIdle(secondsSinceLastInput: Double, secondsSinceOurLastPost: Double?, required: Double = ownerIdleSeconds) -> Bool {
+        if secondsSinceLastInput >= required { return true }
+        guard let ours = secondsSinceOurLastPost else { return false }
+        return secondsSinceLastInput + ownInputToleranceSeconds >= ours
     }
 
     /// `CGEventKeyboardSetUnicodeString` carries at most 20 UTF-16 units per event.
@@ -271,8 +387,78 @@ enum HarnessHands {
               let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = components.host, !host.isEmpty,
               components.user == nil, components.password == nil,
+              // "https://bank.com%40evil.example/" is the credentials trick spelled in percent-escapes.
+              !host.contains("@"), !(components.percentEncodedHost ?? "").lowercased().contains("%40"),
               let url = components.url else { return nil }
         return url
+    }
+
+    /// The owner's own machine or network: a page there can be a router's admin
+    /// screen or a dev server's "delete everything" route, so it is asked about.
+    static func isPrivateHost(_ host: String) -> Bool {
+        let host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local") { return true }
+        if host == "::1" || host == "::" || host.hasPrefix("fe80:") || ((host.hasPrefix("fc") || host.hasPrefix("fd")) && host.contains(":")) {
+            return true
+        }
+        let octets = host.split(separator: ".").compactMap { Int($0) }
+        guard octets.count == 4, host.split(separator: ".").count == 4 else { return false }
+        switch (octets[0], octets[1]) {
+        case (127, _), (10, _), (0, _), (192, 168), (169, 254): return true
+        case (172, 16...31): return true
+        default: return false
+        }
+    }
+
+    /// The kernel's judgement of an address, as of a control's name: an
+    /// irreversible word in its path or query refuses ("/checkout/buy?…"), a
+    /// destructive or publishing one, or a private host, asks on a card.
+    static func openURLDecision(_ url: URL) -> SafetyDecision {
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let words = ((components?.path ?? "") + " " + (components?.query ?? ""))
+            .removingPercentEncoding?.lowercased().replacingOccurrences(of: #"[^\p{L}\p{N}]+"#, with: " ", options: .regularExpression) ?? ""
+        if let keyword = ActionSafetyKernel.irreversibleTitleKeywords.first(where: { keyword in
+            " \(words) ".contains(" \(keyword) ") }) {
+            return .refuse(reason: ActionSafetyKernel.irreversibleRefusalReason(keyword: keyword))
+        }
+        if let phrase = ActionSafetyKernel.destructiveTitleKeywords.first(where: { " \(words) ".contains(" \($0) ") })
+            ?? ActionSafetyKernel.confirmPhrase(in: words) {
+            return .requireConfirmation(reason: "\(ActionSafetyKernel.destructiveActionReasonPrefix)\(phrase)", destructive: true)
+        }
+        if let host = url.host, isPrivateHost(host) {
+            return .requireConfirmation(reason: "the page is on this Mac or its local network (\(host)), where a page can change settings", destructive: false)
+        }
+        return .allow
+    }
+
+    /// What the audit line keeps of an address: scheme, host and path. A query
+    /// or fragment can carry a search, a token or an email address.
+    static func auditableURL(_ url: URL) -> String {
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.query = nil
+        components?.fragment = nil
+        return components?.string ?? (url.host ?? "")
+    }
+
+    /// The page's host is the one asked for: equal, or one is a subdomain of
+    /// the other once "www." is set aside (linkedin.com -> www.linkedin.com/feed).
+    static func hostMatches(page: String, requested: String) -> Bool {
+        func bare(_ host: String) -> String {
+            let lower = host.lowercased()
+            return lower.hasPrefix("www.") ? String(lower.dropFirst(4)) : lower
+        }
+        let (page, requested) = (bare(page), bare(requested))
+        return page == requested || page.hasSuffix("." + requested) || requested.hasSuffix("." + page)
+    }
+
+    /// openURL's verification from the last reads: `confirmed` only when the
+    /// page's own AXURL names the host; `browserReacted` when the browser came
+    /// forward with a new or retitled window but published no readable URL;
+    /// `pageHostDiffers` when it did and named another host.
+    static func openURLVerification(evidence: String?, pageHost: String?, requestedHost: String) -> String {
+        guard evidence != nil else { return "notObserved" }
+        guard let pageHost else { return "browserReacted" }
+        return hostMatches(page: pageHost, requested: requestedHost) ? "confirmed" : "pageHostDiffers"
     }
 
     /// Only an app LaunchServices lists as a web handler may be handed a URL —
@@ -289,6 +475,8 @@ enum HarnessHands {
     }
 
     static let openURLDeadlineSeconds = 5.0
+    /// After the browser reacts, how long its page's address gets to name the host.
+    static let openURLHostGraceSeconds = 1.5
 
     // MARK: Impure tail — AX reads and posted input
 
@@ -342,8 +530,63 @@ enum HarnessHands {
         guard AXUIElementGetPid(hit, &hitProcess) == .success else { return .unreadable }
         if hitProcess == getpid() { return .harnessItself }
         guard hitProcess == processIdentifier else { return .otherApp }
-        if CFEqual(hit, target) { return .target }
-        return isSelfOrDescendant(hit, of: target) ? .insideTarget : .otherElementSameApp
+        // Up from the hit to the target, reading what each element between them is.
+        var chain: [HitChainNode] = []
+        var current: AXUIElement? = hit
+        for _ in 0..<ancestorWalkLimit {
+            guard let node = current else { break }
+            if CFEqual(node, target) { return relation(hitChain: chain, reachedTarget: true) }
+            chain.append(hitChainNode(node))
+            var parent: AnyObject?
+            guard AXUIElementCopyAttributeValue(node, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            current = (parent as! AXUIElement)
+        }
+        return relation(hitChain: chain, reachedTarget: false)
+    }
+
+    /// Role, subrole and name of one element on the way up — never a field's value.
+    static func hitChainNode(_ element: AXUIElement) -> HitChainNode {
+        func string(_ attribute: String) -> (String?, AXError) {
+            var value: AnyObject?
+            let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+            return (value as? String, error)
+        }
+        let role = string(kAXRoleAttribute).0 ?? "AXUnknown"
+        let (subrole, subroleError) = string(kAXSubroleAttribute)
+        let name = string(kAXTitleAttribute).0 ?? string(kAXDescriptionAttribute).0
+            ?? (role == "AXStaticText" ? string(kAXValueAttribute).0 : nil)
+        return HitChainNode(role: role, subrole: subrole, subroleReadFailed: AccessibilityElementNode.subroleReadFailed(subroleError), name: name)
+    }
+
+    /// The target's app is in front: the system-wide read, or — when that gives
+    /// no answer (Chromium before its accessibility is on) — the app's own
+    /// `AXFrontmost`. No answer from either is not a yes.
+    static func targetIsFrontmost(_ processIdentifier: pid_t) -> Bool {
+        if let frontmost = AccessibilityTreeWalker.focusedApplication() { return frontmost.processIdentifier == processIdentifier }
+        let application = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.5)
+        var value: AnyObject?
+        return AXUIElementCopyAttributeValue(application, kAXFrontmostAttribute as CFString, &value) == .success && value as? Bool == true
+    }
+
+    /// When we last posted input, so the owner-idle check can discount it.
+    final class OwnInputClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lastPostedUptime: TimeInterval?
+        func mark() { lock.lock(); lastPostedUptime = ProcessInfo.processInfo.systemUptime; lock.unlock() }
+        var secondsSinceLastPost: Double? {
+            lock.lock(); defer { lock.unlock() }
+            return lastPostedUptime.map { ProcessInfo.processInfo.systemUptime - $0 }
+        }
+    }
+    static let ownInput = OwnInputClock()
+
+    /// The owner idle now (`ownerIsIdle`), from the HID system's own counter.
+    static func ownerIsIdleNow() -> Bool {
+        let anyInput = CGEventType(rawValue: UInt32.max)!
+        return ownerIsIdle(secondsSinceLastInput: CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: anyInput),
+                           secondsSinceOurLastPost: ownInput.secondsSinceLastPost)
     }
 
     /// The app's keyboard focus, read live from the app itself.
@@ -396,9 +639,11 @@ enum HarnessHands {
         // A held modifier must not turn the click into a Cmd-click (new tab) or a Ctrl-click (menu).
         down.flags = []
         up.flags = []
+        ownInput.mark()
         down.post(tap: .cghidEventTap)
         Thread.sleep(forTimeInterval: 0.03)
         up.post(tap: .cghidEventTap)
+        ownInput.mark()
         return true
     }
 
@@ -417,6 +662,7 @@ enum HarnessHands {
         up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
+        ownInput.mark()
         return true
     }
 
@@ -444,7 +690,8 @@ enum HarnessHands {
         }
         let topLeft = SyntheticScroller.topLeftCentre(ofAppKitFrame: CGRect(origin: point, size: .zero),
                                                       primaryDisplayHeightInPoints: CGDisplayBounds(CGMainDisplayID()).height)
-        if let refusal = hitRefusal(hitRelation(atTopLeft: topLeft, target: element, processIdentifier: processIdentifier)) {
+        if let refusal = postRefusal(frontmostIsTarget: targetIsFrontmost(processIdentifier),
+                                     hit: hitRelation(atTopLeft: topLeft, target: element, processIdentifier: processIdentifier)) {
             return .failure(refusal)
         }
         guard postClick(atTopLeft: topLeft) else {
@@ -498,26 +745,39 @@ enum HarnessHands {
     /// not follow it there.
     static func typeByKeystrokes(_ text: String, mode: TypeMode, into element: AXUIElement, processIdentifier: pid_t,
                                  fingerprintBefore: Set<String>, secureInput: () -> SecureInputState) -> KeystrokeOutcome {
-        let valueLengthBefore = AccessibilityTypePerformer.stringValue(of: element)?.count
+        let valueBefore = AccessibilityTypePerformer.stringValue(of: element)
+        let valueLengthBefore = valueBefore?.count
+        let valueLengthUTF16 = valueBefore?.utf16.count
+        // An insert goes at the end: move a caret the focusing click left mid-text, then read where it is.
+        if mode == .insert, let valueLengthUTF16, let range = AccessibilityTypePerformer.selectedRange(of: element),
+           range.length == 0, range.location != valueLengthUTF16 {
+            var end = CFRange(location: valueLengthUTF16, length: 0)
+            if let endValue = AXValueCreate(.cfRange, &end) {
+                AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, endValue)
+            }
+        }
+        let selection = AccessibilityTypePerformer.selectedRange(of: element)
+        // The push-to-talk key's release is the owner's input too: give it a moment.
+        let ownerIdle = waitUntil(seconds: ownerIdleWaitSeconds) { ownerIsIdleNow() }
         if let refusal = keystrokeRefusal(
             text: text, mode: mode, valueLengthBefore: valueLengthBefore, secureInputOn: secureInput().isOn,
             focusedMightBeSecure: focusedMightBeSecure(processIdentifier: processIdentifier),
             focusedIsTarget: focusIsOn(element, processIdentifier: processIdentifier),
-            selectionLength: AccessibilityTypePerformer.selectedRange(of: element).map { $0.length }
+            selectionLength: selection.map { $0.length },
+            frontmostIsTarget: targetIsFrontmost(processIdentifier), ownerIdle: ownerIdle,
+            caretLocation: selection.map { $0.location }, valueLengthUTF16: valueLengthUTF16
         ) { return .refused(refusal) }
 
         let chunks = keystrokeChunks(text)
         let startedAt = Date()
-        var charactersPosted = 0
-        var stoppedBecause: String?
-        for (index, chunk) in chunks.enumerated() {
-            if index > 0 {
-                Thread.sleep(forTimeInterval: interChunkDelaySeconds)
-                if secureInput().isOn { stoppedBecause = "handOver"; break }
-                if !focusIsOn(element, processIdentifier: processIdentifier) { stoppedBecause = "focusMoved"; break }
-            }
-            guard postUnicode(chunk) else { stoppedBecause = "eventCreationFailed"; break }
-            charactersPosted += chunk.count
+        let (charactersPosted, stoppedBecause) = postChunks(chunks, stopReason: { index in
+            if index > 0 { Thread.sleep(forTimeInterval: interChunkDelaySeconds) }
+            return chunkStopReason(secureInputOn: secureInput().isOn, frontmostIsTarget: targetIsFrontmost(processIdentifier),
+                                   focusIsOnTarget: focusIsOn(element, processIdentifier: processIdentifier), ownerIdle: ownerIsIdleNow())
+        }, post: postUnicode)
+        if charactersPosted == 0, let stoppedBecause {
+            return .refused(stoppedBecause == "frontmostChanged" ? frontmostChangedRefusal
+                            : HandsRefusal(code: stoppedBecause, message: "typing stopped before the first key (\(stoppedBecause)); nothing was typed"))
         }
         let postMilliseconds = Int(Date().timeIntervalSince(startedAt) * 1000)
 
@@ -568,6 +828,31 @@ enum HarnessHands {
         var title: AnyObject?
         AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &title)
         return BrowserWindowRead(frontmost: frontmost as? Bool == true, window: (window as! AXUIElement), title: title as? String)
+    }
+
+    /// Nodes looked at for the page's `AXWebArea`: Chromium puts it a few
+    /// levels under the window, beside the tab strip and toolbar.
+    static let webAreaSearchLimit = 400
+
+    /// The host of the page in `window`: its first `AXWebArea`'s `AXURL`, or nil.
+    static func pageHost(inWindow window: AXUIElement) -> String? {
+        var queue = [window]
+        var visited = 0
+        while !queue.isEmpty, visited < webAreaSearchLimit {
+            let node = queue.removeFirst()
+            visited += 1
+            var role: AnyObject?
+            AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &role)
+            if role as? String == "AXWebArea" {
+                var address: AnyObject?
+                guard AXUIElementCopyAttributeValue(node, kAXURLAttribute as CFString, &address) == .success else { return nil }
+                return ((address as? URL) ?? (address as? String).flatMap(URL.init(string:)))?.host
+            }
+            var children: AnyObject?
+            if AXUIElementCopyAttributeValue(node, kAXChildrenAttribute as CFString, &children) == .success,
+               let children = children as? [AXUIElement] { queue += children }
+        }
+        return nil
     }
 
     /// Box for `NSWorkspace.open`'s completion across the blocking wait.
