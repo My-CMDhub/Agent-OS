@@ -5,7 +5,8 @@
 //  `--hands-probe`: the hands (H1) on a page this probe writes itself. It writes
 //  one local HTML page — a login form with a "Log In" button that changes the
 //  page's text, a signup form (First name / Last name / Email / Company), a
-//  contenteditable composer like LinkedIn's, and a plain search box — opens it
+//  contenteditable composer, a plain search box, a Google-style result (a
+//  heading inside a link) and a Quill editor like LinkedIn's — opens it
 //  in a NEW Chrome window it records by identity, runs `click`, `type` (each
 //  method forced once, and the defaults) and `openURL` through
 //  `HarnessServer.answer(line:)`, checks every step with its own structure read
@@ -36,6 +37,8 @@ nonisolated enum HandsProbe {
     static let pageLoadDeadlineSeconds = 10.0
     static let closeDeadlineSeconds = 5.0
     static let openURLTarget = "https://example.com/"
+    /// LinkedIn's share box (2026-10-02): a Quill editor whose placeholder is CSS `::before` content.
+    static let quillPlaceholder = "Share your thoughts..."
 
     static var directoryURL: URL {
         MeasurementLogFile.directoryURL.appendingPathComponent("hands-probe", isDirectory: true)
@@ -50,6 +53,12 @@ nonisolated enum HandsProbe {
         var typed: String? = nil
         /// A refusal is the pass for a negative step.
         var expectRefusal: Bool = false
+        /// The page text a click must produce.
+        var expectStatus: String? = nil
+        /// Record what the focused field publishes BEFORE the request (lengths, the placeholder, the caret).
+        var measureFocusedField: Bool = false
+        /// Record the walk's chain down to the element with this name BEFORE the request.
+        var measureChainTo: String? = nil
     }
 
     static func run(harness: HarnessServer) async {
@@ -67,6 +76,7 @@ nonisolated enum HandsProbe {
         section{display:inline-block;vertical-align:top;width:290px;margin:4px;padding:6px;border:1px solid #bbb}
         h3{margin:2px 0 6px} input,div[contenteditable]{display:block;width:250px;margin:4px 0;padding:4px}
         div[contenteditable]{min-height:36px;border:1px solid #888}
+        .ql-editor p{margin:0} .ql-editor.ql-blank::before{content:attr(data-placeholder);color:#888;font-style:italic;position:absolute;pointer-events:none}
         </style></head><body>
         <section><h3>Login form</h3>
         <input aria-label="Username" placeholder="Username" autocomplete="off">
@@ -80,7 +90,15 @@ nonisolated enum HandsProbe {
         <section><h3>Composer</h3>
         <div contenteditable="true" role="textbox" aria-multiline="true" aria-label="What do you want to talk about?"></div></section>
         <section><h3>Search box</h3><input type="search" aria-label="Search" placeholder="Search" autocomplete="off"></section>
-        <script>let n=0;document.getElementById('login').addEventListener('click',()=>{n++;document.getElementById('status').textContent='Log In pressed '+n})</script>
+        <section><h3>Search result</h3>
+        <a href="#probe-result" id="result"><h3>Probe result title</h3><div><cite>example.com › probe</cite></div></a>
+        <p id="rstatus">Result not opened</p></section>
+        <section><h3>Rich editor</h3>
+        <div id="quill" class="ql-editor ql-blank" contenteditable="true" role="textbox" aria-multiline="true"
+         aria-label="Quill composer" data-placeholder="\(quillPlaceholder)"><p><br></p></div></section>
+        <script>let n=0;document.getElementById('login').addEventListener('click',()=>{n++;document.getElementById('status').textContent='Log In pressed '+n})
+        let r=0;document.getElementById('result').addEventListener('click',e=>{e.preventDefault();r++;document.getElementById('rstatus').textContent='Result opened '+r})
+        const q=document.getElementById('quill');q.addEventListener('input',()=>q.classList.toggle('ql-blank',q.textContent.length===0))</script>
         </body></html>
         """
     }
@@ -107,6 +125,14 @@ nonisolated enum HandsProbe {
             Step(name: "click Search field (default)", request: request(["verb": "click", "title": "Search"])),
             Step(name: "type focused search (default)", request: request(["verb": "type", "target": "focused", "text": "linkedin"]),
                  typed: "linkedin"),
+            // Live 2026-10-02: a Google result's title is a heading inside its link.
+            Step(name: "click result heading (no card)",
+                 request: request(["verb": "click", "title": "Probe result title", "role": "AXHeading"]), expectStatus: "Result opened 1",
+                 measureChainTo: "Probe result title"),
+            // Live 2026-10-02: LinkedIn's empty Quill composer refused caretNotAtEnd.
+            Step(name: "click Quill composer", request: request(["verb": "click", "title": "Quill composer"])),
+            Step(name: "type focused Quill (default)", request: request(["verb": "type", "target": "focused", "text": "Probe into Quill"]),
+                 typed: "Probe into Quill", measureFocusedField: true),
             Step(name: "type Password (must refuse)", request: request(["verb": "type", "title": "Password", "text": "x"]),
                  expectRefusal: true),
             Step(name: "click Password (must refuse)", request: request(["verb": "click", "title": "Password"]), expectRefusal: true),
@@ -220,6 +246,8 @@ nonisolated enum HandsProbe {
         request["id"] = "hands-probe-\(index + 1)"
         let line = (try? JSONSerialization.data(withJSONObject: request)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
         let titleBefore = windowTitle(probeWindow.window)
+        let fieldBefore = step.measureFocusedField ? focusedFieldFacts(processIdentifier: probeWindow.processIdentifier) : nil
+        let chainBefore = step.measureChainTo.map(chainFacts)
         let startedAt = Date()
         let response = (try? JSONSerialization.jsonObject(with: Data(harness.answer(line: line).utf8))) as? [String: Any] ?? [:]
         let verification = response["verification"] as? [String: Any]
@@ -237,6 +265,11 @@ nonisolated enum HandsProbe {
             "ms": Int(Date().timeIntervalSince(startedAt) * 1000)
         ]
         for key in ["resolveMs", "actMs", "verifyMs", "verifyWalks"] { entry[key] = response[key] ?? NSNull() }
+        if let fieldBefore { entry["fieldBefore"] = fieldBefore }
+        if let chainBefore { entry["chainBefore"] = chainBefore }
+        if let resolved = response["resolved"] as? [String: Any] { entry["resolvedRole"] = resolved["role"] ?? NSNull() }
+        if let from = response["retargetedFrom"] as? [String: Any] { entry["retargetedFromRole"] = from["role"] ?? NSNull() }
+        entry["message"] = response["message"] ?? NSNull()
         if let performed = response["performed"] as? [String: Any] {
             // Lengths, counts and codes only: `performed` never carries text.
             entry["performed"] = performed
@@ -257,9 +290,13 @@ nonisolated enum HandsProbe {
         } else if let typed = step.typed {
             let field = request["target"] as? String == "focused" ? focusedField(processIdentifier: probeWindow.processIdentifier)
                 : field(named: request["title"] as? String ?? "", processIdentifier: probeWindow.processIdentifier)
-            let length = field?.value?.raw.count
+            // A paragraph editor's own trailing line break is not typed text.
+            let length = field?.value?.raw.trimmingCharacters(in: .newlines).count
             check = ["kind": "fieldValueLength", "expected": typed.count, "actual": length ?? NSNull(),
                      "passed": length == typed.count && response["ok"] as? Bool == true]
+        } else if let expected = step.expectStatus {
+            let seen = HarnessHands.waitUntil(seconds: 2) { windowNames(processIdentifier: probeWindow.processIdentifier).contains(expected) }
+            check = ["kind": "statusText", "expected": expected, "passed": seen && response["ok"] as? Bool == true]
         } else if request["title"] as? String == "Log In" {
             let expected = "Log In pressed \(index + 1)"
             let seen = HarnessHands.waitUntil(seconds: 2) { windowNames(processIdentifier: probeWindow.processIdentifier).contains(expected) }
@@ -311,6 +348,68 @@ nonisolated enum HandsProbe {
         guard let root = (try? AccessibilityTreeWalker.snapshotFocusedWindow())?.rootNode else { return nil }
         return root.flattenedDescendants().first {
             AccessibilityElementNode.textInputRoles.contains($0.role) && $0.fieldLabel?.raw == name && !$0.mightBeSecure
+        }
+    }
+
+    /// What the focused field publishes, on the probe's own page: its value's
+    /// length and whether it IS the placeholder, `AXPlaceholderValue`, the caret,
+    /// `AXNumberOfCharacters`, and its children's roles.
+    private static func focusedFieldFacts(processIdentifier: pid_t) -> [String: Any] {
+        guard let element = HarnessHands.focusedElement(processIdentifier: processIdentifier) else { return ["focused": false] }
+        func copy(_ attribute: String) -> AnyObject? {
+            var out: AnyObject?
+            return AXUIElementCopyAttributeValue(element, attribute as CFString, &out) == .success ? out : nil
+        }
+        let value = AccessibilityTypePerformer.stringValue(of: element)
+        let range = AccessibilityTypePerformer.selectedRange(of: element)
+        let children = (copy(kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        let childRoles = children.map { child -> String in
+            var role: AnyObject?
+            AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
+            return role as? String ?? "?"
+        }
+        func describe(_ element: AXUIElement, depth: Int) -> [String: Any] {
+            var names: CFArray?
+            AXUIElementCopyAttributeNames(element, &names)
+            func read(_ attribute: String) -> AnyObject? {
+                var out: AnyObject?
+                return AXUIElementCopyAttributeValue(element, attribute as CFString, &out) == .success ? out : nil
+            }
+            var entry: [String: Any] = [
+                "role": read(kAXRoleAttribute) as? String ?? NSNull(),
+                "attributes": (names as? [String]) ?? [],
+                "classList": (read("AXDOMClassList") as? [String]) ?? NSNull(),
+                "domIdentifier": read("AXDOMIdentifier") as? String ?? NSNull(),
+                "valueLength": (read(kAXValueAttribute) as? String)?.count ?? NSNull(),
+                "title": read(kAXTitleAttribute) as? String ?? NSNull(),
+                "description": read(kAXDescriptionAttribute) as? String ?? NSNull()
+            ]
+            if depth < 2 {
+                entry["children"] = ((read(kAXChildrenAttribute) as? [AXUIElement]) ?? []).map { describe($0, depth: depth + 1) }
+            }
+            return entry
+        }
+        return [
+            "tree": describe(element, depth: 0),
+            "role": copy(kAXRoleAttribute) as? String ?? NSNull(),
+            "valueLength": value?.count ?? NSNull(),
+            "valueUTF16": value.map { Array($0.utf16).prefix(40).map(Int.init) } ?? NSNull(),
+            "valueIsPlaceholder": value == quillPlaceholder,
+            "placeholderValue": copy(kAXPlaceholderValueAttribute) as? String ?? NSNull(),
+            "numberOfCharacters": copy(kAXNumberOfCharactersAttribute) as? Int ?? NSNull(),
+            "selectedRange": range.map { ["location": $0.location, "length": $0.length] } ?? NSNull(),
+            "childRoles": childRoles
+        ]
+    }
+
+    /// The walk's chain from the window down to the first element called `name`:
+    /// role, name and published actions per level (the probe's own page).
+    private static func chainFacts(_ name: String) -> [[String: Any]] {
+        guard let root = (try? AccessibilityTreeWalker.snapshotFocusedWindow())?.rootNode,
+              let node = root.flattenedDescendants().first(where: { $0.displayName?.raw == name }),
+              let chain = ElementReachability.ancestorChain(to: node, from: root) else { return [] }
+        return chain.suffix(6).map {
+            ["role": $0.role, "name": $0.displayName?.raw ?? NSNull(), "actions": $0.publishedActionNames]
         }
     }
 
