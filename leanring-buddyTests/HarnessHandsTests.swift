@@ -262,6 +262,24 @@ struct HarnessHandsTests {
         #expect(refusal("a" + String(repeating: "\u{0301}", count: 25)) == "characterTooLong")
     }
 
+    // Review 2026-10-02: the owner idle is checked before the focusing click, not after it.
+    @Test func theOwnerIsIdleBeforeTheFocusingClickAndTheKeys() {
+        var steps: [String] = []
+        let refused = HarnessHands.idleThenFocusThenType(
+            ownerIdle: { steps.append("idle"); return false },
+            focus: { steps.append("focus"); return [:] },
+            type: { steps.append("type"); return .refused(HandsRefusal(code: "x", message: "x")) })
+        #expect(steps == ["idle"] && refused.focus == nil)
+        guard case .refused(let refusal) = refused.outcome else { Issue.record("typed while the owner was active"); return }
+        #expect(refusal.code == "ownerActive")
+        steps = []
+        let typed = HarnessHands.idleThenFocusThenType(
+            ownerIdle: { steps.append("idle"); return true },
+            focus: { steps.append("focus"); return ["method": "click"] },
+            type: { steps.append("type"); return .posted(payload: [:], evidence: "e") })
+        #expect(steps == ["idle", "focus", "type"] && typed.focus?["method"] as? String == "click")
+    }
+
     @Test func keystrokeChunksStayUnderTheEventLimitAndNeverSplitACharacter() {
         let text = "Hello from the hands probe — 👩‍👩‍👧‍👦 and 🇮🇳, then more text to fill several chunks."
         let chunks = HarnessHands.keystrokeChunks(text)

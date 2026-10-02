@@ -2703,12 +2703,21 @@ final class HarnessServer {
                 // composer — live 2026-10-02): type it as key events instead.
                 // Focus first, here only (review of H1): keystrokes need it; the AX
                 // write does not, and a focusing click before it was input for nothing.
-                response["focus"] = HarnessHands.focusForTyping(
-                    element, windowFrame: rootNode.frameInAppKitCoordinates, processIdentifier: processIdentifier,
-                    focusSettable: typingContext?.settableAttributes.contains(kAXFocusedAttribute) == true)
-                switch HarnessHands.typeByKeystrokes(request.text, mode: request.mode, into: element,
-                                                     processIdentifier: processIdentifier, fingerprintBefore: namesBefore,
-                                                     secureInput: secureInputRead) {
+                // The owner idle before that click, not only before the keys.
+                let (focus, typed) = HarnessHands.idleThenFocusThenType(
+                    ownerIdle: { HarnessHands.waitUntil(seconds: HarnessHands.ownerIdleWaitSeconds) { HarnessHands.ownerIsIdleNow() } },
+                    focus: {
+                        HarnessHands.focusForTyping(
+                            element, windowFrame: rootNode.frameInAppKitCoordinates, processIdentifier: processIdentifier,
+                            focusSettable: typingContext?.settableAttributes.contains(kAXFocusedAttribute) == true)
+                    },
+                    type: {
+                        HarnessHands.typeByKeystrokes(request.text, mode: request.mode, into: element,
+                                                      processIdentifier: processIdentifier, fingerprintBefore: namesBefore,
+                                                      secureInput: secureInputRead)
+                    })
+                if let focus { response["focus"] = focus }
+                switch typed {
                 case .refused(let refusal):
                     phaseTiming.actionReturned()
                     response["ok"] = false

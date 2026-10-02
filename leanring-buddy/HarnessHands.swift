@@ -262,10 +262,7 @@ enum HarnessHands {
             return HandsRefusal(code: "secureField", message: ActionSafetyKernel.unreadableSubroleTypeRefusalReason)
         }
         if !frontmostIsTarget { return frontmostChangedRefusal }
-        if !ownerIdle {
-            return HandsRefusal(code: "ownerActive",
-                                message: "the owner is using the keyboard or mouse, so keystrokes could mix with theirs; none were posted")
-        }
+        if !ownerIdle { return ownerActiveRefusal }
         if containsControlCharacters(text) {
             return HandsRefusal(code: "controlCharacters",
                                 message: "the text holds Return, Tab or another control character; keystrokes never send those in v1")
@@ -768,6 +765,20 @@ enum HarnessHands {
         case refused(HandsRefusal)
         /// Lengths and counts only — never the text.
         case posted(payload: [String: Any], evidence: String?)
+    }
+
+    static let ownerActiveRefusal = HandsRefusal(
+        code: "ownerActive", message: "the owner is using the keyboard or mouse, so keystrokes could mix with theirs; none were posted")
+
+    /// Keystrokes in order: the owner idle FIRST, then focus, then type (review
+    /// 2026-10-02). The focusing click is input too: checked only inside the
+    /// typing, it had already landed under the owner's own hand — and, being our
+    /// own, it then counted as idle. Returns the focus report, nil when not focused.
+    static func idleThenFocusThenType(ownerIdle: () -> Bool, focus: () -> [String: Any],
+                                      type: () -> KeystrokeOutcome) -> (focus: [String: Any]?, outcome: KeystrokeOutcome) {
+        guard ownerIdle() else { return (nil, .refused(ownerActiveRefusal)) }
+        let report = focus()
+        return (report, type())
     }
 
     /// How long a field gets to show the keystrokes in its value.
