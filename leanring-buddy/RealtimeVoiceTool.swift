@@ -1069,6 +1069,27 @@ nonisolated enum RealtimeOpenAppTool {
         return "system context, not the owner's words: the app in front is \(UntrustedText(appName).forDisplay)."
     }
 
+    /// The credential guard's line for this turn, or nil when the screenshot went
+    /// out. Secure input on (read at key-down, or the reason the capture was
+    /// withheld): the hand-over. Any other withheld capture: the model is told it
+    /// is blind, so it never describes a screen it was not shown.
+    static func credentialGuardContextLine(secureInput: SecureInputState, withheld: ScreenSecretGuard.Report?) -> String? {
+        if secureInput.isOn { return secureInputContextLine(secureInput) }
+        guard let withheld else { return nil }
+        if withheld.reason == "secureInput", let state = withheld.secureInput { return secureInputContextLine(state) }
+        return "system context, not the owner's words: the screenshot was withheld this turn because the screen could not "
+            + "be checked for secrets in time. say you cannot see the screen right now; never guess what is on it."
+    }
+
+    /// The holder's name is app-written, so quoted and escaped.
+    static func secureInputContextLine(_ state: SecureInputState) -> String {
+        let holder = state.holderName.flatMap { $0.allSatisfy(\.isWhitespace) ? nil : UntrustedText($0).forDisplay }
+        let place = holder.map { state.holderIsFrontmost == false ? " (held by \($0), which is not the app in front)" : " in \($0)" } ?? ""
+        return "system context, not the owner's words: secure typing is on\(place), so no screenshot was taken this turn. "
+            + "never ask for, read or type a password or any other secret. tell the owner it is their turn to type it; "
+            + "you may point at the field."
+    }
+
     /// A press whose request reached the harness passed the notOffered gate
     /// (every line sent carries it). A heard refusal, an unresolved app, a
     /// notOffered refusal or a superseded call never sent one.

@@ -300,11 +300,15 @@ final class RealtimeVoiceSession {
         let liveTurn = self.liveTurn
         do {
             let probeMode = self.probeMode
+            // Key-down: a password being typed is the owner's (the hand-over) -
+            // nothing is photographed, and the model is told why.
+            let secureInput = probeMode ? SecureInputState.off : SecureInputState.current()
             let screenshotTask = Task { @MainActor () -> CompanionScreenCapture? in
                 guard !probeMode else {
                     try await Task.sleep(for: .milliseconds(Self.probeCaptureStandInMilliseconds))
                     return nil
                 }
+                guard !secureInput.isOn else { return nil }
                 return try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG().first(where: \.isCursorScreen)
             }
             // The app in front, from structure — the harness's own read, off main
@@ -332,11 +336,15 @@ final class RealtimeVoiceSession {
             if liveTurn?.line.sessionWasWarm == false { liveTurn?.line.sessionSetupMs = Self.milliseconds(from: setupStart, to: uptime) }
             var screenshotDisplayFrame: CGRect?
             var screenshotPixelSize: CGSize?
-            if let screenshot = try? await screenshotTask.value {
+            let screenshotResult = await screenshotTask.result
+            if let screenshot = try? screenshotResult.get() {
                 try await connection.sendScreenshot(screenshot.imageData)
                 screenshotDisplayFrame = screenshot.displayFrame
                 screenshotPixelSize = CGSize(width: screenshot.screenshotWidthInPixels, height: screenshot.screenshotHeightInPixels)
             }
+            var withheld: ScreenSecretGuard.Report?
+            if case .failure(let error) = screenshotResult { withheld = (error as? ScreenSecretGuard.Withheld)?.report }
+            let guardLine = RealtimeOpenAppTool.credentialGuardContextLine(secureInput: secureInput, withheld: withheld)
             // A press since this one owns the connection now: its `beginTurn` must not be replaced by ours.
             guard !Task.isCancelled else { return }
             // A press while the last answer still played cut words off it: those
@@ -349,6 +357,9 @@ final class RealtimeVoiceSession {
             // Beside the audio, never ahead of it; before the release, so on Gemini
             // it stays inside the owner's activity. Not into a turn that replaced this one.
             let contextSend = Task { @MainActor in
+                if let guardLine, connection.turn === marks {
+                    try? await connection.sendContextText(guardLine)
+                }
                 if let frontmostLine = await frontmostLineTask.value, connection.turn === marks {
                     try? await connection.sendContextText(frontmostLine)
                 }

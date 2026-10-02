@@ -606,6 +606,21 @@ enum HarnessPolicy {
         (killSwitchPresent && verb.isMutating) ? killSwitchReason : nil
     }
 
+    /// The login hand-over: while secure input is on a password is being typed,
+    /// and it is the owner's to type. `type` and every photograph refuse;
+    /// pointing, pressing and reading names (which never carry a password
+    /// box's contents) go on. nil when the verb may proceed.
+    static func handOverRefusal(verb: HarnessVerb, secureInput: SecureInputState) -> String? {
+        guard secureInput.isOn, verb == .type || verb == .look else { return nil }
+        return handOverMessage(secureInput)
+    }
+
+    static func handOverMessage(_ secureInput: SecureInputState) -> String {
+        let holder = secureInput.holderName.map { " in \(UntrustedText($0).forDisplay)" } ?? ""
+        return "secure typing is on\(holder) — a password is the owner's to type, so nothing is typed or photographed "
+            + "until it is off; pointing still works"
+    }
+
     /// Whether a kernel decision may run with no human involved: only `.allow`.
     ///
     /// `requireConfirmation` is the kernel asking a human, and no human sits on
@@ -778,6 +793,8 @@ enum HarnessObservability {
         // with no ticket, and a menu action follows the front window (review
         // 2026-09-15) — so the twenty requests before it show which one did.
         "confirmationPending", "confirmationDenied", "confirmationExpired",
+        // Secure input on: the owner typing a password is not an anomaly.
+        "handOver",
         "dryRun", "unknownVerb", "malformedJSON", "missingField", "invalidField",
         // A kernel refusal is the policy working, and the audit line already
         // says which rule fired. Only a refusal on SECURITY grounds is worth a
@@ -1038,6 +1055,8 @@ final class HarnessServer {
     nonisolated private let connectionSlots = DispatchSemaphore(value: HarnessServer.maximumConcurrentConnections)
 
     private let globalDryRun: Bool
+    /// The secure-input flag, read per request; a test injects its own.
+    var secureInputRead: () -> SecureInputState = SecureInputState.current
     /// Shared with the menu-bar panel: tickets opened here are answered there.
     private let confirmations: HarnessConfirmations
 
@@ -1554,6 +1573,11 @@ final class HarnessServer {
             requested: request.requestedDryRun,
             globalDefault: globalDryRun
         )
+
+        if let handOverReason = HarnessPolicy.handOverRefusal(verb: request.verb, secureInput: secureInputRead()) {
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "handOver", startedAt: startedAt)
+            return ["ok": false, "error": "handOver", "message": handOverReason]
+        }
 
         if let killSwitchReason = HarnessPolicy.killSwitchRefusal(
             verb: request.verb,
@@ -3736,6 +3760,12 @@ final class HarnessServer {
         // touches the region is walked here, before the shutter; a refusal that
         // arrives once the JPEG is on disk is not a refusal. There is no path
         // below that photographs without a complete check.
+        // Any verb's escalation photograph too, not only `look`.
+        let secureInput = secureInputRead()
+        guard !secureInput.isOn else {
+            payload["message"] = HarnessPolicy.handOverMessage(secureInput)
+            return (payload, "handOver")
+        }
         guard let application = plan.application else {
             payload["message"] = "no application to restrict the capture to, and a display-wide capture is never taken"
             return (payload, "captureFailed")
