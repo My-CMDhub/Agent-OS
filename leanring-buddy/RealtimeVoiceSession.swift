@@ -52,6 +52,14 @@ final class RealtimeVoiceSession {
     var probeMode = false {
         didSet { playerNode.volume = probeMode ? 0 : 1; tickNode.volume = probeMode ? 0 : 1 }
     }
+    /// Runner only (`--scenario-run`): `feedProbeAudio` replaces the mic and
+    /// nothing else — capture, guard, context lines and after-reply all run as
+    /// live. Silent, and its turns stay out of the owner's transcript log.
+    var fixtureMic = false {
+        didSet { playerNode.volume = fixtureMic ? 0 : 1; tickNode.volume = fixtureMic ? 0 : 1 }
+    }
+    /// Runner only: the finished turn's marks (its tool decisions), beside its line.
+    var onLiveTurnMarks: ((RealtimeTurnMarks?) -> Void)?
     /// Probe only: the stack, without writing the owner's picker.
     var stackOverride: VoiceStackChoice?
     /// Probe only: each line as it is written, and to its own file — the
@@ -268,7 +276,7 @@ final class RealtimeVoiceSession {
         let (audioStream, continuation) = AsyncStream<Data>.makeStream(bufferingPolicy: .unbounded)
         audioContinuation = continuation
         do {
-            if !probeMode { try startMic(targetSampleRate: selectedStack.inputSampleRate, continuation: continuation) }
+            if !probeMode && !fixtureMic { try startMic(targetSampleRate: selectedStack.inputSampleRate, continuation: continuation) }
         } catch {
             print("❌ realtime: mic failed to start: \(error)")
             writeLiveTurnLine(errorKind: "micFailed")
@@ -284,7 +292,7 @@ final class RealtimeVoiceSession {
 
     func released() {
         liveTurn?.releasedUptime = uptime
-        if !probeMode { stopMic() }
+        if !probeMode && !fixtureMic { stopMic() }
         audioContinuation?.finish()
         audioContinuation = nil
         JarvisNotch.shared.handle(.hotkeyUp)
@@ -481,12 +489,13 @@ final class RealtimeVoiceSession {
                 transcript: marks.transcript,
                 okToolNames: Set(marks.decisions.filter { $0.dispatch?.harnessConfirmed == true }.map(\.call.name)))
             // One line per tool call to voice-decisions.log, joinable on turnId.
-            RealtimeDecisionTrace.append(marks.decisions, turnID: line.turnID, stack: line.stack, source: probeMode ? "notchProbe" : "live",
+            RealtimeDecisionTrace.append(marks.decisions, turnID: line.turnID, stack: line.stack, source: probeMode ? "notchProbe" : fixtureMic ? "scenarioRun" : "live",
                                          releasedUptime: released)
-            if !probeMode { Self.appendTranscriptLine(for: marks, turnID: line.turnID, stack: line.stack, bargedIn: bargedIn) }
+            if !probeMode && !fixtureMic { Self.appendTranscriptLine(for: marks, turnID: line.turnID, stack: line.stack, bargedIn: bargedIn) }
         }
         MeasurementLogFile.appendJSONLine(line.jsonObject, toFileNamed: liveTurnLogFileName)
         onLiveTurnLine?(line)
+        onLiveTurnMarks?(liveTurn.marks)
     }
 
     /// Waits (bounded, detached from the loop) for the owner's transcript to be
