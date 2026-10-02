@@ -94,7 +94,8 @@ final class RealtimeVoiceSession {
         await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
             let once = ResumeOnce(continuation)
             Thread { once.resume(read()) }.start()
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + seconds) { once.resume(nil) }
+            // The deadline gets its own thread too: on the shared pool it waited 2 s behind a loaded test run (2026-10-02).
+            Thread { Thread.sleep(forTimeInterval: seconds); once.resume(nil) }.start()
         }
     }
 

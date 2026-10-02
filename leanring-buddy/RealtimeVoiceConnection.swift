@@ -434,7 +434,11 @@ final class RealtimeVoiceConnection {
     /// Gemini it lands inside the owner's own activity rather than opening a
     /// turn of its own. UNMEASURED as of 2026-09-30: a reply to it would show as
     /// `ignored:audio` before the release in the turn's eventTrail.
+    ///
+    /// Every text path to the model passes here or `systemTurnMessages`, so a
+    /// key in an element name or a tool's line is redacted once, at the wire.
     nonisolated static func contextTextMessage(stack: VoiceStackChoice, text: String) -> [String: Any] {
+        let text = SecretScanner.redact(text)
         switch stack {
         case .openAIRealtime:
             return ["type": "conversation.item.create",
@@ -448,6 +452,7 @@ final class RealtimeVoiceConnection {
     /// Which variant makes each provider answer is what `--speak-probe` measures (2026-10-01).
     nonisolated static func systemTurnMessages(stack: VoiceStackChoice, text: String,
                                                variant: RealtimeSystemTurnVariant) -> [[String: Any]] {
+        let text = SecretScanner.redact(text)
         switch (stack, variant) {
         case (.openAIRealtime, .textThenCreate):
             return [contextTextMessage(stack: stack, text: text), ["type": "response.create"]]
@@ -960,6 +965,21 @@ final class RealtimeVoiceConnection {
         if case .unavailable(let error) = look { print("🎙️ realtime: no fresh look after open_app: \(error)") }
     }
 
+    /// The wire form of a tool result, scrubbed: element names (`listedName`), a
+    /// pointer-hit name or a heard line can carry a key the app shows as text.
+    nonisolated static func toolResultMessage(stack: VoiceStackChoice, result: [String: Any],
+                                              call: RealtimeToolCall) -> [String: Any] {
+        let result = SecretScanner.scrub(result)
+        switch stack {
+        case .openAIRealtime:
+            let output = String(decoding: (try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])) ?? Data("{}".utf8), as: UTF8.self)
+            return ["type": "conversation.item.create",
+                    "item": ["type": "function_call_output", "call_id": call.callID, "output": output]]
+        case .geminiLive:
+            return ["toolResponse": ["functionResponses": [["id": call.callID, "name": call.name, "response": result]]]]
+        }
+    }
+
     /// `requestingReply: false` (a superseded turn): OpenAI still gets the
     /// `function_call_output`, so every call item in its conversation keeps its
     /// output and the model's context says what was actually done — but no
@@ -972,9 +992,7 @@ final class RealtimeVoiceConnection {
         do {
             switch stack {
             case .openAIRealtime:
-                let output = String(decoding: (try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])) ?? Data("{}".utf8), as: UTF8.self)
-                try await socket?.sendJSON(["type": "conversation.item.create",
-                                            "item": ["type": "function_call_output", "call_id": call.callID, "output": output]])
+                try await socket?.sendJSON(Self.toolResultMessage(stack: stack, result: result, call: call))
                 turn.toolsInFlight -= 1
                 guard requestingReply else { return ignoreStale("toolResult", arrivalUptime: uptime, in: turn) }
                 // One follow-up for all the calls of a response, once that response is over.
@@ -992,7 +1010,7 @@ final class RealtimeVoiceConnection {
                 guard requestingReply else { return ignoreStale("toolResult", arrivalUptime: uptime, in: turn) }
                 turn.toolResultSentUptime = uptime
                 turn.followUpFirstAudioUptime = nil
-                try await socket?.sendJSON(["toolResponse": ["functionResponses": [["id": call.callID, "name": call.name, "response": result]]]])
+                try await socket?.sendJSON(Self.toolResultMessage(stack: stack, result: result, call: call))
             }
         } catch {
             turn.finished.settle(.failure(VoiceBenchFailure(kind: "\(stack.rawValue):toolResultSendFailed")))

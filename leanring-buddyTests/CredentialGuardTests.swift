@@ -320,4 +320,28 @@ struct CredentialGuardTests {
         // A screenshot went out: nothing to say.
         #expect(RealtimeOpenAppTool.credentialGuardContextLine(secureInput: .off, withheld: nil) == nil)
     }
+
+    // MARK: Text to the model (review 2026-10-02, B1)
+
+    /// Every text path to the model, both stacks: a context line, a system turn
+    /// and a tool result whose element names carry a key. Fails if the redact in
+    /// `contextTextMessage` / `systemTurnMessages` or the scrub in `toolResultMessage` goes.
+    @Test func textToTheModelIsRedactedAtTheWire() throws {
+        let key = "sk-ant-" + "AbCdEf0123456789ghIJkl"
+        let call = RealtimeToolCall(callID: "c1", name: "find_on_screen", appName: nil)
+        for stack in [VoiceStackChoice.openAIRealtime, .geminiLive] {
+            var messages = [RealtimeVoiceConnection.contextTextMessage(stack: stack, text: "the label reads \(key)"),
+                            RealtimeVoiceConnection.toolResultMessage(
+                                stack: stack, result: ["elements": [["name": "env \(key)"]], "underPointer": key], call: call)]
+            for variant in [RealtimeSystemTurnVariant.textOnly, .textThenCreate, .clientContent] {
+                messages += RealtimeVoiceConnection.systemTurnMessages(stack: stack, text: "say \(key)", variant: variant)
+            }
+            for message in messages {
+                let wire = String(decoding: try JSONSerialization.data(withJSONObject: message), as: UTF8.self)
+                #expect(!wire.contains(key), "\(stack): \(wire)")
+            }
+            let tool = String(decoding: try JSONSerialization.data(withJSONObject: messages[1]), as: UTF8.self)
+            #expect(tool.contains("REDACTED:anthropicKey") && tool.contains("c1"))
+        }
+    }
 }
