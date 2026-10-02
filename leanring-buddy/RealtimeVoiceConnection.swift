@@ -109,6 +109,9 @@ final class RealtimeTurnMarks {
     /// for this turn is played, finished or dispatched, and no result it produces
     /// asks for a reply.
     var supersededByPress = false
+    /// OpenAI only: the follow-up after the tool results came back empty and
+    /// was asked for once more (`openAIFollowUpWasEmpty`).
+    var emptyFollowUpReasked = false
     let finished = VoiceBenchWaiter<TimeInterval>()
 
     /// Each event with its arrival in ms after the release, negative before it.
@@ -548,7 +551,18 @@ final class RealtimeVoiceConnection {
                 turn.staleCompletionsIgnored += 1
                 return ignoreStale("responseDone", arrivalUptime: arrivalUptime)
             }
-            receivedTurnDone(arrivalUptime: arrivalUptime)
+            let empty = Self.openAIFollowUpWasEmpty(response: response, turn: turn, arrivalUptime: arrivalUptime)
+            if empty {
+                turn.events.append(("emptyFollowUp:" + ((response?["status"] as? String) ?? "-"), arrivalUptime))
+                if !turn.emptyFollowUpReasked {
+                    turn.emptyFollowUpReasked = true
+                    let turn = self.turn
+                    Task { @MainActor [weak self] in await self?.reaskAfterEmptyFollowUp(turn) }
+                    return
+                }
+            }
+            // Empty twice: the turn ends on what it has rather than hang until the owner presses.
+            receivedTurnDone(arrivalUptime: arrivalUptime, givingUpOnFollowUp: empty)
         case "error":
             // Console only: the message is the server's text.
             let serverError = message["error"] as? [String: Any]
@@ -680,10 +694,44 @@ final class RealtimeVoiceConnection {
         onAudio?(audio)
     }
 
-    private func receivedTurnDone(arrivalUptime: TimeInterval) {
+    /// OpenAI, live 2026-10-02 (rows 21, 22, 24, 25; 9 of 28 OpenAI tool turns
+    /// in voice-live.log): after the tool results the follow-up response was
+    /// created and finished 200-400 ms later with NO output — no audio, no call
+    /// — and the turn then waited, silent, until the owner pressed again. The
+    /// done event says so itself: `response.output` is an empty array.
+    nonisolated static func openAIFollowUpWasEmpty(output: [Any]?, toolResultSentUptime: TimeInterval?, arrivalUptime: TimeInterval,
+                                                   followUpHadAudio: Bool, toolsInFlight: Int) -> Bool {
+        guard let output, output.isEmpty, let sent = toolResultSentUptime, arrivalUptime > sent else { return false }
+        return !followUpHadAudio && toolsInFlight == 0
+    }
+
+    private static func openAIFollowUpWasEmpty(response: [String: Any]?, turn: RealtimeTurnMarks, arrivalUptime: TimeInterval) -> Bool {
+        openAIFollowUpWasEmpty(output: response?["output"] as? [Any], toolResultSentUptime: turn.toolResultSentUptime,
+                               arrivalUptime: arrivalUptime, followUpHadAudio: turn.followUpFirstAudioUptime != nil,
+                               toolsInFlight: turn.toolsInFlight)
+    }
+
+    static let emptyFollowUpReaskText = "system context, not the owner's words: the tool results above are this turn's outcome. "
+        + "say what happened to the owner now, in one or two short sentences, from those results only."
+
+    /// One more `response.create` after an empty follow-up, with a line saying
+    /// what to say. Never into a turn the owner has since replaced.
+    private func reaskAfterEmptyFollowUp(_ turn: RealtimeTurnMarks) async {
+        guard self.turn === turn, !turn.supersededByPress else { return }
+        do {
+            try await sendContextText(Self.emptyFollowUpReaskText)
+            turn.toolResultSentUptime = uptime
+            turn.followUpFirstAudioUptime = nil
+            try await sendResponseCreate(for: turn)
+        } catch {
+            turn.finished.settle(.failure(VoiceBenchFailure(kind: "\(stack.rawValue):reaskSendFailed")))
+        }
+    }
+
+    private func receivedTurnDone(arrivalUptime: TimeInterval, givingUpOnFollowUp: Bool = false) {
         let turn = self.turn
         guard turn.toolsInFlight == 0 else { return }
-        if !turn.toolCalls.isEmpty {
+        if !turn.toolCalls.isEmpty, !givingUpOnFollowUp {
             guard let resultSent = turn.toolResultSentUptime, arrivalUptime > resultSent, turn.followUpFirstAudioUptime != nil else { return }
         }
         if turn.finishedUptime == nil { turn.finishedUptime = arrivalUptime }

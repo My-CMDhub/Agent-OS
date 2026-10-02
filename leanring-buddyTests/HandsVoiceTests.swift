@@ -274,4 +274,52 @@ struct HandsVoiceTests {
         #expect(target("Click login.") == nil)                      // a button and a link: no guess
         #expect(target("Click Start a post.") == nil)
     }
+
+    // MARK: 8. OpenAI's empty follow-up (rows 21, 22, 24, 25)
+
+    @Test func anEmptyFollowUpIsDecidedByItsOwnOutput() {
+        #expect(RealtimeVoiceConnection.openAIFollowUpWasEmpty(output: [], toolResultSentUptime: 1, arrivalUptime: 2, followUpHadAudio: false, toolsInFlight: 0))
+        #expect(!RealtimeVoiceConnection.openAIFollowUpWasEmpty(output: [["type": "message"]], toolResultSentUptime: 1, arrivalUptime: 2,
+                                                                followUpHadAudio: false, toolsInFlight: 0))
+        #expect(!RealtimeVoiceConnection.openAIFollowUpWasEmpty(output: nil, toolResultSentUptime: 1, arrivalUptime: 2, followUpHadAudio: false, toolsInFlight: 0))
+        // The response that CALLED the tool ends before any result was sent.
+        #expect(!RealtimeVoiceConnection.openAIFollowUpWasEmpty(output: [], toolResultSentUptime: nil, arrivalUptime: 2, followUpHadAudio: false, toolsInFlight: 0))
+        #expect(!RealtimeVoiceConnection.openAIFollowUpWasEmpty(output: [], toolResultSentUptime: 3, arrivalUptime: 2, followUpHadAudio: false, toolsInFlight: 0))
+        #expect(!RealtimeVoiceConnection.openAIFollowUpWasEmpty(output: [], toolResultSentUptime: 1, arrivalUptime: 2, followUpHadAudio: true, toolsInFlight: 0))
+        #expect(!RealtimeVoiceConnection.openAIFollowUpWasEmpty(output: [], toolResultSentUptime: 1, arrivalUptime: 2, followUpHadAudio: false, toolsInFlight: 1))
+    }
+
+    @Test func anEmptyFollowUpIsAskedForOnceMoreThenTheTurnEnds() async throws {
+        let connection = RealtimeVoiceConnection(stack: .openAIRealtime, harnessAnswer: { _ in "{}" })
+        let now = ProcessInfo.processInfo.systemUptime
+        try await connection.beginTurn()
+        try await connection.endTurn()
+        let turn = connection.turn
+        connection.handle(["type": "response.created", "response": ["id": "resp_A"]], arrivalUptime: now)
+        connection.handle(["type": "response.output_item.done", "response_id": "resp_A",
+                           "item": ["type": "function_call", "call_id": "call_1", "name": "bogus_tool", "arguments": "{}"]],
+                          arrivalUptime: now + 0.1)
+        connection.handle(["type": "response.done", "response": ["id": "resp_A", "status": "completed", "output": [["type": "function_call"]]]],
+                          arrivalUptime: now + 0.2)
+        let deadline = ProcessInfo.processInfo.systemUptime + 4
+        while turn.toolResultSentUptime == nil, ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(connection.pendingResponseCreateEventIDs.count == 1)            // the follow-up's create
+        let followUp = ProcessInfo.processInfo.systemUptime
+        connection.handle(["type": "response.created", "response": ["id": "resp_B"]], arrivalUptime: followUp)
+        // Live: created, then done ~250 ms later with nothing in it.
+        connection.handle(["type": "response.done", "response": ["id": "resp_B", "status": "completed", "output": [Any]()]],
+                          arrivalUptime: followUp + 0.25)
+        #expect(turn.finishedUptime == nil)
+        while connection.pendingResponseCreateEventIDs.isEmpty, ProcessInfo.processInfo.systemUptime < deadline + 4 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(connection.pendingResponseCreateEventIDs.count == 1)            // asked once more
+        #expect(turn.emptyFollowUpReasked && turn.eventTrail.contains { $0.hasPrefix("emptyFollowUp:completed@") })
+        // Empty again: the turn ends rather than wait for a press.
+        let again = ProcessInfo.processInfo.systemUptime
+        connection.handle(["type": "response.created", "response": ["id": "resp_C"]], arrivalUptime: again)
+        connection.handle(["type": "response.done", "response": ["id": "resp_C", "status": "completed", "output": [Any]()]], arrivalUptime: again + 0.2)
+        #expect(turn.finishedUptime == again + 0.2)
+        #expect(connection.pendingResponseCreateEventIDs.isEmpty)               // no third ask
+    }
 }
