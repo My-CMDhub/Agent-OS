@@ -690,7 +690,8 @@ enum HarnessPolicy {
         if let frontmostSystemWideError { fields["frontmostSystemWideError"] = Int(frontmostSystemWideError) }
         if let confirmedBy { fields["confirmedBy"] = confirmedBy }
         fields.merge(phases) { existing, _ in existing }
-        guard let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]),
+        // `target` carries typed text: scrubbed like every other on-disk line.
+        guard let data = try? JSONSerialization.data(withJSONObject: SecretScanner.scrub(fields), options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else {
             return "{\"timestamp\":\"\(auditTimestampFormatter.string(from: timestamp))\",\"outcome\":\"auditEncodingFailed\"}"
         }
@@ -1458,7 +1459,7 @@ final class HarnessServer {
             "requests": requests
         ]
         guard let data = try? JSONSerialization.data(
-            withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]
+            withJSONObject: SecretScanner.scrub(payload), options: [.prettyPrinted, .sortedKeys]
         ) else { return nil }
 
         try? FileManager.default.createDirectory(at: Self.supportDirectory, withIntermediateDirectories: true)

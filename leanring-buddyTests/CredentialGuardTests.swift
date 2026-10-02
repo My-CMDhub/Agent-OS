@@ -150,4 +150,31 @@ struct CredentialGuardTests {
         #expect(CredentialGuard.imagePixelRect(forAppKitRect: CGRect(x: 100, y: 100, width: 10, height: 10),
                                                displayFrame: secondary, imageSize: image) == nil)
     }
+
+    // MARK: On-disk writers
+
+    /// The writer itself scrubs, through a real append into a temp directory:
+    /// a key the owner read aloud and a secret-named field never reach the file.
+    @Test func aLogLineIsWrittenScrubbed() throws {
+        let key = "sk-ant-" + "AbCdEf0123456789ghIJkl"
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("credential-guard-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let line = RealtimeTranscriptLog.line(turnID: "T", stack: "geminiLive", date: Date(timeIntervalSince1970: 0),
+                                              heard: "my key is \(key)", heardComplete: true, said: "noted", decisions: [])
+        RealtimeTranscriptLog.append(line.merging(["api_key": "plain-words"]) { $1 }, in: directory)
+        MeasurementLogFile.waitForPendingWrites()
+        let written = try String(contentsOf: directory.appendingPathComponent(RealtimeTranscriptLog.fileName), encoding: .utf8)
+        #expect(!written.contains(key) && !written.contains("plain-words"))
+        #expect(written.contains("my key is [REDACTED:anthropicKey]"))
+        #expect(written.contains(#""api_key":"[REDACTED:namedSecret]""#))
+    }
+
+    @Test func anAuditLineIsScrubbed() {
+        let key = "sk-ant-" + "AbCdEf0123456789ghIJkl"
+        let line = HarnessPolicy.auditLine(at: Date(timeIntervalSince1970: 0), id: "a", verb: "type", target: "paste \(key)",
+                                           app: nil, session: "s", dryRun: true, confirmed: false, kernel: "allow",
+                                           outcome: "ok", milliseconds: 1)
+        #expect(!line.contains(key))
+        #expect(line.contains("[REDACTED:anthropicKey]"))
+    }
 }

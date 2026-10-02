@@ -32,8 +32,10 @@ nonisolated enum MeasurementLogFile {
 
     /// One sorted-key JSON object without its newline, or nil when the object
     /// cannot be serialised. Separate from the write so a test can read exactly
-    /// what would reach disk.
+    /// what would reach disk. Scrubbed here, once for every writer
+    /// (`SecretScanner.scrub`): a key on screen or in a transcript never lands in a log.
     static func jsonLine(_ object: [String: Any]) -> String? {
+        let object = SecretScanner.scrub(object)
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
             return nil
