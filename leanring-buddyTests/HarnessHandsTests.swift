@@ -97,11 +97,13 @@ struct HarnessHandsTests {
     // Review of H1 (blocking): a card group's centre may be its own "Buy now" child.
     @Test func aClickPassesOnlyThroughInertElementsToItsTarget() {
         typealias Node = HarnessHands.HitChainNode
-        #expect(HarnessHands.relation(hitChain: [], reachedTarget: true) == .target)
+        func relation(_ chain: [Node], reachedTarget: Bool = true, targetPublishesPress: Bool = true) -> HarnessHands.HitRelation {
+            HarnessHands.relation(hitChain: chain, reachedTarget: reachedTarget, targetPublishesPress: targetPublishesPress)
+        }
+        #expect(relation([]) == .target)
         // A label inside the button (Chromium's text publishes AXPress too): through.
-        #expect(HarnessHands.relation(hitChain: [Node(role: "AXStaticText", name: "Log In")], reachedTarget: true) == .insideTarget)
-        #expect(HarnessHands.relation(hitChain: [Node(role: "AXStaticText", name: "Order #123"), Node(role: "AXGroup")],
-                                      reachedTarget: true) == .insideTarget)
+        #expect(relation([Node(role: "AXStaticText", name: "Log In", publishesPress: true)]) == .insideTarget)
+        #expect(relation([Node(role: "AXStaticText", name: "Order #123"), Node(role: "AXGroup")]) == .insideTarget)
         let active: [[Node]] = [
             [Node(role: "AXStaticText", name: "Buy"), Node(role: "AXButton", name: "Buy now")],
             [Node(role: "AXLink", name: "Profile")],
@@ -115,10 +117,19 @@ struct HarnessHandsTests {
             [Node(role: "AXUnknown", subrole: "AXTabButton", name: "Posts")]
         ]
         for chain in active {
-            #expect(HarnessHands.relation(hitChain: chain, reachedTarget: true) == .activeInsideTarget, "\(chain)")
+            #expect(relation(chain) == .activeInsideTarget, "\(chain)")
         }
         #expect(HarnessHands.hitRefusal(.activeInsideTarget)?.code == "clickTargetObscured")
-        #expect(HarnessHands.relation(hitChain: [Node(role: "AXStaticText")], reachedTarget: false) == .otherElementSameApp)
+        #expect(relation([Node(role: "AXStaticText")], reachedTarget: false) == .otherElementSameApp)
+        // Review 2026-10-02: the target "Order #42" group publishes no AXPress, and an
+        // unlabelled clickable icon sits at its centre. That icon is what a click acts on.
+        let icon = [Node(role: "AXImage", publishesPress: true), Node(role: "AXGroup")]
+        #expect(relation(icon, targetPublishesPress: false) == .activeInsideTarget)
+        #expect(relation([Node(role: "AXStaticText", name: "Order #42"), Node(role: "AXGroup", publishesPress: true)],
+                         targetPublishesPress: false) == .activeInsideTarget)
+        #expect(relation([Node(role: "AXStaticText", name: "Order #42"), Node(role: "AXGroup")], targetPublishesPress: false) == .insideTarget)
+        // Inside a target that publishes AXPress itself, the Chromium allowance stands.
+        #expect(relation(icon, targetPublishesPress: true) == .insideTarget)
     }
 
     // Review of H1: the click and every keystroke chunk need the target's app still in front.

@@ -102,6 +102,7 @@ enum HarnessHands {
         var subroleReadFailed = false
         /// Title, description, or a static text's value — never a field's.
         var name: String? = nil
+        var publishesPress = false
     }
 
     /// Roles a click lands ON rather than through: what the click would act on
@@ -113,12 +114,13 @@ enum HarnessHands {
     /// Whether a click may pass through `node` to the target (review of H1,
     /// 2026-10-02: a card group's centre may be its "Buy now" child). Not a
     /// control, not what may be a password box, and no word the kernel refuses
-    /// or asks about. ponytail: publishing AXPress alone is NOT active —
-    /// Chromium gives text inside a button AXPress (its click-ancestor verb, per
-    /// Chromium's source, not measured here), so that rule would refuse every
-    /// real click on a web button; tighten if a probe shows a pressable non-control.
-    static func isInert(_ node: HitChainNode) -> Bool {
-        guard !activeRoles.contains(node.role), !(node.subrole.map(ActionSafetyKernel.navigationalPressSubroles.contains) ?? false),
+    /// or asks about. Publishing AXPress is active only when the target publishes
+    /// none (review 2026-10-02: an "Order #42" group whose centre is an unlabelled
+    /// clickable icon): Chromium gives text inside a button AXPress (its
+    /// click-ancestor verb, per Chromium's source, not measured here), so inside a
+    /// pressable target that rule would refuse every real click on a web button.
+    static func isInert(_ node: HitChainNode, targetPublishesPress: Bool) -> Bool {
+        guard targetPublishesPress || !node.publishesPress, !activeRoles.contains(node.role), !(node.subrole.map(ActionSafetyKernel.navigationalPressSubroles.contains) ?? false),
               !AccessibilityElementNode.mightBeSecure(role: node.role, subrole: node.subrole, subroleReadFailed: node.subroleReadFailed,
                                                       namedByValue: false) else { return false }
         guard let name = node.name?.lowercased(), !name.isEmpty else { return true }
@@ -129,10 +131,10 @@ enum HarnessHands {
 
     /// The hit, relative to the target, from the chain read walking up from it:
     /// `chain[0]` is the hit, and the walk stopped at the target (`reachedTarget`).
-    static func relation(hitChain chain: [HitChainNode], reachedTarget: Bool) -> HitRelation {
+    static func relation(hitChain chain: [HitChainNode], reachedTarget: Bool, targetPublishesPress: Bool) -> HitRelation {
         guard reachedTarget else { return .otherElementSameApp }
         if chain.isEmpty { return .target }
-        return chain.allSatisfy(isInert) ? .insideTarget : .activeInsideTarget
+        return chain.allSatisfy { isInert($0, targetPublishesPress: targetPublishesPress) } ? .insideTarget : .activeInsideTarget
     }
 
     /// A synthetic click lands on whatever is drawn at the point, so it is posted
@@ -534,18 +536,19 @@ enum HarnessHands {
         if hitProcess == getpid() { return .harnessItself }
         guard hitProcess == processIdentifier else { return .otherApp }
         // Up from the hit to the target, reading what each element between them is.
+        let targetPublishesPress = AccessibilityTreeWalker.copyActionNames(from: target).contains(kAXPressAction)
         var chain: [HitChainNode] = []
         var current: AXUIElement? = hit
         for _ in 0..<ancestorWalkLimit {
             guard let node = current else { break }
-            if CFEqual(node, target) { return relation(hitChain: chain, reachedTarget: true) }
+            if CFEqual(node, target) { return relation(hitChain: chain, reachedTarget: true, targetPublishesPress: targetPublishesPress) }
             chain.append(hitChainNode(node))
             var parent: AnyObject?
             guard AXUIElementCopyAttributeValue(node, kAXParentAttribute as CFString, &parent) == .success,
                   let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
             current = (parent as! AXUIElement)
         }
-        return relation(hitChain: chain, reachedTarget: false)
+        return relation(hitChain: chain, reachedTarget: false, targetPublishesPress: targetPublishesPress)
     }
 
     /// Role, subrole and name of one element on the way up — never a field's value.
@@ -559,7 +562,8 @@ enum HarnessHands {
         let (subrole, subroleError) = string(kAXSubroleAttribute)
         let name = string(kAXTitleAttribute).0 ?? string(kAXDescriptionAttribute).0
             ?? (role == "AXStaticText" ? string(kAXValueAttribute).0 : nil)
-        return HitChainNode(role: role, subrole: subrole, subroleReadFailed: AccessibilityElementNode.subroleReadFailed(subroleError), name: name)
+        return HitChainNode(role: role, subrole: subrole, subroleReadFailed: AccessibilityElementNode.subroleReadFailed(subroleError), name: name,
+                            publishesPress: AccessibilityTreeWalker.copyActionNames(from: element).contains(kAXPressAction))
     }
 
     /// The target's app is in front: the system-wide read, or — when that gives
