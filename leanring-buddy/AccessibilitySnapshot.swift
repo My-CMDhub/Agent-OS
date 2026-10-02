@@ -162,6 +162,11 @@ struct AccessibilityElementNode {
     /// walk — hand-built nodes in tests leave it nil.
     let accessibilityElement: AXUIElement?
 
+    /// The frame read FAILED (no AXFrame, no position + size), as opposed to a
+    /// successful `(0,0,0,0)` — which is a scrolled-out row or a closed menu
+    /// item. Text in a node like this may be on screen and cannot be located.
+    let frameReadFailed: Bool
+
     init(
         role: String,
         subrole: String?,
@@ -176,7 +181,8 @@ struct AccessibilityElementNode {
         subroleReadFailed: Bool = false,
         selected: Bool? = nil,
         valueLength: Int? = nil,
-        accessibilityElement: AXUIElement? = nil
+        accessibilityElement: AXUIElement? = nil,
+        frameReadFailed: Bool = false
     ) {
         self.role = role
         self.subrole = subrole
@@ -194,6 +200,7 @@ struct AccessibilityElementNode {
         self.selected = selected
         self.valueLength = valueLength
         self.accessibilityElement = accessibilityElement
+        self.frameReadFailed = frameReadFailed
     }
 
     /// `selected` and `valueLength` from raw reads. An error of `.success` means
@@ -389,6 +396,11 @@ struct AccessibilityWindowSnapshot {
     /// resolution photographs THIS app — never a second frontmost read, which
     /// can name a different one 0.8 s later (measured 2026-09-11).
     var application: NSRunningApplication? = nil
+
+    /// AXValue reads that FAILED (not `.noValue` / `.attributeUnsupported`) —
+    /// each one text nobody read. The screenshot guard withholds on any: a
+    /// value it could not read is not a value with no secret in it.
+    var valueReadErrors = 0
 }
 
 enum AccessibilitySnapshotError: Error {
@@ -788,6 +800,7 @@ enum AccessibilityTreeWalker {
         var childrenElidedByVisibleSubset = 0
         var duplicateElementsSkipped = 0
         var nodesReadWithoutBatch = 0
+        var valueReadErrors = 0
         var visitedElements: Set<AccessibilityElementKey> = [
             AccessibilityElementKey(element: windowElement)
         ]
@@ -830,7 +843,8 @@ enum AccessibilityTreeWalker {
             childrenElidedByVisibleSubset: &childrenElidedByVisibleSubset,
             visitedElements: &visitedElements,
             duplicateElementsSkipped: &duplicateElementsSkipped,
-            nodesReadWithoutBatch: &nodesReadWithoutBatch
+            nodesReadWithoutBatch: &nodesReadWithoutBatch,
+            valueReadErrors: &valueReadErrors
         )
         let walkDurationInSeconds = Date().timeIntervalSince(walkStartedAt)
 
@@ -860,7 +874,8 @@ enum AccessibilityTreeWalker {
             duplicateElementsSkipped: duplicateElementsSkipped,
             nodesReadWithoutBatch: nodesReadWithoutBatch,
             focusChangedDuringWalk: focusChangedDuringWalk,
-            application: application
+            application: application,
+            valueReadErrors: valueReadErrors
         )
     }
 
@@ -988,7 +1003,8 @@ enum AccessibilityTreeWalker {
         childrenElidedByVisibleSubset: inout Int,
         visitedElements: inout Set<AccessibilityElementKey>,
         duplicateElementsSkipped: inout Int,
-        nodesReadWithoutBatch: inout Int
+        nodesReadWithoutBatch: inout Int,
+        valueReadErrors: inout Int
     ) -> AccessibilityElementNode? {
         guard budget.claimSlot(atDepth: depth) else { return nil }
 
@@ -1020,7 +1036,16 @@ enum AccessibilityTreeWalker {
             }
         }
         let title = batched?.title ?? copyStringAttribute(from: element, attribute: kAXTitleAttribute)
-        let value = batched?.value ?? copyStringAttribute(from: element, attribute: kAXValueAttribute)
+        // The individual read runs whenever the batch gave no string, as before;
+        // only ITS failure is counted, so a batch error it recovered from is not.
+        var value = batched?.value
+        if value == nil {
+            var rawValue: AnyObject?
+            let valueError = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &rawValue)
+            value = (rawValue as? String).flatMap { $0.isEmpty ? nil : $0 }
+            // Same predicate as the subrole: only noValue / attributeUnsupported mean "none".
+            if AccessibilityElementNode.subroleReadFailed(valueError) { valueReadErrors += 1 }
+        }
         let elementDescription = batched?.elementDescription
             ?? copyStringAttribute(from: element, attribute: kAXDescriptionAttribute)
         // Only an anonymous text input pays for this read: its placeholder is its name.
@@ -1116,7 +1141,8 @@ enum AccessibilityTreeWalker {
                 childrenElidedByVisibleSubset: &childrenElidedByVisibleSubset,
                 visitedElements: &visitedElements,
                 duplicateElementsSkipped: &duplicateElementsSkipped,
-                nodesReadWithoutBatch: &nodesReadWithoutBatch
+                nodesReadWithoutBatch: &nodesReadWithoutBatch,
+                valueReadErrors: &valueReadErrors
             ) else { break }
 
             childNodes.append(childNode)
@@ -1151,7 +1177,8 @@ enum AccessibilityTreeWalker {
             subroleReadFailed: subroleReadFailed,
             selected: state?.selected,
             valueLength: state?.valueLength,
-            accessibilityElement: element
+            accessibilityElement: element,
+            frameReadFailed: frameReadResult.frame == nil
         )
     }
 

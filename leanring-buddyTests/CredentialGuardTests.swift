@@ -13,6 +13,7 @@
 //  carries a contiguous token a secret scanner (ours or a host's) would flag.
 //
 
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -244,8 +245,10 @@ struct CredentialGuardTests {
         #expect(ScreenSecretGuard.withholdReason(with { $0.subtreesLostToFailedReads = 1 }) == "subtreesLost")
         #expect(ScreenSecretGuard.withholdReason(with { $0.focusChangedDuringWalk = true }) == "focusChanged")
         #expect(ScreenSecretGuard.withholdReason(with { $0.unlocatedSecrets = 1 }) == "unlocatedSecret")
-        // Clicky or a password manager in front: excluded from the capture, nothing to walk.
-        #expect(ScreenSecretGuard.withholdReason(with { $0.notWalkedReason = "passwordManager" }) == nil)
+        // A failed AXValue read is text nobody read (review 2026-10-02, B2).
+        #expect(ScreenSecretGuard.withholdReason(with { $0.valueReadErrors = 1 }) == "valueUnreadable")
+        // No app to check (nothing behind Clicky's panel): withheld, never "nothing to walk".
+        #expect(ScreenSecretGuard.withholdReason(with { $0.failure = "noAppToCheck" }) == "noAppToCheck")
         // Redactions found is not a reason: they are drawn.
         #expect(ScreenSecretGuard.withholdReason(with {
             $0.redactions = [.init(kind: "secureField", appKitRect: CGRect(x: 0, y: 0, width: 9, height: 9), source: "frame")]
@@ -257,9 +260,11 @@ struct CredentialGuardTests {
         let field = CGRect(x: 100, y: 500, width: 200, height: 24)
         let anyElement = AXUIElementCreateSystemWide()
         func node(role: String = "AXStaticText", subrole: String? = nil, title: String? = nil, value: String? = nil,
-                  frame: CGRect = field, subroleReadFailed: Bool = false, element: AXUIElement? = nil) -> AccessibilityElementNode {
+                  frame: CGRect = field, subroleReadFailed: Bool = false, element: AXUIElement? = nil,
+                  frameReadFailed: Bool = false) -> AccessibilityElementNode {
             AccessibilityElementNode(role: role, subrole: subrole, title: title, value: value, frameInAppKitCoordinates: frame,
-                                     depth: 1, children: [], subroleReadFailed: subroleReadFailed, accessibilityElement: element)
+                                     depth: 1, children: [], subroleReadFailed: subroleReadFailed, accessibilityElement: element,
+                                     frameReadFailed: frameReadFailed)
         }
         let nodes = [
             node(role: "AXTextField", subrole: "AXSecureTextField", value: "••••"),       // a password box
@@ -268,7 +273,8 @@ struct CredentialGuardTests {
             node(value: "key: \(key)", element: anyElement),                              // exact glyph rect
             node(title: "token=\(key)"),                                                  // a title: the frame
             node(value: "plain words"),
-            node(value: key, frame: .zero)                                                 // nowhere to draw
+            node(value: key, frame: .zero, frameReadFailed: true),                       // frame read failed: nowhere to draw
+            node(value: key, frame: .zero)                                                 // a read (0,0,0,0): scrolled out, skipped
         ]
         // AX top-left (110, 376) on a 900-pt primary display is AppKit y = 900 - 376 - 20 = 504.
         let found = ScreenSecretGuard.redactions(in: nodes, primaryDisplayHeight: 900) { _, range in
@@ -283,6 +289,82 @@ struct CredentialGuardTests {
         // The app did not answer AXBoundsForRange: the element's frame.
         let fallback = ScreenSecretGuard.redactions(in: [node(value: key, element: anyElement)], primaryDisplayHeight: 900) { _, _ in nil }
         #expect(fallback.redactions == [.init(kind: "anthropicKey", appKitRect: field, source: "frame")])
+        // A glyph rect outside its own element (AX y 10 is AppKit y 870, the field is at 500): the frame.
+        let stray = ScreenSecretGuard.redactions(in: [node(value: key, element: anyElement)], primaryDisplayHeight: 900) { _, _ in
+            CGRect(x: 110, y: 10, width: 150, height: 20)
+        }
+        #expect(stray.redactions == [.init(kind: "anthropicKey", appKitRect: field, source: "frame")])
+        // Within the 4 pt tolerance it is kept (AX y 374 -> AppKit 506..526, the field ends at 524).
+        let edge = ScreenSecretGuard.redactions(in: [node(value: key, element: anyElement)], primaryDisplayHeight: 900) { _, _ in
+            CGRect(x: 110, y: 374, width: 150, height: 20)
+        }
+        #expect(edge.redactions.first?.source == "range")
+        // What was read is counted, so a clean over nothing is visible.
+        #expect(found.scannedCharacters > 0
+                && ScreenSecretGuard.redactions(in: [node(value: "abc")], primaryDisplayHeight: 900).scannedCharacters == 3)
+    }
+
+    // MARK: Which windows the guard reads (review 2026-10-02, B2/B3/item 7)
+
+    private func snapshot(root: AccessibilityElementNode? = nil, stop: Set<WalkStopReason> = [], lost: Int = 0,
+                          valueErrors: Int = 0, focusChanged: Bool = false) -> AccessibilityWindowSnapshot {
+        AccessibilityWindowSnapshot(
+            rootNode: root, applicationName: "T", bundleIdentifier: "t", walkDurationInSeconds: 0, nodeCount: 1,
+            deepestLevelReached: 0, wasTruncatedByBudget: !stop.isEmpty, walkStopReasons: stop, timedOutNodePaths: [],
+            nodesWithoutReadableFrame: 0, subtreesLostToFailedReads: lost, subtreesSkippedFarOffScreen: 0,
+            nodesSkippedFarOffScreen: 0, containersReducedToVisibleChildren: 0, childrenElidedByVisibleSubset: 0,
+            duplicateElementsSkipped: 0, nodesReadWithoutBatch: 0, focusChangedDuringWalk: focusChanged,
+            valueReadErrors: valueErrors)
+    }
+
+    /// Every incompleteness a walk reports reaches the fail-closed table, and a
+    /// window's secrets and frame are recorded. Fails if `record` drops a field.
+    @Test func aWalkMapsOntoTheWithholdTable() {
+        let window = CGRect(x: 0, y: 0, width: 800, height: 600)
+        func reason(_ walk: AccessibilityWindowSnapshot) -> String? {
+            var inspection = ScreenSecretGuard.Inspection()
+            inspection.record(walk, windowFrame: window, primaryDisplayHeight: 900) { _, _ in nil }
+            return ScreenSecretGuard.withholdReason(inspection)
+        }
+        #expect(reason(snapshot()) == nil)
+        #expect(reason(snapshot(stop: [.timeLimit])) == "timeLimit")
+        #expect(reason(snapshot(lost: 2)) == "subtreesLost")
+        #expect(reason(snapshot(valueErrors: 1)) == "valueUnreadable")
+        #expect(reason(snapshot(focusChanged: true)) == "focusChanged")
+        let key = "sk-ant-" + "AbCdEf0123456789ghIJkl"
+        let leaf = AccessibilityElementNode(role: "AXStaticText", subrole: nil, title: nil, value: key,
+                                            frameInAppKitCoordinates: CGRect(x: 10, y: 10, width: 100, height: 20), depth: 1, children: [])
+        let root = AccessibilityElementNode(role: "AXWindow", subrole: nil, title: nil, value: nil,
+                                            frameInAppKitCoordinates: window, depth: 0, children: [leaf])
+        var inspection = ScreenSecretGuard.Inspection()
+        inspection.record(snapshot(root: root), windowFrame: window, primaryDisplayHeight: 900) { _, _ in nil }
+        #expect(inspection.redactions.map(\.kind) == ["anthropicKey"] && inspection.windowFrames == [window])
+        #expect(inspection.scannedTextCharacters == (key as NSString).length)
+        // The display holding the window was checked; one beside it was not.
+        #expect(inspection.scanned(CGRect(x: 0, y: 0, width: 1440, height: 900)))
+        #expect(!inspection.scanned(CGRect(x: 1440, y: 0, width: 1920, height: 1080)))
+    }
+
+    /// Clicky's panel or a password manager in front: the guard reads the app
+    /// whose window is frontmost behind it, never nothing (B3).
+    @Test func theAppBehindOurPanelIsTheOneChecked() {
+        let ownPID: pid_t = 100
+        let bundles: [pid_t: String] = [100: "com.dhruvpatel.jarvis.agent", 200: "com.1password.1password", 300: "com.apple.Terminal"]
+        func window(_ pid: pid_t, layer: Int = 0) -> [String: Any] {
+            [kCGWindowOwnerPID as String: NSNumber(value: pid), kCGWindowLayer as String: NSNumber(value: layer)]
+        }
+        let list = [window(300, layer: 25), window(100), window(200), window(300)]
+        let check = { (front: (pid_t, String?)?) in
+            ScreenSecretGuard.appToCheck(frontmost: front.map { (pid: $0.0, bundleIdentifier: $0.1) }, windowList: list,
+                                         ownPID: ownPID, bundleForPID: { bundles[$0] })
+        }
+        #expect(check((300, "com.apple.Terminal"))! == (300, "frontmost"))
+        #expect(check((100, bundles[100]))! == (300, "behindOwnApp"))
+        #expect(check((200, bundles[200]))! == (300, "behindPasswordManager"))
+        #expect(check(nil) == nil)
+        // Nothing ordinary behind: withheld, not waved through.
+        #expect(ScreenSecretGuard.appToCheck(frontmost: (pid: 100, bundleIdentifier: nil), windowList: [window(100), window(200)],
+                                             ownPID: ownPID, bundleForPID: { bundles[$0] }) == nil)
     }
 
     /// Drawn on the real pixels: black inside the padded rect, untouched outside.
@@ -391,5 +473,60 @@ struct CredentialGuardTests {
             let tool = String(decoding: try JSONSerialization.data(withJSONObject: messages[1]), as: UTF8.self)
             #expect(tool.contains("REDACTED:anthropicKey") && tool.contains("c1"))
         }
+    }
+
+    // MARK: Wiring: the capture path (review 2026-10-02)
+
+    private func whiteImage(width: Int, height: Int) throws -> CGImage {
+        let colorSpace = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+        let context = try #require(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace,
+                                             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue))
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return try #require(context.makeImage())
+    }
+
+    /// The only road from a captured image to model-bound JPEG bytes runs
+    /// through the guard: a secret comes out black, an unchecked screen and an
+    /// unchecked display never come out. Fails if `guarded` leaves `modelReadyJPEG`.
+    @Test func capturedPixelsReachTheModelOnlyThroughTheGuard() throws {
+        let display = CGRect(x: 0, y: 0, width: 80, height: 40)
+        let image = try whiteImage(width: 80, height: 40)
+        var inspection = ScreenSecretGuard.Inspection()
+        inspection.windowFrames = [display]
+        inspection.redactions = [.init(kind: "anthropicKey", appKitRect: CGRect(x: 20, y: 10, width: 30, height: 16), source: "frame")]
+        let sent = try #require(try CompanionScreenCaptureUtility.modelReadyJPEG(image, displayFrame: display, inspection: inspection,
+                                                                                 excludedWindowCount: 0))
+        #expect(sent.report.outcome == "redacted")
+        let decoded = try #require(NSBitmapImageRep(data: sent.jpeg))
+        // AppKit (35, 18) is top-left y 40 - 18 = 22: inside the box; (5, 5) is not.
+        #expect((decoded.colorAt(x: 35, y: 22)?.usingColorSpace(.deviceRGB)?.brightnessComponent ?? 1) < 0.2)
+        #expect((decoded.colorAt(x: 5, y: 5)?.usingColorSpace(.deviceRGB)?.brightnessComponent ?? 0) > 0.8)
+        func withheldReason(_ inspection: ScreenSecretGuard.Inspection?, _ frame: CGRect = display) -> String? {
+            do {
+                _ = try CompanionScreenCaptureUtility.modelReadyJPEG(image, displayFrame: frame, inspection: inspection, excludedWindowCount: 0)
+                return nil
+            } catch let withheld as ScreenSecretGuard.Withheld {
+                return withheld.report.reason
+            } catch { return "\(error)" }
+        }
+        #expect(withheldReason(nil) == "walkDeadline")
+        // A second display none of the checked windows touches.
+        #expect(withheldReason(inspection, CGRect(x: 80, y: 0, width: 80, height: 40)) == ScreenSecretGuard.displayNotScanned)
+    }
+
+    /// Ours and every password manager's windows are left out of the filter.
+    @Test func ownAndPasswordManagerWindowsAreLeftOut() {
+        let left = CompanionScreenCaptureUtility.windowsLeftOut(
+            owners: ["com.apple.Terminal", "com.dhruvpatel.jarvis.agent", "com.1password.1password", nil, "com.apple.Passwords"],
+            ownBundleIdentifier: "com.dhruvpatel.jarvis.agent")
+        #expect(left.own == [1] && left.passwordManagers == [2, 4])
+        #expect(CompanionScreenCaptureUtility.windowsLeftOut(owners: [nil], ownBundleIdentifier: nil).own.isEmpty)
+    }
+
+    /// Secure input on: the capture throws before anything is photographed.
+    @Test func secureInputStopsTheCaptureFirst() {
+        #expect(throws: ScreenSecretGuard.Withheld.self) { try ScreenSecretGuard.refuseWhileSecureInput(self.typingInSafari) }
+        #expect(throws: Never.self) { try ScreenSecretGuard.refuseWhileSecureInput(.off) }
     }
 }

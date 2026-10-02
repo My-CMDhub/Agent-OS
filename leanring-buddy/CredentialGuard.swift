@@ -349,11 +349,12 @@ nonisolated struct SecureInputState: Equatable, Sendable {
     }
 }
 
-/// The outgoing-screenshot half: walk the frontmost app's focused window beside
+/// The outgoing-screenshot half: walk every window of the app in front beside
 /// the capture, black out password boxes and every scanner match on the image
 /// before it is encoded, and WITHHOLD the image when that check could not be
 /// completed in time. Fail closed: a picture nobody could check is not sent.
-/// Limit (v1): other apps' windows on the same display are not text-scanned.
+/// Limit: other apps' windows on the same display are not text-scanned; a
+/// display holding none of the checked app's windows is not sent at all.
 nonisolated enum ScreenSecretGuard {
     /// ponytail: one fixed 600 ms from the start of a capture, which it runs beside
     /// (capture ~230-350 ms). Walks measured 2026-09: System Settings ~360 ms,
@@ -375,20 +376,50 @@ nonisolated enum ScreenSecretGuard {
     /// What the walk found. Rects and counts only - never an element's text.
     struct Inspection: Sendable {
         var app: String?
-        /// Set when nothing needed walking: Clicky or a password manager in front
-        /// (both are excluded from the capture itself).
-        var notWalkedReason: String?
-        /// The walk threw: `noFocusedWindow`, `screenIsLocked`, ...
+        /// `frontmost`, or the app behind Clicky's own panel / a password manager
+        /// (`behindOwnApp` / `behindPasswordManager`): both are left out of the
+        /// capture, so the window under them is what the picture shows.
+        var appSource: String?
+        /// The walk threw or could not start: `noAppToCheck`, `screenIsLocked`, ...
         var failure: String?
         var stopReasons: [String] = []
         var subtreesLostToFailedReads = 0
+        /// Failed AXValue reads: text nobody read is not text with no secret.
+        var valueReadErrors = 0
         var focusChangedDuringWalk = false
-        /// A secret was read in an element with no usable frame: it may be on
+        /// A secret was read in an element whose frame read FAILED: it may be on
         /// screen and cannot be covered.
         var unlocatedSecrets = 0
         var redactions: [Redaction] = []
         var nodeCount = 0
+        /// UTF-16 units of text scanned: a "clean" over 0 characters (Monaco,
+        /// a canvas) is a different claim from a clean over 40,000.
+        var scannedTextCharacters = 0
+        /// AppKit frames of the windows walked. A display none of them touches
+        /// was not checked and is not sent.
+        var windowFrames: [CGRect] = []
         var milliseconds = 0
+
+        /// One window's walk folded in. Pure over the snapshot, so a test can
+        /// fail if a field stops reaching `withholdReason`.
+        mutating func record(_ snapshot: AccessibilityWindowSnapshot, windowFrame: CGRect, primaryDisplayHeight: CGFloat,
+                             boundsForRange: (AXUIElement, NSRange) -> CGRect? = ScreenSecretGuard.axBounds(of:range:)) {
+            stopReasons += snapshot.walkStopReasons.map { String(describing: $0) }
+            subtreesLostToFailedReads += snapshot.subtreesLostToFailedReads
+            valueReadErrors += snapshot.valueReadErrors
+            focusChangedDuringWalk = focusChangedDuringWalk || snapshot.focusChangedDuringWalk
+            nodeCount += snapshot.nodeCount
+            windowFrames.append(windowFrame)
+            let found = ScreenSecretGuard.redactions(in: snapshot.rootNode?.flattenedDescendants() ?? [],
+                                                     primaryDisplayHeight: primaryDisplayHeight, boundsForRange: boundsForRange)
+            redactions += found.redactions
+            unlocatedSecrets += found.unlocated
+            scannedTextCharacters += found.scannedCharacters
+        }
+
+        func scanned(_ displayFrame: CGRect) -> Bool {
+            windowFrames.contains { $0.intersects(displayFrame) }
+        }
     }
 
     struct Drawn: Sendable {
@@ -398,7 +429,7 @@ nonisolated enum ScreenSecretGuard {
     }
 
     struct Report: Sendable {
-        /// `clean`, `redacted`, `notWalked` or `withheld`.
+        /// `clean`, `redacted` or `withheld`.
         var outcome: String
         var reason: String?
         var inspection: Inspection?
@@ -412,6 +443,9 @@ nonisolated enum ScreenSecretGuard {
                 "kind": "capture", "outcome": outcome, "reason": reason ?? NSNull(),
                 "app": inspection?.app ?? NSNull(), "walkMs": inspection.map { $0.milliseconds as Any } ?? NSNull(),
                 "nodeCount": inspection?.nodeCount ?? 0, "excludedWindowCount": excludedWindowCount,
+                "appSource": inspection?.appSource ?? NSNull(), "windowsWalked": inspection?.windowFrames.count ?? 0,
+                "scannedTextCharacters": inspection?.scannedTextCharacters ?? 0,
+                "valueReadErrors": inspection?.valueReadErrors ?? 0,
                 "redactionsFound": inspection?.redactions.count ?? 0,
                 // How often the app answered AXBoundsForRange (`range`) vs the element frame.
                 "foundBySource": Dictionary((inspection?.redactions ?? []).map { ($0.source, 1) }, uniquingKeysWith: +),
@@ -433,25 +467,32 @@ nonisolated enum ScreenSecretGuard {
     /// may. nil inspection = the walk missed `walkDeadlineSeconds`.
     static func withholdReason(_ inspection: Inspection?) -> String? {
         guard let inspection else { return "walkDeadline" }
-        if inspection.notWalkedReason != nil { return nil }
         if let failure = inspection.failure { return failure }
         if let stop = inspection.stopReasons.sorted().first { return stop }
         if inspection.subtreesLostToFailedReads > 0 { return "subtreesLost" }
+        if inspection.valueReadErrors > 0 { return "valueUnreadable" }
         if inspection.focusChangedDuringWalk { return "focusChanged" }
         if inspection.unlocatedSecrets > 0 { return "unlocatedSecret" }
         return nil
     }
 
+    /// How far a glyph rect may stray outside its element's frame (a caret, a
+    /// descender) before it is taken for a wrong answer and the frame is used.
+    static let boundsToleranceInPoints: CGFloat = 4
+
     /// What to black out among `nodes`: every on-screen box that might be a
     /// password box, and every scanner match in a name or value - at the exact
-    /// glyph rect when `boundsForRange` answers (AX coordinates), else the
-    /// element's frame. A match with neither is counted as unlocated.
+    /// glyph rect when `boundsForRange` answers (AX coordinates) INSIDE the
+    /// element's frame, else that frame. A successful zero frame is scrolled out
+    /// (nothing on screen to cover); only a match in an element whose frame read
+    /// FAILED is unlocated.
     static func redactions(
         in nodes: [AccessibilityElementNode], primaryDisplayHeight: CGFloat,
         boundsForRange: (AXUIElement, NSRange) -> CGRect? = axBounds(of:range:)
-    ) -> (redactions: [Redaction], unlocated: Int) {
+    ) -> (redactions: [Redaction], unlocated: Int, scannedCharacters: Int) {
         var found: [Redaction] = []
         var unlocated = 0
+        var scannedCharacters = 0
         for node in nodes {
             let frame = node.frameInAppKitCoordinates
             let onScreen = frame.width > 0 && frame.height > 0
@@ -462,24 +503,27 @@ nonisolated enum ScreenSecretGuard {
             }
             for (text, isValue) in [(node.title, false), (node.elementDescription, false), (node.value, true)] {
                 guard let text else { continue }
+                scannedCharacters += (text.raw as NSString).length
                 for match in SecretScanner.matches(in: text.raw) {
+                    guard onScreen else {
+                        if node.frameReadFailed { unlocated += 1 }
+                        continue
+                    }
+                    // An app's glyph rect is trusted only inside its own element.
                     if isValue, let element = node.accessibilityElement, let bounds = boundsForRange(element, match.range) {
                         let rect = AccessibilityTreeWalker.convertAccessibilityFrameToAppKitFrame(
                             bounds, primaryDisplayHeightInPoints: primaryDisplayHeight)
-                        if rect.width > 0, rect.height > 0 {
+                        if rect.width > 0, rect.height > 0,
+                           frame.insetBy(dx: -boundsToleranceInPoints, dy: -boundsToleranceInPoints).contains(rect) {
                             found.append(Redaction(kind: match.kind.rawValue, appKitRect: rect, source: "range"))
                             continue
                         }
                     }
-                    if onScreen {
-                        found.append(Redaction(kind: match.kind.rawValue, appKitRect: frame, source: "frame"))
-                    } else {
-                        unlocated += 1
-                    }
+                    found.append(Redaction(kind: match.kind.rawValue, appKitRect: frame, source: "frame"))
                 }
             }
         }
-        return (found, unlocated)
+        return (found, unlocated, scannedCharacters)
     }
 
     /// The redactions that land on an image of `displayFrame`, padded, in pixels.
@@ -524,9 +568,29 @@ nonisolated enum ScreenSecretGuard {
         return rect
     }
 
-    /// Blocking cross-process walk of the frontmost app's focused window. Call
-    /// off main: `inspectWithinDeadline` gives it a thread of its own.
-    static func inspectFrontmostWindow(timeLimitSeconds: Double) -> Inspection {
+    /// Whose windows the picture shows and the guard must read: the app in front,
+    /// unless that is Clicky or a password manager (both left out of the capture)
+    /// - then the owner of the frontmost ordinary window behind them, from the
+    /// window server's front-to-back list (layer 0). nil (withhold) when there is
+    /// no app in front or nothing behind it.
+    static func appToCheck(frontmost: (pid: pid_t, bundleIdentifier: String?)?, windowList: [[String: Any]],
+                           ownPID: pid_t, bundleForPID: (pid_t) -> String?) -> (pid: pid_t, source: String)? {
+        guard let frontmost else { return nil }
+        let frontIsOwn = frontmost.pid == ownPID
+        guard frontIsOwn || CredentialGuard.isPasswordManager(frontmost.bundleIdentifier) else {
+            return (frontmost.pid, "frontmost")
+        }
+        let behind = windowList.lazy
+            .filter { ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 }
+            .compactMap { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value }
+            .first { $0 != ownPID && !CredentialGuard.isPasswordManager(bundleForPID($0)) }
+        return behind.map { ($0, frontIsOwn ? "behindOwnApp" : "behindPasswordManager") }
+    }
+
+    /// Blocking cross-process walk of every window of the app the picture shows
+    /// (`appToCheck`), main window first, inside one shared deadline. Call off
+    /// main: `inspectWithinDeadline` gives it a thread of its own.
+    static func inspectFrontmostApp(timeLimitSeconds: Double) -> Inspection {
         let startedAt = Date()
         var inspection = Inspection()
         func finished() -> Inspection {
@@ -537,32 +601,43 @@ nonisolated enum ScreenSecretGuard {
             inspection.failure = "accessibilityPermissionNotGranted"
             return finished()
         }
-        // Bounded before the first cross-process read (`focusedWindowTarget`).
+        // Bounded before the first cross-process read.
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
-        inspection.app = AccessibilityTreeWalker.focusedApplication()?.bundleIdentifier
-        if HarnessServer.isHarnessItself(bundleIdentifier: inspection.app) {
-            inspection.notWalkedReason = "ownApp"
+        let front = AccessibilityTreeWalker.focusedApplication()
+        let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        guard let choice = appToCheck(frontmost: front.map { ($0.processIdentifier, $0.bundleIdentifier) },
+                                      windowList: windowList, ownPID: getpid(),
+                                      bundleForPID: { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }),
+              let application = NSRunningApplication(processIdentifier: choice.pid) else {
+            inspection.failure = "noAppToCheck"
             return finished()
         }
-        if CredentialGuard.isPasswordManager(inspection.app) {
-            inspection.notWalkedReason = "passwordManager"
+        inspection.app = application.bundleIdentifier
+        inspection.appSource = choice.source
+        let read = AccessibilityWindows.liveWindows(for: application)
+        guard read.readSucceeded else {
+            inspection.failure = "windowListUnreadable"
             return finished()
         }
-        do {
-            let target = try AccessibilityTreeWalker.focusedWindowTarget()
-            inspection.app = target.application.bundleIdentifier
-            let remaining = max(0.05, timeLimitSeconds - Date().timeIntervalSince(startedAt))
-            let snapshot = try AccessibilityTreeWalker.snapshotFocusedWindow(target, timeLimitInSeconds: remaining)
-            inspection.stopReasons = snapshot.walkStopReasons.map { String(describing: $0) }
-            inspection.subtreesLostToFailedReads = snapshot.subtreesLostToFailedReads
-            inspection.focusChangedDuringWalk = snapshot.focusChangedDuringWalk
-            inspection.nodeCount = snapshot.nodeCount
-            let found = redactions(in: snapshot.rootNode?.flattenedDescendants() ?? [],
-                                   primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height)
-            inspection.redactions = found.redactions
-            inspection.unlocatedSecrets = found.unlocated
-        } catch {
-            inspection.failure = (error as? AccessibilitySnapshotError).map { String(describing: $0) } ?? "walkFailed"
+        let primaryDisplayHeight = CGDisplayBounds(CGMainDisplayID()).height
+        let windows = read.windows.filter { !$0.candidate.isMinimized }
+            .sorted { $0.candidate.isMain && !$1.candidate.isMain }
+        for window in windows {
+            let remaining = timeLimitSeconds - Date().timeIntervalSince(startedAt)
+            guard remaining > 0.02 else {
+                inspection.stopReasons.append(String(describing: WalkStopReason.timeLimit))
+                break
+            }
+            do {
+                let snapshot = try AccessibilityTreeWalker.snapshotWindow(window.element, of: application,
+                                                                          timeLimitInSeconds: remaining)
+                inspection.record(snapshot, windowFrame: window.candidate.frameInAppKitCoordinates,
+                                  primaryDisplayHeight: primaryDisplayHeight)
+            } catch {
+                inspection.failure = (error as? AccessibilitySnapshotError).map { String(describing: $0) } ?? "walkFailed"
+                break
+            }
         }
         return finished()
     }
@@ -570,7 +645,7 @@ nonisolated enum ScreenSecretGuard {
     /// The walk on its own thread, or nil once `walkDeadlineSeconds` pass.
     static func inspectWithinDeadline() async -> Inspection? {
         await RealtimeVoiceSession.value(within: walkDeadlineSeconds) {
-            inspectFrontmostWindow(timeLimitSeconds: walkDeadlineSeconds)
+            inspectFrontmostApp(timeLimitSeconds: walkDeadlineSeconds)
         }
     }
 
@@ -579,15 +654,12 @@ nonisolated enum ScreenSecretGuard {
     static func guarded(_ image: CGImage, displayFrame: CGRect, inspection: Inspection?,
                         excludedWindowCount: Int) throws -> (image: CGImage, report: Report) {
         var report = Report(outcome: "clean", inspection: inspection, excludedWindowCount: excludedWindowCount)
-        if let reason = withholdReason(inspection) {
+        // A display none of the checked windows touches shows only unchecked apps.
+        if let reason = withholdReason(inspection) ?? (inspection?.scanned(displayFrame) == false ? displayNotScanned : nil) {
             report.outcome = "withheld"
             report.reason = reason
             log(report)
             throw Withheld(report: report)
-        }
-        if let notWalked = inspection?.notWalkedReason {
-            report.outcome = "notWalked"
-            report.reason = notWalked
         }
         report.drawn = drawn(inspection?.redactions ?? [], displayFrame: displayFrame,
                              imageSize: CGSize(width: image.width, height: image.height))
@@ -600,6 +672,14 @@ nonisolated enum ScreenSecretGuard {
         if !report.drawn.isEmpty { report.outcome = "redacted" }
         log(report)
         return (safe, report)
+    }
+
+    /// The one per-display reason: the caller skips that display and sends the others.
+    static let displayNotScanned = "displayNotScanned"
+
+    /// The capture's first line: while secure input is on, nothing is photographed.
+    static func refuseWhileSecureInput(_ state: SecureInputState) throws {
+        guard !state.isOn else { throw withheldForSecureInput(state) }
     }
 
     /// The hand-over: nothing is photographed while a password is being typed.
