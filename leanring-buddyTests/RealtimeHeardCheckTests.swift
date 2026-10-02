@@ -302,6 +302,27 @@ struct RealtimeHeardCheckTests {
         }
     }
 
+    // Live 2026-10-02 (90A952DF / D64CDA3D): both heardUnavailable refusals had the
+    // transcript in hand (1,564 / 2,867 ms, waited 0 ms); the app slot held a word
+    // for a thing on the page ("internet" the owner pointed at, "superhub").
+    @Test func aWordOfTheCallsOwnTargetInTheAppSlotIsNoMissedAppName() {
+        func decide(_ transcript: String, target: [String] = []) -> RealtimeHeardCheck.Outcome {
+            RealtimeHeardCheck.decide(transcript: transcript, named: "Google Chrome", among: installed, toolName: "press_element",
+                                      targetWords: RealtimeVoiceVerbs.foldedTokens(target.joined(separator: " "))).outcome
+        }
+        #expect(decide("Click on the internet one, this one.", target: ["Internet"]) == .noAppHeard)
+        // Without that evidence the guard stands: a name-like word nobody recognised still asks.
+        #expect(decide("Click on the internet one, this one.") == .appNameUnclear)
+        #expect(decide("Close the both of the tabs of Superhub.") == .appNameUnclear)
+        #expect(decide("Open a new window in Zorbit.", target: ["Internet"]) == .appNameUnclear)
+    }
+
+    // Live voices are slower than the fixtures: Gemini's transcript came at up to
+    // 3,107 ms after the release (voice-decisions.log, 123 live turns).
+    @Test func theTranscriptWaitCoversTheSlowestLiveTranscript() {
+        #expect(RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds >= 3.107 + 0.5)
+    }
+
     @Test func theTranscriptionIsChargedAtItsPublishedPerMinuteRate() {
         // One minute of PCM16 mono 24 kHz is 2,880,000 bytes: US$0.003.
         #expect(abs(RealtimeVoiceConnection.openAITranscriptionUSD(pcmBytes: 2 * 24_000 * 60) - 0.003) < 1e-12)

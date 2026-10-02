@@ -33,9 +33,11 @@ nonisolated enum RealtimeHeardCheck {
     /// fixture turns per stack, release -> transcript complete: OpenAI
     /// (gpt-4o-mini-transcribe) median 660 ms, p95 810, max 1,809, and AFTER
     /// the first tool call in 35/74 turns (by at most 128 ms); Gemini median
-    /// 293, p95 369, max 387, never after the call. 2.5 s is the OpenAI max
-    /// plus ~0.7 s; it is only ever waited out when no transcript comes.
-    static let transcriptDeadlineAfterReleaseSeconds: Double = 2.5
+    /// 293, p95 369, max 387, never after the call. LIVE voices are slower
+    /// (voice-decisions.log to 2026-10-02): Gemini 123 turns, median 362 ms,
+    /// max 3,107, 8 past 2.5 s; OpenAI 47, max 2,676. 4 s is the live max plus
+    /// ~0.9 s; it is only ever waited out when no transcript comes.
+    static let transcriptDeadlineAfterReleaseSeconds: Double = 4.0
 
     // MARK: Which apps the words name (pure)
 
@@ -363,7 +365,12 @@ nonisolated enum RealtimeHeardCheck {
             return Decision(outcome: .transcriptMissing, heardApps: [], tier: nil)
         }
         let transcript = withoutWebAddresses(rawTranscript)
-        let slot = readSlot(RealtimeVoiceVerbs.foldedTokens(transcript), among: names, menuWords: menuWords)
+        // A word of the call's own target — its query, the offered labels, the
+        // element under the owner's pointer — is a thing inside the app, not a
+        // missed app name: live 2026-10-02 90A952DF, "click on the internet one,
+        // this one" with the pointer on a page's "Internet" link was refused
+        // heardUnavailable. The same evidence `withoutWordsInsideTheNamedApp` uses.
+        let slot = readSlot(RealtimeVoiceVerbs.foldedTokens(transcript), among: names, menuWords: menuWords + targetWords)
         var decision = decideHeard(transcript: transcript, named: named, among: names, afterHeardRefusal: afterHeardRefusal,
                                    toolName: toolName, targetWords: targetWords, frontmostApp: frontmostApp,
                                    contentWords: contentWords, namedIsBrowser: namedIsBrowser)

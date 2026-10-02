@@ -998,6 +998,9 @@ final class RealtimeVoiceConnection {
         let recentOffers = [turn.latestMenuOffer, turn.previousTurnMenuOffer, turn.latestScreenOffer, turn.previousTurnScreenOffer]
             .compactMap { $0 }.filter { waitStart - $0.uptime <= RealtimeOpenAppTool.previousTurnOfferMaximumAgeSeconds }
             .map { (app: $0.app, labels: $0.candidates.flatMap(\.path) + $0.elements.map(\.name)) }
+            // "this one": the element under the owner's pointer at key-down is the call's target too.
+            + (call.underPointer ? [turn.keyDownPointer].compactMap { $0 }.compactMap { pointer in
+                pointer.candidate.map { (app: pointer.app, labels: [$0.name]) } } : [])
         let released = turn.lastAudioSentUptime ?? waitStart
         let transcript = await turn.waitForHeard(until: released + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds)
         let waitedMs = Int(((ProcessInfo.processInfo.systemUptime - waitStart) * 1000).rounded())
