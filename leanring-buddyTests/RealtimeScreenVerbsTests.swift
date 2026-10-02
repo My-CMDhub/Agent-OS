@@ -225,18 +225,31 @@ struct RealtimeScreenVerbsTests {
     private func resolve(_ call: RealtimeToolCall, thisTurn: [RealtimeScreenCandidate]? = nil, display: CGRect? = nil,
                          pointer: RealtimeScreenTarget? = nil,
                          hit: @escaping @Sendable (CGPoint) -> RealtimeScreenHit = { _ in .nothing }) async -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
-        await RealtimeOpenAppTool.resolveScreenTarget(
+        // As production calls it: a name not in an offer is looked up on the live screen.
+        let snapshot = cursorSnapshot
+        let (screen, bundle) = (self.screen, cursorBundle)
+        return await RealtimeOpenAppTool.resolveScreenTarget(
             call: call, thisTurn: thisTurn.map { RealtimeStandingOffer(candidates: [], app: cursorBundle, uptime: 1_000, elements: $0) },
             previousTurn: nil, followUpConfirmed: nil, confirmedByYes: false, now: 1_000,
-            screenshotDisplay: display, keyDownPointer: pointer, hitTest: hit)
+            screenshotDisplay: display, keyDownPointer: pointer,
+            lookUp: { name in
+                .success(RealtimeScreenLookup(candidates: RealtimeScreenVerbs.liveCandidates(named: name, fromSnapshotResponse: snapshot,
+                                                                                             screens: [screen]), app: bundle))
+            },
+            hitTest: hit)
     }
 
     @Test func aPointByNameNeedsTheOfferAndAPointByPositionNeedsOnlyTheScreenshot() async throws {
         let models = candidate("Models", CGRect(x: 20, y: 600, width: 200, height: 24), role: "AXGroup")
         let byName = RealtimeToolCall(callID: "a", name: "point_at", appName: "Cursor", elementName: "Models")
         #expect(try await resolve(byName, thisTurn: [models]).get().source == .thisTurn)
-        // The live receipt violation (BE391D): no offer, so nothing to point at by name.
-        if case .failure(let refusal) = await resolve(byName) { #expect(refusal.error == "notOffered") } else { Issue.record("pointed unoffered") }
+        // No offer: the name is looked up on the live screen (BE391D pointed at an unoffered
+        // name; since H2 the live lookup is what names it, and a name it cannot find is refused).
+        let general = try await resolve(RealtimeToolCall(callID: "g", name: "point_at", appName: "Cursor", elementName: "General")).get()
+        #expect(general.source == .liveName && general.candidate?.name == "General" && general.app == cursorBundle)
+        if case .failure(let refusal) = await resolve(RealtimeToolCall(callID: "n", name: "point_at", appName: "Cursor", elementName: "Billing")) {
+            #expect(refusal.error == "elementNotFound")
+        } else { Issue.record("pointed at a name that is not on screen") }
 
         // A position: mapped on the screenshot's display, hit-tested, no offer needed.
         let seen = PointBox()
@@ -343,7 +356,8 @@ struct RealtimeScreenVerbsTests {
         #expect(press["requireAtPoint"] as? Bool == true)
         #expect((press["nearPoint"] as? [String: Double])?["y"] == 883)
         #expect(press["expectApp"] as? String == "Cursor")
-        // Nothing resolved: refused before the harness.
+        // The line builder's own backstop: production resolves a target first (a live
+        // lookup when nothing was offered), so a nil target here means none was resolved.
         func error(_ result: Result<String, RealtimeToolRefusal>) -> String? {
             if case .failure(let refusal) = result { return refusal.error }
             return nil
