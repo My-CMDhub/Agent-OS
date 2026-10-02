@@ -184,6 +184,54 @@ struct HandsVoiceTests {
         #expect(RealtimeHeardCheck.siteRefusal(transcript: nil, url: "https://www.linkedin.com/")?["error"] as? String == "heardUnavailable")
     }
 
+    // Review 2026-10-02: a redirector passes the site check on its own host, and
+    // "don't open evil.com" names the site it forbids.
+    @Test func openURLRefusesARedirectAndASiteTheOwnerSaidNotToOpen() {
+        func error(_ heard: String, _ url: String) -> String? { RealtimeHeardCheck.siteRefusal(transcript: heard, url: url)?["error"] as? String }
+        for url in ["https://www.linkedin.com/redir/redirect?url=https://evil.example/", "https://www.linkedin.com/redir?u=HTTPS%3A%2F%2Fevil.example",
+                    "https://www.linkedin.com/feed/#next=http://evil.example"] {
+            #expect(error("open linkedin", url) == "urlCarriesAnotherAddress", "\(url)")
+        }
+        #expect(error("open linkedin", "https://www.linkedin.com/search/results/?keywords=swift") == nil)
+        #expect(error("don't open evil.com", "https://evil.com/") == "heardSiteMismatch")
+        #expect(error("do not go to evil dot com", "https://evil.com/") == "heardSiteMismatch")
+        #expect(error("don\u{2019}t open evil.com, open linkedin", "https://evil.com/") == "heardSiteMismatch")
+        #expect(error("don't open evil.com, open linkedin", "https://www.linkedin.com/") == nil)
+        #expect(error("No, open LinkedIn", "https://www.linkedin.com/") == nil)      // C1AAF61A's turn: "no" is its own clause
+    }
+
+    // The call site (RealtimeVoiceConnection `heard?.refusal ?? siteRefusal`) is the only
+    // defence against a URL a page planted: open_url names no app, so no heard check runs.
+    @Test func aSiteTheOwnerDidNotNameNeverReachesTheHarness() async throws {
+        final class Requests: @unchecked Sendable {
+            private let lock = NSLock()
+            private var lines: [String] = []
+            func add(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return lines.count }
+        }
+        let requests = Requests()
+        let connection = RealtimeVoiceConnection(stack: .geminiLive, harnessAnswer: { line in requests.add(line); return "{}" })
+        func openURL(_ url: String, heard: String) async throws -> String? {
+            try await connection.beginTurn()
+            try await connection.endTurn()
+            connection.handle(["serverContent": ["inputTranscription": ["text": heard]]], arrivalUptime: ProcessInfo.processInfo.systemUptime)
+            connection.handle(["toolCall": ["functionCalls": [["id": "u", "name": "open_url", "args": ["url": url]]]]],
+                              arrivalUptime: ProcessInfo.processInfo.systemUptime)
+            let turn = connection.turn
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            while turn.decisions.first?.dispatch == nil, ProcessInfo.processInfo.systemUptime < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            return turn.decisions.first?.dispatch?.result["error"] as? String
+        }
+        #expect(try await openURL("https://evil.example/", heard: "open linkedin") == "heardSiteMismatch")
+        #expect(try await openURL("https://www.linkedin.com/redir?url=https://evil.example/", heard: "open linkedin") == "urlCarriesAnotherAddress")
+        #expect(requests.count == 0)
+        // The control that must move: the owner's own site reaches the harness.
+        _ = try await openURL("https://www.linkedin.com/", heard: "open linkedin")
+        #expect(requests.count == 1)
+    }
+
     // MARK: 3. The heard check (rows 15, 18, 28)
 
     private func app(_ path: String) -> RealtimeVoiceVerbs.AppName {

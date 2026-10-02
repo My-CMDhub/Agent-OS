@@ -474,25 +474,47 @@ nonisolated enum RealtimeHeardCheck {
         return name.isEmpty ? nil : name
     }
 
+    /// Words that, within three words before the site in the same clause, say
+    /// NOT to open it: "don't open evil.com" ("don't" folds to "don", "t").
+    static let siteNegations: Set<String> = ["not", "no", "never", "dont", "don", "t", "nt", "cannot", "without", "instead"]
+
     /// Whether the owner's words say the site: as one word, or run together
-    /// from consecutive words ("linked in"). Never letters inside a word.
+    /// from consecutive words ("linked in"). Never letters inside a word, and
+    /// never just after a negation in its own clause ("No, open LinkedIn" is two).
     static func heardSite(_ transcript: String, siteName: String) -> Bool {
-        let spoken = RealtimeVoiceVerbs.foldedTokens(transcript)
-        return spoken.indices.contains { start in
-            var joined = ""
-            for word in spoken[start...] {
-                joined += word
-                if joined == siteName { return true }
-                if !siteName.hasPrefix(joined) { return false }
+        transcript.split(whereSeparator: { ",;:.!?\n".contains($0) }).contains { clause in
+            let spoken = RealtimeVoiceVerbs.foldedTokens(String(clause))
+            return spoken.indices.contains { start in
+                guard !spoken[max(0, start - 3)..<start].contains(where: siteNegations.contains) else { return false }
+                var joined = ""
+                for word in spoken[start...] {
+                    joined += word
+                    if joined == siteName { return true }
+                    if !siteName.hasPrefix(joined) { return false }
+                }
+                return false
             }
-            return false
         }
+    }
+
+    /// A URL that carries another address in its query or fragment: a
+    /// redirector ("linkedin.com/redir?url=https://evil.example") passes the
+    /// site check on its own host and lands somewhere else.
+    static func carriesAnotherAddress(_ url: String) -> Bool {
+        guard let components = URLComponents(string: url) else { return false }
+        let tail = ((components.percentEncodedQuery ?? "") + "#" + (components.percentEncodedFragment ?? "")).lowercased()
+        return tail.contains("://") || tail.contains("%3a%2f%2f")
     }
 
     /// open_url's heard check: the owner's words must name the site, or nothing
     /// is opened (a page the owner never mentioned is the model's idea). nil proceeds.
     static func siteRefusal(transcript: String?, url: String?) -> [String: Any]? {
         guard let url, let site = siteName(of: url) else { return nil }   // the harness refuses a bad URL itself
+        if carriesAnotherAddress(url) {
+            return ["ok": false, "status": NSNull(), "error": "urlCarriesAnotherAddress",
+                    "message": "that address carries another address inside it, so it may land on a different site. Nothing was opened. "
+                        + "Open the site's own address instead."]
+        }
         guard let transcript, !transcript.allSatisfy(\.isWhitespace) else {
             return ["ok": false, "status": NSNull(), "error": unavailableError,
                     "message": "the owner's words were not transcribed in time to confirm the site. Nothing was opened. Ask them to say it again."]
