@@ -423,7 +423,9 @@ enum EscalationLadder {
     static func captureRegion(
         _ region: CGRect,
         on display: DisplayInfo,
-        processIdentifier: pid_t
+        processIdentifier: pid_t,
+        /// Secrets the inspection found, blacked out before encoding (`ScreenSecretGuard`).
+        redactions: [ScreenSecretGuard.Redaction] = []
     ) async throws -> CaptureOutcome {
         let startedAt = Date()
 
@@ -474,13 +476,21 @@ enum EscalationLadder {
         configuration.width = size.width
         configuration.height = size.height
 
-        let image: CGImage
+        let capturedImage: CGImage
         do {
-            image = try await SCScreenshotManager.captureImage(
+            capturedImage = try await SCScreenshotManager.captureImage(
                 contentFilter: filter, configuration: configuration
             )
         } catch {
             throw CaptureFailure.captureFailed(String(describing: error))
+        }
+        // The crop is its own "display": the same mapping, against `clipped`.
+        let drawn = ScreenSecretGuard.drawn(
+            redactions, displayFrame: clipped,
+            imageSize: CGSize(width: capturedImage.width, height: capturedImage.height)
+        )
+        guard let image = ScreenSecretGuard.blackedOut(capturedImage, pixelRects: drawn.map(\.rect)) else {
+            throw CaptureFailure.encodingFailed
         }
 
         guard let jpeg = NSBitmapImageRep(cgImage: image)
@@ -521,7 +531,8 @@ enum EscalationLadder {
     static func captureSynchronously(
         region: CGRect,
         on display: DisplayInfo,
-        processIdentifier: pid_t
+        processIdentifier: pid_t,
+        redactions: [ScreenSecretGuard.Redaction] = []
     ) -> Result<CaptureOutcome, Error> {
         let box = OutcomeBox()
         let semaphore = DispatchSemaphore(value: 0)
@@ -529,7 +540,7 @@ enum EscalationLadder {
         Task.detached {
             do {
                 box.result = .success(try await captureRegion(
-                    region, on: display, processIdentifier: processIdentifier
+                    region, on: display, processIdentifier: processIdentifier, redactions: redactions
                 ))
             } catch {
                 box.result = .failure(error)

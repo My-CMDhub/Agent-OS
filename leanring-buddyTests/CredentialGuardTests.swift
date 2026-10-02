@@ -13,6 +13,7 @@
 //  carries a contiguous token a secret scanner (ours or a host's) would flag.
 //
 
+import ApplicationServices
 import CoreGraphics
 import Foundation
 import Testing
@@ -176,5 +177,88 @@ struct CredentialGuardTests {
                                            outcome: "ok", milliseconds: 1)
         #expect(!line.contains(key))
         #expect(line.contains("[REDACTED:anthropicKey]"))
+    }
+
+    // MARK: Screenshot guard
+
+    /// The fail-closed table: anything short of a finished, whole, located check withholds.
+    @Test func anIncompleteCheckWithholdsTheScreenshot() {
+        typealias Inspection = ScreenSecretGuard.Inspection
+        func with(_ change: (inout Inspection) -> Void) -> Inspection {
+            var inspection = Inspection()
+            change(&inspection)
+            return inspection
+        }
+        #expect(ScreenSecretGuard.withholdReason(nil) == "walkDeadline")
+        #expect(ScreenSecretGuard.withholdReason(Inspection()) == nil)
+        #expect(ScreenSecretGuard.withholdReason(with { $0.failure = "noFocusedWindow" }) == "noFocusedWindow")
+        #expect(ScreenSecretGuard.withholdReason(with { $0.stopReasons = ["timeLimit"] }) == "timeLimit")
+        #expect(ScreenSecretGuard.withholdReason(with { $0.subtreesLostToFailedReads = 1 }) == "subtreesLost")
+        #expect(ScreenSecretGuard.withholdReason(with { $0.focusChangedDuringWalk = true }) == "focusChanged")
+        #expect(ScreenSecretGuard.withholdReason(with { $0.unlocatedSecrets = 1 }) == "unlocatedSecret")
+        // Clicky or a password manager in front: excluded from the capture, nothing to walk.
+        #expect(ScreenSecretGuard.withholdReason(with { $0.notWalkedReason = "passwordManager" }) == nil)
+        // Redactions found is not a reason: they are drawn.
+        #expect(ScreenSecretGuard.withholdReason(with {
+            $0.redactions = [.init(kind: "secureField", appKitRect: CGRect(x: 0, y: 0, width: 9, height: 9), source: "frame")]
+        }) == nil)
+    }
+
+    @Test func passwordBoxesAndSecretsBecomeRedactions() {
+        let key = "sk-ant-" + "AbCdEf0123456789ghIJkl"
+        let field = CGRect(x: 100, y: 500, width: 200, height: 24)
+        let anyElement = AXUIElementCreateSystemWide()
+        func node(role: String = "AXStaticText", subrole: String? = nil, title: String? = nil, value: String? = nil,
+                  frame: CGRect = field, subroleReadFailed: Bool = false, element: AXUIElement? = nil) -> AccessibilityElementNode {
+            AccessibilityElementNode(role: role, subrole: subrole, title: title, value: value, frameInAppKitCoordinates: frame,
+                                     depth: 1, children: [], subroleReadFailed: subroleReadFailed, accessibilityElement: element)
+        }
+        let nodes = [
+            node(role: "AXTextField", subrole: "AXSecureTextField", value: "••••"),       // a password box
+            node(role: "AXSecureTextField", value: "••••", frame: .zero),                 // scrolled out: nothing to cover
+            node(role: "AXTextField", value: "hello", subroleReadFailed: true),          // may be one
+            node(value: "key: \(key)", element: anyElement),                              // exact glyph rect
+            node(title: "token=\(key)"),                                                  // a title: the frame
+            node(value: "plain words"),
+            node(value: key, frame: .zero)                                                 // nowhere to draw
+        ]
+        // AX top-left (110, 376) on a 900-pt primary display is AppKit y = 900 - 376 - 20 = 504.
+        let found = ScreenSecretGuard.redactions(in: nodes, primaryDisplayHeight: 900) { _, range in
+            #expect(range == NSRange(location: 5, length: (key as NSString).length))
+            return CGRect(x: 110, y: 376, width: 150, height: 20)
+        }
+        // "token=<key>": the key's own kind wins the overlap with the named value.
+        #expect(found.redactions.map(\.kind) == ["secureField", "secureField", "anthropicKey", "anthropicKey"])
+        #expect(found.redactions[2] == .init(kind: "anthropicKey", appKitRect: CGRect(x: 110, y: 504, width: 150, height: 20), source: "range"))
+        #expect(found.redactions[3].appKitRect == field && found.redactions[3].source == "frame")
+        #expect(found.unlocated == 1)
+        // The app did not answer AXBoundsForRange: the element's frame.
+        let fallback = ScreenSecretGuard.redactions(in: [node(value: key, element: anyElement)], primaryDisplayHeight: 900) { _, _ in nil }
+        #expect(fallback.redactions == [.init(kind: "anthropicKey", appKitRect: field, source: "frame")])
+    }
+
+    /// Drawn on the real pixels: black inside the padded rect, untouched outside.
+    @Test func theBlackoutLandsOnThePixels() throws {
+        let colorSpace = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+        let white = try #require(CGContext(data: nil, width: 40, height: 20, bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace,
+                                           bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue))
+        white.setFillColor(CGColor(gray: 1, alpha: 1))
+        white.fill(CGRect(x: 0, y: 0, width: 40, height: 20))
+        let image = try #require(white.makeImage())
+        // A 40x20 pt display captured 1:1; a 10x4 pt secret at AppKit (10, 12) is top-left y 4, padded by 2.
+        let drawn = ScreenSecretGuard.drawn([.init(kind: "jwt", appKitRect: CGRect(x: 10, y: 12, width: 10, height: 4), source: "range")],
+                                            displayFrame: CGRect(x: 0, y: 0, width: 40, height: 20), imageSize: CGSize(width: 40, height: 20))
+        #expect(drawn.map(\.rect) == [CGRect(x: 8, y: 2, width: 14, height: 8)])
+        let redacted = try #require(ScreenSecretGuard.blackedOut(image, pixelRects: drawn.map(\.rect)))
+        // Read back top-left pixels in a known layout.
+        let reader = try #require(CGContext(data: nil, width: 40, height: 20, bitsPerComponent: 8, bytesPerRow: 160, space: colorSpace,
+                                            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue))
+        reader.draw(redacted, in: CGRect(x: 0, y: 0, width: 40, height: 20))
+        let bytes = try #require(reader.data).assumingMemoryBound(to: UInt8.self)
+        func isBlack(x: Int, topY: Int) -> Bool { bytes[topY * 160 + x * 4] < 10 }   // blue channel, top row first
+        #expect(isBlack(x: 8, topY: 2) && isBlack(x: 21, topY: 9) && isBlack(x: 15, topY: 5))
+        #expect(!isBlack(x: 7, topY: 5) && !isBlack(x: 22, topY: 5) && !isBlack(x: 15, topY: 1) && !isBlack(x: 15, topY: 10))
+        // Nothing to draw: the same image, not a redraw that could fail.
+        #expect(ScreenSecretGuard.blackedOut(image, pixelRects: []) === image)
     }
 }

@@ -20,6 +20,8 @@ struct CompanionScreenCapture {
     let displayFrame: CGRect
     let screenshotWidthInPixels: Int
     let screenshotHeightInPixels: Int
+    /// What the credential guard did to this image (`ScreenSecretGuard`).
+    var secretGuard: ScreenSecretGuard.Report? = nil
 }
 
 @MainActor
@@ -29,7 +31,18 @@ enum CompanionScreenCaptureUtility {
 
     /// Captures the display that contains the focused window first when possible.
     /// Falls back to all visible displays when focus cannot be resolved safely.
+    ///
+    /// Every caller gets the credential guard: throws `ScreenSecretGuard.Withheld`
+    /// while secure input is on or when the frontmost window could not be checked
+    /// for secrets in time; otherwise password-manager windows are left out and
+    /// secrets in the focused window are blacked out before encoding.
     static func captureAllScreensAsJPEG() async throws -> [CompanionScreenCapture] {
+        let secureInput = SecureInputState.current()
+        guard !secureInput.isOn else { throw ScreenSecretGuard.withheldForSecureInput(secureInput) }
+        // Started first, so the walk runs beside the capture, not in front of it.
+        // Detached: AX is cross-process IPC and never runs on main.
+        let inspection = Task.detached { await ScreenSecretGuard.inspectWithinDeadline() }
+
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
 
         guard !content.displays.isEmpty else {
@@ -44,6 +57,12 @@ enum CompanionScreenCaptureUtility {
         let ownAppWindows = content.windows.filter { window in
             window.owningApplication?.bundleIdentifier == appBundleIdentifier
         }
+        // A password manager's windows are never photographed at all.
+        let passwordManagerWindows = content.windows.filter { window in
+            CredentialGuard.isPasswordManager(window.owningApplication?.bundleIdentifier)
+        }
+        let excludedWindows = ownAppWindows + passwordManagerWindows
+        let secretGuard = SecretGuardInput(inspection: inspection, excludedWindowCount: passwordManagerWindows.count)
 
         // Build a lookup from display ID to NSScreen so we can use AppKit-coordinate
         // frames instead of CG-coordinate frames. NSEvent.mouseLocation and NSScreen.frame
@@ -66,7 +85,8 @@ enum CompanionScreenCaptureUtility {
                 displayIndex: focusedDisplayIndex,
                 totalDisplayCount: content.displays.count,
                 displayLookup: nsScreenByDisplayID,
-                excludingWindows: ownAppWindows,
+                excludingWindows: excludedWindows,
+                secretGuard: secretGuard,
                 mouseLocation: mouseLocation,
                 labelMode: .focused
             ) {
@@ -96,7 +116,8 @@ enum CompanionScreenCaptureUtility {
                 displayIndex: displayIndex,
                 totalDisplayCount: sortedDisplays.count,
                 displayLookup: nsScreenByDisplayID,
-                excludingWindows: ownAppWindows,
+                excludingWindows: excludedWindows,
+                secretGuard: secretGuard,
                 mouseLocation: mouseLocation,
                 labelMode: .fallback
             ) {
@@ -137,12 +158,19 @@ enum CompanionScreenCaptureUtility {
         case fallback
     }
 
+    private struct SecretGuardInput {
+        let inspection: Task<ScreenSecretGuard.Inspection?, Never>
+        /// Password-manager windows left out of the filter.
+        let excludedWindowCount: Int
+    }
+
     private static func captureDisplay(
         _ display: SCDisplay,
         displayIndex: Int,
         totalDisplayCount: Int,
         displayLookup: [CGDirectDisplayID: NSScreen],
         excludingWindows: [SCWindow],
+        secretGuard: SecretGuardInput,
         mouseLocation: CGPoint,
         labelMode: CaptureLabelMode
     ) async throws -> CompanionScreenCapture? {
@@ -164,9 +192,14 @@ enum CompanionScreenCaptureUtility {
             configuration.width = Int(CGFloat(maxDimension) * aspectRatio)
         }
 
-        let cgImage = try await SCScreenshotManager.captureImage(
+        let capturedImage = try await SCScreenshotManager.captureImage(
             contentFilter: filter,
             configuration: configuration
+        )
+        // Before encoding: blacked out, or withheld (throws) — never sent unchecked.
+        let (cgImage, secretGuardReport) = try ScreenSecretGuard.guarded(
+            capturedImage, displayFrame: displayFrame, inspection: await secretGuard.inspection.value,
+            excludedWindowCount: secretGuard.excludedWindowCount
         )
 
         guard let jpegData = NSBitmapImageRep(cgImage: cgImage)
@@ -196,7 +229,8 @@ enum CompanionScreenCaptureUtility {
             displayHeightInPoints: Int(displayFrame.height),
             displayFrame: displayFrame,
             screenshotWidthInPixels: configuration.width,
-            screenshotHeightInPixels: configuration.height
+            screenshotHeightInPixels: configuration.height,
+            secretGuard: secretGuardReport
         )
     }
 

@@ -3780,6 +3780,18 @@ final class HarnessServer {
             return (payload, "applicationNotCapturable")
         }
 
+        // Secrets in the inspected windows' text are blacked out of the photograph;
+        // one that cannot be located refuses it (`ScreenSecretGuard`, fail closed).
+        let secrets = ScreenSecretGuard.redactions(
+            in: inspection.windows.flatMap(\.nodes), primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height
+        )
+        payload["secretRedactions"] = secrets.redactions.count
+        guard secrets.unlocated == 0 else {
+            payload["message"] = "\(secrets.unlocated) secret-shaped text(s) in this app have no readable frame, "
+                + "so they could not be blacked out — nothing was photographed"
+            return (payload, "captureFailed")
+        }
+
         let displays = EscalationLadder.displays()
         guard let display = EscalationLadder.display(holding: plan.region, among: displays) else {
             payload["message"] = EscalationLadder.CaptureFailure.regionOffScreen.description
@@ -3788,7 +3800,8 @@ final class HarnessServer {
 
         switch EscalationLadder.captureSynchronously(
             region: plan.region, on: display,
-            processIdentifier: application.processIdentifier
+            processIdentifier: application.processIdentifier,
+            redactions: secrets.redactions
         ) {
         case .failure(let error):
             payload["message"] = String(describing: error)

@@ -16,6 +16,7 @@
 //
 
 import AppKit
+import ApplicationServices
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
@@ -273,5 +274,267 @@ nonisolated struct SecureInputState: Equatable, Sendable {
     var jsonObject: [String: Any] {
         ["on": isOn, "holderPid": holderPID.map { Int($0) as Any } ?? NSNull(),
          "holder": holderName ?? NSNull(), "holderIsFrontmost": holderIsFrontmost ?? NSNull()]
+    }
+}
+
+/// The outgoing-screenshot half: walk the frontmost app's focused window beside
+/// the capture, black out password boxes and every scanner match on the image
+/// before it is encoded, and WITHHOLD the image when that check could not be
+/// completed in time. Fail closed: a picture nobody could check is not sent.
+/// Limit (v1): other apps' windows on the same display are not text-scanned.
+nonisolated enum ScreenSecretGuard {
+    /// ponytail: one fixed 600 ms from the start of a capture, which it runs beside
+    /// (capture ~230-350 ms). Walks measured 2026-09: System Settings ~360 ms,
+    /// Finder 112-786 ms, Mail ~1.8 s - so Mail, and a cold Finder, go out blind.
+    /// Read `walkMs` and `withheld` in secret-guard.log before moving it.
+    static let walkDeadlineSeconds: Double = 0.6
+    static let logFileName = "secret-guard.log"
+    /// Points added around every blackout, for anti-aliased edges and a caret.
+    static let paddingPoints: CGFloat = 2
+
+    struct Redaction: Equatable, Sendable {
+        /// A `SecretScanner.Kind` raw value, or `secureField`.
+        let kind: String
+        let appKitRect: CGRect
+        /// `range` when the app answered AXBoundsForRange, else `frame` (the element's).
+        let source: String
+    }
+
+    /// What the walk found. Rects and counts only - never an element's text.
+    struct Inspection: Sendable {
+        var app: String?
+        /// Set when nothing needed walking: Clicky or a password manager in front
+        /// (both are excluded from the capture itself).
+        var notWalkedReason: String?
+        /// The walk threw: `noFocusedWindow`, `screenIsLocked`, ...
+        var failure: String?
+        var stopReasons: [String] = []
+        var subtreesLostToFailedReads = 0
+        var focusChangedDuringWalk = false
+        /// A secret was read in an element with no usable frame: it may be on
+        /// screen and cannot be covered.
+        var unlocatedSecrets = 0
+        var redactions: [Redaction] = []
+        var nodeCount = 0
+        var milliseconds = 0
+    }
+
+    struct Drawn: Sendable {
+        let kind: String
+        /// Top-left image pixels.
+        let rect: CGRect
+    }
+
+    struct Report: Sendable {
+        /// `clean`, `redacted`, `notWalked` or `withheld`.
+        var outcome: String
+        var reason: String?
+        var inspection: Inspection?
+        var excludedWindowCount = 0
+        var drawn: [Drawn] = []
+        var secureInput: SecureInputState?
+
+        /// Counts only - what secret-guard.log carries.
+        var jsonObject: [String: Any] {
+            var line: [String: Any] = [
+                "kind": "capture", "outcome": outcome, "reason": reason ?? NSNull(),
+                "app": inspection?.app ?? NSNull(), "walkMs": inspection.map { $0.milliseconds as Any } ?? NSNull(),
+                "nodeCount": inspection?.nodeCount ?? 0, "excludedWindowCount": excludedWindowCount,
+                "redactionsFound": inspection?.redactions.count ?? 0, "drawnRectCount": drawn.count,
+                "drawnByKind": Dictionary(drawn.map { ($0.kind, 1) }, uniquingKeysWith: +)
+            ]
+            if let secureInput { line["secureInput"] = secureInput.jsonObject }
+            return line
+        }
+    }
+
+    struct Withheld: Error {
+        let report: Report
+    }
+
+    // MARK: Pure
+
+    /// The fail-closed table: why the screenshot may not go out, or nil when it
+    /// may. nil inspection = the walk missed `walkDeadlineSeconds`.
+    static func withholdReason(_ inspection: Inspection?) -> String? {
+        guard let inspection else { return "walkDeadline" }
+        if inspection.notWalkedReason != nil { return nil }
+        if let failure = inspection.failure { return failure }
+        if let stop = inspection.stopReasons.sorted().first { return stop }
+        if inspection.subtreesLostToFailedReads > 0 { return "subtreesLost" }
+        if inspection.focusChangedDuringWalk { return "focusChanged" }
+        if inspection.unlocatedSecrets > 0 { return "unlocatedSecret" }
+        return nil
+    }
+
+    /// What to black out among `nodes`: every on-screen box that might be a
+    /// password box, and every scanner match in a name or value - at the exact
+    /// glyph rect when `boundsForRange` answers (AX coordinates), else the
+    /// element's frame. A match with neither is counted as unlocated.
+    static func redactions(
+        in nodes: [AccessibilityElementNode], primaryDisplayHeight: CGFloat,
+        boundsForRange: (AXUIElement, NSRange) -> CGRect? = axBounds(of:range:)
+    ) -> (redactions: [Redaction], unlocated: Int) {
+        var found: [Redaction] = []
+        var unlocated = 0
+        for node in nodes {
+            let frame = node.frameInAppKitCoordinates
+            let onScreen = frame.width > 0 && frame.height > 0
+            // Its value is bullets, never the password; a zero-frame one is scrolled out.
+            if node.mightBeSecure {
+                if onScreen { found.append(Redaction(kind: "secureField", appKitRect: frame, source: "frame")) }
+                continue
+            }
+            for (text, isValue) in [(node.title, false), (node.elementDescription, false), (node.value, true)] {
+                guard let text else { continue }
+                for match in SecretScanner.matches(in: text.raw) {
+                    if isValue, let element = node.accessibilityElement, let bounds = boundsForRange(element, match.range) {
+                        let rect = AccessibilityTreeWalker.convertAccessibilityFrameToAppKitFrame(
+                            bounds, primaryDisplayHeightInPoints: primaryDisplayHeight)
+                        if rect.width > 0, rect.height > 0 {
+                            found.append(Redaction(kind: match.kind.rawValue, appKitRect: rect, source: "range"))
+                            continue
+                        }
+                    }
+                    if onScreen {
+                        found.append(Redaction(kind: match.kind.rawValue, appKitRect: frame, source: "frame"))
+                    } else {
+                        unlocated += 1
+                    }
+                }
+            }
+        }
+        return (found, unlocated)
+    }
+
+    /// The redactions that land on an image of `displayFrame`, padded, in pixels.
+    static func drawn(_ redactions: [Redaction], displayFrame: CGRect, imageSize: CGSize) -> [Drawn] {
+        redactions.compactMap { redaction in
+            CredentialGuard.imagePixelRect(
+                forAppKitRect: redaction.appKitRect.insetBy(dx: -paddingPoints, dy: -paddingPoints),
+                displayFrame: displayFrame, imageSize: imageSize
+            ).map { Drawn(kind: redaction.kind, rect: $0.integral) }
+        }
+    }
+
+    /// `image` with `rects` (top-left pixels) filled black; nil if it cannot be redrawn.
+    static func blackedOut(_ image: CGImage, pixelRects: [CGRect]) -> CGImage? {
+        guard !pixelRects.isEmpty else { return image }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { return nil }
+        let height = CGFloat(image.height)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        // CGContext is bottom-left; the rects are top-left.
+        for rect in pixelRects { context.fill(CGRect(x: rect.minX, y: height - rect.maxY, width: rect.width, height: rect.height)) }
+        return context.makeImage()
+    }
+
+    // MARK: Live
+
+    /// The exact on-screen rect of `range` inside `element`'s text, in AX
+    /// coordinates; nil when the app does not answer.
+    static func axBounds(of element: AXUIElement, range: NSRange) -> CGRect? {
+        var cfRange = CFRange(location: range.location, length: range.length)
+        guard let parameter = AXValueCreate(.cfRange, &cfRange) else { return nil }
+        var value: AnyObject?
+        guard AXUIElementCopyParameterizedAttributeValue(
+                element, kAXBoundsForRangeParameterizedAttribute as CFString, parameter, &value) == .success,
+              let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var rect = CGRect.zero
+        guard AXValueGetValue(value as! AXValue, .cgRect, &rect), rect.width > 0, rect.height > 0 else { return nil }
+        return rect
+    }
+
+    /// Blocking cross-process walk of the frontmost app's focused window. Call
+    /// off main: `inspectWithinDeadline` gives it a thread of its own.
+    static func inspectFrontmostWindow(timeLimitSeconds: Double) -> Inspection {
+        let startedAt = Date()
+        var inspection = Inspection()
+        func finished() -> Inspection {
+            inspection.milliseconds = Int(Date().timeIntervalSince(startedAt) * 1000)
+            return inspection
+        }
+        guard AXIsProcessTrusted() else {
+            inspection.failure = "accessibilityPermissionNotGranted"
+            return finished()
+        }
+        // Bounded before the first cross-process read (`focusedWindowTarget`).
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
+        inspection.app = AccessibilityTreeWalker.focusedApplication()?.bundleIdentifier
+        if HarnessServer.isHarnessItself(bundleIdentifier: inspection.app) {
+            inspection.notWalkedReason = "ownApp"
+            return finished()
+        }
+        if CredentialGuard.isPasswordManager(inspection.app) {
+            inspection.notWalkedReason = "passwordManager"
+            return finished()
+        }
+        do {
+            let target = try AccessibilityTreeWalker.focusedWindowTarget()
+            inspection.app = target.application.bundleIdentifier
+            let remaining = max(0.05, timeLimitSeconds - Date().timeIntervalSince(startedAt))
+            let snapshot = try AccessibilityTreeWalker.snapshotFocusedWindow(target, timeLimitInSeconds: remaining)
+            inspection.stopReasons = snapshot.walkStopReasons.map { String(describing: $0) }
+            inspection.subtreesLostToFailedReads = snapshot.subtreesLostToFailedReads
+            inspection.focusChangedDuringWalk = snapshot.focusChangedDuringWalk
+            inspection.nodeCount = snapshot.nodeCount
+            let found = redactions(in: snapshot.rootNode?.flattenedDescendants() ?? [],
+                                   primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height)
+            inspection.redactions = found.redactions
+            inspection.unlocatedSecrets = found.unlocated
+        } catch {
+            inspection.failure = (error as? AccessibilitySnapshotError).map { String(describing: $0) } ?? "walkFailed"
+        }
+        return finished()
+    }
+
+    /// The walk on its own thread, or nil once `walkDeadlineSeconds` pass.
+    static func inspectWithinDeadline() async -> Inspection? {
+        await RealtimeVoiceSession.value(within: walkDeadlineSeconds) {
+            inspectFrontmostWindow(timeLimitSeconds: walkDeadlineSeconds)
+        }
+    }
+
+    /// `image` of `displayFrame` made safe to send, or `Withheld`. Logs one
+    /// counts-only line either way.
+    static func guarded(_ image: CGImage, displayFrame: CGRect, inspection: Inspection?,
+                        excludedWindowCount: Int) throws -> (image: CGImage, report: Report) {
+        var report = Report(outcome: "clean", inspection: inspection, excludedWindowCount: excludedWindowCount)
+        if let reason = withholdReason(inspection) {
+            report.outcome = "withheld"
+            report.reason = reason
+            log(report)
+            throw Withheld(report: report)
+        }
+        if let notWalked = inspection?.notWalkedReason {
+            report.outcome = "notWalked"
+            report.reason = notWalked
+        }
+        report.drawn = drawn(inspection?.redactions ?? [], displayFrame: displayFrame,
+                             imageSize: CGSize(width: image.width, height: image.height))
+        guard let safe = blackedOut(image, pixelRects: report.drawn.map(\.rect)) else {
+            report.outcome = "withheld"
+            report.reason = "redactionFailed"
+            log(report)
+            throw Withheld(report: report)
+        }
+        if !report.drawn.isEmpty { report.outcome = "redacted" }
+        log(report)
+        return (safe, report)
+    }
+
+    /// The hand-over: nothing is photographed while a password is being typed.
+    static func withheldForSecureInput(_ state: SecureInputState) -> Withheld {
+        let report = Report(outcome: "withheld", reason: "secureInput", secureInput: state)
+        log(report)
+        return Withheld(report: report)
+    }
+
+    static func log(_ report: Report) {
+        MeasurementLogFile.appendJSONLine(report.jsonObject, toFileNamed: logFileName)
     }
 }

@@ -727,13 +727,15 @@ enum AccessibilityTreeWalker {
     static func snapshotFocusedWindow(
         _ target: FocusedWindowTarget,
         maximumDepth: Int = 120,
-        maximumNodeCount: Int = 25_000
+        maximumNodeCount: Int = 25_000,
+        timeLimitInSeconds: Double = 5.0
     ) throws -> AccessibilityWindowSnapshot {
         var snapshot = try snapshotWindow(
             target.window,
             of: target.application,
             maximumDepth: maximumDepth,
-            maximumNodeCount: maximumNodeCount
+            maximumNodeCount: maximumNodeCount,
+            timeLimitInSeconds: timeLimitInSeconds
         )
         snapshot.frontmostSource = target.frontmostSource
         return snapshot
@@ -750,7 +752,9 @@ enum AccessibilityTreeWalker {
         _ windowElement: AXUIElement,
         of application: NSRunningApplication,
         maximumDepth: Int = 120,
-        maximumNodeCount: Int = 25_000
+        maximumNodeCount: Int = 25_000,
+        /// The screenshot guard's walk is bounded far tighter than 5 s (`ScreenSecretGuard`).
+        timeLimitInSeconds: Double = 5.0
     ) throws -> AccessibilityWindowSnapshot {
         guard AXIsProcessTrusted() else {
             throw AccessibilitySnapshotError.accessibilityPermissionNotGranted
@@ -771,7 +775,8 @@ enum AccessibilityTreeWalker {
 
         var budget = AccessibilityWalkBudget(
             maximumDepth: maximumDepth,
-            maximumNodeCount: maximumNodeCount
+            maximumNodeCount: maximumNodeCount,
+            timeLimitInSeconds: timeLimitInSeconds
         )
         var deepestLevelReached = 0
         var timedOutNodePaths: [String] = []
