@@ -76,6 +76,21 @@ struct AccessibilityElementNode {
         !(error == .success || error == .noValue || error == .attributeUnsupported)
     }
 
+    /// Containers whose AXValue is never drawn as text: their text is in children,
+    /// which are read on their own. Measured 2026-10-02: Finder's AXWindow and
+    /// sidebar AXOutline list AXValue among their attributes and answer -25200
+    /// on every read, and that alone withheld every Finder screenshot.
+    nonisolated static let rolesWhoseValueIsNeverText: Set<String> = [
+        "AXWindow", "AXSheet", "AXDrawer", "AXOutline", "AXTable", "AXList", "AXBrowser",
+        "AXScrollArea", "AXSplitGroup", "AXToolbar", "AXTabGroup"
+    ]
+
+    /// A failed AXValue read that may hide on-screen text (`valueReadErrors`):
+    /// any role not listed above, so an unknown role still fails closed.
+    nonisolated static func valueReadFailureMayHideText(role: String, error: AXError) -> Bool {
+        subroleReadFailed(error) && !rolesWhoseValueIsNeverText.contains(role)
+    }
+
     /// The same two questions of a `HarnessServer.namedElements` entry (the wire form).
     nonisolated static func mightBeSecure(entry: [String: Any]) -> Bool {
         mightBeSecure(role: entry["role"] as? String ?? "", subrole: entry["subrole"] as? String,
@@ -1043,8 +1058,9 @@ enum AccessibilityTreeWalker {
             var rawValue: AnyObject?
             let valueError = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &rawValue)
             value = (rawValue as? String).flatMap { $0.isEmpty ? nil : $0 }
-            // Same predicate as the subrole: only noValue / attributeUnsupported mean "none".
-            if AccessibilityElementNode.subroleReadFailed(valueError) { valueReadErrors += 1 }
+            // Same predicate as the subrole (only noValue / attributeUnsupported mean
+            // "none"), counted only where the value could be on-screen text.
+            if AccessibilityElementNode.valueReadFailureMayHideText(role: role, error: valueError) { valueReadErrors += 1 }
         }
         let elementDescription = batched?.elementDescription
             ?? copyStringAttribute(from: element, attribute: kAXDescriptionAttribute)

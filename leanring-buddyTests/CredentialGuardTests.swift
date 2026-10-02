@@ -588,4 +588,56 @@ struct CredentialGuardTests {
         let mode = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
         #expect(mode?.intValue == 0o600)
     }
+
+    /// Finder's AXWindow and sidebar AXOutline answer AXValue with -25200 on every
+    /// read (measured 2026-10-02) and withheld every Finder screenshot. A
+    /// container's value is never on-screen text; a text role's still is.
+    @Test func aContainerValueFailureIsNotUnreadText() {
+        let failure = AXError.failure   // -25200
+        #expect(!AccessibilityElementNode.valueReadFailureMayHideText(role: "AXWindow", error: failure))
+        #expect(!AccessibilityElementNode.valueReadFailureMayHideText(role: "AXOutline", error: failure))
+        // Fail closed: text roles, and roles nobody has listed, still count.
+        #expect(AccessibilityElementNode.valueReadFailureMayHideText(role: "AXTextField", error: failure))
+        #expect(AccessibilityElementNode.valueReadFailureMayHideText(role: "AXStaticText", error: .cannotComplete))
+        #expect(AccessibilityElementNode.valueReadFailureMayHideText(role: "AXSomethingNew", error: failure))
+        // "No value" is not a failure for anyone.
+        #expect(!AccessibilityElementNode.valueReadFailureMayHideText(role: "AXTextField", error: .noValue))
+    }
+
+    /// The app in front has no window on this Space (Chrome frontmost, its
+    /// full-screen Space not the one showing, 2026-10-02): check the window the
+    /// picture actually shows, not nothing.
+    @Test func anAppWithNoWindowHereHandsTheCheckToTheWindowOnTop() {
+        let window = { (pid: pid_t, layer: Int) -> [String: Any] in
+            [kCGWindowOwnerPID as String: NSNumber(value: pid), kCGWindowLayer as String: NSNumber(value: layer)]
+        }
+        let bundles: [pid_t: String] = [100: "com.dhruvpatel.jarvis.agent", 200: "com.1password.1password",
+                                        300: "com.google.Chrome", 400: "com.apple.finder"]
+        let list = [window(400, 25), window(100, 0), window(200, 0), window(400, 0)]
+        let check = { (noWindow: Bool) in
+            ScreenSecretGuard.appToCheck(frontmost: (pid: 300, bundleIdentifier: bundles[300]), windowList: list, ownPID: 100,
+                                         bundleForPID: { bundles[$0] }, frontmostShowsNoWindow: noWindow)
+        }
+        #expect(check(false)! == (300, "frontmost"))
+        #expect(check(true)! == (400, "frontmostHasNoWindowHere"))
+        // Nothing ordinary on screen: withheld, not waved through.
+        #expect(ScreenSecretGuard.appToCheck(frontmost: (pid: 300, bundleIdentifier: bundles[300]), windowList: [window(100, 0)],
+                                             ownPID: 100, bundleForPID: { bundles[$0] }, frontmostShowsNoWindow: true) == nil)
+    }
+
+    /// Every clean / redacted probe run wrote its JPEG and no summary: `.path`
+    /// in `? : NSNull()` became a `(Bool) -> String` closure (2026-10-02).
+    @MainActor @Test func aProbeSummaryIsAlwaysWritten() throws {
+        let report = ScreenSecretGuard.Report(outcome: "clean", inspection: ScreenSecretGuard.Inspection())
+        let capture = CompanionScreenCapture(imageData: Data(), label: "screen", isCursorScreen: true, displayWidthInPoints: 1440,
+                                             displayHeightInPoints: 900, displayFrame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+                                             screenshotWidthInPixels: 1920, screenshotHeightInPixels: 1200, secretGuard: report)
+        let entry = SecretGuardProbe.captureEntry(capture, imageURL: URL(fileURLWithPath: "/tmp/probe-0.jpg"))
+        #expect(entry["image"] as? String == "/tmp/probe-0.jpg")
+        let line = SecretGuardProbe.summaryLine(["kind": "secretGuardProbe", "outcome": "clean", "captures": [entry]])
+        #expect(line.contains("\"outcome\":\"clean\""))
+        // Whatever slips in later, the run still leaves a file that says so.
+        let broken = SecretGuardProbe.summaryLine(["outcome": "clean", "captures": [["image": { (_: Bool) in "" }]]])
+        #expect(broken.contains("summaryNotSerialisable") && broken.contains("\"unserialisableKeys\":[\"captures\"]"))
+    }
 }

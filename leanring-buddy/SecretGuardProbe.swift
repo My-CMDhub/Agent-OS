@@ -46,13 +46,8 @@ enum SecretGuardProbe {
             summary["outcome"] = captures.first?.secretGuard?.outcome ?? "unguarded"
             summary["captures"] = captures.enumerated().map { index, capture -> [String: Any] in
                 let imageName = "secret-guard-probe-\(stamp)-\(index).jpg"
-                var entry = capture.secretGuard?.jsonObject ?? [:]
-                entry["image"] = write(capture.imageData, named: imageName) ? directoryURL.appendingPathComponent(imageName).path : NSNull()
-                entry["label"] = capture.label
-                entry["imagePixels"] = [capture.screenshotWidthInPixels, capture.screenshotHeightInPixels]
-                entry["displayFrame"] = rectArray(capture.displayFrame)
-                entry["drawnRects"] = (capture.secretGuard?.drawn ?? []).map { ["kind": $0.kind, "rect": rectArray($0.rect)] }
-                return entry
+                return captureEntry(capture, imageURL: write(capture.imageData, named: imageName)
+                                        ? directoryURL.appendingPathComponent(imageName) : nil)
             }
         } catch let withheld as ScreenSecretGuard.Withheld {
             summary.merge(withheld.report.jsonObject) { _, new in new }
@@ -64,7 +59,32 @@ enum SecretGuardProbe {
         print("🧪 secret guard probe: \(summary["outcome"] ?? "?") -> \(directoryURL.path)")
     }
 
-    private static func rectArray(_ rect: CGRect) -> [Double] {
+    /// One capture's summary entry. The path is `path(percentEncoded:)` on
+    /// purpose: a bare `.path` in a `? : NSNull()` against `Any?` resolved to the
+    /// METHOD, a `(Bool) -> String` closure, and every non-withheld summary
+    /// failed to serialise and was silently never written (2026-10-02).
+    static func captureEntry(_ capture: CompanionScreenCapture, imageURL: URL?) -> [String: Any] {
+        var entry = capture.secretGuard?.jsonObject ?? [:]
+        entry["image"] = imageURL.map { $0.path(percentEncoded: false) } ?? NSNull()
+        entry["label"] = capture.label
+        entry["imagePixels"] = [capture.screenshotWidthInPixels, capture.screenshotHeightInPixels]
+        entry["displayFrame"] = rectArray(capture.displayFrame)
+        entry["drawnRects"] = (capture.secretGuard?.drawn ?? []).map { ["kind": $0.kind, "rect": rectArray($0.rect)] }
+        return entry
+    }
+
+    /// The summary's line, or - when it cannot be serialised - a line saying so
+    /// and naming the keys at fault. Never nil: a run always leaves a file.
+    nonisolated static func summaryLine(_ summary: [String: Any]) -> String {
+        if let line = MeasurementLogFile.jsonLine(summary) { return line }
+        let badKeys = summary.keys.filter { MeasurementLogFile.jsonLine(["value": summary[$0]!]) == nil }.sorted()
+        return MeasurementLogFile.jsonLine([
+            "kind": "secretGuardProbe", "outcome": "summaryNotSerialisable", "unserialisableKeys": badKeys,
+            "probeOutcome": summary["outcome"] as? String ?? NSNull(), "timestamp": summary["timestamp"] as? String ?? NSNull()
+        ]) ?? #"{"kind":"secretGuardProbe","outcome":"summaryNotSerialisable"}"#
+    }
+
+    nonisolated private static func rectArray(_ rect: CGRect) -> [Double] {
         [rect.minX, rect.minY, rect.width, rect.height].map { Double($0) }
     }
 
@@ -75,7 +95,6 @@ enum SecretGuardProbe {
     }
 
     private static func write(_ summary: [String: Any], named name: String) {
-        guard let line = MeasurementLogFile.jsonLine(summary) else { return }
-        write(Data((line + "\n").utf8), named: name)
+        write(Data((summaryLine(summary) + "\n").utf8), named: name)
     }
 }

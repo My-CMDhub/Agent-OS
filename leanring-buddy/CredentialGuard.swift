@@ -378,7 +378,8 @@ nonisolated enum ScreenSecretGuard {
         var app: String?
         /// `frontmost`, or the app behind Clicky's own panel / a password manager
         /// (`behindOwnApp` / `behindPasswordManager`): both are left out of the
-        /// capture, so the window under them is what the picture shows.
+        /// capture, so the window under them is what the picture shows; or
+        /// `frontmostHasNoWindowHere` (the app in front has no window on this Space).
         var appSource: String?
         /// The walk threw or could not start: `noAppToCheck`, `screenIsLocked`, ...
         var failure: String?
@@ -571,20 +572,24 @@ nonisolated enum ScreenSecretGuard {
     /// Whose windows the picture shows and the guard must read: the app in front,
     /// unless that is Clicky or a password manager (both left out of the capture)
     /// - then the owner of the frontmost ordinary window behind them, from the
-    /// window server's front-to-back list (layer 0). nil (withhold) when there is
-    /// no app in front or nothing behind it.
+    /// window server's front-to-back list (layer 0). The same when the app in
+    /// front has no window on this Space (`frontmostShowsNoWindow`): measured
+    /// 2026-10-02, Chrome frontmost with its full-screen Space not the one
+    /// showing read 0 windows and withheld a picture of Finder's window. nil
+    /// (withhold) when there is no app in front or nothing behind it.
     static func appToCheck(frontmost: (pid: pid_t, bundleIdentifier: String?)?, windowList: [[String: Any]],
-                           ownPID: pid_t, bundleForPID: (pid_t) -> String?) -> (pid: pid_t, source: String)? {
+                           ownPID: pid_t, bundleForPID: (pid_t) -> String?,
+                           frontmostShowsNoWindow: Bool = false) -> (pid: pid_t, source: String)? {
         guard let frontmost else { return nil }
-        let frontIsOwn = frontmost.pid == ownPID
-        guard frontIsOwn || CredentialGuard.isPasswordManager(frontmost.bundleIdentifier) else {
-            return (frontmost.pid, "frontmost")
-        }
+        let source = frontmost.pid == ownPID ? "behindOwnApp"
+            : CredentialGuard.isPasswordManager(frontmost.bundleIdentifier) ? "behindPasswordManager"
+            : frontmostShowsNoWindow ? "frontmostHasNoWindowHere" : nil
+        guard let source else { return (frontmost.pid, "frontmost") }
         let behind = windowList.lazy
             .filter { ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 }
             .compactMap { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value }
-            .first { $0 != ownPID && !CredentialGuard.isPasswordManager(bundleForPID($0)) }
-        return behind.map { ($0, frontIsOwn ? "behindOwnApp" : "behindPasswordManager") }
+            .first { $0 != ownPID && $0 != frontmost.pid && !CredentialGuard.isPasswordManager(bundleForPID($0)) }
+        return behind.map { ($0, source) }
     }
 
     /// Blocking cross-process walk of every window of the app the picture shows
@@ -606,16 +611,25 @@ nonisolated enum ScreenSecretGuard {
         let front = AccessibilityTreeWalker.focusedApplication()
         let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]] ?? []
-        guard let choice = appToCheck(frontmost: front.map { ($0.processIdentifier, $0.bundleIdentifier) },
-                                      windowList: windowList, ownPID: getpid(),
-                                      bundleForPID: { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }),
-              let application = NSRunningApplication(processIdentifier: choice.pid) else {
+        let bundleForPID = { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }
+        guard var choice = appToCheck(frontmost: front.map { ($0.processIdentifier, $0.bundleIdentifier) },
+                                      windowList: windowList, ownPID: getpid(), bundleForPID: bundleForPID),
+              var application = NSRunningApplication(processIdentifier: choice.pid) else {
             inspection.failure = "noAppToCheck"
             return finished()
         }
+        var read = AccessibilityWindows.liveWindows(for: application)
+        // kAXWindows is Space-scoped: none here means the picture shows other apps' windows.
+        if choice.source == "frontmost", read.readSucceeded, read.windows.allSatisfy(\.candidate.isMinimized),
+           let behind = appToCheck(frontmost: (choice.pid, application.bundleIdentifier), windowList: windowList,
+                                   ownPID: getpid(), bundleForPID: bundleForPID, frontmostShowsNoWindow: true),
+           let behindApplication = NSRunningApplication(processIdentifier: behind.pid) {
+            choice = behind
+            application = behindApplication
+            read = AccessibilityWindows.liveWindows(for: application)
+        }
         inspection.app = application.bundleIdentifier
         inspection.appSource = choice.source
-        let read = AccessibilityWindows.liveWindows(for: application)
         guard read.readSucceeded else {
             inspection.failure = "windowListUnreadable"
             return finished()
