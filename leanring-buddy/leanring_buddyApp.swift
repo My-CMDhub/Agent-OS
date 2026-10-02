@@ -153,6 +153,18 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // The hands (click, type by AX write and by keystrokes, openURL) on a page
+        // it writes, in a Chrome window it opens and closes by identity; JSON
+        // summary 0600 to ~/Library/Logs/Clicky/hands-probe/, then quits. Real
+        // input on its own window only, so it refuses --harness-dry-run.
+        if CommandLine.arguments.contains("--hands-probe") {
+            Task { @MainActor in
+                await HandsProbe.run(harness: self.harnessServer)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // Walks Finder / System Settings / Cursor on main and on a background
         // queue, writes ~/Library/Logs/Clicky/ax-thread-probe.log, then quits.
         if CommandLine.arguments.contains("--ax-thread-probe") {
