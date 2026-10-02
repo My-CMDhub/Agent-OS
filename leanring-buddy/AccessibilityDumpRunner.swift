@@ -21,13 +21,23 @@ enum AccessibilityDumpRunner {
     /// harness saw an empty directory and the operator saw "no result" — which
     /// looks exactly like a hang, a crash, or a stale binary. A refusal is a
     /// result and has to be written down like one.
+    /// Every file this runner leaves in /private/tmp goes through here: a tree
+    /// dump carries every AX value on screen (a terminal's scrollback, an
+    /// editor's .env), so its text is redacted (`SecretScanner.redact`) and the
+    /// file is created owner-only (0600) - /private/tmp is world-readable.
+    @discardableResult
+    nonisolated static func writePrivately(_ text: String, to url: URL) -> Bool {
+        try? FileManager.default.removeItem(at: url)   // a stale 0644 file is replaced, never appended to
+        return MeasurementLogFile.appendOwnerOnly(Data(SecretScanner.redact(text).utf8), to: url)
+    }
+
     static func writeFailure(_ reason: String, to fileName: String = "metrics.txt") {
         let text = "RUN FAILED — \(reason)\nnothing was measured; this file exists so the absence is not silent"
         print("\n" + text)
         for directory in ["/private/tmp/jarvis-ax-dump", "/private/tmp/jarvis-ax-action"] {
             let url = URL(fileURLWithPath: directory, isDirectory: true)
             try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-            try? text.write(to: url.appendingPathComponent(fileName), atomically: true, encoding: .utf8)
+            writePrivately(text, to: url.appendingPathComponent(fileName))
         }
     }
 
@@ -199,11 +209,7 @@ enum AccessibilityDumpRunner {
 
         let outputDirectory = URL(fileURLWithPath: "/private/tmp/jarvis-ax-action", isDirectory: true)
         try? FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        try? reportText.write(
-            to: outputDirectory.appendingPathComponent("outcome.txt"),
-            atomically: true,
-            encoding: .utf8
-        )
+        writePrivately(reportText, to: outputDirectory.appendingPathComponent("outcome.txt"))
 
         NSApplication.shared.terminate(nil)
     }
@@ -290,7 +296,7 @@ enum AccessibilityDumpRunner {
 
         let treeText = snapshot.rootNode.map(AccessibilityTreeWalker.serializeTreeToText) ?? "(no root node)"
         let treeURL = outputDirectory.appendingPathComponent("tree.txt")
-        try treeText.write(to: treeURL, atomically: true, encoding: .utf8)
+        writePrivately(treeText, to: treeURL)
 
         let serializedByteCount = treeText.data(using: .utf8)?.count ?? 0
         let estimatedTextTokens = treeText.count / 4
@@ -298,7 +304,16 @@ enum AccessibilityDumpRunner {
         // We had never timed the screenshot path, which left "structure is faster"
         // an assertion rather than a measurement.
         let captureStartedAt = Date()
-        let screenCaptures = (try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()) ?? []
+        // A withheld or failed capture is a result: the metrics say why, not "0 bytes".
+        var screenCaptures: [CompanionScreenCapture] = []
+        var screenshotOutcome = "sent"
+        do {
+            screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+        } catch let withheld as ScreenSecretGuard.Withheld {
+            screenshotOutcome = "WITHHELD by the credential guard (\(withheld.report.reason ?? "unknown")) - the screenshot numbers below are not a measurement"
+        } catch {
+            screenshotOutcome = "FAILED (\(error)) - the screenshot numbers below are not a measurement"
+        }
         let captureDurationInMilliseconds = Date().timeIntervalSince(captureStartedAt) * 1000
         let primaryCapture = screenCaptures.first
 
@@ -362,6 +377,7 @@ enum AccessibilityDumpRunner {
         ACTIONABLE elements    \(actionableElementCount)
 
         SCREENSHOT PATH
+        screenshot             \(screenshotOutcome)
         capture duration       \(String(format: "%.1f", captureDurationInMilliseconds)) ms
         screenshot size        \(screenshotByteCount) bytes
         screenshot pixels      \(screenshotPixelCount) (\(decodedScreenshot?.pixelsWide ?? 0)x\(decodedScreenshot?.pixelsHigh ?? 0), requested \(requestedPixelCount))
@@ -370,7 +386,7 @@ enum AccessibilityDumpRunner {
         """
 
         let metricsURL = outputDirectory.appendingPathComponent("metrics.txt")
-        try metricsText.write(to: metricsURL, atomically: true, encoding: .utf8)
+        writePrivately(metricsText, to: metricsURL)
 
         print("🧪 J.A.R.V.I.S.: wrote \(treeURL.path)")
         print("🧪 J.A.R.V.I.S.: wrote \(metricsURL.path)")
@@ -477,7 +493,7 @@ enum AccessibilityDumpRunner {
         }
 
         let csv = rows.joined(separator: "\n")
-        try? csv.write(to: surveyURL, atomically: true, encoding: .utf8)
+        writePrivately(csv, to: surveyURL)
         print("\n" + csv)
         print("\n🧪 wrote \(surveyURL.path)")
 
@@ -746,7 +762,7 @@ enum AccessibilityDumpRunner {
         let outputDirectory = URL(fileURLWithPath: "/private/tmp/jarvis-ax-action", isDirectory: true)
         try? FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         let fileName = "probe-\(snapshot.applicationName.replacingOccurrences(of: " ", with: "-")).txt"
-        try? reportText.write(to: outputDirectory.appendingPathComponent(fileName), atomically: true, encoding: .utf8)
+        writePrivately(reportText, to: outputDirectory.appendingPathComponent(fileName))
 
         // Draw what it just judged, so the screen and the numbers can be compared.
         if CommandLine.arguments.contains("--ax-overlay") {
@@ -894,7 +910,7 @@ enum AccessibilityDumpRunner {
         print("\n" + text)
         let outputDirectory = URL(fileURLWithPath: "/private/tmp/jarvis-ax-action", isDirectory: true)
         try? FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        try? text.write(to: outputDirectory.appendingPathComponent("select.txt"), atomically: true, encoding: .utf8)
+        writePrivately(text, to: outputDirectory.appendingPathComponent("select.txt"))
         NSApplication.shared.terminate(nil)
     }
 
@@ -1239,11 +1255,7 @@ enum AccessibilityDumpRunner {
 
         let outputDirectory = URL(fileURLWithPath: "/private/tmp/jarvis-ax-action", isDirectory: true)
         try? FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        try? reportText.write(
-            to: outputDirectory.appendingPathComponent("task.txt"),
-            atomically: true,
-            encoding: .utf8
-        )
+        writePrivately(reportText, to: outputDirectory.appendingPathComponent("task.txt"))
 
         if terminate {
             NSApplication.shared.terminate(nil)

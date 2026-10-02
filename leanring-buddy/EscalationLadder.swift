@@ -484,12 +484,7 @@ enum EscalationLadder {
         } catch {
             throw CaptureFailure.captureFailed(String(describing: error))
         }
-        // The crop is its own "display": the same mapping, against `clipped`.
-        let drawn = ScreenSecretGuard.drawn(
-            redactions, displayFrame: clipped,
-            imageSize: CGSize(width: capturedImage.width, height: capturedImage.height)
-        )
-        guard let image = ScreenSecretGuard.blackedOut(capturedImage, pixelRects: drawn.map(\.rect)) else {
+        guard let image = blackedOutCrop(capturedImage, region: clipped, redactions: redactions) else {
             throw CaptureFailure.encodingFailed
         }
 
@@ -528,6 +523,15 @@ enum EscalationLadder {
     /// Pumping the run loop instead was considered and rejected for the reason
     /// `AccessibilityWindows.focus` records: it would let a second socket
     /// request land inside this one.
+    /// The crop is its own "display": the guard's mapping, against the clipped
+    /// region. nil when the image cannot be redrawn.
+    nonisolated static func blackedOutCrop(_ image: CGImage, region: CGRect,
+                                           redactions: [ScreenSecretGuard.Redaction]) -> CGImage? {
+        let drawn = ScreenSecretGuard.drawn(redactions, displayFrame: region,
+                                            imageSize: CGSize(width: image.width, height: image.height))
+        return ScreenSecretGuard.blackedOut(image, pixelRects: drawn.map(\.rect))
+    }
+
     static func captureSynchronously(
         region: CGRect,
         on display: DisplayInfo,

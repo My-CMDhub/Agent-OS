@@ -1453,6 +1453,12 @@ final class HarnessServer {
         return summary
     }
 
+    /// What reaches disk for an anomaly: the ring, scrubbed (`SecretScanner.scrub`)
+    /// - a request's target is typed text.
+    nonisolated static func anomalyDumpData(_ payload: [String: Any]) -> Data? {
+        try? JSONSerialization.data(withJSONObject: SecretScanner.scrub(payload), options: [.prettyPrinted, .sortedKeys])
+    }
+
     /// Writes the ring buffer out, keeping at most five files. Returns the path
     /// so the response and the audit line can name it.
     private func writeAnomalyDump(
@@ -1477,9 +1483,7 @@ final class HarnessServer {
             "recentWalkMilliseconds": recentWalks,
             "requests": requests
         ]
-        guard let data = try? JSONSerialization.data(
-            withJSONObject: SecretScanner.scrub(payload), options: [.prettyPrinted, .sortedKeys]
-        ) else { return nil }
+        guard let data = Self.anomalyDumpData(payload) else { return nil }
 
         try? FileManager.default.createDirectory(at: Self.supportDirectory, withIntermediateDirectories: true)
         // A new file each time, so an owner-only append is an owner-only create.
@@ -3812,13 +3816,12 @@ final class HarnessServer {
 
         // Secrets in the inspected windows' text are blacked out of the photograph;
         // one that cannot be located refuses it (`ScreenSecretGuard`, fail closed).
-        let secrets = ScreenSecretGuard.redactions(
-            in: inspection.windows.flatMap(\.nodes), primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height
+        let secrets = ScreenSecretGuard.secretsBeforeShutter(
+            in: inspection, primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height
         )
         payload["secretRedactions"] = secrets.redactions.count
-        guard secrets.unlocated == 0 else {
-            payload["message"] = "\(secrets.unlocated) secret-shaped text(s) in this app have no readable frame, "
-                + "so they could not be blacked out — nothing was photographed"
+        if let refusal = secrets.refusal {
+            payload["message"] = refusal
             return (payload, "captureFailed")
         }
 

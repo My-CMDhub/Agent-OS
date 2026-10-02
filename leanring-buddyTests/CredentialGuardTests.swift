@@ -537,4 +537,55 @@ struct CredentialGuardTests {
         #expect(throws: ScreenSecretGuard.Withheld.self) { try ScreenSecretGuard.refuseWhileSecureInput(self.typingInSafari) }
         #expect(throws: Never.self) { try ScreenSecretGuard.refuseWhileSecureInput(.off) }
     }
+
+    // MARK: Wiring: harness, ladder, dumps (review 2026-10-02)
+
+    /// `look` blacks out what it found and refuses a secret it cannot place.
+    @Test func lookBlacksOutOrRefusesBeforeTheShutter() {
+        let key = "sk-ant-" + "AbCdEf0123456789ghIJkl"
+        let shown = AccessibilityElementNode(role: "AXStaticText", subrole: nil, title: nil, value: key,
+                                             frameInAppKitCoordinates: CGRect(x: 10, y: 10, width: 100, height: 20), depth: 1, children: [])
+        let lost = AccessibilityElementNode(role: "AXStaticText", subrole: nil, title: nil, value: key,
+                                            frameInAppKitCoordinates: .zero, depth: 1, children: [], frameReadFailed: true)
+        let located = ScreenSecretGuard.secretsBeforeShutter(
+            in: CaptureInspection(windows: [.init(role: "AXWindow", nodes: [shown])]), primaryDisplayHeight: 900)
+        #expect(located.refusal == nil && located.redactions.map(\.kind) == ["anthropicKey"])
+        let unlocated = ScreenSecretGuard.secretsBeforeShutter(
+            in: CaptureInspection(windows: [.init(role: "AXWindow", nodes: [shown, lost])]), primaryDisplayHeight: 900)
+        #expect(unlocated.refusal?.contains("nothing was photographed") == true)
+    }
+
+    /// An escalation crop is blacked out against its own region, not the display's.
+    @Test func anEscalationCropIsBlackedOut() throws {
+        let image = try whiteImage(width: 40, height: 20)
+        // A crop of AppKit (100, 100, 40, 20) captured 1:1; a secret at (110, 112, 10, 4) is top-left (10, 4), padded by 2.
+        let crop = try #require(EscalationLadder.blackedOutCrop(
+            image, region: CGRect(x: 100, y: 100, width: 40, height: 20),
+            redactions: [.init(kind: "jwt", appKitRect: CGRect(x: 110, y: 112, width: 10, height: 4), source: "range")]))
+        #expect(crop !== image)
+        let rep = NSBitmapImageRep(cgImage: crop)
+        #expect((rep.colorAt(x: 15, y: 5)?.usingColorSpace(.deviceRGB)?.brightnessComponent ?? 1) < 0.1)
+        #expect((rep.colorAt(x: 30, y: 15)?.usingColorSpace(.deviceRGB)?.brightnessComponent ?? 0) > 0.9)
+        #expect(EscalationLadder.blackedOutCrop(image, region: .zero, redactions: []) === image)
+    }
+
+    @Test func anAnomalyDumpIsScrubbed() throws {
+        let key = "sk-ant-" + "AbCdEf0123456789ghIJkl"
+        let data = try #require(HarnessServer.anomalyDumpData(["requests": [["verb": "type", "target": "paste \(key)"]]]))
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(!text.contains(key) && text.contains("[REDACTED:anthropicKey]"))
+    }
+
+    /// A tree dump in /private/tmp is redacted and owner-only, replacing an old file.
+    @Test func aDumpFileIsRedactedAndOwnerOnly() throws {
+        let key = "sk-ant-" + "AbCdEf0123456789ghIJkl"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("credential-guard-dump-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try "stale".write(to: url, atomically: true, encoding: .utf8)
+        #expect(AccessibilityDumpRunner.writePrivately("AXStaticText value=\"\(key)\"", to: url))
+        let written = try String(contentsOf: url, encoding: .utf8)
+        #expect(written == "AXStaticText value=\"[REDACTED:anthropicKey]\"")
+        let mode = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+        #expect(mode?.intValue == 0o600)
+    }
 }
