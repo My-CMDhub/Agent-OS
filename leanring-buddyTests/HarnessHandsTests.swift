@@ -330,6 +330,28 @@ struct HarnessHandsTests {
         #expect(HarnessHands.auditableURL(URL(string: "https://www.google.com/search?q=my+address#frag")!) == "https://www.google.com/search")
     }
 
+    // Review 2026-10-02: the fragment is words too, camelCase hides them, and loopback has many spellings.
+    @Test func openURLReadsEveryWordAndEverySpellingOfThisMac() {
+        func decide(_ string: String) -> SafetyDecision? { HarnessHands.validatedWebURL(string).map(HarnessHands.openURLDecision) }
+        guard case .refuse? = decide("https://app.example/#/checkout/buy") else { Issue.record("buy in the fragment was not refused"); return }
+        for page in ["https://app.example/api/deleteAll", "https://app.example/x?op=removeUser", "https://app.example/#sendNow",
+                     // "%25zz" decodes to a malformed "%zz": the old reading emptied the words and allowed it.
+                     "https://app.example/delete/%25zz"] {
+            guard case .requireConfirmation(_, true)? = decide(page) else { Issue.record("\(page) was not asked"); continue }
+        }
+        #expect(HarnessHands.urlWords(URL(string: "https://a.example/api/deleteAll?x=1#Top")!) == " api delete all x 1 top")
+        for host in ["localhost.", "127.1", "2130706433", "0x7f000001", "::ffff:127.0.0.1", "[::ffff:7f00:1]", "0177.0.0.1", "127.0.0.1.",
+                     "::", "::1", "fe80::1", "fd00::1", "::ffff:192.168.1.1"] {
+            #expect(HarnessHands.isPrivateHost(host), "\(host)")
+        }
+        for host in ["8.8.8.8", "example.com", "fcbarcelona.com", "::ffff:8.8.8.8", "2001:4860:4860::8888", "172.32.0.1", "deleteall.example"] {
+            #expect(!HarnessHands.isPrivateHost(host), "\(host)")
+        }
+        for page in ["http://localhost.:3000/", "http://127.1/", "http://2130706433/", "http://0x7f000001/", "http://[::ffff:127.0.0.1]/"] {
+            guard case .requireConfirmation(_, false)? = decide(page) else { Issue.record("\(page) was not asked about"); continue }
+        }
+    }
+
     // Review of H1: "confirmed" only from the page's own address.
     @Test func openURLIsConfirmedOnlyByThePagesOwnHost() {
         #expect(HarnessHands.openURLVerification(evidence: "x", pageHost: "www.linkedin.com", requestedHost: "linkedin.com") == "confirmed")

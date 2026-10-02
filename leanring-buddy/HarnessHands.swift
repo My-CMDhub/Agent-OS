@@ -400,28 +400,41 @@ enum HarnessHands {
 
     /// The owner's own machine or network: a page there can be a router's admin
     /// screen or a dev server's "delete everything" route, so it is asked about.
+    /// Addresses are parsed as the system parses them (`inet_aton`, `inet_pton`),
+    /// so every spelling of loopback counts (review 2026-10-02): `localhost.`,
+    /// `127.1`, `2130706433`, `0x7f000001`, `::ffff:127.0.0.1`.
     static func isPrivateHost(_ host: String) -> Bool {
-        let host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        var host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if host.hasSuffix(".") { host.removeLast() }
         if host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local") { return true }
-        if host == "::1" || host == "::" || host.hasPrefix("fe80:") || ((host.hasPrefix("fc") || host.hasPrefix("fd")) && host.contains(":")) {
-            return true
+        func privateV4(_ first: UInt8, _ second: UInt8) -> Bool {
+            switch (first, second) {
+            case (127, _), (10, _), (0, _), (192, 168), (169, 254), (172, 16...31): return true
+            default: return false
+            }
         }
-        let octets = host.split(separator: ".").compactMap { Int($0) }
-        guard octets.count == 4, host.split(separator: ".").count == 4 else { return false }
-        switch (octets[0], octets[1]) {
-        case (127, _), (10, _), (0, _), (192, 168), (169, 254): return true
-        case (172, 16...31): return true
-        default: return false
+        var v4 = in_addr()
+        if inet_aton(host, &v4) != 0 {
+            let bytes = withUnsafeBytes(of: v4.s_addr) { Array($0) }   // network order
+            return privateV4(bytes[0], bytes[1])
         }
+        var v6 = in6_addr()
+        guard inet_pton(AF_INET6, host, &v6) == 1 else { return false }
+        let bytes = withUnsafeBytes(of: v6) { Array($0) }
+        if bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80 { return true }   // fe80::/10, link-local
+        if bytes[0] & 0xfe == 0xfc { return true }                       // fc00::/7, unique local
+        // ::, ::1, and IPv4 mapped (::ffff:a.b.c.d) or compatible (::a.b.c.d): the IPv4 rules.
+        if bytes[0..<10].allSatisfy({ $0 == 0 }), bytes[10] == bytes[11], bytes[10] == 0 || bytes[10] == 0xff {
+            return privateV4(bytes[12], bytes[13])
+        }
+        return false
     }
 
     /// The kernel's judgement of an address, as of a control's name: an
-    /// irreversible word in its path or query refuses ("/checkout/buy?…"), a
-    /// destructive or publishing one, or a private host, asks on a card.
+    /// irreversible word in its path, query or fragment refuses ("/checkout/buy?…"),
+    /// a destructive or publishing one, or a private host, asks on a card.
     static func openURLDecision(_ url: URL) -> SafetyDecision {
-        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        let words = ((components?.path ?? "") + " " + (components?.query ?? ""))
-            .removingPercentEncoding?.lowercased().replacingOccurrences(of: #"[^\p{L}\p{N}]+"#, with: " ", options: .regularExpression) ?? ""
+        let words = urlWords(url)
         if let keyword = ActionSafetyKernel.irreversibleTitleKeywords.first(where: { keyword in
             " \(words) ".contains(" \(keyword) ") }) {
             return .refuse(reason: ActionSafetyKernel.irreversibleRefusalReason(keyword: keyword))
@@ -434,6 +447,20 @@ enum HarnessHands {
             return .requireConfirmation(reason: "the page is on this Mac or its local network (\(host)), where a page can change settings", destructive: false)
         }
         return .allow
+    }
+
+    /// An address's path, query and fragment as the kernel's words: percent-escapes
+    /// decoded twice, as before (a malformed escape keeps the text — it used to
+    /// empty it, and an empty string matched no keyword), camelCase split
+    /// (`/api/deleteAll` -> "api delete all"), every non-alphanumeric a space.
+    static func urlWords(_ url: URL) -> String {
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        var text = [components?.percentEncodedPath, components?.percentEncodedQuery, components?.percentEncodedFragment]
+            .compactMap { $0 }.joined(separator: " ")
+        for _ in 0..<2 { text = text.removingPercentEncoding ?? text }
+        return text
+            .replacingOccurrences(of: #"(\p{Ll})(\p{Lu})"#, with: "$1 $2", options: .regularExpression)
+            .lowercased().replacingOccurrences(of: #"[^\p{L}\p{N}]+"#, with: " ", options: .regularExpression)
     }
 
     /// What the audit line keeps of an address: scheme, host and path. A query
