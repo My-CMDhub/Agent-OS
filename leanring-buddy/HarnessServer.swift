@@ -303,6 +303,36 @@ struct HarnessRequest: Equatable {
 
 enum HarnessPolicy {
 
+    /// Roles that label a control without being one.
+    static let labelRoles: Set<String> = ["AXHeading", "AXStaticText", "AXImage"]
+    /// What a label may stand for: a link or a button.
+    static let labelledControlRoles: Set<String> = ["AXLink", "AXButton"]
+    /// How far up a label may sit inside its control.
+    static let labelToControlLevels = 3
+
+    /// The link or button the last node of `chain` (root ... node) labels, or
+    /// nil. Live 2026-10-02: Google puts a result's title in an `AXHeading`
+    /// inside the `AXLink`, the name resolved to the heading, and the kernel
+    /// asked "unrecognised role AXHeading" about an ordinary link (8 s waiting
+    /// on Allow). That heading published AXPress — Chromium's click-ancestor
+    /// verb — so "publishes a press" cannot tell label from control; the role can.
+    /// Only labels and anonymous wrappers are passed through: a named group or
+    /// any other control on the way up is a thing of its own, and stops it.
+    /// The control must carry a plausible name of its own. Not AXPress: the
+    /// hands probe's Chrome (2026-10-03) published none on ANY element, link and
+    /// button included, so the role is the only witness that holds in every mode.
+    static func controlLabelled(byLastOf chain: [AccessibilityElementNode]) -> AccessibilityElementNode? {
+        guard let label = chain.last, labelRoles.contains(label.role) else { return nil }
+        for ancestor in chain.dropLast().reversed().prefix(labelToControlLevels) {
+            if labelledControlRoles.contains(ancestor.role) {
+                // Named, or the kernel refuses it as implausible — worse than the question it replaces.
+                return ancestor.displayName?.isPlausibleControlLabel == true ? ancestor : nil
+            }
+            guard labelRoles.contains(ancestor.role) || (ancestor.role == "AXGroup" && ancestor.displayName == nil) else { return nil }
+        }
+        return nil
+    }
+
     static func decode(line: String) -> Result<HarnessRequest, HarnessRequestError> {
         guard let data = line.data(using: .utf8) else {
             return .failure(.malformedJSON("not valid UTF-8"))
@@ -2486,7 +2516,19 @@ final class HarnessServer {
 
         guard let target = resolveTarget(request, action: action, dryRun: dryRun, startedAt: startedAt, into: &response)
         else { return response }
-        let (snapshot, rootNode, intent, resolvedNode) = target
+        let (snapshot, rootNode, intent, namedNode) = target
+        // A label names a link or button it sits in: the press goes to — and is
+        // judged on — that control, and the label's words are word-checked too.
+        // Here, not in `resolveTarget`: highlight points at what was named.
+        var resolvedNode = namedNode
+        var labelTitle = request.labelTitle
+        if action == .press || action == .click, !request.aimAtFocus, !request.aimAtWindow,
+           let chain = ElementReachability.ancestorChain(to: namedNode, from: rootNode),
+           let control = HarnessPolicy.controlLabelled(byLastOf: chain) {
+            resolvedNode = control
+            labelTitle = namedNode.displayName?.raw ?? labelTitle
+            response["retargetedFrom"] = Self.summarise(namedNode)
+        }
         response["resolved"] = Self.summarise(resolvedNode)
 
         // What the element itself says about being typed into. Four reads on
@@ -2509,7 +2551,7 @@ final class HarnessServer {
                 matchCount: 1,
                 visibleBounds: rootNode.frameInAppKitCoordinates,
                 typing: typingContext,
-                labelTitle: request.labelTitle
+                labelTitle: labelTitle
             ),
             bundleIdentifier: snapshot.bundleIdentifier, into: &response
         )
