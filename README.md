@@ -130,7 +130,7 @@ All in `leanring-buddy/` (an upstream typo; the product is named `Clicky`). **61
 - **A hardware click proves a device, not a person.** Virtual-HID drivers and remote screen control arrive the same way. A Touch ID tier for money and credentials is designed but not built.
 - **Destructive and irreversible actions are recognised by English words in the title the app wrote.** A checkout button labelled "Place order", "Checkout" or "Transfer" matches nothing and is allowed as an ordinary press. Non-English titles are never matched.
 - **Without a policy file, every app is allowed.** Plain button presses do not ask.
-- **Password protection is by accessibility role and subrole.** A field that does not say it is a password field is not caught, and a credential shown as ordinary text (an API key in a terminal) is not recognised at all: it reaches the voice model in the screenshot like any other visible text. The `type` refusal is unit-tested; the capture refusal was verified live once, on a local Safari page.
+- **Credentials: a net with holes, not a guarantee.** While macOS secure typing is on (a password box has focus), no screenshot is taken and the voice model is told it is the owner's turn; `type` and `look` refuse. Otherwise every screenshot that leaves the Mac is checked first: password-manager windows are left out, password boxes and text shaped like a key or token (known vendor prefixes, private keys, `NAME=secret`, passwords inside URLs, long random tokens) are blacked out, and if the check cannot finish in 600 ms, or a text read fails, the screenshot is withheld. Logs and text sent to the model are scrubbed the same way. It only sees what the app publishes: text drawn as pixels (a picture, a canvas, some editors) is not read, other apps' windows on the same display are not text-scanned, and a random token with no known shape inside a URL is not caught. Live 2026-10-02: fake keys on a Chrome page, inside a cross-site frame and in Terminal were blacked out; a focused Chrome password box handed over.
 - **"Always" rules depend on a free personal-team signing profile** that renews every 7 days. The app is not sandboxed.
 
 **What the verifier knows**
@@ -153,7 +153,7 @@ All in `leanring-buddy/` (an upstream typo; the product is named `Clicky`). **61
 
 ## Measured
 
-Dated, from this machine, with sample sizes where the source recorded them. **Tests:** 456 unit tests (Swift Testing), 2026-10-02. Planner tests 6/6 on two consecutive runs, last run 2026-09-15: six tasks, Finder and System Settings only.
+Dated, from this machine, with sample sizes where the source recorded them. **Tests:** 486 unit tests (Swift Testing), 2026-10-02. Planner tests 6/6 on two consecutive runs, last run 2026-09-15: six tasks, Finder and System Settings only.
 
 <details>
 <summary><b>Harness requests off the main thread</b> (<code>dda6804</code>, 2026-09-15)</summary>
