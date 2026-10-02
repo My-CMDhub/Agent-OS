@@ -978,19 +978,84 @@ nonisolated enum RealtimeOpenAppTool {
 
     // MARK: After the reply (hands design items 9 and 10)
 
-    /// The system turn that speaks a correction when the reply claimed what no
-    /// receipt this turn backs (rows 15, 16, 33: "typed" after a refused or
-    /// failed type_text), or nil. The reason is the latest failed acting
-    /// call's own message, quoted. Variants per stack as `--speak-probe` measured
-    /// them (OpenAI textThenCreate, Gemini textOnly).
+    /// The system turn that speaks a correction, or nil (rows 15, 16, 33: "typed"
+    /// after a refused or failed type_text). Only when the reply claims, in the
+    /// first person, a thing a tool THIS TURN tried and got no receipt for — the
+    /// bare-word check (`claimedWithoutReceipt`, kept as the line's metric) fired
+    /// on 9 of 100 live turns 2026-10-02 and at least 3 were honest: "I appear to
+    /// have had trouble typing" (8181F20B), "I can only open installed
+    /// applications" (C1AAF61A), "Click on that… It should open" (A410BC02). The
+    /// reason is the latest failed matching call's own message, quoted. Variants
+    /// per stack as `--speak-probe` measured them (OpenAI textThenCreate, Gemini textOnly).
     static func receiptCorrection(transcript: String, decisions: [RealtimeToolDecision]) -> String? {
-        let okToolNames = Set(decisions.filter { $0.dispatch?.harnessConfirmed == true }.map(\.call.name))
-        guard claimedWithoutReceipt(transcript: transcript, okToolNames: okToolNames) else { return nil }
-        let failed = decisions.last { RealtimeVoiceVerbs.isActingTool($0.call.name) && $0.dispatch?.harnessConfirmed == false }
-        let reason = failed.flatMap { ($0.dispatch?.result["message"] as? String) ?? ($0.dispatch?.result["error"] as? String) }
-            .map { UntrustedText(String($0.prefix(160))).forDisplay } ?? "no action was taken"
-        return "system event, not the owner's words: your last reply said something was done, but no tool result this turn says so. "
-            + "in one short sentence, say \"Correction: that didn't go through\" and the reason in a few words. the reason: \(reason). call no tool."
+        guard !admitsFailure(transcript) else { return nil }
+        for receipts in firstPersonClaims(transcript) {
+            let tried = decisions.filter { RealtimeVoiceVerbs.isActingTool($0.call.name) && (receipts?.contains($0.call.name) ?? true) }
+            guard let failed = tried.last, !tried.contains(where: { $0.dispatch?.harnessConfirmed == true }) else { continue }
+            let reason = ((failed.dispatch?.result["message"] as? String) ?? (failed.dispatch?.result["error"] as? String))
+                .map { UntrustedText(String($0.prefix(160))).forDisplay } ?? "no action was taken"
+            return "system event, not the owner's words: your last reply said something was done, but no tool result this turn says so. "
+                + "in one short sentence, say \"Correction: that didn't go through\" and the reason in a few words. the reason: \(reason). call no tool."
+        }
+        return nil
+    }
+
+    /// Words of a reply that already told the owner it did not work.
+    static let admissionWords: Set<String> = ["trouble", "couldn't", "can't", "didn't", "only", "unable"]
+
+    static func admitsFailure(_ transcript: String) -> Bool {
+        let words = sentences(transcript).flatMap(\.words)
+        return words.contains(where: admissionWords.contains) || zip(words, words.dropFirst()).contains { $0 == "not" && $1 == "able" }
+    }
+
+    static let firstPersonSubjects: Set<String> = ["i", "i've", "we", "we've"]
+    /// "have I typed it right?" asks; it claims nothing.
+    static let questionAuxiliaries: Set<String> = ["have", "had", "did"]
+
+    /// The receipts each first-person completion in a reply needs: a kind's own
+    /// past participle ("pressed", "highlighted", "typed", "opened"…) after "I" /
+    /// "I've" within three words ("I've typed", "I have just opened"), first in a
+    /// statement ("Pressed.", "Opened a new window."), or before "it" ("typed
+    /// it"). "Done, …" / "All done" claims any acting tool (nil). Never bare
+    /// "open", "ready", "done" mid-sentence or "in front". A question still
+    /// counts after "I": "I've typed it, but did you mean…?" (28F7E2CD).
+    static func firstPersonClaims(_ transcript: String) -> [Set<String>?] {
+        var claims: [Set<String>?] = []
+        for (words, isQuestion) in sentences(transcript) {
+            if !isQuestion, words.first == "done" || words.prefix(2) == ["all", "done"] { claims.append(nil) }
+            for (index, word) in words.enumerated() where word.hasSuffix("ed") {
+                guard let kind = kindClaims.first(where: { $0.phrases.contains { $0.split(separator: " ").last.map(String.init) == word } })
+                else { continue }
+                let subject = words[max(0, index - 3)..<index].lastIndex(where: firstPersonSubjects.contains)
+                let asked = subject.map { $0 > 0 && questionAuxiliaries.contains(words[$0 - 1]) } ?? false
+                let leadsOrIt = !isQuestion && (index == 0 || (index + 1 < words.count && words[index + 1] == "it"))
+                if (subject != nil && !asked) || leadsOrIt { claims.append(kind.receipts) }
+            }
+        }
+        return claims
+    }
+
+    /// Each sentence's lowercased words (apostrophes kept, curly ones folded),
+    /// and whether it ended in a question mark.
+    static func sentences(_ transcript: String) -> [(words: [String], isQuestion: Bool)] {
+        var sentences: [(String, Bool)] = []
+        var current = ""
+        for character in transcript.replacingOccurrences(of: "\u{2019}", with: "'") {
+            guard ".!?\n".contains(character) else { current.append(character); continue }
+            sentences.append((current, character == "?"))
+            current = ""
+        }
+        sentences.append((current, false))
+        return sentences.map { ($0.0.lowercased().split { !($0.isLetter || $0 == "'") }.map(String.init), $0.1) }.filter { !$0.words.isEmpty }
+    }
+
+    /// Item 9 then item 10 (hands design), and the correction never stops the
+    /// pointer: A410BC02 told the owner to click and returned before pointing.
+    static func afterReply(transcript: String, decisions: [RealtimeToolDecision], sendCorrection: (String) async -> Void,
+                           pointWhenTelling: () async -> String?) async -> (correctionSent: Bool, pointed: String?) {
+        let correction = receiptCorrection(transcript: transcript, decisions: decisions)
+        if let correction { await sendCorrection(correction) }
+        return (correction != nil, await pointWhenTelling())
     }
 
     static func systemTurnVariant(for stack: VoiceStackChoice) -> RealtimeSystemTurnVariant {
@@ -1390,17 +1455,8 @@ nonisolated enum RealtimeOpenAppTool {
     /// negation, and not in a sentence that ends in a question mark
     /// ("highlighted?" asks; it claims nothing).
     static func claims(_ transcript: String, phrases: [String]) -> Bool {
-        var statements: [String] = []
-        var current = ""
-        for character in transcript.replacingOccurrences(of: "\u{2019}", with: "'") {
-            guard ".!?\n".contains(character) else { current.append(character); continue }
-            if character != "?" { statements.append(current) }
-            current = ""
-        }
-        statements.append(current)
-        return statements.contains { sentence in
-            let words = sentence.lowercased().split { !($0.isLetter || $0 == "'") }.map(String.init)
-            return phrases.contains { phrase in
+        sentences(transcript).contains { words, isQuestion in
+            !isQuestion && phrases.contains { phrase in
                 let phraseWords = phrase.split(separator: " ").map(String.init)
                 guard words.count >= phraseWords.count else { return false }
                 return (0...(words.count - phraseWords.count)).contains { start in

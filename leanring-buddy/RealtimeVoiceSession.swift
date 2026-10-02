@@ -413,19 +413,24 @@ final class RealtimeVoiceSession {
     }
 
     /// Once the reply is done (hands design items 9 and 10): a claim no receipt
-    /// backs is corrected aloud through a system turn; else a reply that told
+    /// backs is corrected aloud through a system turn, and a reply that told
     /// the owner to click something nobody pointed at gets the pointer — never
     /// a word, and nothing when the live screen does not name it exactly once.
     private func afterReply(_ liveTurn: LiveTurn, marks: RealtimeTurnMarks, connection: RealtimeVoiceConnection) async {
-        if let correction = RealtimeOpenAppTool.receiptCorrection(transcript: marks.transcript, decisions: marks.decisions) {
-            liveTurn.line.receiptCorrectionSent = true
-            try? await connection.beginSystemTurn(text: correction, variant: RealtimeOpenAppTool.systemTurnVariant(for: connection.stack))
-            return
-        }
-        liveTurn.line.pointedWhenTelling = await RealtimeOpenAppTool.pointWhenTelling(
-            reply: marks.transcript, decisions: marks.decisions, answer: harnessAnswer,
-            screens: NSScreen.screens.map(\.frame), screenshotDisplay: marks.screenshotDisplayFrame,
-            stillCurrent: { [weak self] in self?.liveTurn === liveTurn })
+        let answer = harnessAnswer
+        let outcome = await RealtimeOpenAppTool.afterReply(
+            transcript: marks.transcript, decisions: marks.decisions,
+            sendCorrection: { correction in
+                try? await connection.beginSystemTurn(text: correction, variant: RealtimeOpenAppTool.systemTurnVariant(for: connection.stack))
+            },
+            pointWhenTelling: {
+                await RealtimeOpenAppTool.pointWhenTelling(
+                    reply: marks.transcript, decisions: marks.decisions, answer: answer,
+                    screens: NSScreen.screens.map(\.frame), screenshotDisplay: marks.screenshotDisplayFrame,
+                    stillCurrent: { [weak self] in self?.liveTurn === liveTurn })
+            })
+        liveTurn.line.receiptCorrectionSent = outcome.correctionSent
+        liveTurn.line.pointedWhenTelling = outcome.pointed
     }
 
     private static func milliseconds(from start: TimeInterval?, to end: TimeInterval?) -> Int? {
