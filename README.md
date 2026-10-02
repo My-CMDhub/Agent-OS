@@ -1,6 +1,6 @@
 # Agent-OS
 
-A macOS accessibility harness for a model to operate the computer through, built to refuse when it should. No model drives it yet.
+A macOS accessibility harness for a model to operate the computer through, built to refuse when it should. A realtime voice model now drives it one step at a time; nothing plans multi-step work yet.
 
 I forked [`farzaa/clicky`](https://github.com/farzaa/clicky), an on-screen AI buddy that looks at a screenshot and points at things, and replaced how it senses and acts. Instead of guessing pixels, it reads the accessibility tree: the named, positioned controls macOS already publishes for screen readers. Every action goes through local code that can allow it, ask me, or refuse it. An action only counts as done when a second read of the app shows it happened.
 
@@ -120,17 +120,17 @@ All in `leanring-buddy/` (an upstream typo; the product is named `Clicky`). **61
 
 ## What this does not claim
 
-**Not yet:** <!-- not-yet -->a model driving it · its actions are hand-written for now<!-- /not-yet -->. (dhruvpatel.net shows this line.)
+**Not yet:** <!-- not-yet -->multi-step plans · the voice model acts one verified step at a time<!-- /not-yet -->. (dhruvpatel.net shows this line.)
 
 **Who is in control**
-- **No model drives this harness yet.** The planner's intents are hand-written. They prove a plan executes, not that anything planned it. The companion app inherited from Clicky still sends a screenshot and parses pixel coordinates.
-- **"The tree never enters a prompt" is a design rule, not an enforced one.** `snapshot` returns the actionable elements to any socket client.
+- **A voice model drives single steps, nothing plans.** OpenAI Realtime or Gemini Live calls harness tools (open, focus, menus, find on screen, point, press, scroll, type, close). It may act only on what it was offered and what the owner was heard to say, and the safety kernel and approval card still decide. The planner tests' intents are hand-written: they prove a plan executes, not that anything planned it.
+- **"The tree never enters a prompt" is a design rule, not an enforced one.** `snapshot` returns the actionable elements to any socket client. Since 2026-10-02 no socket answer names a text field by what was typed into it or a password field by its dots, and no list reads inside either; a field's length is reported, never its text.
 
 **Safety**
 - **A hardware click proves a device, not a person.** Virtual-HID drivers and remote screen control arrive the same way. A Touch ID tier for money and credentials is designed but not built.
 - **Destructive and irreversible actions are recognised by English words in the title the app wrote.** A checkout button labelled "Place order", "Checkout" or "Transfer" matches nothing and is allowed as an ordinary press. Non-English titles are never matched.
 - **Without a policy file, every app is allowed.** Plain button presses do not ask.
-- **Password protection is by accessibility subrole.** A credential shown as ordinary text is not caught. The `type` refusal is unit-tested; the capture refusal was verified live once, on a local Safari page.
+- **Password protection is by accessibility role and subrole.** A field that does not say it is a password field is not caught, and a credential shown as ordinary text (an API key in a terminal) is not recognised at all: it reaches the voice model in the screenshot like any other visible text. The `type` refusal is unit-tested; the capture refusal was verified live once, on a local Safari page.
 - **"Always" rules depend on a free personal-team signing profile** that renews every 7 days. The app is not sandboxed.
 
 **What the verifier knows**
@@ -149,11 +149,11 @@ All in `leanring-buddy/` (an upstream typo; the product is named `Clicky`). **61
 - **Nothing has been tested on a second display.**
 
 **Voice**
-- **There is no voice loop yet.** The worker is deployed and both candidate stacks are benchmarked; neither met its latency target, and answer quality is unmeasured.
+- **Realtime voice is live, with limits.** First audio about 0.7 s (OpenAI) and 0.7 s (Gemini) for a spoken reply with no key press (n=5 each, 2026-10-01). After the owner interrupts, Gemini's reply starts about 2.6 s later against 0.7 s on OpenAI (n=3). Pointing by coordinates missed small web controls 12 of 12 times (2026-10-02); naming the element and resolving it through the tree is the path that works.
 
 ## Measured
 
-Dated, from this machine, with sample sizes where the source recorded them. **Tests:** 217 unit tests (Swift Testing). Planner tests 6/6 on two consecutive runs, last run 2026-09-15: six tasks, Finder and System Settings only.
+Dated, from this machine, with sample sizes where the source recorded them. **Tests:** 456 unit tests (Swift Testing), 2026-10-02. Planner tests 6/6 on two consecutive runs, last run 2026-09-15: six tasks, Finder and System Settings only.
 
 <details>
 <summary><b>Harness requests off the main thread</b> (<code>dda6804</code>, 2026-09-15)</summary>
