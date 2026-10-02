@@ -1,0 +1,24 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Mimic Network — Create a post</title><link rel="stylesheet" href="style.css">
+<style>
+/* LinkedIn's share box: a Quill editor whose placeholder is CSS ::before content, not an attribute AX reads as a value. */
+.ql-editor{min-height:120px;border:1px solid #ccc;border-radius:6px;padding:10px;outline:none;position:relative}
+.ql-editor p{margin:0}
+.ql-editor.ql-blank::before{content:attr(data-placeholder);color:#888;position:absolute;pointer-events:none}
+</style></head><body>
+<header><strong>Mimic Network</strong><nav><a href="#">Home</a><a href="#">My Network</a><a href="#">Jobs</a></nav></header>
+<main><h2>Create a post</h2>
+<div id="editor" class="ql-editor ql-blank" contenteditable="true" role="textbox" aria-multiline="true"
+ aria-label="Text editor for creating content" data-placeholder="What do you want to talk about?"><p><br></p></div>
+<p><button id="post" disabled>Post</button></p></main>
+<script src="mimic.js"></script>
+<script>
+const ed=document.getElementById('editor'),post=document.getElementById('post');
+function sync(){const blank=ed.textContent.length===0;ed.classList.toggle('ql-blank',blank);post.disabled=blank;
+ if(!ed.firstChild){ed.innerHTML='<p><br></p>'}}
+// ?draft=1: the composer already holds a draft (B6 "post it").
+if(mimic.params.get('draft')==='1'){ed.innerHTML='<p>Shipped slice 2 today.</p>'}
+ed.addEventListener('input',sync);sync();
+mimic.set('posted',0);
+// The Post button records a click in the page, and nothing leaves it.
+post.addEventListener('click',()=>mimic.set('posted',mimic.get('posted')+1));
+</script></body></html>

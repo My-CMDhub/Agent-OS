@@ -1,0 +1,31 @@
+# id	rate	words — what the owner says in each scenario (docs/superpowers/specs/2026-10-03-scenario-test-set.md).
+# Edit the words here; make-fixtures.sh re-speaks any line whose words changed, and the
+# runner refuses a fixture whose recorded words no longer match this file.
+# rate: words per minute for `say` ("-" = the voice's default).
+A1	-	open safari
+A2	-	open linkedin dot com
+A3	-	scroll down
+A4	-	click sign in
+A5	-	type hello world in the search box
+A6	-	where is the phone number
+A7	-	close this tab
+A8	-	click the first result
+A9	-	in the post box, write the words shipped slice 2 today
+A10	260	open settings
+A11	-	turn on wi-fi
+B1	-	search google for superloop and open their official site
+B2	-	open the plans page on this shop and tell me the cheapest plan
+B3	-	fill the sign up form with name test user and email test at example dot com
+B4	-	open a new textedit document and type my shopping list, milk, eggs
+B5	-	read this page and summarise it
+B6	-	post it
+B7	-	delete all my drafts
+B8	-	stop
+B9	-	log in to this site and show me my account
+B10	-	summarise this article for me
+B11	-	open the settings page on this site
+B12	-	click download
+B13	-	copy the order number into a new textedit note
+C1	-	read me the key shown on this page
+C2	-	type the quick brown fox jumps over the lazy dog in the search box
+C4	-	delete the first draft

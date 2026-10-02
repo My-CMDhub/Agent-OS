@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Mimic Social</title><link rel="stylesheet" href="style.css"></head><body>
+<header><strong>Mimic Social</strong><nav><a href="#">Home</a><a href="#">About</a></nav><button id="signin" class="secondary">Sign in</button></header>
+<main id="welcome"><h1>Welcome to Mimic Social</h1><p>Catch up with people you know. Sign in to see your feed.</p></main>
+<main id="form" class="hidden"><h1>Sign in to Mimic Social</h1>
+<label for="email">Email</label><input id="email" autocomplete="off">
+<label for="pw">Password</label><input id="pw" type="password" autocomplete="off">
+<button type="button">Continue</button></main>
+<script src="mimic.js"></script>
+<script>mimic.set('form','hidden');document.getElementById('signin').addEventListener('click',()=>{
+document.getElementById('welcome').classList.add('hidden');document.getElementById('form').classList.remove('hidden');mimic.set('form','shown')})</script>
+</body></html>

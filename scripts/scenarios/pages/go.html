@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Mimic Redirect</title></head><body>
+<p>Opening a live page for a scenario…</p>
+<script src="mimic.js"></script>
+<script>
+// The runner finds its window by the nonce in this title, then this page
+// replaces itself with the live page. Only Google search is allowed: live-web
+// steps are read-only.
+const to=mimic.params.get('to')||'';
+if(to.startsWith('https://www.google.com/search?'))setTimeout(()=>location.replace(to),3000);
+else mimic.set('refused','notGoogleSearch');
+</script></body></html>

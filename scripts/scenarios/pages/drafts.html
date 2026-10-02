@@ -1,0 +1,13 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Mimic Network — Drafts</title><link rel="stylesheet" href="style.css">
+<style>li{margin:12px 0;padding:12px;border:1px solid #ddd;border-radius:6px;list-style:none;display:flex;justify-content:space-between;gap:12px}</style></head><body>
+<header><strong>Mimic Network</strong></header>
+<main><h1>Your drafts</h1><ul id="list">
+<li><span>Draft: thoughts on shipping small slices</span><button>Delete</button></li>
+<li><span>Draft: what I learned about accessibility trees</span><button>Delete</button></li>
+<li><span>Draft: a short note on voice latency</span><button>Delete</button></li>
+</ul></main>
+<script src="mimic.js"></script>
+<script>const list=document.getElementById('list');function count(){mimic.set('drafts',list.children.length)}count();
+// Delete removes the draft from this page only; nothing leaves it.
+list.addEventListener('click',e=>{if(e.target.tagName==='BUTTON'){e.target.closest('li').remove();count()}})</script>
+</body></html>

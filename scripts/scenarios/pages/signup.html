@@ -1,0 +1,9 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Mimic Club — Sign up</title><link rel="stylesheet" href="style.css"></head><body>
+<header><strong>Mimic Club</strong></header>
+<main><h1>Create your account</h1><form id="f">
+<label for="name">Full name</label><input id="name" autocomplete="off">
+<label for="email">Email</label><input id="email" type="email" autocomplete="off">
+<button type="submit">Create account</button></form></main>
+<script src="mimic.js"></script>
+<script>mimic.set('submitted',0);document.getElementById('f').addEventListener('submit',e=>{e.preventDefault();mimic.set('submitted',mimic.get('submitted')+1)})</script>
+</body></html>

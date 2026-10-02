@@ -1,0 +1,8 @@
+body{font:16px -apple-system,system-ui,sans-serif;margin:0;color:#1d2226;background:#f4f2ee}
+header{background:#fff;border-bottom:1px solid #ddd;padding:12px 24px;display:flex;gap:24px;align-items:center}
+header strong{font-size:20px} nav a{margin-right:16px;color:#0a66c2;text-decoration:none}
+main{max-width:760px;margin:24px auto;background:#fff;border:1px solid #ddd;border-radius:8px;padding:24px}
+input,textarea{font:inherit;padding:8px;border:1px solid #888;border-radius:4px;width:320px;display:block;margin:6px 0 14px}
+button{font:inherit;padding:8px 16px;border-radius:16px;border:1px solid #0a66c2;background:#0a66c2;color:#fff;cursor:pointer}
+button.secondary{background:#fff;color:#0a66c2} button:disabled{opacity:.4;cursor:default}
+.hidden{display:none} label{font-weight:600}

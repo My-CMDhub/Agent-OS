@@ -153,6 +153,20 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // The scenario runner: spoken fixtures through the live session, each judged
+        // by its own structure read; report to ~/Library/Logs/Clicky/scenarios/,
+        // then quits. Spends Gemini (and, if asked, capped OpenAI) credit. Real
+        // actions, so it refuses --harness-dry-run; needs 120 s of owner idle. The
+        // card is up so a ticket shows as it would live; the runner only denies.
+        if CommandLine.arguments.contains("--scenario-run") {
+            confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
+            Task { @MainActor in
+                await ScenarioRunner.run(harness: self.harnessServer, confirmations: self.confirmations)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // The hands (click, type by AX write and by keystrokes, openURL) on a page
         // it writes, in a Chrome window it opens and closes by identity; JSON
         // summary 0600 to ~/Library/Logs/Clicky/hands-probe/, then quits. Real
