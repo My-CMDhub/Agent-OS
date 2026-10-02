@@ -2773,7 +2773,7 @@ final class HarnessServer {
                     response["performed"] = payload
                     response["method"] = TypeMethod.keystrokes.rawValue
                     performedOK = evidence != nil
-                    keystrokesSawTheText = evidence == HarnessHands.valueGrewEvidence
+                    keystrokesSawTheText = evidence.map(HarnessHands.readBackEvidence.contains) ?? false
                 }
             }
 
@@ -2810,7 +2810,8 @@ final class HarnessServer {
         // the hands probe, 2026-10-02.
         if keystrokesSawTheText {
             phaseTiming.verified(walks: 0, path: "readBack")
-            response["verification"] = ["status": "confirmed", "evidence": HarnessHands.valueGrewEvidence,
+            response["verification"] = ["status": "confirmed",
+                                        "evidence": (response["performed"] as? [String: Any])?["evidence"] ?? HarnessHands.valueGrewEvidence,
                                         "milliseconds": 0, "appeared": [String]()]
             response["ok"] = true
             audit(request, dryRun: dryRun, kernel: described.decision, outcome: "confirmed", startedAt: startedAt)

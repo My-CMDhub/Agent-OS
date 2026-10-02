@@ -229,10 +229,10 @@ struct HarnessHandsTests {
     @Test func keystrokesAreRefusedInTheOrderThatProtectsTheOwnerFirst() {
         func refusal(_ text: String = "hello", mode: TypeMode = .insert, before: Int? = 0, secure: Bool = false,
                      focusedSecure: Bool = false, focused: Bool = true, selection: Int? = 0, frontmost: Bool = true,
-                     idle: Bool = true, caret: Int? = nil, lengthUTF16: Int? = nil) -> String? {
+                     idle: Bool = true, caret: Int? = nil, value: String? = nil) -> String? {
             HarnessHands.keystrokeRefusal(text: text, mode: mode, valueLengthBefore: before, secureInputOn: secure,
                                           focusedMightBeSecure: focusedSecure, focusedIsTarget: focused, selectionLength: selection,
-                                          frontmostIsTarget: frontmost, ownerIdle: idle, caretLocation: caret, valueLengthUTF16: lengthUTF16)?.code
+                                          frontmostIsTarget: frontmost, ownerIdle: idle, caretLocation: caret, value: value)?.code
         }
         #expect(refusal() == nil)
         #expect(refusal(before: 7, selection: 0) == nil)
@@ -256,10 +256,47 @@ struct HarnessHandsTests {
         #expect(refusal(secure: true, frontmost: false) == "handOver")
         #expect(refusal(frontmost: false, idle: false) == "frontmostChanged")
         #expect(refusal(idle: false) == "ownerActive")
-        #expect(refusal(before: 7, caret: 3, lengthUTF16: 7) == "caretNotAtEnd")
-        #expect(refusal(before: 7, caret: 7, lengthUTF16: 7) == nil)
-        #expect(refusal(mode: .replace, before: 0, caret: 0, lengthUTF16: 0) == nil)
+        #expect(refusal(before: 7, caret: 3, value: "hello w") == "caretNotAtEnd")
+        #expect(refusal(before: 7, caret: 7, value: "hello w") == nil)
+        #expect(refusal(mode: .replace, before: 0, caret: 0, value: "") == nil)
         #expect(refusal("a" + String(repeating: "\u{0301}", count: 25)) == "characterTooLong")
+    }
+
+    // Live 2026-10-02: LinkedIn's empty share box refused caretNotAtEnd. Measured on the
+    // hands probe's Quill editor: value "Share your thoughts...\n" (CSS ::before placeholder
+    // plus <p><br></p>), caret at 22 of 23, and a write to the end ignored.
+    @Test func anEmptyEditorShowingAPlaceholderTakesKeysAndTextAfterTheCaretStillRefuses() {
+        let quill = "Share your thoughts...\n"
+        func refusal(caret: Int, value: String) -> String? {
+            HarnessHands.keystrokeRefusal(text: "Probe", mode: .insert, valueLengthBefore: value.count, secureInputOn: false,
+                                          focusedMightBeSecure: false, focusedIsTarget: true, selectionLength: 0,
+                                          frontmostIsTarget: true, ownerIdle: true, caretLocation: caret, value: value)?.code
+        }
+        #expect(refusal(caret: 22, value: quill) == nil)
+        #expect(refusal(caret: 5, value: "Hello\n") == nil)              // a paragraph editor at its true end
+        #expect(refusal(caret: 5, value: "Hello  \n\n") == nil)
+        // Typing must never land inside existing text.
+        #expect(refusal(caret: 0, value: quill) == "caretNotAtEnd")
+        #expect(refusal(caret: 5, value: "Hello\nWorld\n") == "caretNotAtEnd")
+        #expect(refusal(caret: 2, value: "Hello") == "caretNotAtEnd")
+        #expect(refusal(caret: 9, value: "Hello") == "caretNotAtEnd")
+        #expect(refusal(caret: -1, value: "Hello") == "caretNotAtEnd")
+        // UTF-16 offsets: an emoji is two units.
+        #expect(refusal(caret: 2, value: "👋\n") == nil)
+        #expect(refusal(caret: 1, value: "👋\n") == "caretNotAtEnd")
+
+        // Read back: the placeholder gave way to exactly the text.
+        #expect(HarnessHands.placeholderGaveWay(valueBefore: quill, caret: 22, valueAfter: "Probe\n", typed: "Probe"))
+        #expect(HarnessHands.placeholderGaveWay(valueBefore: quill, caret: 22, valueAfter: "Probe", typed: "Probe"))   // measured
+        #expect(!HarnessHands.placeholderGaveWay(valueBefore: quill, caret: 0, valueAfter: "Probe", typed: "Probe"))
+        #expect(!HarnessHands.placeholderGaveWay(valueBefore: "Hello\nWorld", caret: 5, valueAfter: "Probe", typed: "Probe"))
+        #expect(!HarnessHands.placeholderGaveWay(valueBefore: quill, caret: 22, valueAfter: "", typed: ""))
+        #expect(!HarnessHands.placeholderGaveWay(valueBefore: quill, caret: 22, valueAfter: "Share your thoughts...Probe\n", typed: "Probe"))
+        #expect(!HarnessHands.placeholderGaveWay(valueBefore: quill, caret: 22, valueAfter: quill, typed: "Probe"))
+        #expect(!HarnessHands.placeholderGaveWay(valueBefore: quill, caret: 22, valueAfter: "Prob\n", typed: "Probe"))
+        #expect(!HarnessHands.placeholderGaveWay(valueBefore: "", caret: 0, valueAfter: "Probe", typed: "Probe"))
+        #expect(!HarnessHands.placeholderGaveWay(valueBefore: nil, caret: 22, valueAfter: "Probe\n", typed: "Probe"))
+        #expect(HarnessHands.readBackEvidence.contains(HarnessHands.placeholderGaveWayEvidence))
     }
 
     // Review 2026-10-02: the owner idle is checked before the focusing click, not after it.

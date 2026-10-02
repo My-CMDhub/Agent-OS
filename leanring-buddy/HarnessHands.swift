@@ -250,11 +250,11 @@ enum HarnessHands {
     /// focused element survives deactivation, so focus alone would type into
     /// whatever came forward (review of H1, 2026-10-02). `ownerIdle`: no input of
     /// the owner's for `ownerIdleSeconds`, our own discounted. `caretLocation` /
-    /// `valueLengthUTF16`: an insert goes at the END — a focusing click leaves
-    /// the caret where it landed, mid-text.
+    /// `value`: an insert goes at the END — a focusing click leaves the caret
+    /// where it landed, mid-text (`onlyBlankAfter`).
     static func keystrokeRefusal(text: String, mode: TypeMode, valueLengthBefore: Int?, secureInputOn: Bool,
                                  focusedMightBeSecure: Bool, focusedIsTarget: Bool, selectionLength: Int?,
-                                 frontmostIsTarget: Bool, ownerIdle: Bool, caretLocation: Int?, valueLengthUTF16: Int?) -> HandsRefusal? {
+                                 frontmostIsTarget: Bool, ownerIdle: Bool, caretLocation: Int?, value: String?) -> HandsRefusal? {
         if secureInputOn {
             return HandsRefusal(code: "handOver", message: "secure typing is on — a password is the owner's to type; no keystrokes were posted")
         }
@@ -290,11 +290,25 @@ enum HarnessHands {
             return HandsRefusal(code: "selectionNotEmpty",
                                 message: "\(selectionLength) characters are selected; keystrokes would replace them, so none were posted")
         }
-        if mode == .insert, let caretLocation, let valueLengthUTF16, caretLocation != valueLengthUTF16 {
+        if mode == .insert, let caretLocation, let value, !onlyBlankAfter(caret: caretLocation, in: value) {
             return HandsRefusal(code: "caretNotAtEnd",
                                 message: "the caret is inside the existing text and could not be moved to its end; none were posted")
         }
         return nil
+    }
+
+    /// Nothing but spaces and line breaks after the caret (UTF-16 offset): an
+    /// insert there splits no text. Measured 2026-10-03 (hands probe, Chrome):
+    /// an EMPTY Quill editor — LinkedIn's share box — reads "Share your
+    /// thoughts...\n", its CSS `::before` placeholder plus the `<p><br></p>`
+    /// line break, with the caret at 22 of 23 and a write to the end ignored, so
+    /// "caret == length" refused typing into an empty box (`caretNotAtEnd`), and
+    /// would refuse every paragraph editor at its true end. Text after the caret
+    /// still refuses.
+    static func onlyBlankAfter(caret: Int, in value: String) -> Bool {
+        let units = Array(value.utf16)
+        guard (0...units.count).contains(caret) else { return false }
+        return String(decoding: units[caret...], as: UTF16.self).allSatisfy(\.isWhitespace)
     }
 
     /// Why typing stops before the next chunk, or nil. Read before EVERY chunk,
@@ -371,6 +385,23 @@ enum HarnessHands {
         }
         return valueLengthAfter == valueLengthBefore + typedCount ? valueGrewEvidence : nil
     }
+
+    /// The field now reads exactly the typed text — its own trailing line breaks
+    /// aside — and what preceded the caret is gone. Keys at a collapsed caret
+    /// delete nothing, so that text was never the field's: it was a placeholder
+    /// drawn as content (an empty Quill editor, `onlyBlankAfter`), and its
+    /// length made the value look like it shrank. Measured on the hands probe:
+    /// "Share your thoughts...\n" (23) became "Probe into Quill" (16) — the
+    /// `<br>` went with the placeholder.
+    static func placeholderGaveWay(valueBefore: String?, caret: Int?, valueAfter: String?, typed: String) -> Bool {
+        guard let valueBefore, let caret, let valueAfter, caret > 0, caret <= valueBefore.utf16.count,
+              onlyBlankAfter(caret: caret, in: valueBefore) else { return false }
+        func trimmed(_ text: String) -> Substring { text[..<(text.lastIndex { !$0.isWhitespace }.map(text.index(after:)) ?? text.startIndex)] }
+        return !typed.isEmpty && trimmed(valueAfter) == trimmed(typed)
+    }
+    static let placeholderGaveWayEvidence = "the field's placeholder gave way to exactly the text"
+    /// Evidence read from the field itself, so no fingerprint poll is needed.
+    static let readBackEvidence: Set<String> = [valueGrewEvidence, placeholderGaveWayEvidence]
     /// The field itself, re-read after the keys, grew by exactly the text: the effect,
     /// observed — so `type` reports it confirmed without the fingerprint poll.
     static let valueGrewEvidence = "the field's value grew by the text's length"
@@ -794,8 +825,8 @@ enum HarnessHands {
         let valueLengthBefore = valueBefore?.count
         let valueLengthUTF16 = valueBefore?.utf16.count
         // An insert goes at the end: move a caret the focusing click left mid-text, then read where it is.
-        if mode == .insert, let valueLengthUTF16, let range = AccessibilityTypePerformer.selectedRange(of: element),
-           range.length == 0, range.location != valueLengthUTF16 {
+        if mode == .insert, let valueBefore, let valueLengthUTF16, let range = AccessibilityTypePerformer.selectedRange(of: element),
+           range.length == 0, !onlyBlankAfter(caret: range.location, in: valueBefore) {
             var end = CFRange(location: valueLengthUTF16, length: 0)
             if let endValue = AXValueCreate(.cfRange, &end) {
                 AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, endValue)
@@ -810,7 +841,7 @@ enum HarnessHands {
             focusedIsTarget: focusIsOn(element, processIdentifier: processIdentifier),
             selectionLength: selection.map { $0.length },
             frontmostIsTarget: targetIsFrontmost(processIdentifier), ownerIdle: ownerIdle,
-            caretLocation: selection.map { $0.location }, valueLengthUTF16: valueLengthUTF16
+            caretLocation: selection.map { $0.location }, value: valueBefore
         ) { return .refused(refusal) }
 
         let chunks = keystrokeChunks(text)
@@ -829,9 +860,12 @@ enum HarnessHands {
         var valueLengthAfter: Int?
         var evidence: String?
         waitUntil(seconds: keystrokeVerifySeconds) {
-            valueLengthAfter = AccessibilityTypePerformer.stringValue(of: element)?.count
+            let valueAfter = AccessibilityTypePerformer.stringValue(of: element)
+            valueLengthAfter = valueAfter?.count
             evidence = keystrokeEvidence(valueLengthBefore: valueLengthBefore, valueLengthAfter: valueLengthAfter,
                                          typedCount: text.count, fingerprintChanged: false)
+                ?? (placeholderGaveWay(valueBefore: valueBefore, caret: selection?.location, valueAfter: valueAfter, typed: text)
+                    ? placeholderGaveWayEvidence : nil)
             return evidence != nil
         }
         // A field with no readable value: the window's text is the only witness.
