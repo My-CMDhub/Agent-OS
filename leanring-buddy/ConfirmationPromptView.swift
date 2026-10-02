@@ -11,10 +11,22 @@ import AppKit
 import SwiftUI
 
 struct ConfirmationPromptView: View {
+    enum Style: Equatable {
+        /// The menu-bar panel: every line in mono, answered rows kept a while.
+        case panel
+        /// The card under the notch: pending tickets only, laid out by line kind.
+        case card(step: ConfirmationStep?)
+    }
+
     @ObservedObject var confirmations: HarnessConfirmations
+    var style: Style = .panel
     /// The menu-bar panel keeps answered and expired rows for a while; the
     /// floating card asks only what is still open.
-    var includesAnsweredTickets = true
+    private var includesAnsweredTickets: Bool { style == .panel }
+
+    /// The card's sections, top to bottom. Every `CardLine.Kind` is here (a test
+    /// holds it), so no line a ticket binds can be left off the card.
+    static let cardSections: [HarnessConfirmations.CardLine.Kind] = [.verb, .preview, .place, .qualifier, .effect]
     /// Why the last approval pressed on a ticket did not count, by ticket id.
     /// Every reason is our own words and numbers — no app-written text.
     @State private var approvalRejections: [String: String] = [:]
@@ -122,14 +134,24 @@ struct ConfirmationPromptView: View {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let visible = Self.visibleTickets(confirmations.tickets, now: context.date, includesAnswered: includesAnsweredTickets)
                 if !visible.isEmpty {
-                    VStack(alignment: .leading, spacing: DS.Spacing.sm) {
-                        ForEach(visible) { ticket in
-                            row(ticket, now: context.date)
+                    if case .card(let step) = style {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(visible.enumerated()), id: \.element.id) { index, ticket in
+                                if index > 0 { Rectangle().fill(ConfirmationCardStyle.ink.opacity(0.1)).frame(height: 1) }
+                                cardRow(ticket, step: step, now: context.date)
+                            }
                         }
+                        .background(HostWindowReader(tracker: placementTracker))
+                    } else {
+                        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                            ForEach(visible) { ticket in
+                                row(ticket, now: context.date)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
+                        .background(HostWindowReader(tracker: placementTracker))
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                    .background(HostWindowReader(tracker: placementTracker))
                 }
             }
         }
@@ -190,15 +212,201 @@ struct ConfirmationPromptView: View {
         .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.medium))
         .overlay(RoundedRectangle(cornerRadius: DS.CornerRadius.medium)
             .stroke(status == .pending ? DS.Colors.warning : DS.Colors.borderSubtle, lineWidth: 1))
-        // The row's top-left in window coordinates. Any move — a row above it
-        // answered and dropped, the card re-laid-out for a new ticket — restarts
-        // its clock, so a click aimed at one ticket cannot count on another that
-        // slid under the pointer. Origin, not frame: the rejection line growing
-        // below the buttons changes the height and moves nothing clickable.
-        .background(GeometryReader { proxy in
+        .modifier(TracksRowPlacement(ticketID: ticket.id, tracker: placementTracker))
+    }
+
+    // MARK: Card
+
+    private static let ink = ConfirmationCardStyle.ink
+    private static let labelWidth: CGFloat = 58
+
+    /// One ticket on the card. Pending only (the card never shows answered rows).
+    @ViewBuilder
+    private func cardRow(_ ticket: HarnessConfirmations.Ticket, step: ConfirmationStep?, now: Date) -> some View {
+        let lines = ticket.cardLines
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(Self.cardSections, id: \.self) { kind in
+                cardSection(kind, lines.filter { $0.kind == kind }.map(\.text), ticket: ticket)
+            }
+            // The kernel's reason, as before: why it asked.
+            labelled("WHY", Text(ticket.reason).font(.system(size: 12)).foregroundStyle(Self.ink.opacity(0.62))
+                .fixedSize(horizontal: false, vertical: true))
+            if let rejection = approvalRejections[ticket.id] {
+                Text(verbatim: "Not counted: \(rejection)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Self.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 10) {
+                if let step {
+                    Text(verbatim: "Doing \u{00B7} step \(step.current)/\(step.total)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Self.ink.opacity(0.62))
+                }
+                Spacer(minLength: 0)
+                Button { press("deny", ticket, allow: false, scope: .once) } label: {
+                    Text("Deny")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Self.ink)
+                        .frame(width: 96, height: 32)
+                        .overlay(Capsule().stroke(Self.ink.opacity(0.6), lineWidth: 1.5))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                Button { press("allowOnce", ticket, allow: true, scope: .once) } label: {
+                    Text("Allow once")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(ConfirmationCardStyle.material)
+                        .frame(width: 108, height: 32)
+                        .background(Capsule().fill(Self.ink))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .background(recordsFrame(of: "allowOnce", ticketID: ticket.id))
+            }
+            // The quieter third control, only where today's card offered it: a
+            // destructive question is Allow once and Deny only.
+            if HarnessConfirmations.offersAlwaysRule(for: ticket) {
+                HStack {
+                    Spacer(minLength: 0)
+                    Button { press("always", ticket, allow: true, scope: .always) } label: {
+                        Text(HarnessConfirmations.alwaysButtonTitle(for: ticket))
+                            .font(.system(size: 11))
+                            .underline()
+                            .foregroundStyle(Self.ink.opacity(0.62))
+                            .multilineTextAlignment(.trailing)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .background(recordsFrame(of: "always", ticketID: ticket.id))
+                }
+            }
+        }
+        .padding(22)
+        .modifier(TracksRowPlacement(ticketID: ticket.id, tracker: placementTracker))
+    }
+
+    @ViewBuilder
+    private func cardSection(_ kind: HarnessConfirmations.CardLine.Kind, _ texts: [String],
+                             ticket: HarnessConfirmations.Ticket) -> some View {
+        if !texts.isEmpty {
+            switch kind {
+            case .verb:
+                HStack(alignment: .center, spacing: 12) {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Self.ink, lineWidth: 1.5)
+                        .frame(width: 30, height: 30)
+                        .overlay(Image(systemName: Self.symbol(for: ticket.verb))
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Self.ink))
+                    (Text("J.A.R.V.I.S. wants to ") + Text(texts.joined(separator: " ")).fontWeight(.semibold))
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(Self.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    CountdownRing(expiresAt: ticket.expiresAt)
+                }
+            case .preview:
+                // Whole, never cut: `open` refused anything too long to show in full.
+                ForEach(Array(texts.enumerated()), id: \.offset) { _, text in
+                    Text(text)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Self.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            case .place:
+                labelled("WHERE", monoLines(texts, opacity: 0.8))
+            case .qualifier:
+                labelled("", monoLines(texts, opacity: 0.5))
+            case .effect:
+                labelled("EFFECT", VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(texts.enumerated()), id: \.offset) { _, text in
+                        Text(text)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Self.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                })
+            }
+        }
+    }
+
+    private func monoLines(_ texts: [String], opacity: Double) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(texts.enumerated()), id: \.offset) { _, text in
+                Text(text)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Self.ink.opacity(opacity))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func labelled(_ label: String, _ value: some View) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Self.ink.opacity(0.62))
+                .frame(width: Self.labelWidth, alignment: .leading)
+            value
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The icon tile: our own verb, never app-written.
+    static func symbol(for verb: String) -> String {
+        switch verb {
+        case "type": return "keyboard"
+        case "menu": return "filemenu.and.selection"
+        case "focus": return "macwindow"
+        case "launch": return "app"
+        case "openURL": return "globe"
+        case "scroll": return "arrow.up.and.down"
+        case "select": return "checkmark.circle"
+        default: return "cursorarrow.click"
+        }
+    }
+}
+
+/// The 60 s ring, drawn from the ticket's own `expiresAt` — never a timer of its own.
+private struct CountdownRing: View {
+    let expiresAt: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { context in
+            let remaining = max(0, expiresAt.timeIntervalSince(context.date))
+            let fraction = remaining / HarnessConfirmations.ticketLifetimeInSeconds
+            ZStack {
+                Circle().stroke(ConfirmationCardStyle.ink.opacity(0.25), lineWidth: 3)
+                Circle()
+                    .trim(from: 0, to: fraction)
+                    .stroke(ConfirmationCardStyle.ink, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Text(verbatim: "\(Int(remaining.rounded(.up)))")
+                    .font(.system(size: 9, weight: .medium).monospacedDigit())
+                    .foregroundStyle(ConfirmationCardStyle.ink.opacity(0.62))
+            }
+            .frame(width: 26, height: 26)
+            .accessibilityLabel("\(Int(remaining.rounded(.up))) seconds left")
+        }
+    }
+}
+
+/// A row's top-left in window coordinates. Any move — a row above it answered
+/// and dropped, the card re-laid-out for a new ticket — restarts its clock, so
+/// a click aimed at one ticket cannot count on another that slid under the
+/// pointer. Origin, not frame: the rejection line growing below the buttons
+/// changes the height and moves nothing clickable.
+private struct TracksRowPlacement: ViewModifier {
+    let ticketID: String
+    let tracker: ConfirmationPlacementTracker
+
+    func body(content: Content) -> some View {
+        content.background(GeometryReader { proxy in
             Color.clear.onChange(of: proxy.frame(in: .global).origin, initial: true) { _, origin in
-                placementTracker.rowPlacements[ticket.id] = ScreenPlacement.after(
-                    placementTracker.rowPlacements[ticket.id], origin: origin, nowUptime: ProcessInfo.processInfo.systemUptime
+                tracker.rowPlacements[ticketID] = ScreenPlacement.after(
+                    tracker.rowPlacements[ticketID], origin: origin, nowUptime: ProcessInfo.processInfo.systemUptime
                 )
             }
         })

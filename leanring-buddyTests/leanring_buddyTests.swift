@@ -3224,7 +3224,7 @@ private func mailShape(
     #expect(forged.count == plain.count)
     #expect(!forged.contains("then submits (AXConfirm)"))
     #expect(forged.allSatisfy { !$0.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } })
-    #expect(forged.contains(#"text: "hi\nthen submits (AXConfirm)\u{07}" (insert)"#))
+    #expect(forged.contains(#""hi\nthen submits (AXConfirm)\u{07}""#))
 }
 
 @Test func anAlwaysRuleIsForTheWholeShapeItWasApprovedFor() async throws {
@@ -3606,7 +3606,7 @@ private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirma
     #expect(lines.allSatisfy { line in
         !line.unicodeScalars.contains { [.lineSeparator, .paragraphSeparator].contains($0.properties.generalCategory) || $0 == "\u{0085}" || $0 == "\u{00A0}" }
     })
-    #expect(lines.contains(#"text: "hi\u{2028}then submits (AXConfirm)\u{2029}x\u{85}y\u{A0}z\u{3000}" (insert)"#))
+    #expect(lines.contains(#""hi\u{2028}then submits (AXConfirm)\u{2029}x\u{85}y\u{A0}z\u{3000}""#))
 
     // One Character, 3,001 scalars: counted as 1 it would have been shown.
     let overstruck = "a" + String(repeating: "\u{0336}", count: 3_000)

@@ -358,8 +358,9 @@ nonisolated enum JarvisNotchLevel {
 
 // MARK: - Ticks
 
-/// The only two sounds: hotkey down (a rising two-partial tick, a hint of
-/// arc-reactor whine) and hotkey up (lighter, falling). Synthesised, not files.
+/// The two hotkey sounds: down (a rising two-partial tick, a hint of
+/// arc-reactor whine) and up (lighter, falling). Synthesised, not files. The
+/// approval card's chime (`ConfirmationChime`) is the only other sound.
 nonisolated enum JarvisNotchTick: CaseIterable, Sendable {
     case press
     case release
@@ -387,6 +388,11 @@ nonisolated enum JarvisNotchTick: CaseIterable, Sendable {
             let envelope = min(1, time / 0.004) * exp(-progress * 5)
             output[index] = Float(envelope * (sin(phase) + upperPartialLevel * sin(1.5 * phase)))
         }
+        return Self.normalised(output, peakDecibels: peakDecibels)
+    }
+
+    /// Scaled so the loudest sample sits exactly at `peakDecibels`.
+    static func normalised(_ output: [Float], peakDecibels: Float) -> [Float] {
         let peak = output.map(abs).max() ?? 0
         guard peak > 0 else { return output }
         let target = pow(10, peakDecibels / 20)
@@ -410,12 +416,52 @@ nonisolated enum JarvisNotchTick: CaseIterable, Sendable {
         return muted != 0
     }
 
-    @MainActor func buffer(format: AVAudioFormat) -> AVAudioPCMBuffer? {
-        let samples = self.samples
+    @MainActor func buffer(format: AVAudioFormat) -> AVAudioPCMBuffer? { Self.buffer(samples, format: format) }
+
+    @MainActor static func buffer(_ samples: [Float], format: AVAudioFormat) -> AVAudioPCMBuffer? {
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else { return nil }
         buffer.frameLength = AVAudioFrameCount(samples.count)
         samples.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress!, count: samples.count) }
         return buffer
+    }
+}
+
+/// The approval card's sound: a soft two-note bell, nothing like the ticks
+/// (60 ms glides at 1.5-2.3 kHz). An ordinary question rises a fourth; a
+/// destructive one (Allow once and Deny only) falls a fourth, an octave lower,
+/// so the owner hears which kind it is without looking.
+nonisolated enum ConfirmationChime: CaseIterable, Sendable {
+    case permission
+    case destructive
+
+    static let noteSeconds = 0.32
+    /// The second note starts this long after the first.
+    static let noteGapSeconds = 0.13
+    /// Quieter than the press tick (-24): it may arrive while the owner is reading.
+    static let peakDecibels: Float = -27
+
+    var noteHertz: (first: Double, second: Double) {
+        switch self {
+        case .permission: return (784, 1_046.5)  // G5 -> C6
+        case .destructive: return (523.25, 392)  // C5 -> G4
+        }
+    }
+
+    /// Each note: a sine plus a quiet octave, 6 ms attack, exponential decay.
+    var samples: [Float] {
+        let rate = JarvisNotchTick.sampleRate
+        let count = Int((Self.noteGapSeconds + Self.noteSeconds) * rate)
+        var output = [Float](repeating: 0, count: count)
+        for (offset, hertz) in [(0.0, noteHertz.first), (Self.noteGapSeconds, noteHertz.second)] {
+            let start = Int(offset * rate)
+            for index in 0..<Int(Self.noteSeconds * rate) where start + index < count {
+                let time = Double(index) / rate
+                let envelope = min(1, time / 0.006) * exp(-time * 11)
+                let phase = 2 * Double.pi * hertz * time
+                output[start + index] += Float(envelope * (sin(phase) + 0.18 * sin(2 * phase)))
+            }
+        }
+        return JarvisNotchTick.normalised(output, peakDecibels: Self.peakDecibels)
     }
 }
 
@@ -569,6 +615,18 @@ final class JarvisNotch {
     /// Where the panel sits, for the probe's screenshots.
     var panelFrame: CGRect? { panel?.frame }
 
+    /// The notch as drawn now, or nil while idle — the approval card grows out
+    /// of it, so it asks where it is rather than guessing a screen.
+    var visibleGeometry: JarvisNotchGeometry? { state == .idle || panel == nil ? nil : model.geometry }
+
+    /// While the approval card is up it draws its own tab where the notch is
+    /// ("needs you"), so the pill steps aside instead of drawing a second one
+    /// under it. The panel stays ordered in: the drawn-state witness is unchanged.
+    var coveredByCard: Bool {
+        get { model.coveredByCard }
+        set { model.coveredByCard = newValue }
+    }
+
     private func placeOnScreenUnderCursor() {
         let pointer = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { NSMouseInRect(pointer, $0.frame, false) }) ?? NSScreen.main else { return }
@@ -613,6 +671,7 @@ private final class JarvisNotchModel: ObservableObject {
     @Published var state: JarvisNotchState = .idle
     @Published var level: CGFloat = 0
     @Published var reduceMotion = false
+    @Published var coveredByCard = false
     @Published var geometry = JarvisNotchGeometry(hasNotch: false, anchor: .zero)
 }
 
@@ -669,7 +728,8 @@ private struct JarvisNotchView: View {
             .clipShape(outline)
             .frame(width: size.width + 2 * shoulder, height: size.height)
             .shadow(color: geometry.hasNotch ? .clear : .black.opacity(0.35), radius: 7, x: 0, y: 4)
-            .opacity(!geometry.hasNotch && model.state == .idle ? 0 : 1)
+            .opacity(model.coveredByCard || (!geometry.hasNotch && model.state == .idle) ? 0 : 1)
+            .animation(.easeInOut(duration: 0.15), value: model.coveredByCard)
     }
 
     @ViewBuilder

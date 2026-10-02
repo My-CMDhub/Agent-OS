@@ -223,10 +223,13 @@ final class HarnessConfirmations: ObservableObject {
         /// One ticket, one action. Status stays `allowed` so the panel can still
         /// show the answer; this flag is what refuses a second use.
         var consumed = false
-        /// `displayLines(for:appName:)` of this ticket's shape, computed once at
-        /// `open`. The panel renders exactly these — never its own reading of
-        /// the fields — so what the owner sees and what the ticket binds cannot drift.
-        var displayLines: [String] = []
+        /// `cardLines(for:appName:binding:destructive:)` of this ticket, computed
+        /// once at `open`. The card and the panel render exactly these — never
+        /// their own reading of the fields — so what the owner sees and what the
+        /// ticket binds cannot drift.
+        var cardLines: [CardLine] = []
+        /// The same lines as plain text: what the 300-scalar check measured.
+        var displayLines: [String] { cardLines.map(\.text) }
         /// What the action would affect when the ticket was opened. nil for verbs
         /// that act on no element (focus, launch) and in tests of the words alone.
         var binding: ActionBinding? = nil
@@ -378,31 +381,98 @@ final class HarnessConfirmations: ObservableObject {
         return nil
     }
 
-    /// Every field of `shape` as a plain line a human reads — the whole question.
+    /// One line of the question, and where on the card it is drawn. The card
+    /// draws every kind (`ConfirmationPromptView.cardSections` lists them all,
+    /// and a test holds that), so a line can change place but never go missing.
+    struct CardLine: Equatable {
+        enum Kind: CaseIterable {
+            /// Our verb's title: "J.A.R.V.I.S. wants to **Press**".
+            case verb
+            /// The text the action would type, escaped in full — the quote.
+            case preview
+            /// The WHERE row: app › container › target.
+            case place
+            /// Under WHERE, dim: role, point, bundle identifier.
+            case qualifier
+            /// The EFFECT row: what the action does, in plain words.
+            case effect
+        }
+        let kind: Kind
+        let text: String
+    }
+
+    /// Every field of `shape` as a line a human reads — the whole question.
     /// App-written strings are escaped (a newline cannot forge a second line)
     /// and never truncated; `open` refuses instead when a line is too long.
     /// A test walks `Shape` with `Mirror`, so a field added here without a line fails it.
-    static func displayLines(for shape: Shape, appName: String?, binding: ActionBinding?) -> [String] {
-        displayLines(for: shape, appName: appName)
-            + (binding.map { ActionBinding.displayLines(for: $0, bundleIdentifier: shape.bundleIdentifier) } ?? [])
-    }
-
-    static func displayLines(for shape: Shape, appName: String?) -> [String] {
-        var lines = ["\(shape.verb) \(UntrustedText(shape.rawTarget).forDisplayInFull)"]
-        if let withinNamed = shape.withinNamed { lines.append("within \(UntrustedText(withinNamed).forDisplayInFull)") }
-        if let role = shape.role { lines.append("role \(UntrustedText(role).forDisplayInFull)") }
-        if let point = shape.nearPoint { lines.append("at point (\(point.x), \(point.y))") }
-        if shape.text != nil || shape.mode != nil {
-            let text = shape.text.map { UntrustedText($0).forDisplayInFull } ?? "none"
-            lines.append("text: \(text) (\(shape.mode ?? "no mode"))")
-        }
+    ///
+    /// The EFFECT words come only from what this code knows: our own verb and
+    /// mode, `thenConfirm`, and the kernel's typed `destructive` flag — never
+    /// read back out of a reason string, and never a promise about undo that
+    /// nothing here can check (no reversibility tag: no verb knows it today).
+    static func cardLines(for shape: Shape, appName: String?, binding: ActionBinding? = nil,
+                          destructive: Bool = false) -> [CardLine] {
+        let target = UntrustedText(shape.rawTarget).forDisplayInFull
+        let app = appName.map { UntrustedText($0).forDisplayInFull } ?? "unnamed app"
+        var lines = [CardLine(kind: .verb, text: verbTitle(shape.verb))]
+        if let text = shape.text { lines.append(CardLine(kind: .preview, text: UntrustedText(text).forDisplayInFull)) }
+        let place = [app] + (shape.withinNamed.map { [UntrustedText($0).forDisplayInFull] } ?? []) + [target]
+        lines.append(CardLine(kind: .place, text: place.joined(separator: " \u{203A} ")))
+        if let role = shape.role { lines.append(CardLine(kind: .qualifier, text: "role \(UntrustedText(role).forDisplayInFull)")) }
+        if let point = shape.nearPoint { lines.append(CardLine(kind: .qualifier, text: "at point (\(point.x), \(point.y))")) }
+        let bundle = shape.bundleIdentifier.map { UntrustedText($0).forDisplayInFull } ?? "no bundle identifier"
+        lines.append(CardLine(kind: .qualifier, text: "app id \(bundle)"))
+        lines.append(CardLine(kind: .effect, text: effect(of: shape, target: target, app: app)))
         // `type` with thenConfirm also performs AXConfirm — it submits. The owner
         // must not approve "type X" and get "type X and press Return".
-        if shape.thenConfirm { lines.append("then submits (AXConfirm)") }
-        let app = appName.map { UntrustedText($0).forDisplayInFull } ?? "unnamed app"
-        let bundle = shape.bundleIdentifier.map { UntrustedText($0).forDisplayInFull } ?? "no bundle identifier"
-        lines.append("in \(app) (\(bundle))")
+        if shape.thenConfirm { lines.append(CardLine(kind: .effect, text: "then submits (AXConfirm)")) }
+        if destructive {
+            lines.append(CardLine(kind: .effect, text: "judged destructive by the safety rules \u{2014} allow once or deny"))
+        }
+        for line in binding.map({ ActionBinding.displayLines(for: $0, bundleIdentifier: shape.bundleIdentifier) }) ?? [] {
+            lines.append(CardLine(kind: .effect, text: line))
+        }
         return lines
+    }
+
+    static func displayLines(for shape: Shape, appName: String?, binding: ActionBinding? = nil,
+                             destructive: Bool = false) -> [String] {
+        cardLines(for: shape, appName: appName, binding: binding, destructive: destructive).map(\.text)
+    }
+
+    /// Our own verb in the header. A verb not named here is shown as itself,
+    /// capitalised — it is a `HarnessVerb` raw value, never app-written.
+    static func verbTitle(_ verb: String) -> String {
+        switch verb {
+        case "menu": return "Choose a menu item"
+        case "openURL": return "Open a page"
+        default: return verb.prefix(1).uppercased() + verb.dropFirst()
+        }
+    }
+
+    /// What the verb does to `target`, in words that are true of every request
+    /// with this shape. `target` and `app` are already escaped.
+    static func effect(of shape: Shape, target: String, app: String) -> String {
+        switch shape.verb {
+        case "type":
+            let what = shape.text == nil ? "nothing (no text given)" : "the text above"
+            switch shape.mode {
+            case "insert": return "Inserts \(what) into \(target)"
+            case "replace": return "Replaces everything in \(target) with \(what)"
+            default:
+                return "Types \(what) into \(target), mode \(shape.mode.map { UntrustedText($0).forDisplayInFull } ?? "none")"
+            }
+        case "press": return "Presses \(target) in \(app)"
+        case "click": return "Clicks \(target) in \(app)"
+        case "select": return "Selects \(target) in \(app)"
+        case "open": return "Opens \(target) in \(app) (AXOpen)"
+        case "menu": return "Chooses \(target) from \(app)'s menus"
+        case "focus": return "Brings \(target) in \(app) to the front"
+        case "launch": return "Starts \(target)"
+        case "scroll": return "Scrolls \(target) in \(app)"
+        case "openURL": return "Opens the page \(target)"
+        default: return "\(verbTitle(shape.verb)) \(target) in \(app)"
+        }
     }
 
     /// A stored rule in the same words a ticket uses, for the panel's revoke list.
@@ -415,9 +485,14 @@ final class HarnessConfirmations: ObservableObject {
         )
         let appName = NSWorkspace.shared.urlForApplication(withBundleIdentifier: rule.bundleIdentifier)
             .map { FileManager.default.displayName(atPath: $0.path) }
-        var lines = displayLines(for: shape, appName: appName)
-        if rule.target == nil { lines[0] = "\(rule.verb) (any target)" }
-        return lines
+        return cardLines(for: shape, appName: appName).map { line in
+            guard rule.target == nil else { return line.text }
+            switch line.kind {
+            case .place: return "\(appName.map { UntrustedText($0).forDisplayInFull } ?? "unnamed app") \u{203A} any target"
+            case .effect: return "\(verbTitle(rule.verb)), any target"
+            default: return line.text
+            }
+        }
     }
 
     static func consumption(of ticket: Ticket?, _ shape: Shape, now: Date) -> Consumption {
@@ -453,7 +528,8 @@ final class HarnessConfirmations: ObservableObject {
     }
 
     /// Why a ticket may not be opened for this shape, or nil.
-    static func openRefusal(for shape: Shape, appName: String? = nil, binding: ActionBinding? = nil, reason: String, pendingCount: Int) -> (code: String, message: String)? {
+    static func openRefusal(for shape: Shape, appName: String? = nil, binding: ActionBinding? = nil, reason: String,
+                            destructive: Bool = false, pendingCount: Int) -> (code: String, message: String)? {
         if shape.rawTarget.isEmpty {
             return ("confirmationTargetUnnamed", "the request names no target, so a ticket for it would authorise anything")
         }
@@ -463,7 +539,7 @@ final class HarnessConfirmations: ObservableObject {
         // Unicode scalars, not Characters (review 2026-09-14): "a" followed by
         // 3,000 combining marks is ONE Character, yet draws a column of marks over
         // the lines around it. Scalars bound what is actually drawn.
-        let shownLines = displayLines(for: shape, appName: appName, binding: binding) + [displayedReason(reason)]
+        let shownLines = displayLines(for: shape, appName: appName, binding: binding, destructive: destructive) + [displayedReason(reason)]
         if let longest = shownLines.map(\.unicodeScalars.count).max(), longest > maximumDisplayLineLength {
             return ("confirmationTooLongToShow",
                     "a line of the question is \(longest) unicode scalars and the panel shows at most \(maximumDisplayLineLength) in full — the owner cannot approve what they cannot read")
@@ -537,7 +613,8 @@ final class HarnessConfirmations: ObservableObject {
     func open(_ shape: Shape, appName: String?, reason: String, destructive: Bool, binding: ActionBinding? = nil) -> OpenResult {
         let now = Date()
         let pending = pendingCount(now: now)
-        if let refusal = Self.openRefusal(for: shape, appName: appName, binding: binding, reason: reason, pendingCount: pending) {
+        if let refusal = Self.openRefusal(for: shape, appName: appName, binding: binding, reason: reason,
+                                          destructive: destructive, pendingCount: pending) {
             return .refused(code: refusal.code, message: refusal.message)
         }
         var ticket = Ticket(
@@ -547,7 +624,7 @@ final class HarnessConfirmations: ObservableObject {
             withinNamed: shape.withinNamed, nearPoint: shape.nearPoint, role: shape.role, thenConfirm: shape.thenConfirm,
             appName: appName.map { UntrustedText($0).forDisplay },
             bundleIdentifier: shape.bundleIdentifier ?? "", reason: Self.displayedReason(reason), status: .pending,
-            displayLines: Self.displayLines(for: shape, appName: appName, binding: binding),
+            cardLines: Self.cardLines(for: shape, appName: appName, binding: binding, destructive: destructive),
             binding: binding
         )
         ticket.isDestructive = destructive
