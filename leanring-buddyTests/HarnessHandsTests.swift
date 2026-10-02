@@ -88,11 +88,10 @@ struct HarnessHandsTests {
         #expect(HarnessHands.afterPress(error: .cannotComplete) == .verify)     // may have worked (modal callback)
         #expect(HarnessHands.afterPress(error: .actionUnsupported) == .clickNow)
         #expect(HarnessHands.afterPress(error: .invalidUIElement) == .clickNow)
-        #expect(!HarnessHands.clickFollowsPress(error: .success, verified: false))
-        #expect(!HarnessHands.clickFollowsPress(error: .cannotComplete, verified: false))
-        #expect(!HarnessHands.clickFollowsPress(error: .success, verified: true))
-        #expect(HarnessHands.clickFollowsPress(error: .actionUnsupported, verified: false))
-        #expect(HarnessHands.clickFollowsPress(error: .invalidUIElement, verified: false))
+        #expect(!HarnessHands.clickFollowsPress(error: .success))
+        #expect(!HarnessHands.clickFollowsPress(error: .cannotComplete))
+        #expect(HarnessHands.clickFollowsPress(error: .actionUnsupported))
+        #expect(HarnessHands.clickFollowsPress(error: .invalidUIElement))
     }
 
     // Review of H1 (blocking): a card group's centre may be its own "Buy now" child.

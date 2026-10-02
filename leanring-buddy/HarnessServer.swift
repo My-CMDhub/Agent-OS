@@ -2917,7 +2917,7 @@ final class HarnessServer {
                 break
             }
             // A press that went in and showed nothing is not clicked again: a second activation.
-            if method == .axPress, let pressError, !HarnessHands.clickFollowsPress(error: pressError, verified: false) { break }
+            if method == .axPress, let pressError, !HarnessHands.clickFollowsPress(error: pressError) { break }
         }
         phaseTiming.verified(walks: walks, path: "poll")
         response["performed"] = ["attempts": attempts]

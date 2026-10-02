@@ -71,8 +71,8 @@ enum HarnessHands {
     /// and showed nothing is reported notObserved — a click after it would be a
     /// second activation of whatever the press did unseen (review of H1,
     /// 2026-10-02: a toggle flipped back, a "Next" pressed twice).
-    static func clickFollowsPress(error: AXError, verified: Bool) -> Bool {
-        !verified && afterPress(error: error) == .clickNow
+    static func clickFollowsPress(error: AXError) -> Bool {
+        afterPress(error: error) == .clickNow
     }
 
     /// The point a synthetic click aims at: the centre of the part of the element
