@@ -388,6 +388,8 @@ nonisolated enum ScreenSecretGuard {
         /// Failed AXValue reads: text nobody read is not text with no secret.
         var valueReadErrors = 0
         var focusChangedDuringWalk = false
+        /// Browser windows showing a page that gave no text to scan (`webPageUnread`).
+        var unreadWebPages = 0
         /// A secret was read in an element whose frame read FAILED: it may be on
         /// screen and cannot be covered.
         var unlocatedSecrets = 0
@@ -409,6 +411,7 @@ nonisolated enum ScreenSecretGuard {
             subtreesLostToFailedReads += snapshot.subtreesLostToFailedReads
             valueReadErrors += snapshot.valueReadErrors
             focusChangedDuringWalk = focusChangedDuringWalk || snapshot.focusChangedDuringWalk
+            if ScreenSecretGuard.webPageUnread(snapshot.rootNode, bundleIdentifier: app) { unreadWebPages += 1 }
             nodeCount += snapshot.nodeCount
             windowFrames.append(windowFrame)
             let found = ScreenSecretGuard.redactions(in: snapshot.rootNode?.flattenedDescendants() ?? [],
@@ -447,6 +450,7 @@ nonisolated enum ScreenSecretGuard {
                 "appSource": inspection?.appSource ?? NSNull(), "windowsWalked": inspection?.windowFrames.count ?? 0,
                 "scannedTextCharacters": inspection?.scannedTextCharacters ?? 0,
                 "valueReadErrors": inspection?.valueReadErrors ?? 0,
+                "unreadWebPages": inspection?.unreadWebPages ?? 0,
                 "redactionsFound": inspection?.redactions.count ?? 0,
                 // How often the app answered AXBoundsForRange (`range`) vs the element frame.
                 "foundBySource": Dictionary((inspection?.redactions ?? []).map { ($0.source, 1) }, uniquingKeysWith: +),
@@ -473,8 +477,52 @@ nonisolated enum ScreenSecretGuard {
         if inspection.subtreesLostToFailedReads > 0 { return "subtreesLost" }
         if inspection.valueReadErrors > 0 { return "valueUnreadable" }
         if inspection.focusChangedDuringWalk { return "focusChanged" }
+        if inspection.unreadWebPages > 0 { return webPageNotReadable }
         if inspection.unlocatedSecrets > 0 { return "unlocatedSecret" }
         return nil
+    }
+
+    static let webPageNotReadable = "webPageNotReadable"
+
+    /// Browsers and web-app hosts (owner's call 2026-10-02): a page is drawn
+    /// from text the page publishes, so a page that published none was not
+    /// checked. Electron apps are deliberately not on it.
+    static let browserBundleIdentifiers: Set<String> = [
+        "com.google.chrome", "com.google.chrome.beta", "com.google.chrome.dev", "com.google.chrome.canary",
+        "com.microsoft.edgemac", "com.microsoft.edgemac.beta", "com.microsoft.edgemac.dev", "com.microsoft.edgemac.canary",
+        "com.brave.browser", "com.brave.browser.beta", "com.brave.browser.nightly", "company.thebrowser.browser",
+        "com.vivaldi.vivaldi", "com.operasoftware.opera", "com.apple.safari", "com.apple.safaritechnologypreview"
+    ]
+    static let safariWebAppPrefix = "com.apple.safari.webapp."
+
+    static func isBrowser(_ bundleIdentifier: String?) -> Bool {
+        guard let id = bundleIdentifier?.lowercased() else { return false }
+        return browserBundleIdentifiers.contains(id) || id.hasPrefix(safariWebAppPrefix)
+    }
+
+    /// A browser window that should show a page but whose `AXWebArea`s hold no
+    /// text-bearing descendant (or that has no `AXWebArea` at all). Measured
+    /// 2026-10-02: normal pages gave 2,820-5,692 chars (Chrome) and 8,758 (a
+    /// Safari web app), web areas present; the same web app then read clean
+    /// over 44 nodes / 333 chars.
+    /// ponytail: "should show a page" is a role heuristic - an AXWebArea, a tab
+    /// strip (AXTabGroup: Chromium and Safari tab bars), or any standard window
+    /// of a Safari web app (no tab strip there). Misses a web-area-less page in
+    /// a window with neither (Safari with its tab bar hidden, Arc's sidebar,
+    /// a Chrome app window) - those pass as before. Wrongly withholds a native
+    /// browser window holding an NSTabView, or a web app's Settings window: a
+    /// missed picture, never a leak. Upgrade: key on AXDocument (the page URL).
+    static func webPageUnread(_ window: AccessibilityElementNode?, bundleIdentifier: String?) -> Bool {
+        guard let window, isBrowser(bundleIdentifier) else { return false }
+        let nodes = window.flattenedDescendants()
+        let webAreas = nodes.filter { $0.role == "AXWebArea" }
+        let showsPage = !webAreas.isEmpty || nodes.contains { $0.role == "AXTabGroup" }
+            || (bundleIdentifier?.lowercased().hasPrefix(safariWebAppPrefix) == true && window.subrole == "AXStandardWindow")
+        guard showsPage else { return false }
+        let hasText = { (node: AccessibilityElementNode) in
+            [node.title, node.elementDescription, node.value].contains { $0.map { !$0.raw.allSatisfy(\.isWhitespace) } ?? false }
+        }
+        return !webAreas.contains { $0.children.contains { $0.flattenedDescendants().contains(where: hasText) } }
     }
 
     /// How far a glyph rect may stray outside its element's frame (a caret, a
@@ -575,8 +623,13 @@ nonisolated enum ScreenSecretGuard {
     /// window server's front-to-back list (layer 0). The same when the app in
     /// front has no window on this Space (`frontmostShowsNoWindow`): measured
     /// 2026-10-02, Chrome frontmost with its full-screen Space not the one
-    /// showing read 0 windows and withheld a picture of Finder's window. nil
-    /// (withhold) when there is no app in front or nothing behind it.
+    /// showing read 0 windows and withheld a picture of Finder's window. With
+    /// no ordinary window on screen the picture is the desktop, so its owner
+    /// (Finder, desktop-icon level; its kAXWindows lists the desktop as a
+    /// display-sized AXScrollArea) is checked: live 2026-10-02 19:28, a Safari
+    /// web app's last window closed on a Space holding nothing else, and two
+    /// captures withheld `displayNotScanned` with appSource `frontmost`.
+    /// nil (withhold) when there is no app in front or nothing behind it.
     static func appToCheck(frontmost: (pid: pid_t, bundleIdentifier: String?)?, windowList: [[String: Any]],
                            ownPID: pid_t, bundleForPID: (pid_t) -> String?,
                            frontmostShowsNoWindow: Bool = false) -> (pid: pid_t, source: String)? {
@@ -585,12 +638,18 @@ nonisolated enum ScreenSecretGuard {
             : CredentialGuard.isPasswordManager(frontmost.bundleIdentifier) ? "behindPasswordManager"
             : frontmostShowsNoWindow ? "frontmostHasNoWindowHere" : nil
         guard let source else { return (frontmost.pid, "frontmost") }
-        let behind = windowList.lazy
-            .filter { ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 }
-            .compactMap { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value }
-            .first { $0 != ownPID && $0 != frontmost.pid && !CredentialGuard.isPasswordManager(bundleForPID($0)) }
+        func owner(atLayer layer: Int) -> pid_t? {
+            windowList.lazy
+                .filter { ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == layer }
+                .compactMap { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value }
+                .first { $0 != ownPID && $0 != frontmost.pid && !CredentialGuard.isPasswordManager(bundleForPID($0)) }
+        }
+        let behind = owner(atLayer: 0) ?? owner(atLayer: Int(CGWindowLevelForKey(.desktopIconWindow)))
         return behind.map { ($0, source) }
     }
+
+    /// Desktop elements included: the desktop is what shows when no window does (`appToCheck`).
+    static let windowListOptions: CGWindowListOption = [.optionOnScreenOnly]
 
     /// Blocking cross-process walk of every window of the app the picture shows
     /// (`appToCheck`), main window first, inside one shared deadline. Call off
@@ -609,7 +668,7 @@ nonisolated enum ScreenSecretGuard {
         // Bounded before the first cross-process read.
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
         let front = AccessibilityTreeWalker.focusedApplication()
-        let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+        let windowList = CGWindowListCopyWindowInfo(windowListOptions, kCGNullWindowID)
             as? [[String: Any]] ?? []
         let bundleForPID = { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }
         guard var choice = appToCheck(frontmost: front.map { ($0.processIdentifier, $0.bundleIdentifier) },

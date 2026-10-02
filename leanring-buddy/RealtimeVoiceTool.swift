@@ -1072,13 +1072,17 @@ nonisolated enum RealtimeOpenAppTool {
     /// The credential guard's line for this turn, or nil when the screenshot went
     /// out. Secure input on (read at key-down, or the reason the capture was
     /// withheld): the hand-over. Any other withheld capture: the model is told it
-    /// is blind, so it never describes a screen it was not shown.
+    /// is blind, so it never describes a screen it was not shown - and that the
+    /// tools needing no screen still work (live 2026-10-02: told it was blind, it
+    /// told the owner to quit LinkedIn himself instead of calling `close`).
     static func credentialGuardContextLine(secureInput: SecureInputState, withheld: ScreenSecretGuard.Report?) -> String? {
         if secureInput.isOn { return secureInputContextLine(secureInput) }
         guard let withheld else { return nil }
         if withheld.reason == "secureInput", let state = withheld.secureInput { return secureInputContextLine(state) }
         return "system context, not the owner's words: the screenshot was withheld this turn because the screen could not "
-            + "be checked for secrets in time. say you cannot see the screen right now; never guess what is on it."
+            + "be checked for secrets in time. say you cannot see the screen right now; never guess what is on it. "
+            + "the app and menu tools do not need the screen and still work: open_app, focus_app, close (a tab, a window, "
+            + "or quit an app), find_menu_items and press_menu. when asked, call them; never tell the owner to do it instead."
     }
 
     /// The holder's name is app-written, so quoted and escaped. A holder that is

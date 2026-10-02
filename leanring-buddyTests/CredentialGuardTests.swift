@@ -247,6 +247,8 @@ struct CredentialGuardTests {
         #expect(ScreenSecretGuard.withholdReason(with { $0.unlocatedSecrets = 1 }) == "unlocatedSecret")
         // A failed AXValue read is text nobody read (review 2026-10-02, B2).
         #expect(ScreenSecretGuard.withholdReason(with { $0.valueReadErrors = 1 }) == "valueUnreadable")
+        // A browser page that published no text was not checked (owner's call 2026-10-02).
+        #expect(ScreenSecretGuard.withholdReason(with { $0.unreadWebPages = 1 }) == "webPageNotReadable")
         // No app to check (nothing behind Clicky's panel): withheld, never "nothing to walk".
         #expect(ScreenSecretGuard.withholdReason(with { $0.failure = "noAppToCheck" }) == "noAppToCheck")
         // Redactions found is not a reason: they are drawn.
@@ -343,6 +345,45 @@ struct CredentialGuardTests {
         // The display holding the window was checked; one beside it was not.
         #expect(inspection.scanned(CGRect(x: 0, y: 0, width: 1440, height: 900)))
         #expect(!inspection.scanned(CGRect(x: 1440, y: 0, width: 1920, height: 1080)))
+    }
+
+    /// A browser window showing a page that gave no text is withheld; a page with
+    /// text, a native browser window, and an Electron app are not. Fails if
+    /// `record` stops counting `webPageUnread` or the rule loses a branch.
+    @Test func aBrowserPageWithNoTextIsWithheld() {
+        let frame = CGRect(x: 0, y: 0, width: 800, height: 600)
+        func node(_ role: String, subrole: String? = nil, title: String? = nil, value: String? = nil,
+                  _ children: [AccessibilityElementNode] = []) -> AccessibilityElementNode {
+            AccessibilityElementNode(role: role, subrole: subrole, title: title, value: value,
+                                     frameInAppKitCoordinates: frame, depth: 0, children: children)
+        }
+        func reason(_ app: String, _ window: AccessibilityElementNode) -> String? {
+            var inspection = ScreenSecretGuard.Inspection()
+            inspection.app = app
+            inspection.record(snapshot(root: window), windowFrame: frame, primaryDisplayHeight: 900) { _, _ in nil }
+            return ScreenSecretGuard.withholdReason(inspection)
+        }
+        let tabs = node("AXTabGroup", [node("AXRadioButton", title: "LinkedIn")])
+        let page = node("AXWebArea", title: "LinkedIn", [node("AXGroup", [node("AXStaticText", value: "Start a post")])])
+        // The page's own title is not page text; an empty group is not either.
+        let blank = node("AXWebArea", title: "LinkedIn", [node("AXGroup", [node("AXGroup")])])
+        func window(_ children: [AccessibilityElementNode]) -> AccessibilityElementNode {
+            node("AXWindow", subrole: "AXStandardWindow", title: "LinkedIn", children)
+        }
+        let chrome = "com.google.Chrome"
+        let webApp = "com.apple.Safari.WebApp.3AD71A25-F059-469E-91A4-1A7E10464C02"
+        #expect(reason(chrome, window([tabs, page])) == nil)
+        #expect(reason(chrome, window([tabs])) == "webPageNotReadable")                   // tab strip, no web area
+        #expect(reason(chrome, window([tabs, blank])) == "webPageNotReadable")            // web area, no text in it
+        #expect(reason(chrome, window([blank, page])) == nil)                             // an empty iframe beside a page
+        #expect(reason(webApp, window([page])) == nil)
+        #expect(reason(webApp, window([node("AXButton", title: "Back")])) == "webPageNotReadable")  // no tab strip in a web app
+        // Safari's Settings: a browser's own native window, no page in it.
+        #expect(reason("com.apple.Safari", window([node("AXToolbar", [node("AXButton", title: "General")]),
+                                                   node("AXCheckBox", title: "Open safe files")])) == nil)
+        // Electron is out of scope; a non-browser is never asked.
+        #expect(reason("com.todesktop.230313mzl4w4u92", window([tabs, blank])) == nil)
+        #expect(ScreenSecretGuard.isBrowser("COM.BRAVE.BROWSER") && !ScreenSecretGuard.isBrowser(nil))
     }
 
     /// Clicky's panel or a password manager in front: the guard reads the app
@@ -453,8 +494,14 @@ struct CredentialGuardTests {
         #expect(RealtimeOpenAppTool.credentialGuardContextLine(secureInput: .off, withheld: raced) == handOver)
         // Withheld for any other reason: told it is blind.
         let blind = ScreenSecretGuard.Report(outcome: "withheld", reason: "walkDeadline")
-        #expect(RealtimeOpenAppTool.credentialGuardContextLine(secureInput: .off, withheld: blind)?
-                    .contains("could not be checked for secrets in time") == true)
+        let blindLine = try #require(RealtimeOpenAppTool.credentialGuardContextLine(secureInput: .off, withheld: blind))
+        #expect(blindLine.contains("could not be checked for secrets in time"))
+        // Blind is not handless (live 2026-10-02: it told the owner to quit LinkedIn himself).
+        #expect(blindLine.contains("do not need the screen and still work") && blindLine.contains("close")
+                && blindLine.contains("quit an app") && blindLine.contains("press_menu") && blindLine.contains("open_app")
+                && blindLine.contains("never tell the owner to do it instead"))
+        // The hand-over is not told to act: the owner is typing a password.
+        #expect(!handOver.contains("still work"))
         // A screenshot went out: nothing to say.
         #expect(RealtimeOpenAppTool.credentialGuardContextLine(secureInput: .off, withheld: nil) == nil)
     }
@@ -623,6 +670,20 @@ struct CredentialGuardTests {
         // Nothing ordinary on screen: withheld, not waved through.
         #expect(ScreenSecretGuard.appToCheck(frontmost: (pid: 300, bundleIdentifier: bundles[300]), windowList: [window(100, 0)],
                                              ownPID: 100, bundleForPID: { bundles[$0] }, frontmostShowsNoWindow: true) == nil)
+        // Live 2026-10-02 19:28: a Safari web app's last window closed on a Space
+        // holding nothing else. The picture is the desktop: Finder's, at the
+        // desktop-icon level (the Dock's wallpaper sits below it and is not an app's).
+        let desktopIcons = Int(CGWindowLevelForKey(.desktopIconWindow))
+        let desktopOnly = [window(500, Int(CGWindowLevelForKey(.desktopWindow)) - 1), window(400, desktopIcons), window(100, 0)]
+        let desktop = ScreenSecretGuard.appToCheck(frontmost: (pid: 600, bundleIdentifier: "com.apple.Safari.WebApp.X"),
+                                                   windowList: desktopOnly, ownPID: 100, bundleForPID: { bundles[$0] },
+                                                   frontmostShowsNoWindow: true)
+        #expect(desktop?.pid == 400 && desktop?.source == "frontmostHasNoWindowHere")
+        // An ordinary window on screen still wins over the desktop.
+        #expect(ScreenSecretGuard.appToCheck(frontmost: (pid: 600, bundleIdentifier: nil), windowList: desktopOnly + [window(300, 0)],
+                                             ownPID: 100, bundleForPID: { bundles[$0] }, frontmostShowsNoWindow: true)?.pid == 300)
+        // The live list must carry the desktop for the fallback to see it.
+        #expect(!ScreenSecretGuard.windowListOptions.contains(.excludeDesktopElements))
     }
 
     /// Every clean / redacted probe run wrote its JPEG and no summary: `.path`
