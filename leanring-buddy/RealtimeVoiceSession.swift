@@ -257,8 +257,8 @@ final class RealtimeVoiceSession {
         connection.onClosed = { [weak self, weak connection] in
             if let self, self.connection === connection { self.connection = nil }
         }
-        connection.onDoTask = { [weak self] goal, heard in
-            self?.startAgentLoop(goal: goal, heard: heard)
+        connection.onDoTask = { [weak self] goal, heard, startBundle in
+            self?.startAgentLoop(goal: goal, heard: heard, startBundle: startBundle)
                 ?? ["ok": false, "status": NSNull(), "error": "noSession", "message": "the task runner is not available"]
         }
         connection.isAgentLoopRunning = { [weak self] in self?.agentLoop?.isRunning == true }
@@ -277,12 +277,13 @@ final class RealtimeVoiceSession {
 
     /// do_task's answer, at once; the loop runs on and speaks for itself.
     /// `heard`: the owner's words of the turn that called it.
-    private func startAgentLoop(goal: String, heard: String) -> [String: Any] {
+    /// `startBundle`: the app in front at the owner's key-down — where the task began.
+    private func startAgentLoop(goal: String, heard: String, startBundle: String?) -> [String: Any] {
         agentTask?.cancel()
         var words = heard
         if let asked = askedOwner, uptime - asked.uptime <= Self.askOwnerAnswerWindowSeconds { words = asked.heard + " " + heard }
         askedOwner = nil
-        let loop = AgentLoop.live(heard: words, harnessAnswer: harnessAnswer, model: agentModel) { [weak self] line in
+        let loop = AgentLoop.live(heard: words, startBundle: startBundle, harnessAnswer: harnessAnswer, model: agentModel) { [weak self] line in
             self?.enqueueAgentSpeech(line, final: false)
         }
         agentLoop = loop
@@ -456,12 +457,12 @@ final class RealtimeVoiceSession {
             // The app in front, from structure — the harness's own read, off main
             // (cross-process AX), bounded from key-down. Its name only; never
             // Clicky's own panel.
-            let frontmostLineTask = Task { () -> String? in
+            let frontmostLineTask = Task { () -> (line: String?, bundle: String?)? in
                 guard !probeMode else { return nil }
-                return await Self.value(within: Self.frontmostReadDeadlineSeconds) { () -> String? in
+                return await Self.value(within: Self.frontmostReadDeadlineSeconds) { () -> (line: String?, bundle: String?)? in
                     guard let application = AccessibilityTreeWalker.focusedApplication(),
                           !HarnessServer.isHarnessItself(bundleIdentifier: application.bundleIdentifier) else { return nil }
-                    return RealtimeOpenAppTool.frontmostAppContextLine(appName: application.localizedName)
+                    return (RealtimeOpenAppTool.frontmostAppContextLine(appName: application.localizedName), application.bundleIdentifier)
                 }
             }
             // What is under the owner's mouse, from structure, bounded from key-down
@@ -508,7 +509,9 @@ final class RealtimeVoiceSession {
                 if let stoppedLine, connection.turn === marks {
                     try? await connection.sendContextText(stoppedLine)
                 }
-                if let frontmostLine = await frontmostLineTask.value, connection.turn === marks {
+                let front = await frontmostLineTask.value
+                marks.keyDownFrontBundle = front?.bundle
+                if let frontmostLine = front?.line, connection.turn === marks {
                     try? await connection.sendContextText(frontmostLine)
                 }
                 if connection.pointFormat == .native, connection.stack == .openAIRealtime, let screenshotPixelSize, connection.turn === marks {

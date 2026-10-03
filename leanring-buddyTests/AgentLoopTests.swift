@@ -440,6 +440,23 @@ struct AgentLoopTests {
         #expect(AgentLoop.openedByTask(launched: [], taskTabs: tabs, frontTabs: [String: String]()).isEmpty)
     }
 
+    /// C: an owner turn that called do_task could still act beside the loop, and the
+    /// loop's "app in front when the task began" came from its first look, after any
+    /// such call. Once do_task starts, that turn calls nothing; the start app is the
+    /// one in front when the owner spoke.
+    @Test func anOwnerTurnThatStartedATaskCallsNothingElse() {
+        func refused(_ tool: String, started: Bool) -> String? {
+            RealtimeVoiceConnection.turnRefusal(toolName: tool, isSystemTurn: false, speechOnly: false, agentLoopRunning: started,
+                                                heard: "do it", taskStartedThisTurn: started)?.error
+        }
+        #expect(refused("open_app", started: true) == "taskStarted")
+        #expect(refused("do_task", started: true) == "taskStarted")
+        #expect(refused("find_on_screen", started: true) == "taskStarted")
+        #expect(refused("open_app", started: false) == nil)
+        #expect(AgentLoop.resolvedStartBundle(atAcceptance: "com.google.Chrome", firstLook: "com.apple.TextEdit") == "com.google.Chrome")
+        #expect(AgentLoop.resolvedStartBundle(atAcceptance: nil, firstLook: "com.apple.TextEdit") == "com.apple.TextEdit")
+    }
+
     // MARK: Runner findings 2026-10-03 (voice)
 
     @Test func internalWordsSpokenAloudAreFound() {

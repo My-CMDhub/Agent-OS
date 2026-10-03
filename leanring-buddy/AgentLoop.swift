@@ -685,16 +685,19 @@ extension AgentLoop {
     /// checks of every step compare against them, never against the goal the
     /// voice model wrote (review of d2fe0d7: a goal planted by page text named
     /// its own site and passed).
-    static func live(heard: String, harnessAnswer: @escaping @Sendable (String) -> String, model: AgentLoopModel,
+    /// `startBundle`: the app in front when the owner asked (key-down); nil
+    /// falls back to the first look's app.
+    static func live(heard: String, startBundle: String? = nil, harnessAnswer: @escaping @Sendable (String) -> String, model: AgentLoopModel,
                      narrate: @escaping (String) -> Void) -> AgentLoop {
         let carry = MarksCarry()
+        carry.startBundle = startBundle
         carry.runningAtStart = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
         let loop = AgentLoop(dependencies: Dependencies(
             model: { body, timeout in try await model.send(body, timeout: timeout) },
             observe: {
                 let observation = await liveObservation(harnessAnswer: harnessAnswer)
                 // The app the owner was in when the task began.
-                if carry.calls == 0, carry.startBundle == nil { carry.startBundle = observation.bundleIdentifier }
+                if carry.calls == 0 { carry.startBundle = resolvedStartBundle(atAcceptance: carry.startBundle, firstLook: observation.bundleIdentifier) }
                 return observation
             },
             execute: { call, checksSite, observation, remaining in
@@ -727,7 +730,7 @@ extension AgentLoop {
         var launchedBundles: Set<String> = []
         /// Pages this task opened, by their browser tab's identity: its own only while in front.
         var taskTabs: [String: Set<AccessibilityElementKey>] = [:]
-        /// The app in front at the task's first look (`agentStartBundle`).
+        /// The app in front when the owner asked, else at the task's first look (`agentStartBundle`).
         var startBundle: String?
     }
 
@@ -756,6 +759,10 @@ extension AgentLoop {
         guard let browser = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { return nil }
         return HarnessHands.selectedTab(processIdentifier: browser.processIdentifier)
     }
+
+    /// Re-review of 2e45939 (C): the first look comes after any call the voice
+    /// made beside do_task, and may read nothing; the key-down app is the owner's.
+    nonisolated static func resolvedStartBundle(atAcceptance: String?, firstLook: String?) -> String? { atAcceptance ?? firstLook }
 
     struct FrontApp: Sendable {
         let name: String?

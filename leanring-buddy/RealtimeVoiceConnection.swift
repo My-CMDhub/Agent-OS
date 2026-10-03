@@ -69,6 +69,10 @@ final class RealtimeTurnMarks {
     var agentStartBundle: String?
     /// A system turn that may only speak (the agent loop's lines): every tool call in it is refused.
     var speechOnly = false
+    /// This owner turn started a task: from then on it calls nothing (`turnRefusal`).
+    var taskStarted = false
+    /// The app in front at the owner's key-down (the frontmost read): a task this turn starts began there.
+    var keyDownFrontBundle: String?
     var ownerTurnTranscript = ""
     var toolResultSentUptime: TimeInterval?
     /// First audio after the LATEST tool result — with find -> press, the words
@@ -778,7 +782,7 @@ final class RealtimeVoiceConnection {
 
     /// do_task: the session starts the agent loop and answers at once
     /// (`RealtimeVoiceSession`), given the goal and the OWNER's own words.
-    var onDoTask: ((_ goal: String, _ heard: String) -> [String: Any])?
+    var onDoTask: ((_ goal: String, _ heard: String, _ startBundle: String?) -> [String: Any])?
     /// Whether a task is running: then no system turn may call a tool.
     var isAgentLoopRunning: () -> Bool = { false }
 
@@ -789,8 +793,15 @@ final class RealtimeVoiceConnection {
     /// spoke, with their words transcribed (they, never the model's goal, are the
     /// task's heard words); a speech-only system turn, or any system turn while a
     /// task runs, calls nothing.
+    /// Re-review of 2e45939 (C): an owner turn that started a task could still
+    /// act beside it — in the same batch or a follow-up response — two planners
+    /// again; so once its do_task started, the turn calls nothing.
     nonisolated static func turnRefusal(toolName: String, isSystemTurn: Bool, speechOnly: Bool, agentLoopRunning: Bool,
-                                        heard: String?) -> RealtimeToolRefusal? {
+                                        heard: String?, taskStartedThisTurn: Bool = false) -> RealtimeToolRefusal? {
+        if taskStartedThisTurn {
+            return RealtimeToolRefusal(error: "taskStarted", message: "the task runner is doing this request now, so nothing more was done "
+                + "in this turn; say only a few words, and let the task report its progress")
+        }
         if isSystemTurn, speechOnly || agentLoopRunning || toolName == RealtimeVoiceVerbs.doTaskName {
             return RealtimeToolRefusal(error: "systemTurnCannotAct", message: "this turn was not the owner speaking, so nothing was done; "
                 + "speak only, and act only when the owner asks")
@@ -833,9 +844,10 @@ final class RealtimeVoiceConnection {
                 } else if let refusal = Self.turnRefusal(
                     toolName: call.name, isSystemTurn: turn.isSystemTurn, speechOnly: turn.speechOnly,
                     agentLoopRunning: self?.isAgentLoopRunning() ?? false,
-                    heard: call.name == RealtimeVoiceVerbs.doTaskName && !turn.isSystemTurn
+                    heard: call.name == RealtimeVoiceVerbs.doTaskName && !turn.isSystemTurn && !turn.taskStarted
                         ? await turn.waitForHeard(until: (turn.lastAudioSentUptime ?? ProcessInfo.processInfo.systemUptime)
-                                                    + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds) : nil) {
+                                                    + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds) : nil,
+                    taskStartedThisTurn: turn.taskStarted) {
                     dispatch = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: refusal), harnessMilliseconds: 0,
                                                     waitedForConfirmation: false, harnessResponse: nil)
                     turn.dispatches.append(dispatch)
@@ -845,7 +857,9 @@ final class RealtimeVoiceConnection {
                     // judged against the owner's words (`turnRefusal` waited for them).
                     let refusal = RealtimeToolRefusal(error: "missingGoal", message: "do_task needs the owner's request as its goal")
                     let heard = turn.heardText
-                    let result = call.goal.flatMap { goal in self?.onDoTask?(goal, heard) } ?? RealtimeOpenAppTool.toolResult(for: refusal)
+                    let result = call.goal.flatMap { goal in self?.onDoTask?(goal, heard, turn.keyDownFrontBundle) }
+                        ?? RealtimeOpenAppTool.toolResult(for: refusal)
+                    if result["ok"] as? Bool == true { turn.taskStarted = true }
                     dispatch = RealtimeToolDispatch(result: result, harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: nil)
                     turn.dispatches.append(dispatch)
                     turn.decisions[decisionIndex].dispatch = dispatch

@@ -80,7 +80,10 @@ enum AgentLoopProbe {
             let started = Date()
             let startUptime = ProcessInfo.processInfo.systemUptime
             var narrations: [String] = []
-            let loop = AgentLoop.live(heard: goal, harnessAnswer: harnessAnswer, model: model) { line in narrations.append(line) }
+            // `--agent-start-bundle=<id>`: as if the owner had asked from that app, so a page the task
+            // opens is its own only by its tab (re-review of 2e45939).
+            let startBundle = CommandLine.arguments.first { $0.hasPrefix("--agent-start-bundle=") }.map { String($0.dropFirst("--agent-start-bundle=".count)) }
+            let loop = AgentLoop.live(heard: goal, startBundle: startBundle, harnessAnswer: harnessAnswer, model: model) { line in narrations.append(line) }
             let finished = FinishedFlag()
             let runTask = Task { @MainActor in
                 let outcome = await loop.run(goal: goal, heard: goal)
