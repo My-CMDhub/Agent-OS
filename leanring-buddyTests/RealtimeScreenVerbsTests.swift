@@ -514,6 +514,14 @@ struct RealtimeScreenVerbsTests {
         #expect(picked("the last Delete", RealtimeScreenLookup(candidates: [top, beside, bottom], app: nil)) == bottom)
     }
 
+    /// C4 live (10-05-48Z): find_on_screen listed three "Delete" and the voice asked
+    /// "which draft?" — the prompt told it to ask whenever several match. An order the
+    /// owner said is pressed by the name; the press picks by that order.
+    @Test func thePromptPressesByNameWhenTheOwnerSaidWhichByOrder() {
+        #expect(RealtimeOpenAppTool.systemPrompt.contains("if a result lists several matches, ask which one, unless the owner's words "
+            + "already pick one by order (\"the first\", \"the last\"): then press it by that name, and the order picks it."))
+    }
+
     /// The ordinal reaches the press through resolveScreenTarget's `heard` — the
     /// transcript — and never from the model's arguments alone.
     @Test func theHeardOrdinalAimsAPressByName() async throws {
