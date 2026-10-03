@@ -836,11 +836,13 @@ nonisolated enum RealtimeOpenAppTool {
         }
         let chosen = pointOffer(name: call.elementName, thisTurn: thisTurn, previousTurn: previousTurn,
                                 followUpConfirmed: followUpConfirmed, confirmedByYes: confirmedByYes, now: now)
-        if let x = call.x, let y = call.y {
+        positioned: if let x = call.x, let y = call.y {
             guard let screenshotDisplay else {
                 return refuse("noScreenshotPosition", "no screenshot was taken this turn, so a position in it names nothing; aim by name")
             }
-            guard let point = RealtimeScreenVerbs.screenshotPoint(x: x, y: y, display: screenshotDisplay) else {
+            let inRange = RealtimeScreenVerbs.screenshotPoint(x: x, y: y, display: screenshotDisplay)
+            // With a name, a position in the wrong units is dropped and the name decides (C4 live 03-07-01Z).
+            if inRange == nil, call.elementName == nil {
                 // Scenario A8 2026-10-03: Gemini sent pixels (251, 494) and a CSS selector as the
                 // name, heard only "fractions", and gave up. Point it at the name instead.
                 let nothing = isPress ? (call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : "pressed") : "done"
@@ -848,6 +850,7 @@ nonisolated enum RealtimeOpenAppTool {
                     + "\(nothing). Aim by name instead: call find_on_screen now with a few words printed on it (for a search result, "
                     + "words of its title), then call this again with the name it returns.")
             }
+            guard let point = inRange else { break positioned }
             if let name = call.elementName, let offer = chosen.offer, let source = chosen.source {
                 let named = offer.elements.filter { $0.name == name }
                 // Several of that name: the point decides only by lying inside exactly one, never "nearest" (B12).
@@ -860,6 +863,18 @@ nonisolated enum RealtimeOpenAppTool {
                     return liveTarget(named: name, found: RealtimeScreenLookup(candidates: named, app: offer.app),
                                       nothing: call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : isPress ? "pressed" : "pointed at")
                 }
+            }
+            // A name the offer does not hold is looked up on the live screen, and the position
+            // picks only by lying inside exactly one (C4 live 03-07-01Z: the name was ignored and
+            // the hit test answered nothingAtPoint). A name that is nothing there falls to the hit test.
+            if let name = call.elementName, let lookUp, case .success(let found) = await lookUp(name), !found.candidates.isEmpty {
+                let aimed = found.candidates.count == 1 ? found.candidates : found.candidates.filter { $0.frame.contains(point) }
+                if aimed.count == 1 {
+                    return .success(RealtimeScreenTarget(candidate: aimed[0], point: CGPoint(x: aimed[0].frame.midX, y: aimed[0].frame.midY),
+                                                         app: found.app, source: .liveName))
+                }
+                return liveTarget(named: name, found: found,
+                                  nothing: call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : isPress ? "pressed" : "pointed at")
             }
             switch await hitTest(point) {
             case .element(let candidate, let app):
@@ -912,9 +927,14 @@ nonisolated enum RealtimeOpenAppTool {
             return .success(RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY),
                                                  app: found.app, source: .liveName))
         default:
-            let listed = found.candidates.prefix(5).map { "\($0.described) (\($0.position))" }.joined(separator: "; ")
+            // Numbered top to bottom (AppKit: higher maxY is higher on screen): C4 live 02-51-12Z
+            // listed three "Delete (right side)" and "the first draft" could not be told apart.
+            let ordinals = ["1st", "2nd", "3rd", "4th", "5th"]
+            let listed = found.candidates.sorted { $0.frame.maxY > $1.frame.maxY }.prefix(5).enumerated()
+                .map { "\($1.described) (\($1.position), \(ordinals[$0]) from the top)" }.joined(separator: "; ")
             return .failure(RealtimeToolRefusal(error: "elementAmbiguous", message: "\(found.candidates.count) visible elements match \(shown): "
-                + "\(listed). Nothing was \(nothing); ask the owner which one, or aim by its exact name or position."))
+                + "\(listed). Nothing was \(nothing). If the owner's words already say which one (\"the first\", \"the last\"), aim at "
+                + "that one by its position in the screenshot; otherwise ask the owner which one."))
         }
     }
 

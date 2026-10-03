@@ -365,12 +365,19 @@ struct RealtimeScreenVerbsTests {
     /// and pixels (251, 494) as x, y, was told only "x and y are fractions", and gave up.
     /// The refusal now says what to do instead: find it by its words and press that name.
     @Test func aPositionOffTheScreenshotIsToldToAimByName() async {
-        let call = RealtimeToolCall(callID: "a8", name: "press_element", appName: "Cursor",
-                                    elementName: "rso > div:nth-child(1) > .LC20lb", x: 251, y: 494)
+        let call = RealtimeToolCall(callID: "a8", name: "press_element", appName: "Cursor", x: 251, y: 494)
         guard case .failure(let refusal) = await resolve(call, display: screen) else { Issue.record("pressed a pixel position"); return }
         #expect(refusal.error == "positionOutOfRange")
         #expect(refusal.message.contains("find_on_screen"))
         #expect(refusal.message.contains("Nothing was pressed"))
+        // With a name, the name decides (C4 live 03-07-01Z: "Delete" with pixels). A name that
+        // is no element (A8's CSS selector) is told the same way out.
+        let selector = RealtimeToolCall(callID: "a8s", name: "press_element", appName: "Cursor",
+                                        elementName: "rso > div:nth-child(1) > .LC20lb", x: 251, y: 494)
+        guard case .failure(let notFound) = await resolve(selector, display: screen) else { Issue.record("pressed a selector"); return }
+        #expect(notFound.error == "elementNotFound" && notFound.message.contains("find_on_screen"))
+        let named = RealtimeToolCall(callID: "a8n", name: "press_element", appName: "Cursor", elementName: "General", x: 251, y: 494)
+        #expect((try? await resolve(named, display: screen).get())?.candidate?.name == "General")
         let name = RealtimeVoiceVerbs.openAIDeclarations.first { $0["name"] as? String == "press_element" }
             .flatMap { (($0["parameters"] as? [String: Any])?["properties"] as? [String: Any])?["name"] as? [String: Any] }
         #expect((name?["description"] as? String)?.contains("never a CSS selector") == true)
@@ -458,6 +465,45 @@ struct RealtimeScreenVerbsTests {
         #expect(hint.contains("\"Text editor for creating content\""))
         #expect(hint.contains("type_text"))
         #expect(RealtimeOpenAppTool.unaimedTypingHint(fieldNames: []) == nil)
+    }
+
+    /// C4 live (02-51-12Z), after the pool kept same-named controls: "delete the first
+    /// draft" met three buttons listed as "Delete (right side)" three times, so the voice
+    /// could not tell which was first and asked. They are numbered top to bottom, and an
+    /// order the owner already said is aimed at by position; otherwise it asks.
+    @Test func sameNamedCandidatesAreNumberedTopToBottom() {
+        let top = candidate("Delete", CGRect(x: 1000, y: 600, width: 80, height: 30))
+        let middle = candidate("Delete", CGRect(x: 1000, y: 400, width: 80, height: 30))
+        let bottom = candidate("Delete", CGRect(x: 1000, y: 200, width: 80, height: 30))
+        let found = RealtimeScreenLookup(candidates: [middle, bottom, top], app: nil)
+        guard case .failure(let refusal) = RealtimeOpenAppTool.liveTarget(named: "Delete", found: found, nothing: "pressed") else {
+            Issue.record("pressed one of three"); return
+        }
+        let first = refusal.message.range(of: "1st from the top"), third = refusal.message.range(of: "3rd from the top")
+        #expect(first != nil && third != nil && first!.lowerBound < third!.lowerBound)
+        #expect(refusal.message.contains("aim at that one by its position"))
+        #expect(refusal.message.contains("ask the owner which one"))
+    }
+
+    /// C4 live (03-07-01Z): "Delete" with a position and no find this turn was hit-tested
+    /// and came back nothingAtPoint — the name was ignored. A name with a position is
+    /// looked up by name; the position picks only by lying inside exactly one.
+    @Test func aNameWithAPositionIsLookedUpByName() async throws {
+        let top = candidate("Delete", CGRect(x: 1000, y: 600, width: 80, height: 30))
+        let lower = candidate("Delete", CGRect(x: 1000, y: 400, width: 80, height: 30))
+        func resolve(_ call: RealtimeToolCall) async -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
+            await RealtimeOpenAppTool.resolveScreenTarget(
+                call: call, thisTurn: nil, previousTurn: nil, followUpConfirmed: nil, confirmedByYes: false, now: 1_000,
+                screenshotDisplay: screen, keyDownPointer: nil,
+                lookUp: { _ in .success(RealtimeScreenLookup(candidates: [lower, top], app: "com.google.Chrome")) },
+                hitTest: { _ in .nothing })
+        }
+        let inTop = RealtimeToolCall(callID: "t", name: "press_element", appName: "Chrome", elementName: "Delete",
+                                     x: 1040.0 / 1440, y: 285.0 / 900)     // AppKit y 615
+        #expect(try await resolve(inTop).get().candidate == top)
+        let between = RealtimeToolCall(callID: "b", name: "press_element", appName: "Chrome", elementName: "Delete",
+                                       x: 1040.0 / 1440, y: 400.0 / 900)   // AppKit y 500
+        if case .failure(let refusal) = await resolve(between) { #expect(refusal.error == "elementAmbiguous") } else { Issue.record("guessed") }
     }
 
     @Test func underPointerIsTheElementUnderTheMouseAtKeyDown() async throws {
