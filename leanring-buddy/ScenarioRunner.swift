@@ -41,6 +41,9 @@ struct ScenarioOutcome {
     var tickets: [HarnessConfirmations.Ticket] = []
     /// Every rectangle the element pointer marked during the turn (AppKit).
     var pointerTargets: [CGRect] = []
+    /// A turn that called do_task: the task's outcome; its decisions and spoken
+    /// words are already merged into `marks`.
+    var agentReport: AgentLoopReport?
     var transcript: String { marks?.transcript ?? "" }
     var decisions: [RealtimeToolDecision] { marks?.decisions ?? [] }
     /// Every error code a tool result or heard check carried.
@@ -422,7 +425,9 @@ enum ScenarioRunner {
             "turnEndReason": line?.turnEndReason ?? NSNull(),
             "errorKind": line?.errorKind ?? NSNull(),
             "claimedWithoutReceipt": line?.claimedWithoutReceipt ?? NSNull(),
-            "pointerShown": !outcome.pointerTargets.isEmpty
+            "pointerShown": !outcome.pointerTargets.isEmpty,
+            "agentOutcome": outcome.agentReport?.outcome.name ?? NSNull(),
+            "agentSteps": outcome.agentReport?.steps ?? NSNull()
         ]
     }
 
@@ -499,6 +504,7 @@ enum ScenarioRunner {
         // Written back to back in `writeLiveTurnLine`: the line, then its marks.
         session.onLiveTurnLine = { line in box.lines[line.turnID] = line; box.lastLineID = line.turnID }
         session.onLiveTurnMarks = { marks in if let id = box.lastLineID, let marks { box.marks[id] = marks } }
+        session.onAgentLoopFinished = { report in box.agentReport = report }
         defer { session.stop() }
         session.prewarm()
         try? await Task.sleep(for: .seconds(prewarmSeconds))
@@ -548,9 +554,24 @@ enum ScenarioRunner {
             watch()
             try? await Task.sleep(for: .milliseconds(100))
         }
+        // do_task returned "started": the task runs on, so wait for its end (its
+        // own caps bound it), still denying cards, then judge the whole of it.
+        if let turnID, let marks = box.marks[turnID],
+           marks.decisions.contains(where: { $0.call.name == RealtimeVoiceVerbs.doTaskName && $0.dispatch?.harnessConfirmed == true }) {
+            let agentDeadline = uptime + AgentLoop.maximumSeconds + 40
+            while uptime < agentDeadline, box.agentReport == nil {
+                watch()
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            if let report = box.agentReport {
+                marks.transcript += " " + report.spoken
+                marks.decisions += report.decisions
+            }
+        }
         var outcome = box.outcome
         outcome.line = turnID.flatMap { box.lines[$0] }
         outcome.marks = turnID.flatMap { box.marks[$0] }
+        outcome.agentReport = box.agentReport
         outcome.tickets = confirmations.tickets.filter { $0.createdAt >= turnStart }
         return (outcome, session.estimatedOpenAIUSD)
     }
@@ -615,4 +636,5 @@ enum ScenarioRunner {
     var lastLineID: String?
     var lines: [String: RealtimeLiveTurnLine] = [:]
     var marks: [String: RealtimeTurnMarks] = [:]
+    var agentReport: AgentLoopReport?
 }

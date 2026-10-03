@@ -68,6 +68,19 @@ final class RealtimeVoiceSession {
     var liveTurnLogFileName = RealtimeVoiceSession.liveLogFileName
     var estimatedOpenAIUSD: Double { connection?.estimatedOpenAIUSD ?? 0 }
 
+    // MARK: Agent loop state (`do_task`)
+
+    /// The running task, if any: one at a time; a new do_task replaces it.
+    private(set) var agentLoop: AgentLoop?
+    private var agentTask: Task<Void, Never>?
+    private let agentModel = AgentLoopModel()
+    /// Set when a press stopped a task: the next turn's context says where.
+    private var agentStoppedLine: String?
+    /// The system turns the running task spoke, so its words can be reported.
+    private var agentSpokenTurns: [RealtimeTurnMarks] = []
+    /// Runner only: the task's outcome, its tool decisions and what was spoken.
+    var onAgentLoopFinished: ((AgentLoopReport) -> Void)?
+
     private final class LiveTurn {
         var line: RealtimeLiveTurnLine
         let pressedUptime: TimeInterval
@@ -244,6 +257,66 @@ final class RealtimeVoiceSession {
         connection.onClosed = { [weak self, weak connection] in
             if let self, self.connection === connection { self.connection = nil }
         }
+        connection.onDoTask = { [weak self] goal in
+            self?.startAgentLoop(goal: goal) ?? ["ok": false, "status": NSNull(), "error": "noSession", "message": "the task runner is not available"]
+        }
+    }
+
+    // MARK: Agent loop
+
+    /// do_task's answer, at once; the loop runs on and speaks for itself.
+    private func startAgentLoop(goal: String) -> [String: Any] {
+        agentTask?.cancel()
+        let loop = AgentLoop.live(goal: goal, harnessAnswer: harnessAnswer, model: agentModel) { [weak self] line in
+            Task { @MainActor [weak self] in await self?.speakForAgent(line, waitForQuiet: false) }
+        }
+        agentLoop = loop
+        agentSpokenTurns = []
+        agentTask = Task { @MainActor [weak self] in
+            let outcome = await loop.run(goal: goal)
+            guard let self else { return }
+            if let final = AgentLoop.finalLine(outcome, goal: goal, lastProgress: loop.lastProgress, step: loop.step), !Task.isCancelled {
+                await self.speakForAgent(final, waitForQuiet: true)
+            }
+            if self.agentLoop === loop { self.agentLoop = nil }
+            await self.reportAgentLoop(loop, outcome: outcome)
+        }
+        return ["ok": true, "status": "started", "error": NSNull(),
+                "message": "the task runner has started on it and will report progress and the outcome as system lines; "
+                    + "nothing is done yet, so say only a few words such as that you are on it"]
+    }
+
+    /// A press stopped the running task: before the tool call it was waiting
+    /// on, never after. Returns the step it stopped at.
+    private func stopAgentLoop() -> Int? {
+        guard let loop = agentLoop, loop.isRunning, let agentTask, !agentTask.isCancelled else { return nil }
+        agentTask.cancel()
+        return loop.step
+    }
+
+    /// A system turn for the loop, only between the owner's turns: never into
+    /// a turn being spoken or answered (it would take over that turn's marks).
+    /// Progress lines are dropped when busy; the final line waits up to 15 s.
+    private func speakForAgent(_ text: String, waitForQuiet: Bool) async {
+        let deadline = uptime + (waitForQuiet ? 15 : 0)
+        while liveTurn != nil || isReplyAudioPlaying {
+            guard uptime < deadline else { return }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        guard let connection = try? await readyConnection(), liveTurn == nil else { return }
+        do {
+            try await connection.beginSystemTurn(text: text, variant: RealtimeOpenAppTool.systemTurnVariant(for: connection.stack))
+            agentSpokenTurns.append(connection.turn)
+        } catch {
+            print("🤖 agent loop: system turn failed: \(error)")
+        }
+    }
+
+    private func reportAgentLoop(_ loop: AgentLoop, outcome: AgentLoop.Outcome) async {
+        guard let onAgentLoopFinished else { return }
+        for turn in agentSpokenTurns { _ = try? await turn.finished.value(timeoutSeconds: 20, timeoutKind: "agentSpeech") }
+        onAgentLoopFinished(AgentLoopReport(outcome: outcome, steps: loop.step, decisions: loop.decisions,
+                                            spoken: agentSpokenTurns.map(\.transcript).joined(separator: " ")))
     }
 
     // MARK: Push-to-talk
@@ -266,6 +339,8 @@ final class RealtimeVoiceSession {
         liveTurn = LiveTurn(line: line, pressedUptime: uptime)
         liveTurn?.previousReplyWasHeard = Self.previousReplyWasHeard(line: line, previousErrorKind: lastLineErrorKind)
         stopPlayback()
+        // The owner's press stops a running task; this turn is told where.
+        if let stoppedAt = stopAgentLoop() { agentStoppedLine = AgentLoop.stoppedContextLine(step: stoppedAt) }
         JarvisNotch.shared.currentTurnID = line.turnID
         JarvisNotch.shared.handle(.hotkeyDown)
         playTick(.press)
@@ -369,9 +444,14 @@ final class RealtimeVoiceSession {
             marks.screenshotGuard = (try? screenshotResult.get())?.secretGuard?.outcome ?? withheld?.outcome
             // Beside the audio, never ahead of it; before the release, so on Gemini
             // it stays inside the owner's activity. Not into a turn that replaced this one.
+            let stoppedLine = agentStoppedLine
+            agentStoppedLine = nil
             let contextSend = Task { @MainActor in
                 if let guardLine, connection.turn === marks {
                     try? await connection.sendContextText(guardLine)
+                }
+                if let stoppedLine, connection.turn === marks {
+                    try? await connection.sendContextText(stoppedLine)
                 }
                 if let frontmostLine = await frontmostLineTask.value, connection.turn === marks {
                     try? await connection.sendContextText(frontmostLine)
@@ -489,6 +569,7 @@ final class RealtimeVoiceSession {
             line.claimedWithoutReceipt = RealtimeOpenAppTool.claimedWithoutReceipt(
                 transcript: marks.transcript,
                 okToolNames: Set(marks.decisions.filter { $0.dispatch?.harnessConfirmed == true }.map(\.call.name)))
+            line.internalWordsSpoken = RealtimeOpenAppTool.internalWordsSpoken(marks.transcript).count
             // One line per tool call to voice-decisions.log, joinable on turnId.
             RealtimeDecisionTrace.append(marks.decisions, turnID: line.turnID, stack: line.stack, source: probeMode ? "notchProbe" : fixtureMic ? "scenarioRun" : "live",
                                          releasedUptime: released)
@@ -583,6 +664,7 @@ final class RealtimeVoiceSession {
     }
 
     func stop() {
+        agentTask?.cancel()
         stopMic()
         stopPlayback()
         playbackEngine.stop()
@@ -637,6 +719,9 @@ nonisolated struct RealtimeLiveTurnLine {
     /// Counts-only: the model said done / pointed / clicked with no ok result
     /// of that kind this turn (`RealtimeOpenAppTool.claimedWithoutReceipt`).
     var claimedWithoutReceipt = false
+    /// Counts-only: tool names, error codes or system lines said aloud
+    /// (`RealtimeOpenAppTool.internalWordsSpoken`).
+    var internalWordsSpoken = 0
     /// That claim was corrected aloud (`RealtimeOpenAppTool.receiptCorrection`).
     var receiptCorrectionSent = false
     /// The reply told the owner to click something unpointed: pointed | notFound | noApp | an error code; nil when it did not.
@@ -665,6 +750,7 @@ nonisolated struct RealtimeLiveTurnLine {
             "turnEndReason": value(turnEndReason), "watchdogFired": watchdogFired, "finishedMs": value(finishedMs), "staleCompletionsIgnored": staleCompletionsIgnored,
             "bargedInPreviousTurnId": value(bargedInPreviousTurnID), "previousAudioWasPlaying": previousAudioWasPlaying,
             "eventTrail": eventTrail, "notchTransitions": notchTransitions, "claimedWithoutReceipt": claimedWithoutReceipt,
+            "internalWordsSpoken": internalWordsSpoken,
             "receiptCorrectionSent": receiptCorrectionSent, "pointedWhenTelling": value(pointedWhenTelling)
         ]
     }
@@ -723,4 +809,13 @@ private final class ResumeOnce<Value: Sendable>: @unchecked Sendable {
         lock.unlock()
         pending?.resume(returning: value)
     }
+}
+
+/// What a finished task did, for the scenario runner: its outcome, its tool
+/// calls as the voice turn records them, and the words its system turns spoke.
+struct AgentLoopReport {
+    let outcome: AgentLoop.Outcome
+    let steps: Int
+    let decisions: [RealtimeToolDecision]
+    let spoken: String
 }

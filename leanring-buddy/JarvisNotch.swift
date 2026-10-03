@@ -517,11 +517,33 @@ final class JarvisNotch {
 
     private init() {}
 
+    /// The agent loop's step while a task runs (`AgentLoop`): "Doing · 3". A
+    /// proof, a didn't-take or a finished voice turn falls back to it instead
+    /// of to idle, so the notch says a task is still going between steps.
+    var doingStep: Int? {
+        didSet {
+            if let doingStep {
+                // Never over a press, a card or a proof still holding: they fall back to it themselves.
+                switch state {
+                case .idle, .thinking, .noReply: handle(.toolCall(title: Self.doingTitle(doingStep)))
+                case .intent(let title) where title.hasPrefix(Self.doingPrefix): handle(.toolCall(title: Self.doingTitle(doingStep)))
+                default: break
+                }
+            } else if case .intent(let title) = state, title.hasPrefix(Self.doingPrefix) {
+                handle(.turnEnded)
+            }
+        }
+    }
+
+    nonisolated static let doingPrefix = "Doing \u{00B7} "
+    nonisolated static func doingTitle(_ step: Int) -> String { doingPrefix + "\(step)" }
+
     /// Applies an event; returns the new state, or nil when the event does not
     /// move this state (a late answer after a new press, say).
     @discardableResult
     func handle(_ event: JarvisNotchEvent) -> JarvisNotchState? {
-        guard let next = state.next(on: event) else { return nil }
+        guard var next = state.next(on: event) else { return nil }
+        if next == .idle, let doingStep { next = .intent(title: Self.doingTitle(doingStep)) }
         if event == .hotkeyDown || panel == nil { placeOnScreenUnderCursor() }
         let before = frontmostWitness?()
         state = next

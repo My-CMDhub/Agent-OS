@@ -92,7 +92,7 @@ final class ConfirmationCardModel: ObservableObject {
     /// their frames are not where they will be.
     @Published var interactive = false
     @Published var reduceMotion = false
-    /// The agent loop's step, when a multi-step task asked. Nobody feeds it yet;
+    /// The agent loop's step, when a multi-step task asked (`AgentLoop` feeds it);
     /// the tab and the footer show it only when set.
     @Published var step: ConfirmationStep?
     /// The tree's own height, as laid out — the panel follows it.
@@ -142,8 +142,12 @@ final class ConfirmationCardWindowManager {
         set { model.step = newValue }
     }
 
+    /// The process's card (one per process): where `AgentLoop` sets `step`.
+    private(set) static weak var current: ConfirmationCardWindowManager?
+
     init(confirmations: HarnessConfirmations) {
         self.confirmations = confirmations
+        Self.current = self
         chimeEngine.attach(chimeNode)
         chimeEngine.connect(chimeNode, to: chimeEngine.mainMixerNode, format: chimeFormat)
         // `receive(on: DispatchQueue.main)` delivers on the NEXT run-loop turn,

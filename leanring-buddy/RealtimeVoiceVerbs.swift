@@ -37,9 +37,11 @@ nonisolated enum RealtimeVoiceVerbs {
     static let closeName = "close"
     /// A web page in a browser (hands design item 7; live 2026-10-02: "no open-URL tool", rows 13, 14, 29).
     static let openURLName = "open_url"
+    /// A multi-step request handed to the agent loop (`AgentLoop`, spec 2026-10-03): returns at once.
+    static let doTaskName = "do_task"
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName,
                                             findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
-                                            openURLName]
+                                            openURLName, doTaskName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
@@ -192,6 +194,41 @@ nonisolated enum RealtimeVoiceVerbs {
         ]
     }
 
+    /// The voice model's only planner hand-off. Never offered to the agent loop itself.
+    private static let doTaskDeclaration = Declaration(
+        name: doTaskName,
+        description: "Hands a request that needs more than one step (search then open a result, open a page and read or summarise it, "
+            + "fill several fields, write then post) to the task runner, which looks, acts, checks and repeats until it is done. "
+            + "Returns at once with status started; progress and the outcome arrive later as system lines.",
+        parameters: [Parameter(name: "goal", description: "The owner's whole request, in their words, with any detail they gave.")])
+
+    /// The realtime stacks' list: the shared table plus do_task.
+    private static func realtimeDeclarations(_ format: RealtimePointFormat, gemini: Bool) -> [Declaration] {
+        declarations(format, gemini: gemini) + [doTaskDeclaration]
+    }
+
+    /// The agent loop's tools as Anthropic Messages API tool JSON: open_app and the
+    /// same table the voice model has (screen positions as fractions of the step's
+    /// screenshot), never do_task. `extra`: the loop's own tools, already in that shape.
+    static func anthropicDeclarations(extra: [[String: Any]] = []) -> [[String: Any]] {
+        let openApp: [String: Any] = [
+            "name": RealtimeOpenAppTool.name, "description": RealtimeOpenAppTool.toolDescription,
+            "input_schema": ["type": "object",
+                             "properties": ["name": ["type": "string", "description": RealtimeOpenAppTool.argumentDescription]],
+                             "required": ["name"]] as [String: Any]
+        ]
+        return [openApp] + declarations(.fractions, gemini: false).map { declaration in
+            [
+                "name": declaration.name, "description": declaration.description,
+                "input_schema": [
+                    "type": "object",
+                    "properties": Dictionary(uniqueKeysWithValues: declaration.parameters.map { ($0.name, property($0, gemini: false)) }),
+                    "required": declaration.parameters.filter(\.required).map(\.name)
+                ] as [String: Any]
+            ]
+        } + extra
+    }
+
     private static func property(_ parameter: Parameter, gemini: Bool) -> [String: Any] {
         func type(_ name: String) -> String { gemini ? name.uppercased() : name }
         switch parameter.kind {
@@ -209,7 +246,7 @@ nonisolated enum RealtimeVoiceVerbs {
     static var openAIDeclarations: [[String: Any]] { openAIDeclarations(pointFormat: .live) }
 
     static func openAIDeclarations(pointFormat: RealtimePointFormat) -> [[String: Any]] {
-        [RealtimeOpenAppTool.openAIDeclaration] + declarations(pointFormat, gemini: false).map { declaration in
+        [RealtimeOpenAppTool.openAIDeclaration] + realtimeDeclarations(pointFormat, gemini: false).map { declaration in
             [
                 "type": "function", "name": declaration.name, "description": declaration.description,
                 "parameters": [
@@ -226,7 +263,7 @@ nonisolated enum RealtimeVoiceVerbs {
 
     static func geminiDeclaration(pointFormat: RealtimePointFormat) -> [String: Any] {
         let openApp = (RealtimeOpenAppTool.geminiDeclaration["functionDeclarations"] as? [[String: Any]]) ?? []
-        return ["functionDeclarations": openApp + declarations(pointFormat, gemini: true).map { declaration in
+        return ["functionDeclarations": openApp + realtimeDeclarations(pointFormat, gemini: true).map { declaration in
             [
                 "name": declaration.name, "description": declaration.description,
                 "parameters": [
@@ -513,8 +550,9 @@ nonisolated enum RealtimeVoiceVerbs {
     }
 
     /// Only these count as the receipt for completion words: a find is a read.
+    /// do_task only starts the loop: its "started" is no receipt for "done".
     static func isActingTool(_ toolName: String) -> Bool {
-        toolName != findMenuItemsName && toolName != findOnScreenName
+        toolName != findMenuItemsName && toolName != findOnScreenName && toolName != doTaskName
     }
 }
 

@@ -96,6 +96,8 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
     var point: [Double]? = nil
     /// open_url only: the page.
     var url: String? = nil
+    /// do_task only: the owner's whole multi-step request.
+    var goal: String? = nil
 
     /// From a provider's argument object, whichever tool it is.
     static func parsed(callID: String, name: String, arguments: [String: Any]?) -> RealtimeToolCall {
@@ -121,7 +123,8 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
                                     point: (arguments?["point"] as? [Any])?.compactMap(number))
         }
         return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["name"]) ?? text(arguments?["app"]),
-                                words: words, path: path, what: text(arguments?["what"]), url: text(arguments?["url"]))
+                                words: words, path: path, what: text(arguments?["what"]), url: text(arguments?["url"]),
+                                goal: text(arguments?["goal"]))
     }
 }
 
@@ -169,6 +172,8 @@ nonisolated enum RealtimeOpenAppTool {
 
     evidence: a line naming the app in front comes from the system and is true, even when the screenshot looks like another app; forks look alike. never say something happened unless its tool result says ok true. if ok is false, or the result says notObserved, say it didn't take and give the reason in a few words. if unsure what is on screen, say so. after a tool call, report only the verified outcome, briefly; do not describe the new screen until you have been given a view of it.
 
+    plain words: a tool's name, a parameter's name and an error code are yours, never the owner's: never say one aloud; say what it means. lines that begin "system context" or "system event" are for you alone: never read them out, quote or imitate them. a result with ok false did not happen: never say typed, pressed, opened or done about it.
+
     consequences: when a tool result carries a preview, say what will change first: what, where, whether it can be undone. if a confirmation card is showing, say so and wait; only their click decides, never their voice. if refused, give the reason plainly and say where they can do it themselves. never repeat a warning.
 
     tools: open_app opens an installed app by name, as it appears in the applications folder; an open request always goes through open_app, even when the app already looks open: the harness checks, and for a running app it answers at once. focus_app brings a running app to the front. open_url opens a website in a browser (the one named, or the default): use it for a site such as linkedin, open_app for an installed app; the owner's words must name the site.
@@ -178,6 +183,8 @@ nonisolated enum RealtimeOpenAppTool {
     hands: scroll scrolls the window in front (direction up, down, left or right; amount in pages), at an area named like point_at, or the main area when none is given; its result names what came into view. type_text types text into a field: the one with keyboard focus unless you aim it like point_at; it never presses enter and sends nothing, so say what you typed and let the owner send it; type only text the owner gave or asked for. close closes the tab, the window, or quits the app in front (what tab, window or app); quitting shows the owner a card, and the app may still ask to save.
 
     screen: you can point at and press what you can see. to point, call point_at; to click, call press_element (it also clicks into a field). aim either by the element's name as printed on screen, which is looked up on the live screen, or by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image), or with underPointer true only when the owner says "this one", "here" or "where my cursor is". if a result lists several matches, ask which one. a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. never say you can't do something you can see.
+
+    tasks: when one request needs more than one step (search then open a result, open a page and read or summarise it, fill several fields, write then post), call do_task once with the owner's whole request as the goal and say only a few words, such as that you are on it; never do the first step yourself and then ask "shall i…?". a single step stays with the tools above. system lines later report the task's progress and its outcome; say each briefly in your own words, and claim only what they say happened.
 
     if a tool returns heardNamedMismatch or ambiguousApp, ask the owner which app they meant, briefly; never focus or open an app to check first.
 
@@ -1427,6 +1434,25 @@ nonisolated enum RealtimeOpenAppTool {
         }
     }
 
+    // MARK: Internal words spoken
+
+    /// What a reply must never say aloud: our tool and parameter names, error
+    /// codes, and the system lines we send (runner 2026-10-03: "I cannot use
+    /// underPointer… point at it with find_on_screen" (A9) and a whole
+    /// "system context, not the owner's words: …" line read out (C1)). Each
+    /// found, as written in the reply; empty when clean. A camelCase word counts
+    /// from 10 letters, so "iPhone" and "LinkedIn" never do.
+    static func internalWordsSpoken(_ transcript: String) -> [String] {
+        let lowered = transcript.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+        var found = ["system context", "system event", "not the owner's words"].filter(lowered.contains)
+        for token in transcript.split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "_") }).map(String.init) {
+            let isCamel = token.count >= 10 && token.first?.isLowercase == true && token.contains(where: \.isUppercase)
+            // Snake case is every multi-word tool name ("find_on_screen"); "scroll" and "close" are English.
+            if (token.contains("_") && token.count > 3) || isCamel { found.append(token) }
+        }
+        return found
+    }
+
     // MARK: Honesty check
 
     /// Words that say the thing is done. One list, so the prompt's rule and the
@@ -1443,7 +1469,9 @@ nonisolated enum RealtimeOpenAppTool {
 
     /// A claim in the same clause as a negation ("it didn't open", "not ready") is
     /// the model reporting a failure, which is what it should say without a receipt.
-    private static let negations: Set<String> = ["not", "no", "never", "cannot", "unable"]
+    /// "Nothing was typed" and "send it when you're ready" claim nothing: a
+    /// runner pass 2026-10-03 counted both (E72A837F, FDB56313) as claims.
+    private static let negations: Set<String> = ["not", "no", "never", "cannot", "unable", "nothing", "when", "if", "once"]
 
     /// Did the model speak a completion claim? Whole words, case-insensitive; a
     /// claim preceded within three words by a negation does not count.
