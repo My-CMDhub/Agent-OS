@@ -578,6 +578,18 @@ struct AgentLoopTests {
         #expect(guarded("not json").contains("taskTabChanged"), "an unparseable request counts as mutating")
     }
 
+    /// 2026-10-03 brief, B2: the voice pressed "Plans" itself for "open the Plans page
+    /// and tell me the cheapest plan". Two actions, or an action and "tell me", go to do_task.
+    @Test func thePromptAndDoTaskRouteMultiActionAndTellMeRequests() {
+        let prompt = RealtimeOpenAppTool.systemPrompt
+        let doTask = RealtimeVoiceVerbs.openAIDeclarations.first { $0["name"] as? String == "do_task" }?["description"] as? String ?? ""
+        for text in [prompt, doTask] {
+            #expect(text.contains("two or more actions"))
+            #expect(text.contains("and tell me"))
+            #expect(text.contains("summarise"))
+            #expect(text.contains("find out"))
+        }
+    }
 }
 
 /// A harness that answers from a script, one line per request, and keeps what it was asked.
