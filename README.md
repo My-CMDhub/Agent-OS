@@ -1,6 +1,6 @@
 # Agent-OS
 
-A macOS accessibility harness for a model to operate the computer through, built to refuse when it should. A realtime voice model now drives it one step at a time; nothing plans multi-step work yet.
+A macOS accessibility harness for a model to operate the computer through, built to refuse when it should. A realtime voice model drives single steps and hands multi-step goals to a Claude agent loop that acts through the same guards.
 
 I forked [`farzaa/clicky`](https://github.com/farzaa/clicky), an on-screen AI buddy that looks at a screenshot and points at things, and replaced how it senses and acts. Instead of guessing pixels, it reads the accessibility tree: the named, positioned controls macOS already publishes for screen readers. Every action goes through local code that can allow it, ask me, or refuse it. An action only counts as done when a second read of the app shows it happened.
 
@@ -120,10 +120,10 @@ All in `leanring-buddy/` (an upstream typo; the product is named `Clicky`). **61
 
 ## What this does not claim
 
-**Not yet:** <!-- not-yet -->multi-step plans · the voice model acts one verified step at a time<!-- /not-yet -->. (dhruvpatel.net shows this line.)
+**Not yet:** <!-- not-yet -->memory across sessions · apps without a readable structure<!-- /not-yet -->. (dhruvpatel.net shows this line.)
 
 **Who is in control**
-- **A voice model drives single steps, nothing plans.** OpenAI Realtime or Gemini Live calls harness tools (open, focus, menus, find on screen, point, press, scroll, type, close). It may act only on what it was offered and what the owner was heard to say, and the safety kernel and approval card still decide. The planner tests' intents are hand-written: they prove a plan executes, not that anything planned it.
+- **A voice model drives single steps; a Claude loop plans multi-step goals.** OpenAI Realtime or Gemini Live calls harness tools (open, focus, menus, find on screen, point, press, scroll, type, close). For a multi-step request it calls `do_task`: a Claude loop (look → one tool → read the receipt, ≤15 steps, ≤180 s) runs through the same execution path, so the safety kernel, approval card, credential guard and idle gate still decide. A task starts only from the owner's own spoken turn, every step is checked against the owner's words, it acts only in apps the owner named, the app in front at the start, or what it launched, and `done` needs a receipt for every claimed effect. Measured 2026-10-03 on Gemini with the scenario runner: 21 of 29 scenarios pass, judged by an independent structure read.
 - **"The tree never enters a prompt" is a design rule, not an enforced one.** `snapshot` returns the actionable elements to any socket client. Since 2026-10-02 no socket answer names a text field by what was typed into it or a password field by its dots, and no list reads inside either; a field's length is reported, never its text.
 
 **Safety**
@@ -153,7 +153,7 @@ All in `leanring-buddy/` (an upstream typo; the product is named `Clicky`). **61
 
 ## Measured
 
-Dated, from this machine, with sample sizes where the source recorded them. **Tests:** 486 unit tests (Swift Testing), 2026-10-02. Planner tests 6/6 on two consecutive runs, last run 2026-09-15: six tasks, Finder and System Settings only.
+Dated, from this machine, with sample sizes where the source recorded them. **Tests:** 603 unit tests (Swift Testing), 2026-10-03. Scenario runner (`--scenario-run`, spoken requests replayed through the real voice path): 21/29 on Gemini, 2026-10-03. Planner tests 6/6 on two consecutive runs, last run 2026-09-15: six tasks, Finder and System Settings only.
 
 <details>
 <summary><b>Harness requests off the main thread</b> (<code>dda6804</code>, 2026-09-15)</summary>
