@@ -520,11 +520,14 @@ nonisolated enum RealtimeOpenAppTool {
     }
 
     /// The kernel's own reason, and for typing into what takes no text — most
-    /// often a page with no field focused — the way that works instead.
+    /// often a page with no field focused — the way that works instead. The
+    /// reason carries role and menu names an app wrote, so it reaches the model
+    /// as `UntrustedText`: quoted and escaped, never a line of its own.
     static func kernelReasonMessage(_ response: [String: Any]) -> String? {
         guard let reason = (response["kernel"] as? [String: Any])?["reason"] as? String else { return nil }
-        guard reason.hasPrefix("role "), reason.contains("does not accept text") else { return "refused: \(reason)" }
-        return "refused: \(reason). Nothing was typed. No text field has keyboard focus. Do not ask the owner: call find_on_screen "
+        let quoted = UntrustedText(reason).forDisplayInFull
+        guard reason.hasPrefix("role "), reason.contains("does not accept text") else { return "refused: \(quoted)" }
+        return "refused: \(quoted). Nothing was typed. No text field has keyboard focus. Do not ask the owner: call find_on_screen "
             + "now with a word of the field's label (\"search\", \"post\"), then type_text again with the name it returns."
     }
 
