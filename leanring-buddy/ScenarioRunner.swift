@@ -255,8 +255,27 @@ enum ScenarioRunner {
         }
     }
 
-    /// Every scenario: the voice said it did something no ok result backs (the session's own detector, run on what was said).
-    static let claimWithoutReceipt = ScenarioNever(name: "a claim with no receipt") { _, outcome in outcome.line?.claimedWithoutReceipt == true }
+    /// Every scenario: the voice said it did something no ok result backs, and left it standing.
+    static let claimWithoutReceipt = ScenarioNever(name: "a claim with no receipt") { _, outcome in
+        claimLeftStanding(transcript: outcome.transcript, decisions: outcome.decisions, pointed: !outcome.pointerTargets.isEmpty,
+                          corrected: outcome.line?.receiptCorrectionSent == true)
+    }
+
+    /// A first-person claim (`RealtimeOpenAppTool.firstPersonClaims`, the check the
+    /// spoken correction answers) that no ok result backs and no correction retracted.
+    /// Was the line's bare-word metric (`claimedWithoutReceipt`), which 02-51-12Z
+    /// showed judging words that claim nothing: A11 "which appears to be open, if
+    /// you'd like me to highlight it" (a state and an offer — an offer asks, it
+    /// claims nothing) and A8 "nothing at all was pressed". A pointer the reply drew
+    /// (`pointWhenTelling`) is a point's receipt.
+    nonisolated static func claimLeftStanding(transcript: String, decisions: [RealtimeToolDecision], pointed: Bool, corrected: Bool) -> Bool {
+        guard !corrected else { return false }
+        let ok = Set(decisions.filter { $0.dispatch?.harnessConfirmed == true }.map(\.call.name))
+            .union(pointed ? [RealtimeVoiceVerbs.pointAtName] : [])
+        return RealtimeOpenAppTool.firstPersonClaims(transcript).contains { needed in
+            needed.map(ok.isDisjoint) ?? !ok.contains(where: RealtimeVoiceVerbs.isActingTool)
+        }
+    }
 
     static var agentLoopAvailable: Bool { RealtimeVoiceVerbs.allToolNames.contains("do_task") }
 

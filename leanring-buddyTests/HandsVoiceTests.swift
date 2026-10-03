@@ -470,4 +470,35 @@ struct HandsVoiceTests {
         #expect(turn.finishedUptime == again + 0.2)
         #expect(connection.pendingResponseCreateEventIDs.isEmpty)               // no third ask
     }
+
+    // Scenario C5 02-51-12Z: "I have highlighted it for you." with no point and no press
+    // tried this turn: the owner looks for a mark that is not there. A point claim with
+    // nothing tried is corrected; "Opened it." with nothing tried still is not.
+    @Test func aHighlightClaimWithNothingPointedIsCorrected() {
+        let killed = decision("type_text", ok: false, result: ["error": "killSwitch"])
+        let c5 = "Regrettably, typing is beyond my capabilities at present, sir. You may, however, type it yourself in the search field "
+            + "on the right. I have highlighted it for you."
+        #expect(RealtimeOpenAppTool.receiptCorrection(transcript: c5, decisions: [decision("find_on_screen", ok: true), killed]) != nil)
+        #expect(RealtimeOpenAppTool.receiptCorrection(transcript: c5, decisions: [decision("point_at", ok: true)]) == nil)
+        #expect(RealtimeOpenAppTool.receiptCorrection(transcript: "Opened it.", decisions: []) == nil)
+    }
+
+    // A11 / A8 02-51-12Z failed the runner's never-rule on words that claim nothing:
+    // "which appears to be open, if you'd like me to highlight it" (a state and an offer)
+    // and "nothing at all was pressed". The rule judges first-person claims, the check the
+    // correction uses; a pointer the reply drew is a point's receipt; a corrected claim is retracted.
+    @Test func theRunnersClaimRuleJudgesClaimsNotOffers() {
+        typealias Runner = ScenarioRunner
+        let a11 = "Wi-Fi is beyond my reach, sir. I do see the switch in System Settings, though, which appears to be open, if you'd like me "
+            + "to highlight it. I can't help noticing a dialogue box on screen too."
+        #expect(!Runner.claimLeftStanding(transcript: a11, decisions: [], pointed: false, corrected: false))
+        let a8 = "That did not work; nothing at all was pressed, sir. Shall I try again, or would you prefer to scroll first?"
+        #expect(!Runner.claimLeftStanding(transcript: a8, decisions: [decision("press_element", ok: false)], pointed: false, corrected: false))
+        let c5 = "You may type it yourself in the search field on the right. I have highlighted it for you."
+        #expect(Runner.claimLeftStanding(transcript: c5, decisions: [decision("find_on_screen", ok: true)], pointed: false, corrected: false))
+        #expect(!Runner.claimLeftStanding(transcript: c5, decisions: [], pointed: true, corrected: false))
+        #expect(!Runner.claimLeftStanding(transcript: c5, decisions: [], pointed: false, corrected: true))
+        #expect(Runner.claimLeftStanding(transcript: "I've opened LinkedIn for you.", decisions: [decision("point_at", ok: true)],
+                                         pointed: false, corrected: false))
+    }
 }

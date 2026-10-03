@@ -1056,15 +1056,27 @@ nonisolated enum RealtimeOpenAppTool {
     /// per stack as `--speak-probe` measured them (OpenAI textThenCreate, Gemini textOnly).
     static func receiptCorrection(transcript: String, decisions: [RealtimeToolDecision]) -> String? {
         guard !admitsFailure(transcript) else { return nil }
+        let pointReceipts = kindClaims.first { $0.phrases == pointClaimPhrases }?.receipts
         for receipts in firstPersonClaims(transcript) {
             let tried = decisions.filter { RealtimeVoiceVerbs.isActingTool($0.call.name) && (receipts?.contains($0.call.name) ?? true) }
-            guard let failed = tried.last, !tried.contains(where: { $0.dispatch?.harnessConfirmed == true }) else { continue }
+            guard !tried.contains(where: { $0.dispatch?.harnessConfirmed == true }) else { continue }
+            // C5 02-51-12Z: "I have highlighted it for you." with nothing pointed at or
+            // pressed: the owner looks for a mark that is not there. Only a point claim
+            // is corrected untried; "Opened it." with nothing tried stays as it was.
+            guard let failed = tried.last else {
+                if receipts == pointReceipts { return correction(reason: "nothing was pointed at or highlighted") }
+                continue
+            }
             let reason = ((failed.dispatch?.result["message"] as? String) ?? (failed.dispatch?.result["error"] as? String))
                 .map { UntrustedText(String($0.prefix(160))).forDisplay } ?? "no action was taken"
-            return "system event, not the owner's words: your last reply said something was done, but no tool result this turn says so. "
-                + "in one short sentence, say \"Correction: that didn't go through\" and the reason in a few words. the reason: \(reason). call no tool."
+            return correction(reason: reason)
         }
         return nil
+    }
+
+    private static func correction(reason: String) -> String {
+        "system event, not the owner's words: your last reply said something was done, but no tool result this turn says so. "
+            + "in one short sentence, say \"Correction: that didn't go through\" and the reason in a few words. the reason: \(reason). call no tool."
     }
 
     /// Words of a reply that already told the owner it did not work.
