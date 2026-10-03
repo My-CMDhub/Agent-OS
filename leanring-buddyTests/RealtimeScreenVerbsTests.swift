@@ -533,6 +533,55 @@ struct RealtimeScreenVerbsTests {
         } else { Issue.record("took the ordinal from the model's arguments") }
     }
 
+    /// A Google results page: the Shopping tab, two results (a link holding a heading),
+    /// and a "People also ask" heading that is no link.
+    private var googleSnapshot: [String: Any] {
+        ["ok": true, "bundleIdentifier": "com.google.Chrome", "walkStopReasons": [String](), "windowFrame": frameJSON(screen), "elements": [
+            element("AXWindow", "alan turing - Google Search", screen),
+            element("AXWebArea", "alan turing - Google Search", CGRect(x: 0, y: 0, width: 1440, height: 820), actions: []),   // 1
+            element("AXLink", "Shopping", CGRect(x: 400, y: 700, width: 70, height: 20), parent: 1),
+            element("AXLink", "Alan Turing Wikipedia https://en.wikipedia.org › wiki › Alan_Turing",
+                    CGRect(x: 180, y: 560, width: 600, height: 60), parent: 1),                                           // 3
+            element("AXHeading", "Alan Turing", CGRect(x: 180, y: 590, width: 200, height: 26), actions: [], parent: 3),
+            element("AXHeading", "People also ask", CGRect(x: 180, y: 480, width: 200, height: 26), actions: [], parent: 1),
+            element("AXLink", "Alan Turing | Biography Britannica https://www.britannica.com › biography",
+                    CGRect(x: 180, y: 300, width: 600, height: 60), parent: 1),                                           // 6
+            element("AXHeading", "Alan Turing | Biography", CGRect(x: 180, y: 330, width: 260, height: 26), actions: [], parent: 6)
+        ]]
+    }
+
+    /// A8 (23-43-38Z pressed "Shopping"; 02-51-12Z, 03-11-55Z nothingAtPoint; 03-34-52Z a
+    /// guessed title not found, then a position on a system dialog): "click the first
+    /// result" was left to Gemini's aim. A result is a heading inside a link in the page
+    /// (the checker's own definition), and an ordinal the owner said before "result"
+    /// picks one top to bottom — whatever the model aimed at.
+    @Test func theResultTheOwnerNumberedIsTheOnePressed() async throws {
+        #expect(RealtimeScreenVerbs.resultHeadings(fromSnapshotResponse: googleSnapshot, screens: [screen]).map(\.name)
+                == ["Alan Turing", "Alan Turing | Biography"])
+        let snapshot = googleSnapshot
+        let screen = self.screen
+        let shopping = candidate("Shopping", CGRect(x: 400, y: 700, width: 70, height: 20), role: "AXLink")
+        func press(_ name: String = "press_element", heard: String?) async -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
+            await RealtimeOpenAppTool.resolveScreenTarget(
+                call: RealtimeToolCall(callID: "r", name: name, appName: "Google Chrome", x: 0.3, y: 0.2, text: "x"),
+                thisTurn: nil, previousTurn: nil, followUpConfirmed: nil, confirmedByYes: false, now: 1_000,
+                screenshotDisplay: screen, keyDownPointer: nil, ordinalWords: heard,
+                lookUpResults: {
+                    .success(RealtimeScreenLookup(candidates: RealtimeScreenVerbs.resultHeadings(fromSnapshotResponse: snapshot, screens: [screen]),
+                                                  app: "com.google.Chrome"))
+                },
+                hitTest: { _ in .element(shopping, app: "com.google.Chrome") })
+        }
+        let first = try await press(heard: "Click the first result.").get()
+        #expect(first.candidate?.name == "Alan Turing" && first.source == .heardOrdinal)
+        #expect(first.candidate?.clickTarget?.role == "AXLink")
+        #expect(try await press("point_at", heard: "point at the second search result").get().candidate?.name == "Alan Turing | Biography")
+        // No ordinal before "result", or one past the results: the model's aim stands.
+        #expect(try await press(heard: "click the result about Turing").get().candidate == shopping)
+        #expect(try await press(heard: nil).get().candidate == shopping)
+        #expect(try await press(heard: "the third result").get().candidate == shopping)
+    }
+
     /// C4 live (03-07-01Z): "Delete" with a position and no find this turn was hit-tested
     /// and came back nothingAtPoint — the name was ignored. A name with a position is
     /// looked up by name; the position picks only by lying inside exactly one.

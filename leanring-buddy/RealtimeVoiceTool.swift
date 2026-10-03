@@ -819,12 +819,23 @@ nonisolated enum RealtimeOpenAppTool {
                                     screenshotDisplay: CGRect?, screenshotStale: Bool = false, keyDownPointer: RealtimeScreenTarget?,
                                     heard: String? = nil, ordinalWords: String? = nil,
                                     lookUp: ((String) async -> Result<RealtimeScreenLookup, RealtimeToolRefusal>)? = nil,
+                                    lookUpResults: (() async -> Result<RealtimeScreenLookup, RealtimeToolRefusal>)? = nil,
                                     hitTest: (CGPoint) async -> RealtimeScreenHit) async -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
         func refuse(_ error: String, _ message: String) -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
             .failure(RealtimeToolRefusal(error: error, message: message))
         }
         // A press, and typing, need an element there; a point or a scroll can be approximate.
         let isPress = call.name == RealtimeVoiceVerbs.pressElementName || call.name == RealtimeVoiceVerbs.typeTextName
+        // "Click the first result" (A8: Gemini's aim pressed Shopping, a system dialog, or
+        // nothing): the owner's ordinal before "result" picks from the page's results,
+        // whatever the model aimed at. No results, or no such place: the model's aim stands.
+        if [RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pointAtName].contains(call.name),
+           heardOrdinal(ordinalWords, before: resultNouns) != nil, let lookUpResults,
+           case .success(let results) = await lookUpResults(),
+           let picked = heardOrdinalPick(results.candidates, heard: ordinalWords, before: resultNouns) {
+            return .success(RealtimeScreenTarget(candidate: picked, point: CGPoint(x: picked.frame.midX, y: picked.frame.midY),
+                                                 app: results.app, source: .heardOrdinal))
+        }
         if call.x != nil || call.y != nil, !call.underPointer, screenshotStale {
             return refuse("screenshotStale", "the screen has changed since the screenshot this turn, so a position in it is out of date; "
                 + "aim by a name from find_on_screen instead")
@@ -971,6 +982,9 @@ nonisolated enum RealtimeOpenAppTool {
         candidates.sorted { $0.frame.maxY > $1.frame.maxY }
     }
 
+    /// What "the first result" counts: `RealtimeScreenVerbs.resultHeadings`.
+    static let resultNouns: Set<String> = ["result", "results"]
+
     /// An ordinal word's place in that order; -1 is the last.
     static let ordinalPlaces: [String: Int] = ["first": 0, "1st": 0, "top": 0, "topmost": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2,
                                               "fourth": 3, "4th": 3, "fifth": 4, "5th": 4, "last": -1, "bottom": -1, "bottommost": -1]
@@ -1010,8 +1024,9 @@ nonisolated enum RealtimeOpenAppTool {
 
     /// The live screen's answer for a name: a forModel snapshot of the app in
     /// front (the find_on_screen read, under its policy), matched locally.
+    /// `results`: the page's search results (`resultHeadings`) instead of a name's matches.
     static func liveLookup(named name: String, app: String?, answer: @escaping @Sendable (String) -> String, screens: [CGRect],
-                           screenshotDisplay: CGRect?) async -> Result<RealtimeScreenLookup, RealtimeToolRefusal> {
+                           screenshotDisplay: CGRect?, results: Bool = false) async -> Result<RealtimeScreenLookup, RealtimeToolRefusal> {
         guard let app, case .success(let line) = harnessRequestLine(
             for: RealtimeToolCall(callID: "lookup", name: RealtimeVoiceVerbs.findOnScreenName, appName: app, words: name)) else {
             return .failure(RealtimeToolRefusal(error: "missingAppName", message: "no app is in front to look in; nothing was done"))
@@ -1023,8 +1038,10 @@ nonisolated enum RealtimeOpenAppTool {
                                                     ?? "the window could not be read; nothing was done"))
         }
         return .success(RealtimeScreenLookup(
-            candidates: RealtimeScreenVerbs.liveCandidates(named: name, fromSnapshotResponse: response, screens: screens,
-                                                           screenshotDisplay: screenshotDisplay),
+            candidates: results
+                ? RealtimeScreenVerbs.resultHeadings(fromSnapshotResponse: response, screens: screens, screenshotDisplay: screenshotDisplay)
+                : RealtimeScreenVerbs.liveCandidates(named: name, fromSnapshotResponse: response, screens: screens,
+                                                     screenshotDisplay: screenshotDisplay),
             app: response["bundleIdentifier"] as? String))
     }
 

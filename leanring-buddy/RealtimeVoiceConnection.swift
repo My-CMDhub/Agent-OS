@@ -982,6 +982,11 @@ final class RealtimeVoiceConnection {
                     }.value
                     return await RealtimeOpenAppTool.liveLookup(named: name, app: app, answer: harnessAnswer, screens: screens,
                                                                 screenshotDisplay: turn.screenshotDisplayFrame)
+                },
+                lookUpResults: {
+                    // The app in front, as the hit test reads it.
+                    await RealtimeOpenAppTool.liveLookup(named: "result", app: call.appName, answer: harnessAnswer, screens: screens,
+                                                         screenshotDisplay: turn.screenshotDisplayFrame, results: true)
                 }) { point in
                     let answered = await RealtimeOpenAppTool.screenHit(at: point, app: call.appName, answer: harnessAnswer, screens: screens,
                                                                        primaryDisplayHeight: primaryHeight,

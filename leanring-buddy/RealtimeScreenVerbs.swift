@@ -265,6 +265,31 @@ nonisolated enum RealtimeScreenVerbs {
             .filter { textInputRoles.contains($0.role) }.map(\.name)
     }
 
+    /// The visible search results of a web page, in tree order: a heading inside a
+    /// link (within three levels), in the page — the A8 checker's own definition.
+    static func resultHeadings(fromSnapshotResponse response: [String: Any], screens: [CGRect],
+                               screenshotDisplay: CGRect? = nil) -> [RealtimeScreenCandidate] {
+        let elements = response["elements"] as? [[String: Any]] ?? []
+        let display = visibleWindow(fromSnapshotResponse: response, screens: screens, screenshotDisplay: screenshotDisplay)
+            .map { [$0.display] } ?? screens
+        func insideLink(_ element: PoolElement) -> Bool {
+            var next = element.parent
+            for _ in 0..<3 {
+                guard let index = next, elements.indices.contains(index) else { return false }
+                if elements[index]["role"] as? String == "AXLink" { return true }
+                next = elements[index]["parent"] as? Int
+            }
+            return false
+        }
+        return visiblePool(fromSnapshotResponse: response, screens: screens, screenshotDisplay: screenshotDisplay).pool
+            .filter { $0.role == "AXHeading" && insideLink($0) && inPage($0, elements: elements) }
+            .map { element in
+                RealtimeScreenCandidate(name: element.name, role: element.role, frame: element.frame,
+                                        position: positionPhrase(of: element.frame, neighbours: [], screens: display),
+                                        subrole: element.subrole, pressable: element.pressable, pressAncestor: element.pressAncestor)
+            }
+    }
+
     /// The words a query ranks by, and a name's own (its "(⇧⌘L)" shortcut dropped).
     static func rankingTokens(_ words: String) -> [String] {
         RealtimeVoiceVerbs.foldedTokens(words).filter { !RealtimeVoiceVerbs.ignoredQueryWords.contains($0) }
