@@ -541,4 +541,22 @@ struct RealtimeHeardCheckTests {
         #expect(prompt.count <= RealtimeHeardCheck.transcriptionHintMaxCharacters)
         #expect(prompt.count > RealtimeHeardCheck.transcriptionHintMaxCharacters - 20)
     }
+
+    // Scenario B2 2026-10-03: "tell me the cheapest plan" put "cheapest" in the app
+    // slot, Webster's Second lists only "cheap", and seven task steps were refused
+    // heardUnavailable. Inflections reduce to a listed stem; a missed app name has none.
+    @Test func anInflectedEnglishWordIsNoMissedAppName() {
+        for word in ["cheapest", "cheaper", "largest", "bigger", "running", "opened", "saved", "tried", "copies", "happier", "plans"] {
+            #expect(RealtimeHeardCheck.isEnglishWord(word), "\(word)")
+        }
+        for word in ["zorbit", "zorbits", "zorbiter", "zorbitest", "superhub"] {
+            #expect(!RealtimeHeardCheck.isEnglishWord(word), "\(word)")
+        }
+        func decide(_ transcript: String) -> RealtimeHeardCheck.Outcome {
+            RealtimeHeardCheck.decide(transcript: transcript, named: "Google Chrome", among: installed, toolName: "press_element").outcome
+        }
+        #expect(decide("Open the plans page on this shop and tell me the cheapest plan.") == .noAppHeard)
+        #expect(decide("Open the plans page in Zorbit.") == .appNameUnclear)
+        #expect(decide("Show me the biggest one in Zorbiter.") == .appNameUnclear)
+    }
 }

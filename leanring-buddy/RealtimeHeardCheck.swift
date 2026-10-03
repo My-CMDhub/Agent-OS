@@ -266,11 +266,22 @@ nonisolated enum RealtimeHeardCheck {
         "box", "textbox", "searchbox", "checkbox", "dialog", "textarea", "omnibox"
     ]
 
-    /// Plural and verb endings stripped once: Webster's lists "window", not "windows".
+    /// An inflected form of a listed word: Webster's lists "window", not
+    /// "windows", and "cheap", not "cheapest" (scenario B2 2026-10-03: seven
+    /// task steps refused heardUnavailable on "tell me the cheapest plan"). One
+    /// ending stripped, then the stem as spelled, with its "e" back (larger,
+    /// saved), its doubled consonant undone (bigger, running), or "i" back to "y"
+    /// (copies, tried, happiest). An app name nobody recognised has no such stem.
     static func isEnglishWord(_ word: String) -> Bool {
-        if englishWords.contains(word) || modernWords.contains(word) { return true }
-        return ["s", "es", "ed", "ing"].contains { suffix in
-            word.count > suffix.count + 2 && word.hasSuffix(suffix) && englishWords.contains(String(word.dropLast(suffix.count)))
+        func listed(_ stem: String) -> Bool { englishWords.contains(stem) || modernWords.contains(stem) }
+        if listed(word) { return true }
+        return ["s", "es", "ed", "ing", "er", "est"].contains { suffix in
+            guard word.count > suffix.count + 2, word.hasSuffix(suffix) else { return false }
+            let stem = String(word.dropLast(suffix.count))
+            var stems = [stem, stem + "e"]
+            if stem.hasSuffix("i") { stems.append(stem.dropLast() + "y") }
+            if let last = stem.last, stem.dropLast().last == last { stems.append(String(stem.dropLast())) }
+            return stems.contains(where: listed)
         }
     }
 
