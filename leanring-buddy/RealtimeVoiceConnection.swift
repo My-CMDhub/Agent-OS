@@ -1177,9 +1177,10 @@ final class RealtimeVoiceConnection {
         let agentOpenedBundles = turn.agentOpenedBundles
         let agentStartBundle = turn.agentStartBundle
         let mayRefuseCall = RealtimeHeardCheck.mayRefuse(toolName: call.name)
-        let (decision, namedAppIsRunning, actsInUnnamedApp) = await Task.detached { () -> (RealtimeHeardCheck.Decision, Bool, Bool) in
+        let (decision, namedAppIsRunning, actsInUnnamedApp, callIsPageApp) = await Task.detached { () -> (RealtimeHeardCheck.Decision, Bool, Bool, Bool) in
             var callBundle: String?
             if case .resolved(let bundleIdentifier, _) = RealtimeVoiceVerbs.appIdentity(named: appName) { callBundle = bundleIdentifier }
+            let pageApp = callBundle != nil && (callBundle == agentStartBundle || callBundle == frontmost.flatMap { Bundle(url: $0)?.bundleIdentifier })
             let offered = recentOffers.filter { $0.app != nil && $0.app == callBundle }.flatMap(\.labels)
             // A browser named: "LinkedIn within this browser" is a page inside it.
             let namedIsBrowser = callBundle.flatMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }.map { appURL in
@@ -1201,18 +1202,22 @@ final class RealtimeVoiceConnection {
                                                  unclearWords: decision.heardSlot, among: RealtimeVoiceVerbs.installedAppNames()) {
                 var proceeding = RealtimeHeardCheck.Decision(outcome: .noAppHeard, heardApps: [], tier: nil)
                 proceeding.heardSlot = decision.heardSlot
-                return (proceeding, true, false)
+                return (proceeding, true, false, pageApp)
             }
             let unnamed = isAgentStep && agentStepActsInUnnamedApp(outcome: decision.outcome, mayRefuse: mayRefuseCall, callBundle: callBundle,
                                                                     startBundle: agentStartBundle, openedByTask: agentOpenedBundles)
             // Only asked when it decides: open_app with no transcript.
-            guard decision.outcome == .transcriptMissing, call.name == RealtimeOpenAppTool.name else { return (decision, true, unnamed) }
-            return (decision, RealtimeVoiceVerbs.isRunning(named: named), unnamed)
+            guard decision.outcome == .transcriptMissing, call.name == RealtimeOpenAppTool.name else { return (decision, true, unnamed, pageApp) }
+            return (decision, RealtimeVoiceVerbs.isRunning(named: named), unnamed, pageApp)
         }.value
         let arrivalMs = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime).map { Int((($0 - released) * 1000).rounded()) }
         // A read is never refused here (`mayRefuse`); its decision still drives auto-focus.
         var refusal = RealtimeHeardCheck.mayRefuse(toolName: call.name)
             ? RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named, namedAppIsRunning: namedAppIsRunning) : nil
+        if refusal == nil, RealtimeHeardCheck.refusesOpeningAnApp(toolName: call.name, outcome: decision.outcome, transcript: transcript,
+                                                                   callIsPageApp: callIsPageApp) {
+            refusal = RealtimeHeardCheck.pageNotAppRefusal(named: named)
+        }
         if refusal == nil, actsInUnnamedApp {
             refusal = ["ok": false, "status": NSNull(), "error": "appNotNamed", "named": named,
                        "message": "the owner's words do not name \(UntrustedText(named).forDisplay), the task did not start in it and did not "

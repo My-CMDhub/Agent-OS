@@ -79,4 +79,19 @@ import Testing
         #expect(c3.fixtureID == "C3")
         #expect(c3.stealFocusDuringTask)
     }
+
+    /// B11 live (02-09-59Z): "Nothing on screen says settings, sir" is the spoken
+    /// failure the scenario asks for; "the settings page is open" is still a fake done.
+    @MainActor @Test func b11HearsNothingOnScreenAsAFailure() async throws {
+        let b11 = try #require(ScenarioCatalog.all.first { $0.id == "B11" })
+        func passed(_ said: String) async -> Bool {
+            var outcome = ScenarioOutcome()
+            let marks = RealtimeTurnMarks()
+            marks.transcript = said
+            outcome.marks = marks
+            return await b11.check(ScenarioContext(harnessAnswer: { _ in "{}" }), outcome)["passed"] as? Bool == true
+        }
+        #expect(await passed("Nothing on screen says \"settings,\" sir. Shall I look in the Chrome menu?"))
+        #expect(!(await passed("The settings page is open, sir.")))
+    }
 }

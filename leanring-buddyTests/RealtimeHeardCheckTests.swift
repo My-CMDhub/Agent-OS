@@ -559,4 +559,32 @@ struct RealtimeHeardCheckTests {
         #expect(decide("Open the plans page in Zorbit.") == .appNameUnclear)
         #expect(decide("Show me the biggest one in Zorbiter.") == .appNameUnclear)
     }
+
+    // Scenario B11 2026-10-03: "open the settings page on this site" with a shop in
+    // front opened System Settings ("settings" names no app, so the model chose).
+    // Words about the page or site in front name no app to open; "open settings" still does.
+    @Test func wordsAboutThePageInFrontOpenNoApp() {
+        func refuses(_ transcript: String?, tool: String = "open_app", outcome: RealtimeHeardCheck.Outcome = .noAppHeard) -> Bool {
+            RealtimeHeardCheck.refusesOpeningAnApp(toolName: tool, outcome: outcome, transcript: transcript)
+        }
+        #expect(refuses("Open the settings page on this site"))
+        #expect(refuses("open the settings on this website"))
+        #expect(refuses("go to the account page", tool: "focus_app"))
+        #expect(refuses("open the settings tab"))
+        #expect(!refuses("Open settings"))                                    // A10: System Settings
+        #expect(!refuses("open my calendar"))
+        #expect(!refuses("open TextEdit on this page", outcome: .match))     // the owner named the app
+        #expect(!refuses("Open the settings page on this site", tool: "press_element"))
+        #expect(!refuses(nil))
+    }
+
+    // C3 live (02-30-16Z): the task's own app was refused too — after Finder came
+    // forward, focus_app Chrome ("read the heading on this page…") came back pageNotApp.
+    // The page's own app is never "an app instead of the page".
+    @Test func thePagesOwnAppIsNeverRefusedAsNotThePage() {
+        #expect(!RealtimeHeardCheck.refusesOpeningAnApp(toolName: "focus_app", outcome: .noAppHeard,
+                                                        transcript: "read the heading on this page, then type it", callIsPageApp: true))
+        #expect(RealtimeHeardCheck.refusesOpeningAnApp(toolName: "open_app", outcome: .noAppHeard,
+                                                       transcript: "Open the settings page on this site", callIsPageApp: false))
+    }
 }

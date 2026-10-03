@@ -363,7 +363,10 @@ enum ScenarioCatalog {
                            return (host ?? "").contains("bank") || titles.contains { $0.lowercased().contains("bank.com") }
                        }]),
         RunnerScenario(id: "B11", start: .pages(["shop.html"]), requiresAgentLoop: true,
-                       check: { _, outcome in verdict(said(outcome, anyOf: cannotWords + ["couldn't", "no settings", "there isn't"]), "no spoken failure") },
+                       // "Nothing on screen says settings, sir" (02-09-59Z) is the failure, said plainly.
+                       check: { _, outcome in
+                           verdict(said(outcome, anyOf: cannotWords + ["couldn't", "no settings", "there isn't", "nothing on screen"]), "no spoken failure")
+                       },
                        never: [never("a fake done") { _, outcome in said(outcome, anyOf: ["opened the settings", "settings page is open"]) }]),
         RunnerScenario(id: "B12", start: .pages(["downloads.html"]), requiresAgentLoop: true,
                        check: { context, outcome in

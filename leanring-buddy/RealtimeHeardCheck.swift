@@ -239,6 +239,38 @@ nonisolated enum RealtimeHeardCheck {
         return .none
     }
 
+    // MARK: Words about the page in front (pure)
+
+    /// Scenario B11 2026-10-03: "open the settings page on this site", a shop in
+    /// front, opened System Settings — "settings" names no app (`genericNameWords`),
+    /// so the model's choice stood, as it must for "open settings" (A10). What
+    /// separates them is the owner's own words: "on this site", or the app word
+    /// naming a part of a page ("the settings page"). Then no app is opened or
+    /// brought forward unless the words name one; the voice looks on the page.
+    static let placeInFrontPhrases: [[String]] = [["this", "site"], ["this", "page"], ["this", "website"], ["this", "shop"],
+                                                  ["this", "store"], ["this", "tab"], ["the", "site"], ["the", "website"]]
+    static let pagePartWords: Set<String> = ["page", "tab", "section"]
+
+    /// `callIsPageApp`: the call opens or focuses the page's own app (the one in
+    /// front, or the task's start app) — never "an app instead of the page"
+    /// (C3 live 02-30-16Z: focusing Chrome back after Finder came forward).
+    static func refusesOpeningAnApp(toolName: String, outcome: Outcome, transcript: String?, callIsPageApp: Bool = false) -> Bool {
+        guard [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName].contains(toolName), outcome == .noAppHeard,
+              !callIsPageApp, let transcript else { return false }
+        let spoken = RealtimeVoiceVerbs.foldedTokens(transcript)
+        let onThePage = spoken.indices.contains { start in placeInFrontPhrases.contains { spoken[start...].starts(with: $0) } }
+        let partOfAPage = zip(spoken, spoken.dropFirst()).contains { first, second in
+            pagePartWords.contains(second) && !["this", "the", "a", "that", "my", "new"].contains(first)
+        }
+        return onThePage || partOfAPage
+    }
+
+    static func pageNotAppRefusal(named: String) -> [String: Any] {
+        ["ok": false, "status": NSNull(), "error": "pageNotApp", "named": named,
+         "message": "the owner's words are about the page or site in front, not an app, so \(UntrustedText(named).forDisplay) was not "
+            + "opened. Look for it on the page with find_on_screen; if it is not there, tell the owner plainly."]
+    }
+
     // MARK: The app slot, read when nothing else settles it (pure)
 
     /// The words read as "where the app name goes": the word after one of these,
