@@ -232,6 +232,13 @@ nonisolated enum RealtimeScreenVerbs {
         )
     }
 
+    /// The names of the text fields the owner can see (the pool: never a password
+    /// box, never a typed value): what an unaimed type_text is told to aim at.
+    static func visibleTextFieldNames(fromSnapshotResponse response: [String: Any], screens: [CGRect], screenshotDisplay: CGRect? = nil) -> [String] {
+        visiblePool(fromSnapshotResponse: response, screens: screens, screenshotDisplay: screenshotDisplay).pool
+            .filter { textInputRoles.contains($0.role) }.map(\.name)
+    }
+
     /// The words a query ranks by, and a name's own (its "(⇧⌘L)" shortcut dropped).
     static func rankingTokens(_ words: String) -> [String] {
         RealtimeVoiceVerbs.foldedTokens(words).filter { !RealtimeVoiceVerbs.ignoredQueryWords.contains($0) }

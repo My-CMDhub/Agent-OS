@@ -1006,6 +1006,21 @@ final class RealtimeVoiceConnection {
                                                           screenshotDisplay: turn.screenshotDisplayFrame,
                                                           answer: harnessAnswer, confirmationWaitSeconds: confirmationWaitSeconds,
                                                           onConfirmationRequired: onConfirmationRequired)
+            // Unaimed typing met no focused field: name the fields that are there (A9 live 02-30-16Z).
+            if call.name == RealtimeVoiceVerbs.typeTextName, call.elementName == nil, call.x == nil, !call.underPointer,
+               dispatch.result["error"] as? String == "kernelRefused", (dispatch.result["message"] as? String)?.contains("does not accept text") == true,
+               case .success(let line) = RealtimeOpenAppTool.harnessRequestLine(
+                for: RealtimeToolCall(callID: "fields", name: RealtimeVoiceVerbs.findOnScreenName, appName: call.appName, words: "field")) {
+                let display = turn.screenshotDisplayFrame
+                let screens = NSScreen.screens.map(\.frame)
+                let fields = await Task.detached { () -> [String] in
+                    RealtimeScreenVerbs.visibleTextFieldNames(fromSnapshotResponse: RealtimeOpenAppTool.harnessResponseObject(harnessAnswer(line)),
+                                                              screens: screens, screenshotDisplay: display)
+                }.value
+                if let hint = RealtimeOpenAppTool.unaimedTypingHint(fieldNames: fields), let message = dispatch.result["message"] as? String {
+                    dispatch.result["message"] = message + hint
+                }
+            }
             // Both witnesses name one running app and only the app in front is
             // wrong: bring it forward through the harness (policy applies), then
             // run this call ONCE more. Never a loop, never a launch.

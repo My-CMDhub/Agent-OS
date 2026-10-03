@@ -412,6 +412,8 @@ enum ScenarioRunner {
             "tools": outcome.decisions.map { decision -> [String: Any] in
                 ["name": decision.call.name, "ok": decision.dispatch?.harnessConfirmed ?? NSNull(),
                  "error": (decision.dispatch?.result["error"] as? String) ?? NSNull(),
+                 // What the model was told: the only record of a refusal's reason.
+                 "message": (decision.dispatch?.result["message"] as? String).map { String($0.prefix(240)) } ?? NSNull(),
                  "heardCheck": (decision.dispatch?.heardCheck?["outcome"] as? String) ?? NSNull(),
                  "waitedForConfirmation": decision.dispatch?.waitedForConfirmation ?? false]
             },

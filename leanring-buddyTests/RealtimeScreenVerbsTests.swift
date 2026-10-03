@@ -376,6 +376,27 @@ struct RealtimeScreenVerbsTests {
         #expect((name?["description"] as? String)?.contains("never a CSS selector") == true)
     }
 
+    /// A9 live (02-30-16Z): told to find the field, the voice searched "What do you want
+    /// to talk about?", "Create a post" and "Post" — the composer is named "Text editor for
+    /// creating content" and its placeholder is CSS — and gave up. An unaimed typing
+    /// refusal now names the text fields visible in the window (never a password box).
+    @Test func anUnaimedTypingRefusalNamesTheVisibleTextFields() {
+        let snapshot: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(screen), "elements": [
+            element("AXWindow", "Mimic Network", screen),
+            element("AXStaticText", "Create a post", CGRect(x: 20, y: 700, width: 200, height: 30), actions: [], source: "value"),
+            element("AXTextArea", "Text editor for creating content", CGRect(x: 20, y: 560, width: 600, height: 120), actions: []),
+            element("AXTextField", "Password", CGRect(x: 20, y: 500, width: 200, height: 24), subrole: "AXSecureTextField"),
+            element("AXButton", "Post", CGRect(x: 20, y: 520, width: 60, height: 30)),
+            element("AXTextField", "Hidden", CGRect(x: 20, y: -200, width: 200, height: 24))
+        ]]
+        let names = RealtimeScreenVerbs.visibleTextFieldNames(fromSnapshotResponse: snapshot, screens: [screen])
+        #expect(names == ["Text editor for creating content"])
+        let hint = RealtimeOpenAppTool.unaimedTypingHint(fieldNames: names) ?? ""
+        #expect(hint.contains("\"Text editor for creating content\""))
+        #expect(hint.contains("type_text"))
+        #expect(RealtimeOpenAppTool.unaimedTypingHint(fieldNames: []) == nil)
+    }
+
     @Test func underPointerIsTheElementUnderTheMouseAtKeyDown() async throws {
         let general = RealtimeScreenTarget(candidate: candidate("General", CGRect(x: 40, y: 640, width: 60, height: 16), role: "AXStaticText"),
                                            point: CGPoint(x: 70, y: 648), app: cursorBundle, source: .underPointer)

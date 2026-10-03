@@ -506,7 +506,9 @@ nonisolated enum RealtimeOpenAppTool {
         guard !response.isEmpty else {
             return ["ok": false, "status": NSNull(), "error": "unreadableHarnessResponse", "message": NSNull()]
         }
-        let message = (response["message"] as? String).map { String($0.prefix(300)) }
+        // A kernel refusal's reason lives under `kernel.reason` (scenarios A9/C2
+        // 2026-10-03: the model heard `message: null` and said "the system blocked me").
+        let message = ((response["message"] as? String) ?? kernelReasonMessage(response)).map { String($0.prefix(300)) }
         return [
             "ok": response["ok"] as? Bool ?? false,
             "status": (response["status"] as? String) ?? NSNull(),
@@ -515,6 +517,24 @@ nonisolated enum RealtimeOpenAppTool {
             // focus and menu say how they verified; launch says it in `status`.
             "verification": ((response["verification"] as? [String: Any])?["status"] as? String) ?? NSNull()
         ]
+    }
+
+    /// The kernel's own reason, and for typing into what takes no text — most
+    /// often a page with no field focused — the way that works instead.
+    static func kernelReasonMessage(_ response: [String: Any]) -> String? {
+        guard let reason = (response["kernel"] as? [String: Any])?["reason"] as? String else { return nil }
+        guard reason.hasPrefix("role "), reason.contains("does not accept text") else { return "refused: \(reason)" }
+        return "refused: \(reason). Nothing was typed. No text field has keyboard focus. Do not ask the owner: call find_on_screen "
+            + "now with a word of the field's label (\"search\", \"post\"), then type_text again with the name it returns."
+    }
+
+    /// A9 live 02-30-16Z: a field's visible words may not be its name (LinkedIn's
+    /// composer is "Text editor for creating content", its placeholder CSS), so an
+    /// unaimed typing refusal names the fields that are there.
+    static func unaimedTypingHint(fieldNames: [String]) -> String? {
+        guard !fieldNames.isEmpty else { return nil }
+        return " Text fields visible now: " + fieldNames.prefix(5).map { UntrustedText($0).forDisplay }.joined(separator: ", ")
+            + ". Call type_text again with the name of the one the owner means."
     }
 
     static func toolResult(for refusal: RealtimeToolRefusal) -> [String: Any] {

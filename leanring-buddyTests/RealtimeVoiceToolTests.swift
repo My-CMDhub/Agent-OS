@@ -332,4 +332,24 @@ struct RealtimeVoiceToolTests {
             "claimedWithoutReceipt", "internalWordsSpoken", "receiptCorrectionSent", "pointedWhenTelling"
         ])
     }
+
+    /// Scenarios A9/C2 2026-10-03: type_text came back kernelRefused with message null —
+    /// the harness puts the kernel's reason under `kernel.reason`, and only `message` was
+    /// copied — so the voice said "the system blocked me" and could not change course.
+    @Test func aKernelRefusalCarriesItsReasonToTheModel() {
+        let refused = RealtimeOpenAppTool.toolResult(fromHarnessResponse: [
+            "ok": false, "error": "kernelRefused",
+            "kernel": ["decision": "refuse", "reason": ActionSafetyKernel.nonTextRoleRefusalReason(role: "AXWebArea")]])
+        let message = refused["message"] as? String ?? ""
+        #expect(message.contains("AXWebArea"))
+        #expect(message.contains("find_on_screen"), "a field with no focus is aimed at by name")
+        // Live 02-24-49Z: told only how, the voice asked "shall I find one?" instead of doing it.
+        #expect(message.contains("Do not ask the owner"))
+        let typeText = RealtimeVoiceVerbs.openAIDeclarations.first { $0["name"] as? String == "type_text" }?["description"] as? String
+        #expect(typeText?.contains("on a web page usually none has") == true)
+        // A message the harness wrote still wins.
+        let written = RealtimeOpenAppTool.toolResult(fromHarnessResponse: ["ok": false, "error": "kernelRefused", "message": "m",
+                                                                           "kernel": ["reason": "r"]])
+        #expect(written["message"] as? String == "m")
+    }
 }
