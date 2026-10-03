@@ -124,7 +124,8 @@ nonisolated enum RealtimeScreenVerbs {
     }
 
     /// Every NAMED element the owner can see in the frontmost window, in tree
-    /// order, one per name, and how many were hidden (counted, never listed).
+    /// order, one per name (two clickable controls of one name are both kept),
+    /// and how many were hidden (counted, never listed).
     /// Visible means what `highlight` checks — inside the WINDOW, on the display
     /// that window is mostly on (review 2026-09-30). Hidden: secure fields, a
     /// text input's typed value, a document-length name, the window itself. A
@@ -162,7 +163,6 @@ nonisolated enum RealtimeScreenVerbs {
                elements[parentIndex]["name"] as? String == name || parentFrame == frame {
                 continue
             }
-            guard !pool.contains(where: { $0.name == name }) else { continue }
             let pressable = publishesPress(element)
             let windowArea = window.width * window.height
             var ancestor: RealtimeScreenPressTarget?
@@ -192,8 +192,13 @@ nonisolated enum RealtimeScreenVerbs {
                                           || (candidateRole == "AXGroup" && (candidate["name"] as? String) == nil))
                 next = candidate["parent"] as? Int
             }
-            pool.append(PoolElement(name: name, role: role, subrole: subrole, frame: frame, pressable: pressable, parent: parentIndex,
-                                    pressAncestor: ancestor))
+            let kept = PoolElement(name: name, role: role, subrole: subrole, frame: frame, pressable: pressable, parent: parentIndex,
+                                   pressAncestor: ancestor)
+            // One per name, except two clickable controls apart from each other (scenario
+            // B12 2026-10-03: two "Download" buttons offered as one, and the press guessed).
+            let sameName = pool.filter { $0.name == name }
+            guard sameName.isEmpty || (kept.isClickable && sameName.allSatisfy { $0.isClickable && !$0.frame.intersects(frame) }) else { continue }
+            pool.append(kept)
         }
         return (pool, hidden)
     }

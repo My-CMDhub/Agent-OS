@@ -376,6 +376,46 @@ struct RealtimeScreenVerbsTests {
         #expect((name?["description"] as? String)?.contains("never a CSS selector") == true)
     }
 
+    /// Scenario B12 2026-10-03: two buttons both named "Download"; find_on_screen
+    /// offered both and press_element "Download" pressed the first. Two equally named
+    /// offered elements are a question, never a guess — unless a position lies in one.
+    @Test func twoOfferedElementsOfOneNameAreAskedAboutNeverPressed() async throws {
+        let report = candidate("Download", CGRect(x: 20, y: 200, width: 90, height: 30))
+        let invoice = candidate("Download", CGRect(x: 20, y: 400, width: 90, height: 30))
+        let byName = RealtimeToolCall(callID: "d", name: "press_element", appName: "Cursor", elementName: "Download")
+        guard case .failure(let refusal) = await resolve(byName, thisTurn: [report, invoice]) else { Issue.record("guessed a Download"); return }
+        #expect(refusal.error == "elementAmbiguous")
+        #expect(refusal.message.contains("ask the owner which one"))
+        // A position inside exactly one of them settles it; a position in neither does not.
+        let inInvoice = RealtimeToolCall(callID: "e", name: "press_element", appName: "Cursor", elementName: "Download",
+                                         x: 60.0 / 1440, y: 485.0 / 900)   // AppKit y 415
+        #expect(try await resolve(inInvoice, thisTurn: [report, invoice], display: screen).get().candidate == invoice)
+        let between = RealtimeToolCall(callID: "f", name: "press_element", appName: "Cursor", elementName: "Download",
+                                       x: 60.0 / 1440, y: 600.0 / 900)   // AppKit y 300
+        if case .failure(let refusal) = await resolve(between, thisTurn: [report, invoice], display: screen) {
+            #expect(refusal.error == "elementAmbiguous")
+        } else { Issue.record("picked the nearest Download") }
+        // One element of the name is still pressed by name.
+        #expect(try await resolve(byName, thisTurn: [report]).get().candidate == report)
+    }
+
+    /// B12 live (02-09-59Z): the guard above never fired — find_on_screen offered ONE
+    /// "Download", because the pool kept one element per name, so the live lookup could
+    /// never list two either. Two clickable controls of one name are both kept;
+    /// repeated text still collapses to its first.
+    @Test func twoControlsOfOneNameAreBothInThePool() {
+        let snapshot: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(screen), "elements": [
+            element("AXWindow", "Mimic Files", screen),
+            element("AXButton", "Download", CGRect(x: 20, y: 600, width: 90, height: 30)),
+            element("AXButton", "Download", CGRect(x: 20, y: 400, width: 90, height: 30)),
+            element("AXStaticText", "Your files", CGRect(x: 20, y: 800, width: 90, height: 30), actions: [], source: "value"),
+            element("AXStaticText", "Your files", CGRect(x: 600, y: 860, width: 90, height: 20), actions: [], source: "value")
+        ]]
+        #expect(RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: snapshot, words: "download", screens: [screen]).candidates.count == 2)
+        #expect(RealtimeScreenVerbs.liveCandidates(named: "Download", fromSnapshotResponse: snapshot, screens: [screen]).count == 2)
+        #expect(RealtimeScreenVerbs.liveCandidates(named: "Your files", fromSnapshotResponse: snapshot, screens: [screen]).count == 1)
+    }
+
     /// C3 (01-17-35Z) and A5 (02-09-59Z): "type … in the search box" on a page whose
     /// field is named "Search" offered it beside Chrome's "Address and search bar" and
     /// "Tab search", and the voice asked which. On a web page, when the best match is

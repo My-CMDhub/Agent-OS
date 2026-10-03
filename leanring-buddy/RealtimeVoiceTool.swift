@@ -850,9 +850,15 @@ nonisolated enum RealtimeOpenAppTool {
             }
             if let name = call.elementName, let offer = chosen.offer, let source = chosen.source {
                 let named = offer.elements.filter { $0.name == name }
-                if let nearest = named.min(by: { hypot($0.frame.midX - point.x, $0.frame.midY - point.y) < hypot($1.frame.midX - point.x, $1.frame.midY - point.y) }) {
-                    return .success(RealtimeScreenTarget(candidate: nearest, point: CGPoint(x: nearest.frame.midX, y: nearest.frame.midY),
+                // Several of that name: the point decides only by lying inside exactly one, never "nearest" (B12).
+                let aimed = named.count == 1 ? named : named.filter { $0.frame.contains(point) }
+                if aimed.count == 1 {
+                    return .success(RealtimeScreenTarget(candidate: aimed[0], point: CGPoint(x: aimed[0].frame.midX, y: aimed[0].frame.midY),
                                                          app: offer.app, source: source))
+                }
+                if named.count > 1 {
+                    return liveTarget(named: name, found: RealtimeScreenLookup(candidates: named, app: offer.app),
+                                      nothing: call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : isPress ? "pressed" : "pointed at")
                 }
             }
             switch await hitTest(point) {
@@ -870,11 +876,17 @@ nonisolated enum RealtimeOpenAppTool {
         guard let name = call.elementName else {
             return refuse("missingTarget", "\(call.name) needs a name from find_on_screen, x and y in the screenshot, or underPointer")
         }
-        if let offer = chosen.offer, let source = chosen.source, let candidate = offer.elements.first(where: { $0.name == name }) {
-            return .success(RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY),
-                                                 app: offer.app, source: source))
-        }
         let nothing = call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : isPress ? "pressed" : "pointed at"
+        // Scenario B12 2026-10-03: two offered buttons both named "Download" and the
+        // first was pressed. Two of one name are a question for the owner, as on the live screen.
+        if let offer = chosen.offer, let source = chosen.source {
+            let named = offer.elements.filter { $0.name == name }
+            if named.count == 1 {
+                return .success(RealtimeScreenTarget(candidate: named[0], point: CGPoint(x: named[0].frame.midX, y: named[0].frame.midY),
+                                                     app: offer.app, source: source))
+            }
+            if named.count > 1 { return liveTarget(named: name, found: RealtimeScreenLookup(candidates: named, app: offer.app), nothing: nothing) }
+        }
         guard let lookUp else {
             return refuse("notOffered", "Nothing was \(nothing). That name was not among what find_on_screen returned; "
                 + "aim by the element's position in the screenshot instead, or call find_on_screen.")
