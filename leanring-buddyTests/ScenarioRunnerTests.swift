@@ -13,6 +13,20 @@ import Testing
         #expect(ScenarioRunnerAX.titleState(nil).isEmpty)
     }
 
+    /// 09-39-46Z ran on a locked screen (loginwindow in front): no window titled with
+    /// the nonce was found in time, so nothing was recorded and the three Chrome windows
+    /// the run opened were left. A window is the run's by the nonce in its title — never
+    /// by a count — and a locked screen refuses the run before anything opens.
+    @Test func theRunsWindowsAreKnownByTheirNonceAndALockedScreenRefusesTheRun() {
+        #expect(ScenarioRunnerAX.isRunnerWindow(title: "Mimic Search · n=AB12CD34 clicks=0", nonce: "AB12CD34"))
+        #expect(!ScenarioRunnerAX.isRunnerWindow(title: "Mimic Search · n=FFFF0000 clicks=0", nonce: "AB12CD34"))
+        #expect(!ScenarioRunnerAX.isRunnerWindow(title: "Inbox - Gmail", nonce: "AB12CD34"))
+        #expect(!ScenarioRunnerAX.isRunnerWindow(title: nil, nonce: "AB12CD34"))
+        #expect(ScenarioRunner.lockedScreenRefusal(frontmost: "com.apple.loginwindow") != nil)
+        #expect(ScenarioRunner.lockedScreenRefusal(frontmost: "com.apple.ScreenSaver.Engine") != nil)
+        #expect(ScenarioRunner.lockedScreenRefusal(frontmost: "com.google.Chrome") == nil)
+    }
+
     @Test func aHostMatchesItsSiteAndSubdomainsOnly() {
         #expect(ScenarioRunnerAX.host("www.linkedin.com", isOrIsUnder: "linkedin.com"))
         #expect(ScenarioRunnerAX.host("LinkedIn.com", isOrIsUnder: "linkedin.com"))

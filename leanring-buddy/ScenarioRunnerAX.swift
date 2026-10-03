@@ -152,12 +152,23 @@ nonisolated enum ScenarioRunnerAX {
         var found: ScenarioWindow?
         HarnessHands.waitUntil(seconds: windowDeadlineSeconds) {
             found = chromeWindows().first {
-                !before.contains(AccessibilityElementKey(element: $0.window)) && ($0.title?.contains("n=\(nonce)") ?? false)
+                !before.contains(AccessibilityElementKey(element: $0.window)) && isRunnerWindow(title: $0.title, nonce: nonce)
             }.map { ScenarioWindow(element: $0.window, processIdentifier: $0.processIdentifier, nonce: nonce) }
             return found != nil
         }
         if let found { _ = placeClearOfFloatingWindows(found.element) }
         return found
+    }
+
+    /// The run's window, by the nonce its page puts in the title — the identity
+    /// the runner opened it with, never a count of windows.
+    static func isRunnerWindow(title: String?, nonce: String) -> Bool { title?.contains("n=\(nonce)") ?? false }
+
+    /// Every Chrome window carrying the nonce: what a start that never found its
+    /// window still opened (09-39-46Z left three on a locked screen).
+    static func runnerWindows(nonce: String) -> [ScenarioWindow] {
+        chromeWindows().filter { isRunnerWindow(title: $0.title, nonce: nonce) }
+            .map { ScenarioWindow(element: $0.window, processIdentifier: $0.processIdentifier, nonce: nonce) }
     }
 
     /// Chrome is frontmost and its focused window IS ours.

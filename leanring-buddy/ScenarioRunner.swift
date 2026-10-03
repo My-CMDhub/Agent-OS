@@ -79,6 +79,9 @@ struct ScenarioWindow {
 final class ScenarioContext {
     let harnessAnswer: @Sendable (String) -> String
     var window: ScenarioWindow?
+    /// The nonce the start opened its window with: cleanup closes every window
+    /// carrying it, found or not when the start gave up.
+    var nonce: String?
     /// Read before the turn; reported (so never put a secret here — see `secret`).
     var baseline: [String: Any] = [:]
     /// Read before the turn and NEVER reported: C1's fake key.
@@ -206,6 +209,11 @@ enum ScenarioRunner {
                     results.append(result)
                     continue
                 }
+                if let locked = lockedScreenRefusal(frontmost: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
+                    meta["outcome"] = "aborted"
+                    meta["reason"] = locked + "; stopped before \(scenario.id)"
+                    break scenarioLoop
+                }
                 // The owner came back: HID input newer than any the run itself posted.
                 let idle = secondsSinceLastInput()
                 let ours = min(HarnessHands.ownInput.secondsSinceLastPost ?? .infinity, ScenarioRunnerAX.nudges.secondsSinceLastPost ?? .infinity,
@@ -279,12 +287,18 @@ enum ScenarioRunner {
 
     static var agentLoopAvailable: Bool { RealtimeVoiceVerbs.allToolNames.contains("do_task") }
 
+    /// A locked screen: nothing the run opens can be read, so nothing could be closed.
+    nonisolated static func lockedScreenRefusal(frontmost: String?) -> String? {
+        LockScreenGuard.isLockScreen(frontmost) ? "the screen is locked (\(frontmost ?? "?") in front)" : nil
+    }
+
     static func refusalToStart() -> String? {
         if CommandLine.arguments.contains("--harness-dry-run") {
             return "the runner judges real actions on its own pages; run it without --harness-dry-run"
         }
         guard WorkerConfiguration.isConfigured else { return "worker not configured" }
         guard AXIsProcessTrusted() else { return "Accessibility is not granted" }
+        if let locked = lockedScreenRefusal(frontmost: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) { return locked }
         if SecureInputState.current().isOn { return "secure input is on — the owner is typing a password" }
         let idle = secondsSinceLastInput()
         if idle < requiredIdleSeconds { return "owner active (\(Int(idle)) s idle, needs \(Int(requiredIdleSeconds)))" }
@@ -396,6 +410,16 @@ enum ScenarioRunner {
         if let window = context.window {
             cleanup["window"] = await Task.detached { ScenarioRunnerAX.close(window) }.value
         }
+        // Windows that carry the run's nonce and were never recorded (the start gave up
+        // waiting for them): closed by that identity, each by its own close button.
+        if let nonce = context.nonce {
+            let recorded = context.window?.element
+            let strays = await Task.detached {
+                ScenarioRunnerAX.runnerWindows(nonce: nonce).filter { stray in recorded.map { !CFEqual($0, stray.element) } ?? true }
+                    .map { ScenarioRunnerAX.close($0) }
+            }.value
+            if !strays.isEmpty { cleanup["strayRunnerWindows"] = strays }
+        }
         var quit: [String] = []
         for bundleIdentifier in scenario.quitIfLaunched where !runningBefore.contains(bundleIdentifier) {
             for application in NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier) {
@@ -500,6 +524,7 @@ enum ScenarioRunner {
     }
 
     private static func openWindow(urls: [URL], nonce: String, context: ScenarioContext) async -> (ok: Bool, evidence: [String: Any]) {
+        context.nonce = nonce
         let window = await Task.detached { ScenarioRunnerAX.openChromeWindow(urls: urls, nonce: nonce) }.value
         guard let window else { return (false, ["error": "windowNotFound", "note": "no new Chrome window titled with the nonce appeared"]) }
         context.window = window
