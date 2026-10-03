@@ -96,7 +96,8 @@ nonisolated enum RealtimeVoiceVerbs {
         // Live 2026-10-02 (rows 2, 19): the model sent underPointer for "let's point it" and "in Google Chrome".
         let underPointer = Parameter(name: "underPointer", kind: .flag, required: false,
                                      description: "Only when the owner says \"this one\", \"here\" or \"where my cursor is\": true for the "
-                                        + "element under their mouse pointer. Otherwise leave it out and aim by name; it is refused unless they said so.")
+                                        + "element under their mouse pointer. Otherwise leave it out and aim by name; it is refused unless they said so. "
+                                        + "A request that names the thing (\"click sign in\", \"where is the phone number\") is never underPointer.")
         switch (format, gemini) {
         case (.fractions, _):
             return [name,

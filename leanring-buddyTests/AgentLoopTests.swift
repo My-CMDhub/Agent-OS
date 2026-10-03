@@ -390,6 +390,21 @@ struct AgentLoopTests {
         }
     }
 
+    /// Queue items 11 and 12 (runner A4, A6): underPointer only for "this one",
+    /// never for a request that names the thing; "where is X" points at X — the
+    /// value beside a label — without asking.
+    @Test func underPointerAndWhereIsRulesAreInThePromptAndTheSchema() {
+        let prompt = RealtimeOpenAppTool.systemPrompt
+        #expect(prompt.contains("a request that names the thing (\"click sign in\", \"where is the phone number\") is aimed by that name, never underPointer"))
+        #expect(prompt.contains("for \"where is X\", call find_on_screen with X's words, then point_at the element that is X at once"))
+        #expect(prompt.contains("point at the value, not the label"))
+        for tool in ["point_at", "press_element", "scroll", "type_text"] {
+            let declaration = RealtimeVoiceVerbs.openAIDeclarations.first { $0["name"] as? String == tool }
+            let underPointer = ((declaration?["parameters"] as? [String: Any])?["properties"] as? [String: Any])?["underPointer"] as? [String: Any]
+            #expect((underPointer?["description"] as? String)?.contains("is never underPointer") == true, "\(tool)")
+        }
+    }
+
     /// The B5 live run: the loop acts only where the owner put it.
     @Test func anAgentStepActsOnlyInAnAppTheOwnerNamedStartedInOrTheTaskOpened() {
         func unnamed(_ outcome: RealtimeHeardCheck.Outcome, tool: String = "type_text", bundle: String?, start: String? = "com.google.Chrome",
