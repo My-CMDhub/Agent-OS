@@ -260,7 +260,10 @@ nonisolated enum RealtimeHeardCheck {
     static let modernWords: Set<String> = [
         "email", "desktop", "download", "online", "inbox", "screenshot", "popup", "dropdown", "toolbar", "sidebar",
         "fullscreen", "emoji", "website", "homepage", "wifi", "bluetooth", "login", "logout", "username", "app", "apps",
-        "tab", "tabs", "url", "browser", "devtools", "incognito", "workspace", "terminal", "settings", "okay"
+        "tab", "tabs", "url", "browser", "devtools", "incognito", "workspace", "terminal", "settings", "okay",
+        // Absent from Webster's Second, every one (checked 2026-10-03): "in the search
+        // box" was refused heardUnavailable in every scenario run (A5, C2, C5).
+        "box", "textbox", "searchbox", "checkbox", "dialog", "textarea", "omnibox"
     ]
 
     /// Plural and verb endings stripped once: Webster's lists "window", not "windows".
@@ -370,7 +373,9 @@ nonisolated enum RealtimeHeardCheck {
         // missed app name: live 2026-10-02 90A952DF, "click on the internet one,
         // this one" with the pointer on a page's "Internet" link was refused
         // heardUnavailable. The same evidence `withoutWordsInsideTheNamedApp` uses.
-        let slot = readSlot(RealtimeVoiceVerbs.foldedTokens(transcript), among: names, menuWords: menuWords + targetWords)
+        // What the call puts INTO the app is content too: "type Kubernetes" puts the
+        // typed word in the slot's last place.
+        let slot = readSlot(RealtimeVoiceVerbs.foldedTokens(transcript), among: names, menuWords: menuWords + targetWords + contentWords)
         var decision = decideHeard(transcript: transcript, named: named, among: names, afterHeardRefusal: afterHeardRefusal,
                                    toolName: toolName, targetWords: targetWords, frontmostApp: frontmostApp,
                                    contentWords: contentWords, namedIsBrowser: namedIsBrowser)

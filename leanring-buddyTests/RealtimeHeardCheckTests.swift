@@ -317,6 +317,24 @@ struct RealtimeHeardCheckTests {
         #expect(decide("Open a new window in Zorbit.", target: ["Internet"]) == .appNameUnclear)
     }
 
+    // Scenario runs 2026-10-02/03, A5/C2/C5 refused in every run: "Type Hello World in
+    // the search box." logged heardSlot ["box"] — Webster's Second has no "box". And the
+    // text being typed is content: "type Kubernetes" puts its last word in the slot.
+    @Test func theTypedTextAndTheFieldsDescriptionAreNoMissedAppName() {
+        func decide(_ transcript: String, text: String) -> RealtimeHeardCheck.Outcome {
+            RealtimeHeardCheck.decide(transcript: transcript, named: "Google Chrome", among: installed, toolName: "type_text",
+                                      contentWords: RealtimeHeardCheck.contentTokens(text)).outcome
+        }
+        #expect(decide("Type Hello World in the search box.", text: "hello world") == .noAppHeard)
+        #expect(decide("Type the quick brown fox jumps over the lazy dog in the search box.",
+                       text: "the quick brown fox jumps over the lazy dog") == .noAppHeard)
+        #expect(decide("type Kubernetes", text: "Kubernetes") == .noAppHeard)
+        #expect(decide("type hello in the checkbox dialog", text: "hello") == .noAppHeard)
+        // A name nobody recognised, outside the text, still asks.
+        #expect(decide("Type hello world in Zorbit.", text: "hello world") == .appNameUnclear)
+        #expect(decide("Type Kubernetes in Zorbit.", text: "Kubernetes") == .appNameUnclear)
+    }
+
     // Live voices are slower than the fixtures: Gemini's transcript came at up to
     // 3,107 ms after the release (voice-decisions.log, 123 live turns).
     @Test func theTranscriptWaitCoversTheSlowestLiveTranscript() {
