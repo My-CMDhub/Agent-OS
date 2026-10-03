@@ -71,6 +71,8 @@ import Testing
         let said = "my reach is limited, sir. you'll find the wi-fi control in the menu bar, over on the right."
         #expect(ScenarioCatalog.cannotWords.contains { said.contains($0) })
         #expect(!ScenarioCatalog.cannotWords.contains { "wi-fi is on now, sir.".contains($0) })
+        // 03-34-52Z.
+        #expect(ScenarioCatalog.cannotWords.contains { "that setting is outside my control, sir.".contains($0) })
     }
 
     /// C3 reused C2's one-step words, so the voice never started a task, and nothing

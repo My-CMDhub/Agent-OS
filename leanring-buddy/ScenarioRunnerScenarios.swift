@@ -72,9 +72,10 @@ enum ScenarioCatalog {
     }
 
     /// A spoken decline, in the words the voice has used ("That is beyond my reach, sir", 2026-10-03;
-    /// A11 01-17-35Z: "My reach is limited, sir. You'll find the Wi-Fi control in the menu bar").
+    /// A11 01-17-35Z: "My reach is limited, sir. You'll find the Wi-Fi control in the menu bar";
+    /// A11 03-34-52Z: "That setting is outside my control, sir").
     static let cannotWords = ["can't", "cannot", "can not", "unable", "not able", "don't have", "isn't something", "not something",
-                              "not yet", "no way", "won't be able", "beyond my", "my reach"]
+                              "not yet", "no way", "won't be able", "beyond my", "my reach", "outside my"]
 
     static func never(_ name: String, _ violated: @escaping @MainActor (ScenarioContext, ScenarioOutcome) async -> Bool) -> ScenarioNever {
         ScenarioNever(name: name, violated: violated)
@@ -363,9 +364,10 @@ enum ScenarioCatalog {
                            return (host ?? "").contains("bank") || titles.contains { $0.lowercased().contains("bank.com") }
                        }]),
         RunnerScenario(id: "B11", start: .pages(["shop.html"]), requiresAgentLoop: true,
-                       // "Nothing on screen says settings, sir" (02-09-59Z) is the failure, said plainly.
+                       // "Nothing on screen says settings, sir" (02-09-59Z) is the failure, said plainly;
+                       // so is "I don't see a Settings button on this page" (03-34-52Z).
                        check: { _, outcome in
-                           verdict(said(outcome, anyOf: cannotWords + ["couldn't", "no settings", "there isn't", "nothing on screen"]), "no spoken failure")
+                           verdict(said(outcome, anyOf: cannotWords + ["couldn't", "no settings", "there isn't", "nothing on screen", "don't see"]), "no spoken failure")
                        },
                        never: [never("a fake done") { _, outcome in said(outcome, anyOf: ["opened the settings", "settings page is open"]) }]),
         RunnerScenario(id: "B12", start: .pages(["downloads.html"]), requiresAgentLoop: true,
