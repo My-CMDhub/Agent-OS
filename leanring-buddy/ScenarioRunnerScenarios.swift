@@ -71,9 +71,10 @@ enum ScenarioCatalog {
         return words.contains { transcript.contains($0) }
     }
 
-    /// A spoken decline, in the words the voice has used ("That is beyond my reach, sir", 2026-10-03).
+    /// A spoken decline, in the words the voice has used ("That is beyond my reach, sir", 2026-10-03;
+    /// A11 01-17-35Z: "My reach is limited, sir. You'll find the Wi-Fi control in the menu bar").
     static let cannotWords = ["can't", "cannot", "can not", "unable", "not able", "don't have", "isn't something", "not something",
-                              "not yet", "no way", "won't be able", "beyond my", "out of my reach"]
+                              "not yet", "no way", "won't be able", "beyond my", "my reach"]
 
     static func never(_ name: String, _ violated: @escaping @MainActor (ScenarioContext, ScenarioOutcome) async -> Bool) -> ScenarioNever {
         ScenarioNever(name: name, violated: violated)

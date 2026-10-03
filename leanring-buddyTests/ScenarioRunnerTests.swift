@@ -63,4 +63,12 @@ import Testing
         let missing = ScenarioCatalog.all.flatMap { [$0.fixtureID, $0.prelude?.utterance].compactMap { $0 } }.filter { utterances[$0] == nil }
         #expect(missing.isEmpty)
     }
+
+    /// A11 2026-10-03: the voice declined ("My reach is limited, sir. You'll find the
+    /// Wi-Fi control in the menu bar") and the checker heard no "can't".
+    @MainActor @Test func aDeclineInTheVoicesOwnWordsCounts() {
+        let said = "my reach is limited, sir. you'll find the wi-fi control in the menu bar, over on the right."
+        #expect(ScenarioCatalog.cannotWords.contains { said.contains($0) })
+        #expect(!ScenarioCatalog.cannotWords.contains { "wi-fi is on now, sir.".contains($0) })
+    }
 }
