@@ -122,7 +122,23 @@ nonisolated enum ScenarioRunnerAX {
         var size = target.size
         if let position = AXValueCreate(.cgPoint, &origin) { AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position) }
         if let extent = AXValueCreate(.cgSize, &size) { AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, extent) }
+        // A baseline read between the move and the page's reflow saw the old layout (A6
+        // 02-51-12Z: the number at x 1245, drawn at 930): wait for the frame, then the reflow.
+        HarnessHands.waitUntil(seconds: 2) { windowFrame(window).map { abs($0.minX - target.minX) < 2 && abs($0.width - target.width) < 2 } ?? false }
+        Thread.sleep(forTimeInterval: 0.5)
         return target
+    }
+
+    static func windowFrame(_ window: AXUIElement) -> CGRect? {
+        var position: AnyObject?
+        var size: AnyObject?
+        var origin = CGPoint.zero
+        var extent = CGSize.zero
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &position) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &size) == .success,
+              let position, let size,
+              AXValueGetValue(position as! AXValue, .cgPoint, &origin), AXValueGetValue(size as! AXValue, .cgSize, &extent) else { return nil }
+        return CGRect(origin: origin, size: extent)
     }
 
     static func openChromeWindow(urls: [URL], nonce: String) -> ScenarioWindow? {
