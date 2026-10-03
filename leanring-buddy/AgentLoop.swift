@@ -109,22 +109,25 @@ actor AgentLoopModel {
         return body
     }
 
-    func send(_ body: [String: Any]) async throws -> AgentModelReply {
+    /// `timeout`: the task's time left; a fallback retry gets only what remains of it.
+    func send(_ body: [String: Any], timeout: TimeInterval) async throws -> AgentModelReply {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
         do {
-            return try await post(Self.completed(body, model: model))
+            return try await post(Self.completed(body, model: model), timeout: timeout)
         } catch let error as AgentModelError where error.isModelNotFound && model != Self.fallback {
             MeasurementLogFile.appendJSONLine(["kind": "modelFallback", "from": model, "to": Self.fallback, "status": error.status],
                                               toFileNamed: AgentLoop.traceFileName, rotatingAtBytes: HarnessServer.auditLogRotationBytes)
             print("🤖 agent loop: \(model) not found, falling back to \(Self.fallback)")
             model = Self.fallback
-            return try await post(Self.completed(body, model: model))
+            return try await post(Self.completed(body, model: model), timeout: deadline - ProcessInfo.processInfo.systemUptime)
         }
     }
 
-    private func post(_ body: [String: Any]) async throws -> AgentModelReply {
+    private func post(_ body: [String: Any], timeout: TimeInterval) async throws -> AgentModelReply {
+        guard timeout >= 1 else { throw AgentModelError(status: -1, body: "no time left in the task") }
         var request = URLRequest(url: WorkerConfiguration.routeURL("/chat"))
         request.httpMethod = "POST"
-        request.timeoutInterval = 60
+        request.timeoutInterval = min(60, timeout)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         WorkerConfiguration.attachClientKey(to: &request)
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -153,6 +156,8 @@ nonisolated struct AgentObservation {
     var look: String = "notTaken"
     /// The app in front, from structure, quoted.
     var lines: [String] = []
+    /// That app's bundle (never shown to the model).
+    var bundleIdentifier: String?
     var milliseconds = 0
 }
 
@@ -193,11 +198,13 @@ final class AgentLoop {
     }
 
     struct Dependencies {
-        var model: ([String: Any]) async throws -> AgentModelReply
+        /// The request, and the seconds the task has left (the call's timeout).
+        var model: ([String: Any], TimeInterval) async throws -> AgentModelReply
         var observe: () async -> AgentObservation
         /// A voice tool's call, through the voice turn's own path. `checksSite`
         /// is false only for search_web's fixed host.
-        var execute: (RealtimeToolCall, _ checksSite: Bool, AgentObservation) async -> RealtimeToolDispatch
+        /// The last argument: seconds the task has left, which bounds a card's wait.
+        var execute: (RealtimeToolCall, _ checksSite: Bool, AgentObservation, TimeInterval) async -> RealtimeToolDispatch
         var readPage: () async -> [String: Any]
         /// The card's footer and the notch: "step n/m", nil when the run ends.
         var onStep: (ConfirmationStep?) -> Void = { _ in }
@@ -237,7 +244,9 @@ final class AgentLoop {
 
     // MARK: Run
 
-    func run(goal: String) async -> Outcome {
+    /// `goal`: the request as the voice passed it on. `heard`: the owner's own
+    /// words, which the guards judge by (set in `live`); Claude sees both.
+    func run(goal: String, heard: String? = nil) async -> Outcome {
         isRunning = true
         let started = dependencies.uptime()
         let goalHash = Self.goalHash(goal)
@@ -269,7 +278,7 @@ final class AgentLoop {
             let observation = await dependencies.observe()
             var content = pending
             if messages.isEmpty {
-                content.append(["type": "text", "text": "The owner's goal, in their words: \(goal)"])
+                content.append(["type": "text", "text": Self.goalText(goal: goal, heard: heard)])
             }
             content += Self.observationBlocks(observation, step: step)
             messages.append(["role": "user", "content": content])
@@ -277,10 +286,15 @@ final class AgentLoop {
             messages = Self.keepingLatestImage(messages)
 
             if Task.isCancelled { return finish(.cancelled) }
+            func remaining() -> TimeInterval { Self.maximumSeconds - (dependencies.uptime() - started) }
+            if remaining() <= 0 { return finish(.timeCap) }
             let reply: AgentModelReply
             do {
-                reply = try await dependencies.model(Self.requestBody(messages: messages))
+                reply = try await dependencies.model(Self.requestBody(messages: messages), remaining())
             } catch {
+                // A press during the call cancels it: that is a stop, not a failure.
+                if Task.isCancelled { return finish(.cancelled) }
+                if remaining() <= 0 { return finish(.timeCap) }
                 lastError = String(describing: error).prefix(200).description
                 return finish(.failed(reason: "the model could not be reached (\(lastError ?? "error"))"))
             }
@@ -303,6 +317,10 @@ final class AgentLoop {
             }
             let assistant = Self.assistantContent(reply.json)
             messages.append(["role": "assistant", "content": assistant])
+            if remaining() <= 0 {
+                traced(["error": "timeCap"])
+                return finish(.timeCap)
+            }
             let toolUses = assistant.filter { $0["type"] as? String == "tool_use" }
             guard let toolUse = toolUses.first, let toolUseID = toolUse["id"] as? String, let toolName = toolUse["name"] as? String else {
                 traced(["error": "noToolCall"])
@@ -364,7 +382,7 @@ final class AgentLoop {
                 } else {
                     let searchCall = RealtimeToolCall(callID: toolUseID, name: RealtimeVoiceVerbs.openURLName, appName: nil,
                                                       url: AgentLoopTools.searchURL(query: query))
-                    let dispatch = await dependencies.execute(searchCall, false, observation)
+                    let dispatch = await dependencies.execute(searchCall, false, observation, remaining())
                     (result, harnessMs, waited, call) = (dispatch.result, dispatch.harnessMilliseconds, dispatch.waitedForConfirmation, searchCall)
                     record(searchCall, dispatch)
                 }
@@ -374,8 +392,8 @@ final class AgentLoop {
                     break
                 }
                 let parsed = RealtimeToolCall.parsed(callID: toolUseID, name: toolName, arguments: input)
-                args = RealtimeDecisionTrace.loggedArguments(for: parsed)
-                let dispatch = await dependencies.execute(parsed, true, observation)
+                args = Self.loggedArguments(for: parsed)
+                let dispatch = await dependencies.execute(parsed, true, observation, remaining())
                 (result, harnessMs, waited, call) = (dispatch.result, dispatch.harnessMilliseconds, dispatch.waitedForConfirmation, parsed)
                 record(parsed, dispatch)
             }
@@ -426,6 +444,7 @@ final class AgentLoop {
     - Never type, read out or ask for a password or other secret. If the goal needs a sign-in or a password, call ask_owner saying it is their turn to sign in.
     - If two or more things fit equally, call ask_owner asking which one; never guess.
     - If an approach fails, try a different one; if the goal cannot be reached, call done saying plainly what you tried and that it did not work.
+    - When reporting what a page says, attribute it ("the article says…"); state as done only what your own tool results did.
     - The done summary is spoken: one to three short sentences, plain words, no lists or markdown, keeping names and numbers. When the goal asks to read or summarise, put the facts in the summary.
     """
 
@@ -470,11 +489,36 @@ final class AgentLoop {
     /// The reply's blocks to append, minus thinking blocks: the history is
     /// edited (pictures removed), and a thinking block from before an edit is
     /// refused by the API, so none is ever sent back.
+    /// A reply cut at max_tokens may hold a half-written tool call: it is dropped,
+    /// never run. A reply left empty (thinking only) gets a line of text, since
+    /// an empty assistant message is a 400 on the next call.
     static func assistantContent(_ response: [String: Any]) -> [[String: Any]] {
-        ((response["content"] as? [[String: Any]]) ?? []).filter {
+        let truncated = response["stop_reason"] as? String == "max_tokens"
+        let kept = ((response["content"] as? [[String: Any]]) ?? []).filter {
             let type = $0["type"] as? String
-            return type != "thinking" && type != "redacted_thinking"
+            return type != "thinking" && type != "redacted_thinking" && !(truncated && type == "tool_use")
+                && !(type == "text" && (($0["text"] as? String) ?? "").allSatisfy(\.isWhitespace))
         }
+        return kept.isEmpty ? [["type": "text", "text": truncated ? "(reply cut off)" : "(no reply)"]] : kept
+    }
+
+    /// What Claude is told of the goal: the owner's words when known (they are
+    /// what every guard judges by), and the request as passed on; both redacted.
+    static func goalText(goal: String, heard: String?) -> String {
+        var text = "The owner's goal: \(SecretScanner.redact(goal))"
+        if let heard, !heard.allSatisfy(\.isWhitespace) { text += "\nThe owner's own words: \(SecretScanner.redact(heard))" }
+        return text
+    }
+
+    /// agent-loop.log's args: `loggedArguments` with the words a page or the
+    /// owner wrote (find words, element names, menu paths) as lengths.
+    static func loggedArguments(for call: RealtimeToolCall) -> [String: Any] {
+        var arguments = RealtimeDecisionTrace.loggedArguments(for: call)
+        for key in ["words", "name"] {
+            if let text = arguments.removeValue(forKey: key) as? String { arguments[key + "Length"] = text.count }
+        }
+        if let path = arguments.removeValue(forKey: "path") as? [String] { arguments["pathSteps"] = path.count }
+        return arguments
     }
 
     /// Scrubbed and bounded; a page's text is the one long field.
@@ -497,7 +541,7 @@ final class AgentLoop {
     /// 2019" is no claim. Every cited step must be an ok one.
     static func doneChallenge(summary: String, evidence: [Int], receipts: [Receipt]) -> String? {
         let okTools = Set(receipts.filter(\.ok).map(\.toolName))
-        for receiptsNeeded in RealtimeOpenAppTool.firstPersonClaims(summary) {
+        for receiptsNeeded in RealtimeOpenAppTool.firstPersonClaims(summary) + effectClaims(summary).map(Optional.some) {
             if let needed = receiptsNeeded {
                 if okTools.isDisjoint(with: needed) { return "no ok \(needed.sorted().joined(separator: " or ")) result backs that claim" }
             } else if !okTools.contains(where: RealtimeVoiceVerbs.isActingTool) {
@@ -507,6 +551,43 @@ final class AgentLoop {
         let okSteps = Set(receipts.filter(\.ok).map(\.step))
         let unbacked = evidence.filter { !okSteps.contains($0) }
         return unbacked.isEmpty ? nil : "step \(unbacked.map(String.init).joined(separator: ", ")) has no ok result"
+    }
+
+    static let pressTools: Set<String> = [RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName]
+    static let navigationTools: Set<String> = pressTools.union([RealtimeOpenAppTool.name, RealtimeVoiceVerbs.openURLName, RealtimeVoiceVerbs.focusAppName])
+
+    /// Effects a summary states in any grammatical person, each with the tools
+    /// whose ok result is its receipt. Review of d2fe0d7: "The post was published
+    /// and the form submitted." passed with no receipt, being no first-person claim.
+    static let effectWords: [(words: Set<String>, receipts: Set<String>)] = [
+        (["posted", "published", "submitted", "sent", "shared", "deleted", "removed", "pressed", "clicked", "tapped", "selected",
+          "saved", "uploaded", "purchased", "bought", "ordered", "approved"], pressTools),
+        (["typed", "entered", "filled", "written", "wrote"], [RealtimeVoiceVerbs.typeTextName]),
+        (["opened", "launched", "loaded", "navigated", "visited"], navigationTools),
+        (["closed", "quit"], [RealtimeVoiceVerbs.closeName]),
+        (["scrolled"], [RealtimeVoiceVerbs.scrollName])
+    ]
+    /// Within three words before an effect, a word that says it did not happen.
+    static let effectNegations: Set<String> = ["not", "no", "never", "nothing", "couldn't", "didn't", "wasn't", "weren't", "isn't",
+                                               "aren't", "hasn't", "haven't", "unable", "without", "cannot", "can't", "failed", "neither", "nor"]
+    /// A sentence reporting what the page itself says is a fact read, not an
+    /// effect: "The article says the bridge opened in 1932."
+    static let attributionWords: Set<String> = ["says", "said", "states", "reads", "lists", "shows", "describes", "mentions", "according",
+                                                "article", "page", "site", "story", "post's", "reports", "notes", "explains"]
+
+    /// The receipts each stated effect needs; a question, a negated effect and
+    /// a sentence attributed to the page claim nothing.
+    static func effectClaims(_ summary: String) -> [Set<String>] {
+        var claims: [Set<String>] = []
+        for (words, isQuestion) in RealtimeOpenAppTool.sentences(summary) where !isQuestion {
+            guard !words.contains(where: attributionWords.contains) else { continue }
+            for (index, word) in words.enumerated() {
+                guard let kind = effectWords.first(where: { $0.words.contains(word) }) else { continue }
+                if words[max(0, index - 3)..<index].contains(where: { effectNegations.contains($0) || $0.hasSuffix("n't") }) { continue }
+                claims.append(kind.receipts)
+            }
+        }
+        return claims
     }
 
     /// A few words of what a step did, for narration and a failure's
@@ -600,16 +681,26 @@ final class AgentLoop {
 extension AgentLoop {
     /// The live dependencies: the harness for looking, reading and acting, the
     /// worker for the model. `narrate` speaks (the session's system turn).
-    static func live(goal: String, harnessAnswer: @escaping @Sendable (String) -> String, model: AgentLoopModel,
+    /// `heard`: the owner's own words that started the task — the heard and site
+    /// checks of every step compare against them, never against the goal the
+    /// voice model wrote (review of d2fe0d7: a goal planted by page text named
+    /// its own site and passed).
+    static func live(heard: String, harnessAnswer: @escaping @Sendable (String) -> String, model: AgentLoopModel,
                      narrate: @escaping (String) -> Void) -> AgentLoop {
         let carry = MarksCarry()
         let loop = AgentLoop(dependencies: Dependencies(
-            model: { body in try await model.send(body) },
-            observe: { await liveObservation(harnessAnswer: harnessAnswer) },
-            execute: { call, checksSite, observation in
+            model: { body, timeout in try await model.send(body, timeout: timeout) },
+            observe: {
+                let observation = await liveObservation(harnessAnswer: harnessAnswer)
+                // The app the owner was in when the task began.
+                if carry.calls == 0, carry.startBundle == nil { carry.startBundle = observation.bundleIdentifier }
+                return observation
+            },
+            execute: { call, checksSite, observation, remaining in
                 carry.calls += 1
-                return await liveExecute(call, checksSite: checksSite, goal: goal, observation: observation, carry: carry,
-                                         traceTurnID: "\(carry.runID)-\(carry.calls)", harnessAnswer: harnessAnswer)
+                return await liveExecute(call, checksSite: checksSite, heard: heard, observation: observation, carry: carry,
+                                         traceTurnID: "\(carry.runID)-\(carry.calls)", confirmationWaitSeconds: remaining,
+                                         harnessAnswer: harnessAnswer)
             },
             readPage: { await liveReadPage(harnessAnswer: harnessAnswer) },
             onStep: { step in
@@ -629,6 +720,10 @@ extension AgentLoop {
         /// voice-decisions.log's turnId for a step: "<run>-<n>".
         var runID = ""
         var calls = 0
+        /// Apps this task opened or focused itself (`agentOpenedBundles`).
+        var openedBundles: Set<String> = []
+        /// The app in front at the task's first look (`agentStartBundle`).
+        var startBundle: String?
     }
 
     struct FrontApp: Sendable {
@@ -652,6 +747,7 @@ extension AgentLoop {
         let started = ProcessInfo.processInfo.systemUptime
         var observation = AgentObservation()
         let front = await frontApp()
+        observation.bundleIdentifier = front?.bundleIdentifier
         if let line = RealtimeOpenAppTool.frontmostAppContextLine(appName: front?.name) { observation.lines.append(line) }
         let secureInput = SecureInputState.current()
         if secureInput.isOn {
@@ -676,14 +772,18 @@ extension AgentLoop {
     }
 
     /// One voice tool through `RealtimeVoiceConnection.runToolCall`, with a
-    /// marks object standing in for a turn: the heard words are the goal, the
-    /// screenshot is this step's look, cancellation is the turn's supersession.
-    static func liveExecute(_ call: RealtimeToolCall, checksSite: Bool, goal: String, observation: AgentObservation, carry: MarksCarry,
-                            traceTurnID: String, harnessAnswer: @escaping @Sendable (String) -> String) async -> RealtimeToolDispatch {
+    /// marks object standing in for a turn: the heard words are the owner's, the
+    /// screenshot is this step's look, cancellation is the turn's supersession,
+    /// and a card waits no longer than the task has left.
+    static func liveExecute(_ call: RealtimeToolCall, checksSite: Bool, heard: String, observation: AgentObservation, carry: MarksCarry,
+                            traceTurnID: String, confirmationWaitSeconds: TimeInterval,
+                            harnessAnswer: @escaping @Sendable (String) -> String) async -> RealtimeToolDispatch {
         let now = ProcessInfo.processInfo.systemUptime
         let marks = RealtimeTurnMarks()
         marks.isAgentStep = true
-        marks.heardText = goal
+        marks.agentOpenedBundles = carry.openedBundles
+        marks.agentStartBundle = carry.startBundle
+        marks.heardText = heard
         marks.heardCompleteUptime = now
         marks.lastAudioSentUptime = now
         marks.screenshotDisplayFrame = observation.frame
@@ -694,7 +794,15 @@ extension AgentLoop {
         marks.toolCalls = [filled]
         marks.decisions = [RealtimeToolDecision(call: filled, callUptime: now)]
         let dispatch = await RealtimeVoiceConnection.runToolCall(filled, decisionIndex: 0, in: marks, harnessAnswer: harnessAnswer,
-                                                                 checksSite: checksSite, isCurrent: { !Task.isCancelled })
+                                                                 checksSite: checksSite,
+                                                                 confirmationWaitSeconds: min(RealtimeOpenAppTool.confirmationWaitSeconds,
+                                                                                              max(1, confirmationWaitSeconds)),
+                                                                 isCurrent: { !Task.isCancelled })
+        if let dispatch, dispatch.harnessConfirmed,
+           [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName, RealtimeVoiceVerbs.openURLName].contains(filled.name),
+           let bundle = dispatch.harnessResponse?["bundleIdentifier"] as? String {
+            carry.openedBundles.insert(bundle)
+        }
         // voice-decisions.log, as a voice turn's calls are: the heard check, the offer, the rung.
         RealtimeDecisionTrace.append(marks.decisions, turnID: traceTurnID, stack: "agentLoop", source: "agentLoop", releasedUptime: now)
         return dispatch ?? RealtimeToolDispatch(

@@ -257,26 +257,42 @@ final class RealtimeVoiceSession {
         connection.onClosed = { [weak self, weak connection] in
             if let self, self.connection === connection { self.connection = nil }
         }
-        connection.onDoTask = { [weak self] goal in
-            self?.startAgentLoop(goal: goal) ?? ["ok": false, "status": NSNull(), "error": "noSession", "message": "the task runner is not available"]
+        connection.onDoTask = { [weak self] goal, heard in
+            self?.startAgentLoop(goal: goal, heard: heard)
+                ?? ["ok": false, "status": NSNull(), "error": "noSession", "message": "the task runner is not available"]
         }
+        connection.isAgentLoopRunning = { [weak self] in self?.agentLoop?.isRunning == true }
     }
 
     // MARK: Agent loop
 
+    /// The owner's words of a task that ended asking them something: their
+    /// answer starts a new task, judged by both turns' words (theirs only).
+    private var askedOwner: (heard: String, uptime: TimeInterval)?
+    static let askOwnerAnswerWindowSeconds: TimeInterval = 300
+    /// Agent system turns, one after another (OpenAI refuses a second
+    /// `response.create` while one is answering).
+    private var agentSpeech: Task<Void, Never>?
+    private var agentSpeechBusy = false
+
     /// do_task's answer, at once; the loop runs on and speaks for itself.
-    private func startAgentLoop(goal: String) -> [String: Any] {
+    /// `heard`: the owner's words of the turn that called it.
+    private func startAgentLoop(goal: String, heard: String) -> [String: Any] {
         agentTask?.cancel()
-        let loop = AgentLoop.live(goal: goal, harnessAnswer: harnessAnswer, model: agentModel) { [weak self] line in
-            Task { @MainActor [weak self] in await self?.speakForAgent(line, waitForQuiet: false) }
+        var words = heard
+        if let asked = askedOwner, uptime - asked.uptime <= Self.askOwnerAnswerWindowSeconds { words = asked.heard + " " + heard }
+        askedOwner = nil
+        let loop = AgentLoop.live(heard: words, harnessAnswer: harnessAnswer, model: agentModel) { [weak self] line in
+            self?.enqueueAgentSpeech(line, final: false)
         }
         agentLoop = loop
         agentSpokenTurns = []
         agentTask = Task { @MainActor [weak self] in
-            let outcome = await loop.run(goal: goal)
+            let outcome = await loop.run(goal: goal, heard: words)
             guard let self else { return }
+            if case .askOwner = outcome { self.askedOwner = (words, self.uptime) }
             if let final = AgentLoop.finalLine(outcome, goal: goal, lastProgress: loop.lastProgress, step: loop.step), !Task.isCancelled {
-                await self.speakForAgent(final, waitForQuiet: true)
+                await self.enqueueAgentSpeech(final, final: true)?.value
             }
             if self.agentLoop === loop { self.agentLoop = nil }
             await self.reportAgentLoop(loop, outcome: outcome)
@@ -286,27 +302,67 @@ final class RealtimeVoiceSession {
                     + "nothing is done yet, so say only a few words such as that you are on it"]
     }
 
-    /// A press stopped the running task: before the tool call it was waiting
-    /// on, never after. Returns the step it stopped at.
+    /// The owner pressed: the running task stops before its next tool call,
+    /// and any line it still meant to say is dropped. Returns the step a
+    /// RUNNING task stopped at.
     private func stopAgentLoop() -> Int? {
-        guard let loop = agentLoop, loop.isRunning, let agentTask, !agentTask.isCancelled else { return nil }
-        agentTask.cancel()
-        return loop.step
+        let running = agentLoop.flatMap { $0.isRunning ? $0.step : nil }
+        agentTask?.cancel()
+        agentSpeech?.cancel()
+        return running
     }
 
-    /// A system turn for the loop, only between the owner's turns: never into
-    /// a turn being spoken or answered (it would take over that turn's marks).
-    /// Progress lines are dropped when busy; the final line waits up to 15 s.
-    private func speakForAgent(_ text: String, waitForQuiet: Bool) async {
-        let deadline = uptime + (waitForQuiet ? 15 : 0)
-        while liveTurn != nil || isReplyAudioPlaying {
-            guard uptime < deadline else { return }
-            try? await Task.sleep(for: .milliseconds(200))
+    /// What an agent line does now (pure, tested). Cancelled: dropped. The
+    /// owner's turn or reply audio still going: a progress line is dropped,
+    /// the final line waits (15 s at most). Lines never overlap: each waits on
+    /// the one before it (`enqueueAgentSpeech`).
+    enum AgentSpeechStep: Equatable { case speak, wait, drop }
+
+    nonisolated static func agentSpeechStep(cancelled: Bool, final: Bool, ownerTurnActive: Bool, replyPlaying: Bool,
+                                            pastDeadline: Bool) -> AgentSpeechStep {
+        if cancelled { return .drop }
+        guard ownerTurnActive || replyPlaying else { return .speak }
+        return final && !pastDeadline ? .wait : .drop
+    }
+
+    /// Queued behind the previous agent line; a progress line arriving while
+    /// one is in flight is dropped rather than queued.
+    @discardableResult
+    private func enqueueAgentSpeech(_ text: String, final: Bool) -> Task<Void, Never>? {
+        if !final, agentSpeechBusy { return nil }
+        let previous = agentSpeech
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            await self?.speakForAgent(text, final: final)
         }
-        guard let connection = try? await readyConnection(), liveTurn == nil else { return }
+        agentSpeech = task
+        return task
+    }
+
+    /// A speech-only system turn, only between the owner's turns, and waited
+    /// on until answered so the next line never collides with it.
+    private func speakForAgent(_ text: String, final: Bool) async {
+        agentSpeechBusy = true
+        defer { agentSpeechBusy = false }
+        let deadline = uptime + (final ? 15 : 0)
+        // A cancelled sleep returns at once; the next pass then drops the line, never spins.
+        waiting: while true {
+            switch Self.agentSpeechStep(cancelled: Task.isCancelled, final: final, ownerTurnActive: liveTurn != nil,
+                                        replyPlaying: isReplyAudioPlaying, pastDeadline: uptime >= deadline) {
+            case .drop: return
+            case .wait: try? await Task.sleep(for: .milliseconds(200))
+            case .speak: break waiting
+            }
+        }
+        guard let connection = try? await readyConnection(), liveTurn == nil, !Task.isCancelled else { return }
         do {
-            try await connection.beginSystemTurn(text: text, variant: RealtimeOpenAppTool.systemTurnVariant(for: connection.stack))
-            agentSpokenTurns.append(connection.turn)
+            try await connection.beginSystemTurn(text: text, variant: RealtimeOpenAppTool.systemTurnVariant(for: connection.stack),
+                                                 speechOnly: true)
+            let turn = connection.turn
+            agentSpokenTurns.append(turn)
+            _ = try? await turn.finished.value(timeoutSeconds: 20, timeoutKind: "agentSpeech")
+            // The audio it scheduled plays out before the next line may start.
+            while isReplyAudioPlaying, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(100)) }
         } catch {
             print("🤖 agent loop: system turn failed: \(error)")
         }
@@ -314,7 +370,6 @@ final class RealtimeVoiceSession {
 
     private func reportAgentLoop(_ loop: AgentLoop, outcome: AgentLoop.Outcome) async {
         guard let onAgentLoopFinished else { return }
-        for turn in agentSpokenTurns { _ = try? await turn.finished.value(timeoutSeconds: 20, timeoutKind: "agentSpeech") }
         onAgentLoopFinished(AgentLoopReport(outcome: outcome, steps: loop.step, decisions: loop.decisions,
                                             spoken: agentSpokenTurns.map(\.transcript).joined(separator: " ")))
     }

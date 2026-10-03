@@ -4,7 +4,8 @@
 //
 //  `--agent-loop-probe [--agent-scenarios=B1,B5,B6]`: the agent loop driven
 //  directly, no voice, on the scenario runner's own B scenarios (start page,
-//  goal words from scripts/scenarios/utterances.tsv, checker and Never rules —
+//  goal words from scripts/scenarios/utterances.tsv (also the "heard" words the
+//  guards judge by, as the owner would say them), checker and Never rules —
 //  `ScenarioCatalog.multiStep`). Each runs in a Chrome window the probe opens
 //  (nonce in its title) and closes by its own close button; the owner's Chrome
 //  windows are checked by window-server number after each. Cards: a pending
@@ -79,10 +80,10 @@ enum AgentLoopProbe {
             let started = Date()
             let startUptime = ProcessInfo.processInfo.systemUptime
             var narrations: [String] = []
-            let loop = AgentLoop.live(goal: goal, harnessAnswer: harnessAnswer, model: model) { line in narrations.append(line) }
+            let loop = AgentLoop.live(heard: goal, harnessAnswer: harnessAnswer, model: model) { line in narrations.append(line) }
             let finished = FinishedFlag()
             let runTask = Task { @MainActor in
-                let outcome = await loop.run(goal: goal)
+                let outcome = await loop.run(goal: goal, heard: goal)
                 finished.value = true
                 return outcome
             }

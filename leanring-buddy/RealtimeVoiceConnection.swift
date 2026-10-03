@@ -62,6 +62,13 @@ final class RealtimeTurnMarks {
     /// An agent-loop step (`AgentLoop.liveExecute`): the "heard" words are the
     /// task's goal, a sentence of instructions, not a one-step request.
     var isAgentStep = false
+    /// Agent steps: the apps this run itself opened or focused (ok open_app,
+    /// focus_app, open_url): the only ones an unclear app word may act in.
+    var agentOpenedBundles: Set<String> = []
+    /// Agent steps: the app in front when the task began — the owner's own.
+    var agentStartBundle: String?
+    /// A system turn that may only speak (the agent loop's lines): every tool call in it is refused.
+    var speechOnly = false
     var ownerTurnTranscript = ""
     var toolResultSentUptime: TimeInterval?
     /// First audio after the LATEST tool result — with find -> press, the words
@@ -488,10 +495,11 @@ final class RealtimeVoiceConnection {
     /// (review 2026-10-02: a correction between "find X" and "yes, that one" lost
     /// the offer), and takes no heard piece: the owner said nothing in it, so a
     /// late Gemini piece is the owner turn's.
-    func beginSystemTurn(text: String, variant: RealtimeSystemTurnVariant) async throws {
+    func beginSystemTurn(text: String, variant: RealtimeSystemTurnVariant, speechOnly: Bool = false) async throws {
         let previous = turn
         turn = RealtimeTurnMarks()
         turn.isSystemTurn = true
+        turn.speechOnly = speechOnly
         turn.ownerTurnTranscript = previous.isSystemTurn ? previous.ownerTurnTranscript : previous.transcript
         turn.previousTurnScreenOffer = previous.latestScreenOffer ?? previous.previousTurnScreenOffer
         turn.previousTurnMenuOffer = previous.latestMenuOffer ?? previous.previousTurnMenuOffer
@@ -768,8 +776,32 @@ final class RealtimeVoiceConnection {
 
     // MARK: Tool calls
 
-    /// do_task: the session starts the agent loop and answers at once (`RealtimeVoiceSession`).
-    var onDoTask: ((String) -> [String: Any])?
+    /// do_task: the session starts the agent loop and answers at once
+    /// (`RealtimeVoiceSession`), given the goal and the OWNER's own words.
+    var onDoTask: ((_ goal: String, _ heard: String) -> [String: Any])?
+    /// Whether a task is running: then no system turn may call a tool.
+    var isAgentLoopRunning: () -> Bool = { false }
+
+    /// A call the turn itself rules out, before any other check. Review of
+    /// d2fe0d7: page text the loop summarised could reach a system turn and have
+    /// the voice start a new task, and narration turns kept acting while the loop
+    /// acted — two planners at once. So: a task starts only from a turn the owner
+    /// spoke, with their words transcribed (they, never the model's goal, are the
+    /// task's heard words); a speech-only system turn, or any system turn while a
+    /// task runs, calls nothing.
+    nonisolated static func turnRefusal(toolName: String, isSystemTurn: Bool, speechOnly: Bool, agentLoopRunning: Bool,
+                                        heard: String?) -> RealtimeToolRefusal? {
+        if isSystemTurn, speechOnly || agentLoopRunning || toolName == RealtimeVoiceVerbs.doTaskName {
+            return RealtimeToolRefusal(error: "systemTurnCannotAct", message: "this turn was not the owner speaking, so nothing was done; "
+                + "speak only, and act only when the owner asks")
+        }
+        guard toolName == RealtimeVoiceVerbs.doTaskName else { return nil }
+        guard let heard, !heard.allSatisfy(\.isWhitespace) else {
+            return RealtimeToolRefusal(error: RealtimeHeardCheck.unavailableError, message: "the owner's words were not transcribed in time, "
+                + "so no task was started. Ask them, briefly, to say it again.")
+        }
+        return nil
+    }
 
     private func receivedToolCalls(_ calls: [RealtimeToolCall], arrivalUptime: TimeInterval) {
         let turn = self.turn
@@ -798,10 +830,22 @@ final class RealtimeVoiceConnection {
                                                     waitedForConfirmation: false, harnessResponse: nil)
                     turn.dispatches.append(dispatch)
                     turn.decisions[decisionIndex].dispatch = dispatch
+                } else if let refusal = Self.turnRefusal(
+                    toolName: call.name, isSystemTurn: turn.isSystemTurn, speechOnly: turn.speechOnly,
+                    agentLoopRunning: self?.isAgentLoopRunning() ?? false,
+                    heard: call.name == RealtimeVoiceVerbs.doTaskName && !turn.isSystemTurn
+                        ? await turn.waitForHeard(until: (turn.lastAudioSentUptime ?? ProcessInfo.processInfo.systemUptime)
+                                                    + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds) : nil) {
+                    dispatch = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: refusal), harnessMilliseconds: 0,
+                                                    waitedForConfirmation: false, harnessResponse: nil)
+                    turn.dispatches.append(dispatch)
+                    turn.decisions[decisionIndex].dispatch = dispatch
                 } else if call.name == RealtimeVoiceVerbs.doTaskName {
-                    // Starts the loop and returns; the loop's own steps run every guard below.
+                    // Starts the loop and returns; the loop's own steps run every guard below,
+                    // judged against the owner's words (`turnRefusal` waited for them).
                     let refusal = RealtimeToolRefusal(error: "missingGoal", message: "do_task needs the owner's request as its goal")
-                    let result = call.goal.flatMap { goal in self?.onDoTask?(goal) } ?? RealtimeOpenAppTool.toolResult(for: refusal)
+                    let heard = turn.heardText
+                    let result = call.goal.flatMap { goal in self?.onDoTask?(goal, heard) } ?? RealtimeOpenAppTool.toolResult(for: refusal)
                     dispatch = RealtimeToolDispatch(result: result, harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: nil)
                     turn.dispatches.append(dispatch)
                     turn.decisions[decisionIndex].dispatch = dispatch
@@ -847,6 +891,7 @@ final class RealtimeVoiceConnection {
     /// before the call ran (recorded as superseded; nothing was done).
     static func runToolCall(_ call: RealtimeToolCall, decisionIndex: Int, in turn: RealtimeTurnMarks,
                             harnessAnswer: @escaping @Sendable (String) -> String, checksSite: Bool = true,
+                            confirmationWaitSeconds: Double = RealtimeOpenAppTool.confirmationWaitSeconds,
                             isCurrent: @escaping @MainActor () -> Bool) async -> RealtimeToolDispatch? {
         // Read now, after the previous call finished: a find and a press sent
         // in one batch must still press what that find offered.
@@ -959,7 +1004,8 @@ final class RealtimeVoiceConnection {
             }
             dispatch = await RealtimeOpenAppTool.dispatch(call, offered: offered, offeredApp: offeredApp, screenTarget: screenTarget,
                                                           screenshotDisplay: turn.screenshotDisplayFrame,
-                                                          answer: harnessAnswer, onConfirmationRequired: onConfirmationRequired)
+                                                          answer: harnessAnswer, confirmationWaitSeconds: confirmationWaitSeconds,
+                                                          onConfirmationRequired: onConfirmationRequired)
             // Both witnesses name one running app and only the app in front is
             // wrong: bring it forward through the harness (policy applies), then
             // run this call ONCE more. Never a loop, never a launch.
@@ -973,7 +1019,8 @@ final class RealtimeVoiceConnection {
                     let shownName = (dispatch.result["named"] as? String) ?? resolvedBundle
                     JarvisNotch.shared.handle(.toolCall(title: "Switching to \(RealtimeOpenAppTool.captionName(shownName))\u{2026}"))
                     let focusCall = RealtimeToolCall(callID: call.callID, name: RealtimeVoiceVerbs.focusAppName, appName: resolvedBundle)
-                    let focus = await RealtimeOpenAppTool.dispatch(focusCall, answer: harnessAnswer, onConfirmationRequired: onConfirmationRequired)
+                    let focus = await RealtimeOpenAppTool.dispatch(focusCall, answer: harnessAnswer, confirmationWaitSeconds: confirmationWaitSeconds,
+                                                                   onConfirmationRequired: onConfirmationRequired)
                     autoFocus["focusStatus"] = focus.harnessConfirmed ? ((focus.result["verification"] as? String) ?? "ok")
                         : ((focus.result["error"] as? String) ?? "failed")
                     autoFocus["focusMs"] = focus.harnessMilliseconds
@@ -987,6 +1034,7 @@ final class RealtimeVoiceConnection {
                         JarvisNotch.shared.handle(.toolCall(title: RealtimeVoiceVerbs.intentTitle(for: call)))
                         dispatch = await RealtimeOpenAppTool.dispatch(call, offered: offered, offeredApp: offeredApp,
                                                                       screenTarget: screenTarget, answer: harnessAnswer,
+                                                                      confirmationWaitSeconds: confirmationWaitSeconds,
                                                                       onConfirmationRequired: onConfirmationRequired)
                         autoFocus["retried"] = true
                     }
@@ -1017,6 +1065,47 @@ final class RealtimeVoiceConnection {
                                                            uptime: ProcessInfo.processInfo.systemUptime, elements: offer.candidates)
         }
         return dispatch
+    }
+
+    /// An agent step acts only where the owner put it: in an app their words
+    /// name, the app in front when the task began, or one the task opened by
+    /// such a step (live 2026-10-03 B5: "read this page and summarise it" — the
+    /// voice opened TextEdit unasked and the loop typed the summary into it).
+    /// Reads are never refused (`mayRefuse`).
+    nonisolated static func agentStepActsInUnnamedApp(outcome: RealtimeHeardCheck.Outcome, mayRefuse: Bool, callBundle: String?,
+                                                      startBundle: String?, openedByTask: Set<String>) -> Bool {
+        guard mayRefuse, outcome == .noAppHeard, let callBundle else { return false }
+        return callBundle != startBundle && !openedByTask.contains(callBundle)
+    }
+
+    /// An agent step's appNameUnclear proceeds only in an app the task opened
+    /// or focused itself, and never when an unclear word is within two edits of
+    /// an installed app's name or a word of it ("slak" / Slack).
+    nonisolated static func agentStepMayActDespiteUnclearWord(callBundle: String?, openedByTask: Set<String>, unclearWords: [String],
+                                                              among names: [RealtimeVoiceVerbs.AppName]) -> Bool {
+        guard let callBundle, openedByTask.contains(callBundle) else { return false }
+        let appWords = Set(names.flatMap { name -> [String] in
+            let tokens = RealtimeVoiceVerbs.foldedTokens(name.name)
+            return tokens + [tokens.joined()]
+        }.filter { $0.count >= 3 })
+        return !unclearWords.map { RealtimeVoiceVerbs.foldedTokens($0).joined() }.contains { word in
+            word.count >= 3 && appWords.contains { editDistance(word, $0) <= (min(word.count, $0.count) <= 4 ? 1 : 2) }
+        }
+    }
+
+    nonisolated static func editDistance(_ first: String, _ second: String) -> Int {
+        let a = Array(first), b = Array(second)
+        guard !a.isEmpty else { return b.count }
+        guard !b.isEmpty else { return a.count }
+        var previous = Array(0...b.count)
+        for i in 1...a.count {
+            var current = [i] + Array(repeating: 0, count: b.count)
+            for j in 1...b.count {
+                current[j] = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1))
+            }
+            previous = current
+        }
+        return previous[b.count]
     }
 
     /// Waits (bounded) for this turn's transcript, then decides. nil for a call
@@ -1056,7 +1145,10 @@ final class RealtimeVoiceConnection {
             : call.name == RealtimeVoiceVerbs.openURLName ? ([call.url.flatMap(RealtimeHeardCheck.siteName(of:)), call.url.flatMap { URL(string: $0)?.host }]
                 .compactMap { $0 }.joined(separator: " ")) : ""
         let isAgentStep = turn.isAgentStep
-        let (decision, namedAppIsRunning) = await Task.detached { () -> (RealtimeHeardCheck.Decision, Bool) in
+        let agentOpenedBundles = turn.agentOpenedBundles
+        let agentStartBundle = turn.agentStartBundle
+        let mayRefuseCall = RealtimeHeardCheck.mayRefuse(toolName: call.name)
+        let (decision, namedAppIsRunning, actsInUnnamedApp) = await Task.detached { () -> (RealtimeHeardCheck.Decision, Bool, Bool) in
             var callBundle: String?
             if case .resolved(let bundleIdentifier, _) = RealtimeVoiceVerbs.appIdentity(named: appName) { callBundle = bundleIdentifier }
             let offered = recentOffers.filter { $0.app != nil && $0.app == callBundle }.flatMap(\.labels)
@@ -1069,25 +1161,34 @@ final class RealtimeVoiceConnection {
                                                      targetWords: menuWords + RealtimeVoiceVerbs.foldedTokens(offered.joined(separator: " ")),
                                                      frontmostApp: frontmost, contentWords: RealtimeHeardCheck.contentTokens(content),
                                                      namedIsBrowser: namedIsBrowser)
-            // A goal names what it is about ("search Google for Superloop"): live
+            // A request names what it is about ("search Google for Superloop"): live
             // 2026-10-03 its "superloop" sat in the app slot and every scroll of the
-            // task was refused heardUnavailable. appNameUnclear is "a name was said
-            // and missed, so ask" — a guess about one spoken step; in a task it is
-            // the topic, so the step proceeds as noAppHeard does. A heard app that
-            // is not the call's still refuses (heardNamedMismatch).
-            if isAgentStep, decision.outcome == .appNameUnclear {
+            // task was refused heardUnavailable. appNameUnclear still means "ask"
+            // (review of d2fe0d7: "post this in Slak" would type into whatever was
+            // in front), except in an app this task itself opened or focused, and
+            // only when no unclear word resembles an installed app.
+            if isAgentStep, decision.outcome == .appNameUnclear,
+               agentStepMayActDespiteUnclearWord(callBundle: callBundle, openedByTask: agentOpenedBundles,
+                                                 unclearWords: decision.heardSlot, among: RealtimeVoiceVerbs.installedAppNames()) {
                 var proceeding = RealtimeHeardCheck.Decision(outcome: .noAppHeard, heardApps: [], tier: nil)
                 proceeding.heardSlot = decision.heardSlot
-                return (proceeding, true)
+                return (proceeding, true, false)
             }
+            let unnamed = isAgentStep && agentStepActsInUnnamedApp(outcome: decision.outcome, mayRefuse: mayRefuseCall, callBundle: callBundle,
+                                                                    startBundle: agentStartBundle, openedByTask: agentOpenedBundles)
             // Only asked when it decides: open_app with no transcript.
-            guard decision.outcome == .transcriptMissing, call.name == RealtimeOpenAppTool.name else { return (decision, true) }
-            return (decision, RealtimeVoiceVerbs.isRunning(named: named))
+            guard decision.outcome == .transcriptMissing, call.name == RealtimeOpenAppTool.name else { return (decision, true, unnamed) }
+            return (decision, RealtimeVoiceVerbs.isRunning(named: named), unnamed)
         }.value
         let arrivalMs = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime).map { Int((($0 - released) * 1000).rounded()) }
         // A read is never refused here (`mayRefuse`); its decision still drives auto-focus.
-        let refusal = RealtimeHeardCheck.mayRefuse(toolName: call.name)
+        var refusal = RealtimeHeardCheck.mayRefuse(toolName: call.name)
             ? RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named, namedAppIsRunning: namedAppIsRunning) : nil
+        if refusal == nil, actsInUnnamedApp {
+            refusal = ["ok": false, "status": NSNull(), "error": "appNotNamed", "named": named,
+                       "message": "the owner's words do not name \(UntrustedText(named).forDisplay), the task did not start in it and did not "
+                        + "open it, so nothing was done there. Ask the owner whether to use it."]
+        }
         if refusal != nil { turn.heardRefusals += 1 }
         // The item a press or a point names.
         let isPoint = RealtimeVoiceVerbs.isScreenTargetTool(call.name)
