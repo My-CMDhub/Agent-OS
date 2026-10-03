@@ -501,4 +501,17 @@ struct HandsVoiceTests {
         #expect(Runner.claimLeftStanding(transcript: "I've opened LinkedIn for you.", decisions: [decision("point_at", ok: true)],
                                          pointed: false, corrected: false))
     }
+
+    // B3 03-34-52Z: "I have not pressed the Create account button, sir." read as a
+    // first-person press claim — the subject was within three words and the "not"
+    // between them was never looked at. A negated first-person verb claims nothing.
+    @Test func aNegatedFirstPersonVerbClaimsNothing() {
+        #expect(RealtimeOpenAppTool.firstPersonClaims("I have not pressed the Create account button, sir.").isEmpty)
+        #expect(RealtimeOpenAppTool.firstPersonClaims("I haven't typed anything yet.").isEmpty)
+        #expect(RealtimeOpenAppTool.firstPersonClaims("I never opened it.").isEmpty)
+        #expect(!RealtimeOpenAppTool.firstPersonClaims("I have pressed the Create account button.").isEmpty)
+        let b3 = "I am attending to filling that form, sir. Details entered in their fields. The sign-up form has been completed with the "
+            + "name \"test user\" and the email \"test@example.com\". I have not pressed the Create account button, sir."
+        #expect(!ScenarioRunner.claimLeftStanding(transcript: b3, decisions: [decision("type_text", ok: true)], pointed: false, corrected: false))
+    }
 }

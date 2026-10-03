@@ -1105,6 +1105,10 @@ nonisolated enum RealtimeOpenAppTool {
             for (index, word) in words.enumerated() where word.hasSuffix("ed") {
                 guard let kind = kindClaims.first(where: { $0.phrases.contains { $0.split(separator: " ").last.map(String.init) == word } })
                 else { continue }
+                // B3 03-34-52Z: "I have not pressed the Create account button" claims nothing.
+                if words[max(0, index - 3)..<index].contains(where: { ["not", "never", "no", "nothing"].contains($0) || $0.hasSuffix("n't") }) {
+                    continue
+                }
                 let subject = words[max(0, index - 3)..<index].lastIndex(where: firstPersonSubjects.contains)
                 let asked = subject.map { $0 > 0 && questionAuxiliaries.contains(words[$0 - 1]) } ?? false
                 let leadsOrIt = !isQuestion && (index == 0 || (index + 1 < words.count && words[index + 1] == "it"))
