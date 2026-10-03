@@ -487,6 +487,29 @@ struct AgentLoopTests {
         #expect(AgentLoop.doneChallenge(summary: "The page lists three plans launched in 2024.", evidence: [], receipts: []) == nil)
     }
 
+    /// Low: under a second left, the model call cannot run (AgentLoopModel refuses it),
+    /// and that was reported as a failure; it is the time cap.
+    @MainActor @Test func lessThanASecondLeftIsTheTimeCap() async {
+        let script = Script([toolUse("scroll", ["direction": "down"])])
+        script.secondsPerModelCall = 179.5
+        #expect(await loop(script).run(goal: "keep scrolling") == .timeCap)
+        #expect(script.timeouts == [180])
+    }
+
+    /// Low: voice-decisions.log wrote an agent step's find words and element names
+    /// raw; agent-loop.log already keeps lengths. Same rule for the same step.
+    @Test func anAgentStepsDecisionLineHoldsLengthsNotWordsOrNames() {
+        let call = RealtimeToolCall(callID: "c", name: "press_element", appName: "Google Chrome", words: "delete", elementName: "Delete draft 3")
+        func args(_ source: String) -> [String: Any] {
+            RealtimeDecisionTrace.line(decision: RealtimeToolDecision(call: call, callUptime: 1), sequence: 1, turnID: "t",
+                                       stack: source, source: source, releasedUptime: 1)["args"] as? [String: Any] ?? [:]
+        }
+        let agent = args("agentLoop")
+        #expect(agent["name"] == nil && agent["words"] == nil)
+        #expect(agent["nameLength"] as? Int == 14 && agent["wordsLength"] as? Int == 6)
+        #expect(args("live")["name"] as? String == "Delete draft 3")
+    }
+
     // MARK: Runner findings 2026-10-03 (voice)
 
     @Test func internalWordsSpokenAloudAreFound() {

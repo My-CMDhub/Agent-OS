@@ -287,14 +287,15 @@ final class AgentLoop {
 
             if Task.isCancelled { return finish(.cancelled) }
             func remaining() -> TimeInterval { Self.maximumSeconds - (dependencies.uptime() - started) }
-            if remaining() <= 0 { return finish(.timeCap) }
+            // Under a second left, `AgentLoopModel` refuses the call: that is the time cap, not a failure.
+            if remaining() < 1 { return finish(.timeCap) }
             let reply: AgentModelReply
             do {
                 reply = try await dependencies.model(Self.requestBody(messages: messages), remaining())
             } catch {
                 // A press during the call cancels it: that is a stop, not a failure.
                 if Task.isCancelled { return finish(.cancelled) }
-                if remaining() <= 0 { return finish(.timeCap) }
+                if remaining() < 1 { return finish(.timeCap) }
                 lastError = String(describing: error).prefix(200).description
                 return finish(.failed(reason: "the model could not be reached (\(lastError ?? "error"))"))
             }
@@ -513,12 +514,7 @@ final class AgentLoop {
     /// agent-loop.log's args: `loggedArguments` with the words a page or the
     /// owner wrote (find words, element names, menu paths) as lengths.
     static func loggedArguments(for call: RealtimeToolCall) -> [String: Any] {
-        var arguments = RealtimeDecisionTrace.loggedArguments(for: call)
-        for key in ["words", "name"] {
-            if let text = arguments.removeValue(forKey: key) as? String { arguments[key + "Length"] = text.count }
-        }
-        if let path = arguments.removeValue(forKey: "path") as? [String] { arguments["pathSteps"] = path.count }
-        return arguments
+        RealtimeDecisionTrace.lengthOnlyArguments(for: call)
     }
 
     /// Scrubbed and bounded; a page's text is the one long field.

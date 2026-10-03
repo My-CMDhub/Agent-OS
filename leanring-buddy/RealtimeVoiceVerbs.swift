@@ -835,6 +835,18 @@ nonisolated enum RealtimeDecisionTrace {
         return arguments
     }
 
+    /// `loggedArguments` with the words a page or the owner wrote (find words,
+    /// element names, menu paths) as lengths: an agent step's goal-driven words
+    /// are the owner's request, and agent-loop.log already keeps only lengths.
+    static func lengthOnlyArguments(for call: RealtimeToolCall) -> [String: Any] {
+        var arguments = loggedArguments(for: call)
+        for key in ["words", "name"] {
+            if let text = arguments.removeValue(forKey: key) as? String { arguments[key + "Length"] = text.count }
+        }
+        if let path = arguments.removeValue(forKey: "path") as? [String] { arguments["pathSteps"] = path.count }
+        return arguments
+    }
+
     static func line(
         decision: RealtimeToolDecision, sequence: Int, turnID: String, stack: String, source: String,
         releasedUptime: TimeInterval?, probeID: String? = nil, fixture: String? = nil,
@@ -850,16 +862,19 @@ nonisolated enum RealtimeDecisionTrace {
             : isPoint && decision.call.elementName != nil
                 ? decision.offeredElementsBeforeCall.map { offered in offered.contains { $0.name == decision.call.elementName } }
             : nil
+        // An agent step (re-review of 2e45939): lengths, and no offered names.
+        let agentStep = source == "agentLoop"
         return [
             "kind": "toolCall", "schema": schemaVersion, "source": source,
             "turnId": turnID, "stack": stack, "probeId": value(probeID), "fixture": value(fixture),
-            "seq": sequence, "tool": decision.call.name, "args": loggedArguments(for: decision.call),
+            "seq": sequence, "tool": decision.call.name,
+            "args": agentStep ? lengthOnlyArguments(for: decision.call) : loggedArguments(for: decision.call),
             "callMs": value(releasedUptime.map { Int(((decision.callUptime - $0) * 1000).rounded()) }),
             "harnessMs": value(dispatch?.harnessMilliseconds),
             "ok": value(dispatch.map(\.harnessConfirmed)),
             "harnessError": value(dispatch?.result["error"] as? String),
             "verification": value((dispatch?.result["verification"] as? String) ?? (dispatch?.result["status"] as? String)),
-            "offered": value(offer.map { $0.candidates.map(\.jsonObject) } ?? screenOffer.map { $0.candidates.map(\.jsonObject) }),
+            "offered": agentStep ? NSNull() : value(offer.map { $0.candidates.map(\.jsonObject) } ?? screenOffer.map { $0.candidates.map(\.jsonObject) }),
             "offeredCount": value(offer?.candidates.count ?? screenOffer?.candidates.count),
             "correctOffered": value(expectedPath.flatMap { expected in offer.map { $0.candidates.contains { $0.path == expected } } }),
             "enabledItemCount": value(offer?.enabledItemCount),
