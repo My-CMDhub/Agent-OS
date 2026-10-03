@@ -268,8 +268,32 @@ final class RealtimeVoiceSession {
 
     /// The owner's words of a task that ended asking them something: their
     /// answer starts a new task, judged by both turns' words (theirs only).
-    private var askedOwner: (heard: String, uptime: TimeInterval)?
-    static let askOwnerAnswerWindowSeconds: TimeInterval = 300
+    /// Re-review of 2e45939 (A): it was cleared only by the next do_task, so a
+    /// task minutes later was judged by an older task's words, and a question
+    /// answered by another question piled the words up. Now only the press right
+    /// after the question answers it (`askedOwnerAfterPress`), and the words are
+    /// the original request plus that one answer (`taskWords`).
+    struct AskedOwner: Equatable {
+        /// The original request's words: never an answer's.
+        var heard: String
+        var uptime: TimeInterval
+        /// Presses since the question: the first is the answer turn.
+        var pressesSince = 0
+    }
+    private var askedOwner: AskedOwner?
+    nonisolated static let askOwnerAnswerWindowSeconds: TimeInterval = 300
+
+    nonisolated static func askedOwnerAfterPress(_ asked: AskedOwner?) -> AskedOwner? {
+        guard var asked, asked.pressesSince == 0 else { return nil }
+        asked.pressesSince = 1
+        return asked
+    }
+
+    /// The words a new task is judged by, and the root kept if it asks again.
+    nonisolated static func taskWords(heard: String, asked: AskedOwner?, now: TimeInterval) -> (words: String, root: String) {
+        guard let asked, now - asked.uptime <= askOwnerAnswerWindowSeconds else { return (heard, heard) }
+        return (asked.heard + " " + heard, asked.heard)
+    }
     /// Agent system turns, one after another (OpenAI refuses a second
     /// `response.create` while one is answering).
     private var agentSpeech: Task<Void, Never>?
@@ -280,8 +304,9 @@ final class RealtimeVoiceSession {
     /// `startBundle`: the app in front at the owner's key-down — where the task began.
     private func startAgentLoop(goal: String, heard: String, startBundle: String?) -> [String: Any] {
         agentTask?.cancel()
-        var words = heard
-        if let asked = askedOwner, uptime - asked.uptime <= Self.askOwnerAnswerWindowSeconds { words = asked.heard + " " + heard }
+        // The old task's lines must not speak over the new one.
+        agentSpeech?.cancel()
+        let (words, root) = Self.taskWords(heard: heard, asked: askedOwner, now: uptime)
         askedOwner = nil
         let loop = AgentLoop.live(heard: words, startBundle: startBundle, harnessAnswer: harnessAnswer, model: agentModel) { [weak self] line in
             self?.enqueueAgentSpeech(line, final: false)
@@ -291,7 +316,7 @@ final class RealtimeVoiceSession {
         agentTask = Task { @MainActor [weak self] in
             let outcome = await loop.run(goal: goal, heard: words)
             guard let self else { return }
-            if case .askOwner = outcome { self.askedOwner = (words, self.uptime) }
+            if case .askOwner = outcome { self.askedOwner = AskedOwner(heard: root, uptime: self.uptime) }
             if let final = AgentLoop.finalLine(outcome, goal: goal, lastProgress: loop.lastProgress, step: loop.step), !Task.isCancelled {
                 await self.enqueueAgentSpeech(final, final: true)?.value
             }
@@ -397,6 +422,7 @@ final class RealtimeVoiceSession {
         stopPlayback()
         // The owner's press stops a running task; this turn is told where.
         if let stoppedAt = stopAgentLoop() { agentStoppedLine = AgentLoop.stoppedContextLine(step: stoppedAt) }
+        askedOwner = Self.askedOwnerAfterPress(askedOwner)
         JarvisNotch.shared.currentTurnID = line.turnID
         JarvisNotch.shared.handle(.hotkeyDown)
         playTick(.press)

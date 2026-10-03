@@ -457,6 +457,24 @@ struct AgentLoopTests {
         #expect(AgentLoop.resolvedStartBundle(atAcceptance: nil, firstLook: "com.apple.TextEdit") == "com.apple.TextEdit")
     }
 
+    /// A: a question's words were cleared only by the next do_task, so a task minutes
+    /// later was judged by an older task's words, and they piled up. Only the turn
+    /// right after the question answers it, and the words are the original request
+    /// plus that answer, never more.
+    @Test func anOldTasksWordsNeverJudgeALaterTask() {
+        typealias S = RealtimeVoiceSession
+        let asked = S.AskedOwner(heard: "post this in Slack", uptime: 100)
+        let answering = S.askedOwnerAfterPress(asked)
+        #expect(answering != nil)
+        let answered = S.taskWords(heard: "the general channel", asked: answering, now: 120)
+        #expect(answered.words == "post this in Slack the general channel")
+        #expect(answered.root == "post this in Slack")
+        #expect(S.askedOwnerAfterPress(answering) == nil, "a second press is not the answer")
+        let again = S.AskedOwner(heard: answered.root, uptime: 130)
+        #expect(S.taskWords(heard: "yes", asked: S.askedOwnerAfterPress(again), now: 140).words == "post this in Slack yes")
+        #expect(S.taskWords(heard: "x", asked: answering, now: 100 + S.askOwnerAnswerWindowSeconds + 1).words == "x")
+    }
+
     // MARK: Runner findings 2026-10-03 (voice)
 
     @Test func internalWordsSpokenAloudAreFound() {
