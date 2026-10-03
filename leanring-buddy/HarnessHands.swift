@@ -93,7 +93,17 @@ enum HarnessHands {
         /// Inside the target, but under a control of its own: a button, link,
         /// field or password box, or a name the kernel would ask or refuse about.
         case activeInsideTarget
+        /// The hit is an element the target sits INSIDE: Chromium answering coarsely
+        /// before it has refined the hit (asked again, `retriesHit`), or a backdrop
+        /// the tree does not publish (still refused).
+        case containerOfTarget
     }
+
+    /// How many times, and how far apart, a container answer is asked again.
+    static let hitRetries = 3
+    static let hitRetrySeconds = 0.15
+
+    static func retriesHit(_ relation: HitRelation) -> Bool { relation == .containerOfTarget }
 
     /// One element between the hit and the target, as read on the way up.
     struct HitChainNode: Equatable {
@@ -131,8 +141,9 @@ enum HarnessHands {
 
     /// The hit, relative to the target, from the chain read walking up from it:
     /// `chain[0]` is the hit, and the walk stopped at the target (`reachedTarget`).
-    static func relation(hitChain chain: [HitChainNode], reachedTarget: Bool, targetPublishesPress: Bool) -> HitRelation {
-        guard reachedTarget else { return .otherElementSameApp }
+    static func relation(hitChain chain: [HitChainNode], reachedTarget: Bool, targetPublishesPress: Bool,
+                         hitContainsTarget: Bool = false) -> HitRelation {
+        guard reachedTarget else { return hitContainsTarget ? .containerOfTarget : .otherElementSameApp }
         if chain.isEmpty { return .target }
         return chain.allSatisfy { isInert($0, targetPublishesPress: targetPublishesPress) } ? .insideTarget : .activeInsideTarget
     }
@@ -149,6 +160,9 @@ enum HarnessHands {
         case .otherElementSameApp:
             return HandsRefusal(code: "clickTargetObscured",
                                 message: "something else in the app is drawn over the element at that point; nothing was clicked")
+        case .containerOfTarget:
+            return HandsRefusal(code: "clickTargetObscured",
+                                message: "the app answers that point with a container of the element, not the element - something it does not list may cover it; nothing was clicked")
         case .unreadable:
             return HandsRefusal(code: "clickTargetObscured",
                                 message: "what is drawn at that point could not be checked; nothing was clicked")
@@ -603,6 +617,17 @@ enum HarnessHands {
                   let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
             current = (parent as! AXUIElement)
         }
+        // Not reached from the hit: is the hit one of the target's own ancestors?
+        var up: AXUIElement? = target
+        for _ in 0..<ancestorWalkLimit {
+            var parent: AnyObject?
+            guard let node = up, AXUIElementCopyAttributeValue(node, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            if CFEqual(parent, hit) {
+                return relation(hitChain: chain, reachedTarget: false, targetPublishesPress: targetPublishesPress, hitContainsTarget: true)
+            }
+            up = (parent as! AXUIElement)
+        }
         return relation(hitChain: chain, reachedTarget: false, targetPublishesPress: targetPublishesPress)
     }
 
@@ -752,8 +777,12 @@ enum HarnessHands {
         }
         let topLeft = SyntheticScroller.topLeftCentre(ofAppKitFrame: CGRect(origin: point, size: .zero),
                                                       primaryDisplayHeightInPoints: CGDisplayBounds(CGMainDisplayID()).height)
-        if let refusal = postRefusal(frontmostIsTarget: targetIsFrontmost(processIdentifier),
-                                     hit: hitRelation(atTopLeft: topLeft, target: element, processIdentifier: processIdentifier)) {
+        var hit = hitRelation(atTopLeft: topLeft, target: element, processIdentifier: processIdentifier)
+        for _ in 0..<hitRetries where retriesHit(hit) {
+            Thread.sleep(forTimeInterval: hitRetrySeconds)
+            hit = hitRelation(atTopLeft: topLeft, target: element, processIdentifier: processIdentifier)
+        }
+        if let refusal = postRefusal(frontmostIsTarget: targetIsFrontmost(processIdentifier), hit: hit) {
             return .failure(refusal)
         }
         guard postClick(atTopLeft: topLeft) else {

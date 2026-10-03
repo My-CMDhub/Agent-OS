@@ -192,6 +192,24 @@ struct HarnessHandsTests {
         }
     }
 
+    // Scenario A4, 2026-10-03 00:33Z anomaly dump: "Sign in" (an AXButton, frame
+    // read fine) refused "something else in the app is drawn over the element" on
+    // the runner's freshly loaded page; the same button, probed in its own window
+    // seconds later, hit-tested as itself. Chromium can answer a hit with a CONTAINER
+    // of the element before it has refined it: that is asked again, briefly, and
+    // still refused if it stays a container — never clicked through, because a
+    // backdrop the tree does not publish also answers as the container.
+    @Test func aHitThatAnswersWithTheTargetsContainerIsAskedAgainNeverClickedThrough() {
+        let group = HarnessHands.HitChainNode(role: "AXGroup")
+        #expect(HarnessHands.relation(hitChain: [group], reachedTarget: false, targetPublishesPress: false, hitContainsTarget: true) == .containerOfTarget)
+        #expect(HarnessHands.relation(hitChain: [group], reachedTarget: false, targetPublishesPress: false) == .otherElementSameApp)
+        #expect(HarnessHands.retriesHit(.containerOfTarget))
+        for relation in [HarnessHands.HitRelation.otherApp, .otherElementSameApp, .unreadable, .target, .insideTarget] {
+            #expect(!HarnessHands.retriesHit(relation), "\(relation)")
+        }
+        #expect(HarnessHands.hitRefusal(.containerOfTarget)?.code == "clickTargetObscured")
+    }
+
     @Test func aClickIsConfirmedByNamesOrByFocusThatArrived() {
         #expect(HarnessHands.clickEvidence(fingerprintChanged: true, focusedBefore: true, focusedNow: true) == "named elements changed")
         #expect(HarnessHands.clickEvidence(fingerprintChanged: false, focusedBefore: false, focusedNow: true) == "focus moved to the element")
