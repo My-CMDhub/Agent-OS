@@ -175,8 +175,9 @@ nonisolated enum RealtimeVoiceVerbs {
                                            description: "How far, in pages (screens). Default 1.")] + positionParameters),
         Declaration(name: typeTextName,
                     description: "Types text into a field of the app in front, as if from the keyboard. Never presses Enter or sends anything. "
-                        + "Aim it at the field by a name find_on_screen returned, x and y, or underPointer; leave them out only for a field "
-                        + "you know has keyboard focus — on a web page usually none has, so find the field first. Password fields are "
+                        + "Aim it by the field's name: the words printed in or beside it, for example \"Search\", looked up on screen. "
+                        + "A position only for a field with no words; leave the aim out only for a field "
+                        + "you know has keyboard focus — on a web page usually none has. Password fields are "
                         + "refused; replacing text already in a field asks the owner on a card.",
                     parameters: [appInFront,
                                  Parameter(name: "text", description: "Exactly the text to type, as the owner gave it."),

@@ -365,7 +365,9 @@ nonisolated enum RealtimeScreenVerbs {
     /// with a wrapper whose first named ancestor is the whole pane. The walk
     /// behind find_on_screen holds every element the pointer could be sent to,
     /// and the harness resolves the same names, so this is the first rung.
-    static func structuralHit(at point: CGPoint, snapshotResponse: [String: Any], screens: [CGRect]) -> RealtimeScreenHit? {
+    /// `roles`: only elements of these roles answer (typing: the text inputs).
+    static func structuralHit(at point: CGPoint, snapshotResponse: [String: Any], screens: [CGRect],
+                              roles: Set<String>? = nil) -> RealtimeScreenHit? {
         guard let window = visibleWindow(fromSnapshotResponse: snapshotResponse, screens: screens) else { return nil }
         // Over a password box: refused like the AX path, never its container.
         let overSecure = (snapshotResponse["elements"] as? [[String: Any]] ?? []).contains { element in
@@ -374,7 +376,8 @@ nonisolated enum RealtimeScreenVerbs {
         }
         if overSecure { return .refused(error: "secureField") }
         let windowArea = window.visible.width * window.visible.height
-        let pool = visiblePool(fromSnapshotResponse: snapshotResponse, screens: screens).pool
+        // `roles`: typing asks for a text field only (C2 03-34-52Z snapped to the page heading).
+        let pool = visiblePool(fromSnapshotResponse: snapshotResponse, screens: screens).pool.filter { roles?.contains($0.role) ?? true }
         guard let smallest = pool.enumerated()
             .filter({ $0.element.frame.contains(point) && $0.element.frame.width * $0.element.frame.height <= windowArea / 3 })
             .min(by: { ($0.element.frame.width * $0.element.frame.height, -$0.offset) < ($1.element.frame.width * $1.element.frame.height, -$1.offset) })?

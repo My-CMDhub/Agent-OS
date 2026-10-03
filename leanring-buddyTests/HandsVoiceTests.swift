@@ -125,6 +125,58 @@ struct HandsVoiceTests {
         #expect(try await resolve(call, heard: nil, pointer: pointer).get() == pointer)
     }
 
+    // MARK: Typing aimed by a position (scenarios A5, A9, C2, 03-34-52Z)
+
+    /// Gemini aimed type_text by x, y in A5, A9 and C2: C2's point snapped to the page's
+    /// heading and the kernel refused it, A5's y was pixels. A position types only into the
+    /// text field it lies inside — never into what the snap found nearest — and every
+    /// refusal sends the model back to the field's name.
+    @Test func typingByPositionTypesOnlyIntoTheFieldThePointIsIn() async throws {
+        let field = RealtimeScreenCandidate(name: "Search", role: "AXTextField", frame: CGRect(x: 500, y: 600, width: 300, height: 30), position: "x")
+        let heading = RealtimeScreenCandidate(name: "Mimic Search", role: "AXHeading", frame: CGRect(x: 500, y: 700, width: 300, height: 40), position: "x")
+        func type(x: Double, y: Double, hit: RealtimeScreenHit) async -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
+            await RealtimeOpenAppTool.resolveScreenTarget(
+                call: RealtimeToolCall(callID: "t", name: "type_text", appName: "Google Chrome", x: x, y: y, text: "hello world"),
+                thisTurn: nil, previousTurn: nil, followUpConfirmed: nil, confirmedByYes: false, now: 1_000,
+                screenshotDisplay: screen, keyDownPointer: nil, hitTest: { _ in hit })
+        }
+        #expect(try await type(x: 0.4, y: 0.32, hit: .element(field, app: chromeBundle)).get().candidate == field)
+        for hit in [RealtimeScreenHit.element(heading, app: chromeBundle), .nothing] {
+            guard case .failure(let refusal) = await type(x: 0.4, y: 0.2, hit: hit) else { Issue.record("typed into \(hit)"); continue }
+            #expect(refusal.error == "noFieldAtPoint")
+            #expect(refusal.message.contains("type_text again with name"))
+        }
+        guard case .failure(let pixels) = await type(x: 0.77, y: 332, hit: .element(field, app: chromeBundle)) else { Issue.record("typed at a pixel"); return }
+        #expect(pixels.error == "positionOutOfRange" && pixels.message.contains("type_text again with name"))
+    }
+
+    /// The walk's answer for typing: the text field holding the point, even under a
+    /// smaller named element inside it (a magnifier button); nothing when no field holds it.
+    @Test func theWalkAnswersATypingPositionWithTheFieldHoldingIt() {
+        let snapshot: [String: Any] = ["ok": true, "bundleIdentifier": chromeBundle, "walkStopReasons": [String](), "windowFrame": frameJSON(screen),
+                                       "elements": [
+            element("AXWindow", "Mimic Search", screen),
+            element("AXHeading", "Mimic Search", CGRect(x: 500, y: 700, width: 300, height: 40), actions: []),
+            element("AXTextField", "Search", CGRect(x: 500, y: 600, width: 300, height: 30), actions: [], source: "placeholder"),
+            element("AXButton", "Clear search", CGRect(x: 770, y: 603, width: 24, height: 24), parent: 2)
+        ]]
+        let roles = RealtimeScreenVerbs.textInputRoles
+        func hit(_ point: CGPoint, _ roles: Set<String>?) -> String? {
+            RealtimeScreenVerbs.structuralHit(at: point, snapshotResponse: snapshot, screens: [screen], roles: roles)?.candidate?.role
+        }
+        #expect(hit(CGPoint(x: 780, y: 612), nil) == "AXButton")
+        #expect(hit(CGPoint(x: 780, y: 612), roles) == "AXTextField")
+        #expect(hit(CGPoint(x: 600, y: 720), nil) == "AXHeading")
+        #expect(hit(CGPoint(x: 600, y: 720), roles) == nil)
+    }
+
+    /// The name is the way the model is told to aim typing: tool and prompt both.
+    @Test func typingIsAimedByTheFieldsName() {
+        let typeText = RealtimeVoiceVerbs.openAIDeclarations.first { $0["name"] as? String == "type_text" }
+        #expect((typeText?["description"] as? String)?.contains("Aim it by the field's name") == true)
+        #expect(RealtimeOpenAppTool.systemPrompt.contains("type_text types text into a field: aim it by the field's name"))
+    }
+
     // MARK: 1. press_element is a click; type_text clicks into its field; open_url (rows 13, 14, 23, 29)
 
     @Test func pressElementGoesToTheClickVerbAndAFieldIsClickedItself() throws {

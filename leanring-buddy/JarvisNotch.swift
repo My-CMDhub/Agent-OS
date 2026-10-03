@@ -226,6 +226,7 @@ nonisolated enum JarvisNotchReason {
         "frameUnreadable": "its position didn\u{2019}t read",
         // scroll / type_text / close (2026-10-01).
         "nothingAtPoint": "nothing there to act on",
+        "noFieldAtPoint": "no text field there",
         "missingText": "no text was given",
         "controlCharacterInText": "no line breaks, I don\u{2019}t press Enter",
         "invalidDirection": "no direction was given",

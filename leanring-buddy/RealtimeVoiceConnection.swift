@@ -893,6 +893,18 @@ final class RealtimeVoiceConnection {
         }
     }
 
+    /// The text fields visible in `app` now, as a hint for a typing refusal (nil: none, or unreadable).
+    static func visibleFieldsHint(app: String?, display: CGRect?, harnessAnswer: @escaping @Sendable (String) -> String) async -> String? {
+        guard case .success(let line) = RealtimeOpenAppTool.harnessRequestLine(
+            for: RealtimeToolCall(callID: "fields", name: RealtimeVoiceVerbs.findOnScreenName, appName: app, words: "field")) else { return nil }
+        let screens = NSScreen.screens.map(\.frame)
+        let fields = await Task.detached { () -> [String] in
+            RealtimeScreenVerbs.visibleTextFieldNames(fromSnapshotResponse: RealtimeOpenAppTool.harnessResponseObject(harnessAnswer(line)),
+                                                      screens: screens, screenshotDisplay: display)
+        }.value
+        return RealtimeOpenAppTool.unaimedTypingHint(fieldNames: fields)
+    }
+
     /// One tool call through every guard the live turn has: the offers, the heard
     /// check (against `turn.heardText`), the site check, the screen-target
     /// resolution, the notch, `RealtimeOpenAppTool.dispatch` with its tickets, the
@@ -973,7 +985,9 @@ final class RealtimeVoiceConnection {
                 }) { point in
                     let answered = await RealtimeOpenAppTool.screenHit(at: point, app: call.appName, answer: harnessAnswer, screens: screens,
                                                                        primaryDisplayHeight: primaryHeight,
-                                                                       deadlineSeconds: hitTestDeadlineSeconds)
+                                                                       deadlineSeconds: hitTestDeadlineSeconds,
+                                                                       roles: call.name == RealtimeVoiceVerbs.typeTextName
+                                                                           ? RealtimeScreenVerbs.textInputRoles : nil)
                     rung.value = answered.rung
                     return answered.hit
                 }
@@ -1015,6 +1029,11 @@ final class RealtimeVoiceConnection {
             dispatch = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: screenRefusal), harnessMilliseconds: 0,
                                             waitedForConfirmation: false, harnessResponse: nil)
             JarvisNotch.shared.handle(.harnessAnswered(ok: false, subject: "", error: screenRefusal.error))
+            // A typing position that named no field: say which fields are there (A5, C2 03-34-52Z).
+            if call.name == RealtimeVoiceVerbs.typeTextName, ["noFieldAtPoint", "positionOutOfRange"].contains(screenRefusal.error),
+               let hint = await visibleFieldsHint(app: call.appName, display: turn.screenshotDisplayFrame, harnessAnswer: harnessAnswer) {
+                dispatch.result["message"] = screenRefusal.message + hint
+            }
         } else {
             let onConfirmationRequired: @MainActor () -> Void = {
                 if isKnownTool { JarvisNotch.shared.handle(.confirmationRequired) }
@@ -1026,17 +1045,9 @@ final class RealtimeVoiceConnection {
             // Unaimed typing met no focused field: name the fields that are there (A9 live 02-30-16Z).
             if call.name == RealtimeVoiceVerbs.typeTextName, call.elementName == nil, call.x == nil, !call.underPointer,
                dispatch.result["error"] as? String == "kernelRefused", (dispatch.result["message"] as? String)?.contains("does not accept text") == true,
-               case .success(let line) = RealtimeOpenAppTool.harnessRequestLine(
-                for: RealtimeToolCall(callID: "fields", name: RealtimeVoiceVerbs.findOnScreenName, appName: call.appName, words: "field")) {
-                let display = turn.screenshotDisplayFrame
-                let screens = NSScreen.screens.map(\.frame)
-                let fields = await Task.detached { () -> [String] in
-                    RealtimeScreenVerbs.visibleTextFieldNames(fromSnapshotResponse: RealtimeOpenAppTool.harnessResponseObject(harnessAnswer(line)),
-                                                              screens: screens, screenshotDisplay: display)
-                }.value
-                if let hint = RealtimeOpenAppTool.unaimedTypingHint(fieldNames: fields), let message = dispatch.result["message"] as? String {
-                    dispatch.result["message"] = message + hint
-                }
+               let hint = await visibleFieldsHint(app: call.appName, display: turn.screenshotDisplayFrame, harnessAnswer: harnessAnswer),
+               let message = dispatch.result["message"] as? String {
+                dispatch.result["message"] = message + hint
             }
             // Both witnesses name one running app and only the app in front is
             // wrong: bring it forward through the harness (policy applies), then

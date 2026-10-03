@@ -180,7 +180,7 @@ nonisolated enum RealtimeOpenAppTool {
 
     menus: for a command in an app's menu bar, such as a view, a new window, or showing a bar, first call find_menu_items with the app and a few words, then press_menu with one of the paths it returned, copied exactly. never invent or change a path; if none fits, say so and press nothing. menus belong to the app in front, so focus_app first when it is not.
 
-    hands: scroll scrolls the window in front (direction up, down, left or right; amount in pages), at an area named like point_at, or the main area when none is given; its result names what came into view. type_text types text into a field: the one with keyboard focus unless you aim it like point_at; it never presses enter and sends nothing, so say what you typed and let the owner send it; type only text the owner gave or asked for. close closes the tab, the window, or quits the app in front (what tab, window or app); quitting shows the owner a card, and the app may still ask to save.
+    hands: scroll scrolls the window in front (direction up, down, left or right; amount in pages), at an area named like point_at, or the main area when none is given; its result names what came into view. type_text types text into a field: aim it by the field's name, the words printed in or beside it, such as "search"; a position only for a field with no words; no aim only for a field with keyboard focus; it never presses enter and sends nothing, so say what you typed and let the owner send it; type only text the owner gave or asked for. close closes the tab, the window, or quits the app in front (what tab, window or app); quitting shows the owner a card, and the app may still ask to save.
 
     screen: you can point at and press what you can see. to point, call point_at; to click, call press_element (it also clicks into a field). aim either by the element's name as printed on screen, which is looked up on the live screen, or by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image), or with underPointer true only when the owner says "this one", "here" or "where my cursor is"; a request that names the thing ("click sign in", "where is the phone number") is aimed by that name, never underPointer. for "where is X", call find_on_screen with X's words, then point_at the element that is X at once and say where it is; when a label such as "Phone:" sits beside its value, point at the value, not the label. if a result lists several matches, ask which one. a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. never say you can't do something you can see.
 
@@ -850,7 +850,11 @@ nonisolated enum RealtimeOpenAppTool {
             if inRange == nil, call.elementName == nil {
                 // Scenario A8 2026-10-03: Gemini sent pixels (251, 494) and a CSS selector as the
                 // name, heard only "fractions", and gave up. Point it at the name instead.
-                let nothing = isPress ? (call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : "pressed") : "done"
+                if call.name == RealtimeVoiceVerbs.typeTextName {
+                    return refuse("positionOutOfRange", "x and y are fractions of the screenshot, each from 0 to 1, never pixels. Nothing was typed. "
+                        + typeByNameAdvice)
+                }
+                let nothing = isPress ? "pressed" : "done"
                 return refuse("positionOutOfRange", "x and y are fractions of the screenshot, each from 0 to 1, never pixels. Nothing was "
                     + "\(nothing). Aim by name instead: call find_on_screen now with a few words printed on it (for a search result, "
                     + "words of its title), then call this again with the name it returns.")
@@ -882,6 +886,11 @@ nonisolated enum RealtimeOpenAppTool {
                                   nothing: call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : isPress ? "pressed" : "pointed at", heard: ordinalWords)
             }
             switch await hitTest(point) {
+            // Typing goes only into the text field the point lies in, never what the snap
+            // found nearest (C2 03-34-52Z: the page heading, refused by the kernel).
+            case .element(let candidate, _) where call.name == RealtimeVoiceVerbs.typeTextName
+                && !RealtimeScreenVerbs.textInputRoles.contains(candidate.role):
+                return refuse("noFieldAtPoint", "no text field is at that position; nothing was typed. " + typeByNameAdvice)
             case .element(let candidate, let app):
                 return .success(RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY),
                                                      app: app, source: .screenshotPoint))
@@ -889,6 +898,9 @@ nonisolated enum RealtimeOpenAppTool {
                 return refuse(error, error == "secureField" ? "that is a password field; nothing was done"
                     : error == "policyRefused" ? "the owner's policy refuses this app; nothing was done" : "that is Clicky itself; nothing was done")
             case .nothing:
+                if call.name == RealtimeVoiceVerbs.typeTextName {
+                    return refuse("noFieldAtPoint", "no text field is at that position; nothing was typed. " + typeByNameAdvice)
+                }
                 if isPress { return refuse("nothingAtPoint", "nothing that can be pressed is at that position; nothing was pressed") }
                 return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .screenshotPoint))
             }
@@ -918,6 +930,11 @@ nonisolated enum RealtimeOpenAppTool {
             return liveTarget(named: name, found: found, nothing: nothing, heard: ordinalWords)
         }
     }
+
+    /// Where a typing refusal sends the model: the field's name, looked up live
+    /// (A5, A9, C2 03-34-52Z: Gemini aimed by x, y and missed or sent pixels).
+    static let typeByNameAdvice = "Aim by the field's name instead: call type_text again with name set to the words printed in or "
+        + "beside the field (for example \"Search\"); it is looked up on screen."
 
     /// One visible match acts; several are listed for the model to ask about
     /// (name, kind, where — never a pixel); none is notFound.
@@ -1018,14 +1035,14 @@ nonisolated enum RealtimeOpenAppTool {
     /// the policy refuses is refused here too: the AX fallback reads no policy.
     static func screenHit(at point: CGPoint, app: String?, answer: @escaping @Sendable (String) -> String, screens: [CGRect],
                           primaryDisplayHeight: CGFloat, deadlineSeconds: Double,
-                          snapshotDeadlineSeconds: Double = 2) async -> (hit: RealtimeScreenHit, rung: String) {
+                          snapshotDeadlineSeconds: Double = 2, roles: Set<String>? = nil) async -> (hit: RealtimeScreenHit, rung: String) {
         if let app, case .success(let line) = harnessRequestLine(
             for: RealtimeToolCall(callID: "hit", name: RealtimeVoiceVerbs.findOnScreenName, appName: app, words: "hit")),
            let answered = await RealtimeVoiceSession.value(within: snapshotDeadlineSeconds, { answer(line) }) {
             let snapshot = harnessResponseObject(answered)
             // Refused or unreadable: fail closed, never on to the AX path, which reads no policy.
             if (snapshot["error"] as? String)?.hasPrefix("policy") == true { return (.refused(error: "policyRefused"), "policy") }
-            if let hit = RealtimeScreenVerbs.structuralHit(at: point, snapshotResponse: snapshot, screens: screens) {
+            if let hit = RealtimeScreenVerbs.structuralHit(at: point, snapshotResponse: snapshot, screens: screens, roles: roles) {
                 return (hit, "walk")
             }
         }
