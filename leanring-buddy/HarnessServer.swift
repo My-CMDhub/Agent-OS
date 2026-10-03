@@ -1816,7 +1816,8 @@ final class HarnessServer {
     ///    AXStaticText, and that is typed text, not a label.
     /// A withheld element (`AccessibilityElementNode.withholdsName`) is listed
     /// with a null name, so a consumer can count it hidden.
-    static func namedElements(in rootNode: AccessibilityElementNode) -> [[String: Any]] {
+    /// `clippedToView` false: off-screen ones too (a scroll's before-picture).
+    static func namedElements(in rootNode: AccessibilityElementNode, clippedToView: Bool = true) -> [[String: Any]] {
         var listed: [[String: Any]] = []
         func visit(_ node: AccessibilityElementNode, parent: Int?, clip: CGRect) {
             let frame = node.frameInAppKitCoordinates
@@ -1826,7 +1827,7 @@ final class HarnessServer {
             // pointer's `structuralHit` can see it and refuse rather than land on its container.
             if node.displayName != nil || (isTextInput && node.fieldLabel != nil) || node.mightBeSecure,
                frame.width > 0, frame.height > 0,
-               !frame.intersection(clip).isEmpty {
+               !clippedToView || !frame.intersection(clip).isEmpty {
                 var entry = summarise(node)
                 entry["nameSource"] = node.title != nil ? "title" : node.elementDescription != nil ? "description"
                     : isTextInput && node.placeholder != nil ? "placeholder" : "value"
@@ -2260,6 +2261,8 @@ final class HarnessServer {
         }
 
         let before = HarnessScroll.visibleNames(fromNamedElements: Self.namedElements(in: rootNode), within: bounds)
+        // Everything the walk knew, in view or not: what comes in from below was below.
+        let known = HarnessScroll.visibleNames(fromNamedElements: Self.namedElements(in: rootNode, clippedToView: false), within: .infinite)
         let barBefore = HarnessScroll.scrollBarValue(of: container?.accessibilityElement, horizontal: direction.isHorizontal)
         // Re-walk until the content moved (an animated page takes a few hundred ms), ~1 s at most.
         func observe() -> (outcome: ScrollOutcome, newlyVisible: [String]) {
@@ -2279,7 +2282,7 @@ final class HarnessServer {
                 let after = HarnessScroll.visibleNames(fromNamedElements: Self.namedElements(in: laterRoot),
                                                        within: bounds.offsetBy(dx: -dx, dy: -dy))
                     .map { (name: $0.name, frame: $0.frame.offsetBy(dx: dx, dy: dy)) }
-                let change = HarnessScroll.change(before: before, after: after, direction: direction)
+                let change = HarnessScroll.change(before: known, after: after, direction: direction, inViewBefore: Set(before.map(\.name)))
                 last = (HarnessScroll.outcome(moved: change.moved, barBefore: barBefore, barAfter: barAfter, direction: direction),
                         change.newlyVisible)
                 if last.outcome == .moved { return last }

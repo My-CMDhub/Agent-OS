@@ -127,19 +127,21 @@ enum HarnessScroll {
 
     /// Moved: elements in view before and after shifted the way the content goes
     /// for `direction` (AppKit, y up: down moves content UP), along that axis
-    /// only, same size — and they outnumber the elements that changed any other
+    /// only — and they outnumber the elements that changed any other
     /// way. A clock ticking or an indicator appearing changes names, not
     /// positions (review 2026-10-01). Scenario A3 (run 2026-10-02T23-51-05Z)
     /// answered "confirmed" while the page's offset stayed 0, when "moved" was
     /// any frame change or NOTHING shared at all: a re-layout, a different
     /// window, two same-named elements read against each other's frame.
     /// Same-named elements are left out: nothing says which is which.
-    /// ponytail: a scroll so long that nothing in view is shared (10 pages of a
-    /// web area, which publishes no scroll bar) reads notObserved — honest, not
-    /// proven; compare against the off-screen tree if that ever matters.
+    /// ponytail: a scroll past everything the walk knew (it reads one screenful
+    /// beyond the view) shares nothing and reads notObserved — honest, not proven.
     /// newlyVisible: names in view after that were not before, once each, capped.
+    /// `before`: every element known before the scroll, in view or not (a heading
+    /// that comes in from below was below); `inViewBefore`: the names that were in
+    /// view (nil: all of `before`), for newlyVisible.
     static func change(before: [(name: String, frame: CGRect)], after: [(name: String, frame: CGRect)],
-                       direction: ScrollDirection) -> (moved: Bool, newlyVisible: [String]) {
+                       direction: ScrollDirection, inViewBefore: Set<String>? = nil) -> (moved: Bool, newlyVisible: [String]) {
         func unique(_ items: [(name: String, frame: CGRect)]) -> [String: CGRect] {
             Dictionary(grouping: items, by: \.name).compactMapValues { $0.count == 1 ? $0[0].frame : nil }
         }
@@ -147,18 +149,22 @@ enum HarnessScroll {
         var along = 0, otherwise = 0
         for (name, frame) in unique(after) {
             guard let old = beforeFrames[name], old != frame else { continue }
-            let dx = frame.minX - old.minX, dy = frame.minY - old.minY
-            let sameSize = abs(frame.width - old.width) < 1 && abs(frame.height - old.height) < 1
+            // The midpoint along the axis, the other axis fixed. Size ALONG the axis may
+            // change: Chromium clips an element leaving the view to the view's edge
+            // (probe 2026-10-03, mimic article: a heading at AX y 243, h 38 read y 112,
+            // h 1 once scrolled past), and that clipped row is still "in view".
             let shift: CGFloat
             switch direction {
-            case .down: shift = abs(dx) < 1 ? dy : 0
-            case .up: shift = abs(dx) < 1 ? -dy : 0
-            case .right: shift = abs(dy) < 1 ? -dx : 0
-            case .left: shift = abs(dy) < 1 ? dx : 0
+            case .down, .up:
+                let fixed = abs(frame.minX - old.minX) < 1 && abs(frame.width - old.width) < 1
+                shift = fixed ? (direction == .down ? 1 : -1) * (frame.midY - old.midY) : 0
+            case .right, .left:
+                let fixed = abs(frame.minY - old.minY) < 1 && abs(frame.height - old.height) < 1
+                shift = fixed ? (direction == .left ? 1 : -1) * (frame.midX - old.midX) : 0
             }
-            if sameSize && shift >= 1 { along += 1 } else { otherwise += 1 }
+            if shift >= 1 { along += 1 } else { otherwise += 1 }
         }
-        let beforeNames = Set(before.map(\.name))
+        let beforeNames = inViewBefore ?? Set(before.map(\.name))
         var newlyVisible: [String] = []
         for item in after where !beforeNames.contains(item.name) && !newlyVisible.contains(item.name) {
             newlyVisible.append(item.name)

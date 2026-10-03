@@ -184,6 +184,25 @@ struct HandsReviewTests {
         let twins = [(name: "Read more", frame: CGRect(x: 300, y: 500, width: 80, height: 16)),
                      (name: "Read more", frame: CGRect(x: 300, y: 300, width: 80, height: 16))]
         #expect(!HarnessScroll.change(before: twins, after: twins, direction: .down).moved, "nothing moved")
+        // Live 2026-10-03 00-29-44Z, A3 3/3: a page scrolled 640 pt and nothing in view
+        // was shared — the heading that came in sat BELOW the view before. Known
+        // before, anywhere in the walk, is what a frame is compared with.
+        let below = (name: "The keeper's cat", frame: CGRect(x: 300, y: -300, width: 300, height: 30))
+        let cameIn = [(name: "The keeper's cat", frame: CGRect(x: 300, y: 340, width: 300, height: 30))]
+        let scrolled = HarnessScroll.change(before: before + [below], after: cameIn, direction: .down,
+                                            inViewBefore: Set(before.map(\.name)))
+        #expect(scrolled.moved && scrolled.newlyVisible == ["The keeper's cat"])
+        #expect(!HarnessScroll.change(before: before + [below], after: cameIn, direction: .up).moved)
+        // Probe 2026-10-03 on the mimic article (AX frames, 900-pt display, as AppKit):
+        // Chromium clips what scrolled past to the view's top edge, 1 pt tall, still in
+        // view. A3 3/3 and B5 read notVerified while the page moved, on "same size".
+        let pageBefore = [(name: "Mimic Weekly", frame: CGRect(x: 24, y: 752, width: 130, height: 24)),
+                          (name: "The last lighthouse on Sample Point", frame: CGRect(x: 340, y: 619, width: 760, height: 38))]
+        let pageAfter = [(name: "Mimic Weekly", frame: CGRect(x: 24, y: 787, width: 130, height: 1)),
+                         (name: "The last lighthouse on Sample Point", frame: CGRect(x: 340, y: 787, width: 760, height: 1)),
+                         (name: "Visiting", frame: CGRect(x: 340, y: 380, width: 760, height: 28))]
+        #expect(HarnessScroll.change(before: pageBefore, after: pageAfter, direction: .down).moved)
+        #expect(!HarnessScroll.change(before: pageBefore, after: pageAfter, direction: .up).moved)
         // The bar moving the wrong way is not the scroll asked for.
         #expect(HarnessScroll.outcome(moved: false, barBefore: 0.6, barAfter: 0.4, direction: .down) == .notObserved)
         #expect(HarnessScroll.outcome(moved: false, barBefore: 0.6, barAfter: 0.4, direction: .up) == .moved)
