@@ -688,6 +688,7 @@ extension AgentLoop {
     static func live(heard: String, harnessAnswer: @escaping @Sendable (String) -> String, model: AgentLoopModel,
                      narrate: @escaping (String) -> Void) -> AgentLoop {
         let carry = MarksCarry()
+        carry.runningAtStart = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
         let loop = AgentLoop(dependencies: Dependencies(
             model: { body, timeout in try await model.send(body, timeout: timeout) },
             observe: {
@@ -720,10 +721,40 @@ extension AgentLoop {
         /// voice-decisions.log's turnId for a step: "<run>-<n>".
         var runID = ""
         var calls = 0
-        /// Apps this task opened or focused itself (`agentOpenedBundles`).
-        var openedBundles: Set<String> = []
+        /// Apps running when the task began: opening or focusing one makes it no more the task's.
+        var runningAtStart: Set<String> = []
+        /// Apps this task launched itself: wholly its own.
+        var launchedBundles: Set<String> = []
+        /// Pages this task opened, by their browser tab's identity: its own only while in front.
+        var taskTabs: [String: Set<AccessibilityElementKey>] = [:]
         /// The app in front at the task's first look (`agentStartBundle`).
         var startBundle: String?
+    }
+
+    /// What an ok open makes the task's own (re-review of 2e45939): the harness's
+    /// answer to open_url names the default browser, usually already running, and
+    /// counting it made every tab of it — the owner's own — the task's. An app the
+    /// task launched is its own; a page it opened is its own tab only (a browser
+    /// launched for it may restore the owner's tabs); an app already running that
+    /// it opened or focused stays the owner's.
+    enum OpenOwnership: Equatable { case app, tab, none }
+
+    nonisolated static func ownership(afterOpening tool: String, bundle: String, runningAtStart: Set<String>) -> OpenOwnership {
+        if tool == RealtimeVoiceVerbs.openURLName { return .tab }
+        return runningAtStart.contains(bundle) ? .none : .app
+    }
+
+    /// The apps a step may act in as the task's own: what it launched, and a
+    /// browser whose tab in front is one the task opened.
+    nonisolated static func openedByTask<Key: Hashable>(launched: Set<String>, taskTabs: [String: Set<Key>],
+                                                        frontTabs: [String: Key]) -> Set<String> {
+        launched.union(taskTabs.compactMap { bundle, tabs in frontTabs[bundle].map(tabs.contains) == true ? bundle : nil })
+    }
+
+    /// The browser's selected tab in its front window, read off main.
+    nonisolated static func frontTab(of bundle: String) -> AccessibilityElementKey? {
+        guard let browser = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { return nil }
+        return HarnessHands.selectedTab(processIdentifier: browser.processIdentifier)
     }
 
     struct FrontApp: Sendable {
@@ -781,7 +812,11 @@ extension AgentLoop {
         let now = ProcessInfo.processInfo.systemUptime
         let marks = RealtimeTurnMarks()
         marks.isAgentStep = true
-        marks.agentOpenedBundles = carry.openedBundles
+        let tabBrowsers = Array(carry.taskTabs.keys)
+        let frontTabs = await Task.detached {
+            Dictionary(uniqueKeysWithValues: tabBrowsers.compactMap { bundle in frontTab(of: bundle).map { (bundle, $0) } })
+        }.value
+        marks.agentOpenedBundles = openedByTask(launched: carry.launchedBundles, taskTabs: carry.taskTabs, frontTabs: frontTabs)
         marks.agentStartBundle = carry.startBundle
         marks.heardText = heard
         marks.heardCompleteUptime = now
@@ -801,7 +836,12 @@ extension AgentLoop {
         if let dispatch, dispatch.harnessConfirmed,
            [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName, RealtimeVoiceVerbs.openURLName].contains(filled.name),
            let bundle = dispatch.harnessResponse?["bundleIdentifier"] as? String {
-            carry.openedBundles.insert(bundle)
+            switch ownership(afterOpening: filled.name, bundle: bundle, runningAtStart: carry.runningAtStart) {
+            case .app: carry.launchedBundles.insert(bundle)
+            case .tab:
+                if let tab = await Task.detached(operation: { frontTab(of: bundle) }).value { carry.taskTabs[bundle, default: []].insert(tab) }
+            case .none: break
+            }
         }
         // voice-decisions.log, as a voice turn's calls are: the heard check, the offer, the rung.
         RealtimeDecisionTrace.append(marks.decisions, turnID: traceTurnID, stack: "agentLoop", source: "agentLoop", releasedUptime: now)

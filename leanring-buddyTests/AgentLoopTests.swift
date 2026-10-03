@@ -420,6 +420,26 @@ struct AgentLoopTests {
         #expect(!unnamed(.noAppHeard, tool: "find_on_screen", bundle: "com.apple.TextEdit")) // reads are never refused
     }
 
+    // MARK: Re-review of 2e45939
+
+    /// B: open_url's answer names the default browser, usually already running, and
+    /// every tab of it then counted as opened by the task — the owner's own tabs
+    /// too; open_app of a running app did the same. Only an app the task launched
+    /// counts whole, and a page it opened counts only while its own tab is in front.
+    @Test func onlyWhatTheTaskLaunchedOrTheTabItOpenedCountsAsItsOwn() {
+        let running: Set<String> = ["com.google.Chrome", "com.apple.TextEdit"]
+        #expect(AgentLoop.ownership(afterOpening: "open_url", bundle: "com.google.Chrome", runningAtStart: running) == .tab)
+        #expect(AgentLoop.ownership(afterOpening: "open_url", bundle: "com.apple.Safari", runningAtStart: running) == .tab)
+        #expect(AgentLoop.ownership(afterOpening: "open_app", bundle: "com.apple.TextEdit", runningAtStart: running) == .none)
+        #expect(AgentLoop.ownership(afterOpening: "focus_app", bundle: "com.apple.TextEdit", runningAtStart: running) == .none)
+        #expect(AgentLoop.ownership(afterOpening: "open_app", bundle: "com.apple.Notes", runningAtStart: running) == .app)
+        let tabs = ["com.google.Chrome": Set(["taskTab"])]
+        #expect(AgentLoop.openedByTask(launched: ["com.apple.Notes"], taskTabs: tabs, frontTabs: ["com.google.Chrome": "taskTab"])
+                == ["com.apple.Notes", "com.google.Chrome"])
+        #expect(AgentLoop.openedByTask(launched: [], taskTabs: tabs, frontTabs: ["com.google.Chrome": "ownerTab"]).isEmpty)
+        #expect(AgentLoop.openedByTask(launched: [], taskTabs: tabs, frontTabs: [String: String]()).isEmpty)
+    }
+
     // MARK: Runner findings 2026-10-03 (voice)
 
     @Test func internalWordsSpokenAloudAreFound() {

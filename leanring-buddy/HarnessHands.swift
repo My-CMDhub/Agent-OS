@@ -938,6 +938,34 @@ enum HarnessHands {
         return BrowserWindowRead(frontmost: frontmost as? Bool == true, window: (window as! AXUIElement), title: title as? String)
     }
 
+    /// The selected tab of the browser's front window: the tab strip's
+    /// (`AXTabGroup`) child whose AXValue is 1, by element identity — a tab keeps
+    /// its element while its page navigates. nil when it cannot be read.
+    static func selectedTab(processIdentifier: pid_t) -> AccessibilityElementKey? {
+        guard let window = browserWindow(processIdentifier: processIdentifier).window else { return nil }
+        var queue = [window]
+        var visited = 0
+        while !queue.isEmpty, visited < webAreaSearchLimit {
+            let node = queue.removeFirst()
+            visited += 1
+            var role: AnyObject?
+            var children: AnyObject?
+            AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &role)
+            guard AXUIElementCopyAttributeValue(node, kAXChildrenAttribute as CFString, &children) == .success,
+                  let children = children as? [AXUIElement] else { continue }
+            if role as? String == "AXTabGroup" {
+                for tab in children {
+                    var value: AnyObject?
+                    if AXUIElementCopyAttributeValue(tab, kAXValueAttribute as CFString, &value) == .success, (value as? NSNumber)?.intValue == 1 {
+                        return AccessibilityElementKey(element: tab)
+                    }
+                }
+            }
+            queue += children
+        }
+        return nil
+    }
+
     /// Nodes looked at for the page's `AXWebArea`: Chromium puts it a few
     /// levels under the window, beside the tab strip and toolbar.
     static let webAreaSearchLimit = 400
