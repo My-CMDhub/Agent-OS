@@ -251,10 +251,12 @@ nonisolated enum RealtimeHeardCheck {
                                                   ["this", "store"], ["this", "tab"], ["the", "site"], ["the", "website"]]
     static let pagePartWords: Set<String> = ["page", "tab", "section"]
 
-    /// `callIsPageApp`: the call opens or focuses the page's own app (the one in
-    /// front, or the task's start app) — never "an app instead of the page"
-    /// (C3 live 02-30-16Z: focusing Chrome back after Finder came forward).
-    static func refusesOpeningAnApp(toolName: String, outcome: Outcome, transcript: String?, callIsPageApp: Bool = false) -> Bool {
+    /// `callIsPageApp`: the call opens or focuses the page's own app (`isPageApp`)
+    /// — never "an app instead of the page" (C3 live 02-30-16Z: focusing Chrome
+    /// back after Finder came forward). `named`: the app the call opens; a page
+    /// part the owner places in it ("the bluetooth page in settings") is its page.
+    static func refusesOpeningAnApp(toolName: String, outcome: Outcome, transcript: String?, callIsPageApp: Bool = false,
+                                    named: String? = nil) -> Bool {
         guard [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName].contains(toolName), outcome == .noAppHeard,
               !callIsPageApp, let transcript else { return false }
         let spoken = RealtimeVoiceVerbs.foldedTokens(transcript)
@@ -262,7 +264,31 @@ nonisolated enum RealtimeHeardCheck {
         let partOfAPage = zip(spoken, spoken.dropFirst()).contains { first, second in
             pagePartWords.contains(second) && !["this", "the", "a", "that", "my", "new"].contains(first)
         }
-        return onThePage || partOfAPage
+        return onThePage || (partOfAPage && !(named.map { wordsPlaceThePage(spoken, inAppNamed: $0) } ?? false))
+    }
+
+    /// Words that put a page inside an app: "in settings", "of System Settings", "within Chrome".
+    static let pagePlaceLeadWords: Set<String> = ["in", "of", "inside", "within"]
+
+    /// The owner's words place the page in the app the call names: a lead word,
+    /// then (past "the" / "my") a word of that app's name. 2026-10-03: "open the
+    /// bluetooth page in settings" was refused unless System Settings was in front.
+    /// "settings" names no app to `decide` (`genericNameWords`), so this reads the
+    /// call's own app: the owner's words agree with it, they do not choose it.
+    static func wordsPlaceThePage(_ spoken: [String], inAppNamed named: String) -> Bool {
+        let nameWords = Set(RealtimeVoiceVerbs.foldedTokens(named)).subtracting(["app", "the"])
+        return spoken.indices.contains { index in
+            guard pagePlaceLeadWords.contains(spoken[index]) else { return false }
+            let next = spoken[(index + 1)...].firstIndex { !["the", "my"].contains($0) }
+            return next.map { nameWords.contains(spoken[$0]) } ?? false
+        }
+    }
+
+    /// The page's own app: the one in front, the task's start app, or one the
+    /// task itself opened (launched, or whose tab in front it opened).
+    static func isPageApp(callBundle: String?, startBundle: String?, frontmostBundle: String?, openedByTask: Set<String>) -> Bool {
+        guard let callBundle else { return false }
+        return callBundle == startBundle || callBundle == frontmostBundle || openedByTask.contains(callBundle)
     }
 
     static func pageNotAppRefusal(named: String) -> [String: Any] {

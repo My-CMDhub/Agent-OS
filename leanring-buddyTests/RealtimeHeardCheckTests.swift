@@ -587,4 +587,35 @@ struct RealtimeHeardCheckTests {
         #expect(RealtimeHeardCheck.refusesOpeningAnApp(toolName: "open_app", outcome: .noAppHeard,
                                                        transcript: "Open the settings page on this site", callIsPageApp: false))
     }
+
+    // 2026-10-03 brief: any word before "page" / "section" refused the north-star app
+    // ("open the bluetooth page in settings" opened nothing unless Settings was in front).
+    // Words that place the page IN an app name that app; B11 (no app named) still refuses.
+    @Test func aPageTheOwnerPlacesInAnAppMayOpenThatApp() {
+        func refuses(_ transcript: String, named: String) -> Bool {
+            RealtimeHeardCheck.refusesOpeningAnApp(toolName: "open_app", outcome: .noAppHeard, transcript: transcript, named: named)
+        }
+        #expect(!refuses("open the bluetooth page in settings", named: "System Settings"))
+        #expect(!refuses("open the wifi section of settings", named: "System Settings"))
+        #expect(!refuses("open the wi-fi section of System Settings", named: "System Settings"))
+        #expect(!refuses("open the extensions page in Chrome", named: "Google Chrome"))
+        // B11: a page part with no app named, or the page in front named.
+        #expect(refuses("Open the Settings page", named: "System Settings"))
+        #expect(refuses("Open the settings page on this site", named: "System Settings"))
+        #expect(refuses("open the settings page in this shop", named: "System Settings"))
+        // The words place the page in another app than the call opens.
+        #expect(refuses("open the bluetooth page in settings", named: "TextEdit"))
+    }
+
+    // An app the task itself opened is the page's app too, like the front and start apps.
+    @Test func anAppTheTaskOpenedIsThePagesApp() {
+        typealias Check = RealtimeHeardCheck
+        #expect(Check.isPageApp(callBundle: "com.apple.TextEdit", startBundle: "com.google.Chrome", frontmostBundle: "com.apple.finder",
+                                openedByTask: ["com.apple.TextEdit"]))
+        #expect(Check.isPageApp(callBundle: "com.google.Chrome", startBundle: "com.google.Chrome", frontmostBundle: nil, openedByTask: []))
+        #expect(Check.isPageApp(callBundle: "com.apple.finder", startBundle: nil, frontmostBundle: "com.apple.finder", openedByTask: []))
+        #expect(!Check.isPageApp(callBundle: "com.apple.systempreferences", startBundle: "com.google.Chrome", frontmostBundle: "com.google.Chrome",
+                                 openedByTask: ["com.apple.TextEdit"]))
+        #expect(!Check.isPageApp(callBundle: nil, startBundle: nil, frontmostBundle: nil, openedByTask: []))
+    }
 }

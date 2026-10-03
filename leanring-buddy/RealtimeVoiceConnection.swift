@@ -1180,7 +1180,9 @@ final class RealtimeVoiceConnection {
         let (decision, namedAppIsRunning, actsInUnnamedApp, callIsPageApp) = await Task.detached { () -> (RealtimeHeardCheck.Decision, Bool, Bool, Bool) in
             var callBundle: String?
             if case .resolved(let bundleIdentifier, _) = RealtimeVoiceVerbs.appIdentity(named: appName) { callBundle = bundleIdentifier }
-            let pageApp = callBundle != nil && (callBundle == agentStartBundle || callBundle == frontmost.flatMap { Bundle(url: $0)?.bundleIdentifier })
+            let pageApp = RealtimeHeardCheck.isPageApp(callBundle: callBundle, startBundle: agentStartBundle,
+                                                       frontmostBundle: frontmost.flatMap { Bundle(url: $0)?.bundleIdentifier },
+                                                       openedByTask: agentOpenedBundles)
             let offered = recentOffers.filter { $0.app != nil && $0.app == callBundle }.flatMap(\.labels)
             // A browser named: "LinkedIn within this browser" is a page inside it.
             let namedIsBrowser = callBundle.flatMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }.map { appURL in
@@ -1215,7 +1217,7 @@ final class RealtimeVoiceConnection {
         var refusal = RealtimeHeardCheck.mayRefuse(toolName: call.name)
             ? RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named, namedAppIsRunning: namedAppIsRunning) : nil
         if refusal == nil, RealtimeHeardCheck.refusesOpeningAnApp(toolName: call.name, outcome: decision.outcome, transcript: transcript,
-                                                                   callIsPageApp: callIsPageApp) {
+                                                                   callIsPageApp: callIsPageApp, named: named) {
             refusal = RealtimeHeardCheck.pageNotAppRefusal(named: named)
         }
         if refusal == nil, actsInUnnamedApp {
