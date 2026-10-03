@@ -584,13 +584,20 @@ final class AgentLoop {
         return nil
     }
 
-    /// The receipts each stated effect needs; a question, a negated effect and
-    /// a sentence attributed to the page claim nothing.
+    /// A person in attributed speech: the effect is J.A.R.V.I.S.'s or the owner's,
+    /// not the page's content. 2026-10-03: "According to the page, your comment was
+    /// posted." and "The page shows I sent it" passed with no receipt.
+    static let effectPersons: Set<String> = ["i", "i've", "i'd", "i'm", "me", "my", "we", "we've", "our", "us",
+                                             "you", "you've", "your", "yours"]
+
+    /// The receipts each stated effect needs; a question and a negated effect
+    /// claim nothing, nor does an effect attributed to the page, unless a person
+    /// (`effectPersons`) is in the attributed part before it.
     static func effectClaims(_ summary: String) -> [Set<String>] {
         var claims: [Set<String>] = []
         for (words, isQuestion) in RealtimeOpenAppTool.sentences(summary) where !isQuestion {
             let attributed = attributionStart(words) ?? words.count
-            for (index, word) in words.enumerated() where index < attributed {
+            for (index, word) in words.enumerated() where index < attributed || words[attributed..<index].contains(where: effectPersons.contains) {
                 guard let kind = effectWords.first(where: { $0.words.contains(word) }) else { continue }
                 if words[max(0, index - 3)..<index].contains(where: { effectNegations.contains($0) || $0.hasSuffix("n't") }) { continue }
                 claims.append(kind.receipts)

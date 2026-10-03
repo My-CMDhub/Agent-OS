@@ -541,6 +541,22 @@ struct AgentLoopTests {
         #expect(!RealtimeOpenAppTool.claimedWithoutReceipt(transcript: "You may send it when you're ready.", okToolNames: []))
         #expect(RealtimeOpenAppTool.claimedWithoutReceipt(transcript: "I typed it, sir.", okToolNames: []))
     }
+
+    /// 2026-10-03 brief: attributed speech hid effects done by J.A.R.V.I.S. or the
+    /// owner. "According to the page, your comment was posted." passed with no receipt.
+    /// Inside attributed speech an effect with a person (I, you, we) still needs one;
+    /// a fact about the page's content does not.
+    @MainActor @Test func anAttributedEffectOnTheOwnerOrJarvisStillNeedsAReceipt() {
+        #expect(AgentLoop.doneChallenge(summary: "According to the page, your comment was posted.", evidence: [], receipts: []) != nil)
+        #expect(AgentLoop.doneChallenge(summary: "The page shows I sent it.", evidence: [], receipts: []) != nil)
+        #expect(AgentLoop.doneChallenge(summary: "The site says we submitted the form.", evidence: [], receipts: []) != nil)
+        #expect(AgentLoop.doneChallenge(summary: "The page shows I sent it.", evidence: [3],
+                                        receipts: [AgentLoop.Receipt(step: 3, toolName: "press_element", ok: true, error: nil)]) == nil)
+        // Facts about the page's content stay exempt.
+        #expect(AgentLoop.doneChallenge(summary: "The page says the shop opened in 2019.", evidence: [], receipts: []) == nil)
+        #expect(AgentLoop.doneChallenge(summary: "According to the article, the bridge opened in 1932.", evidence: [], receipts: []) == nil)
+    }
+
 }
 
 /// A harness that answers from a script, one line per request, and keeps what it was asked.
