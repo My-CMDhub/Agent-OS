@@ -203,6 +203,16 @@ struct HandsReviewTests {
                          (name: "Visiting", frame: CGRect(x: 340, y: 380, width: 760, height: 28))]
         #expect(HarnessScroll.change(before: pageBefore, after: pageAfter, direction: .down).moved)
         #expect(!HarnessScroll.change(before: pageBefore, after: pageAfter, direction: .up).moved)
+        // B5 live 2026-10-03 00:57:17Z, the second scroll (offset 640 -> 1762): what
+        // was left in view was headings and their own text, each pair sharing a name,
+        // and what had already been clipped to the top edge did not move again.
+        let secondBefore = [(name: "Mimic Weekly", frame: CGRect(x: 24, y: 787, width: 130, height: 1)),
+                            (name: "The restoration", frame: CGRect(x: 340, y: 600, width: 760, height: 38)),
+                            (name: "The restoration", frame: CGRect(x: 340, y: 600, width: 171, height: 38))]
+        let secondAfter = [(name: "Mimic Weekly", frame: CGRect(x: 24, y: 787, width: 130, height: 1)),
+                           (name: "The restoration", frame: CGRect(x: 340, y: 787, width: 760, height: 1)),
+                           (name: "The restoration", frame: CGRect(x: 340, y: 787, width: 171, height: 1))]
+        #expect(HarnessScroll.change(before: secondBefore, after: secondAfter, direction: .down).moved)
         // The bar moving the wrong way is not the scroll asked for.
         #expect(HarnessScroll.outcome(moved: false, barBefore: 0.6, barAfter: 0.4, direction: .down) == .notObserved)
         #expect(HarnessScroll.outcome(moved: false, barBefore: 0.6, barAfter: 0.4, direction: .up) == .moved)

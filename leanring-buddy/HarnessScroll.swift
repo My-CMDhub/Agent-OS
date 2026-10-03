@@ -133,7 +133,6 @@ enum HarnessScroll {
     /// answered "confirmed" while the page's offset stayed 0, when "moved" was
     /// any frame change or NOTHING shared at all: a re-layout, a different
     /// window, two same-named elements read against each other's frame.
-    /// Same-named elements are left out: nothing says which is which.
     /// ponytail: a scroll past everything the walk knew (it reads one screenful
     /// beyond the view) shares nothing and reads notObserved — honest, not proven.
     /// newlyVisible: names in view after that were not before, once each, capped.
@@ -142,13 +141,18 @@ enum HarnessScroll {
     /// view (nil: all of `before`), for newlyVisible.
     static func change(before: [(name: String, frame: CGRect)], after: [(name: String, frame: CGRect)],
                        direction: ScrollDirection, inViewBefore: Set<String>? = nil) -> (moved: Bool, newlyVisible: [String]) {
-        func unique(_ items: [(name: String, frame: CGRect)]) -> [String: CGRect] {
-            Dictionary(grouping: items, by: \.name).compactMapValues { $0.count == 1 ? $0[0].frame : nil }
+        // Same-named elements pair in tree order, and only when both sides hold the
+        // same number: a heading and its own text share a name (B5, 2026-10-03: every
+        // heading on the article was such a pair, so a second scroll had nothing
+        // left to compare and read notObserved while the page moved 1,122 pt).
+        let beforeByName = Dictionary(grouping: before, by: \.name)
+        let pairs = Dictionary(grouping: after, by: \.name).flatMap { name, later -> [(old: CGRect, new: CGRect)] in
+            guard let earlier = beforeByName[name], earlier.count == later.count else { return [] }
+            return zip(earlier, later).map { (old: $0.frame, new: $1.frame) }
         }
-        let beforeFrames = unique(before)
         var along = 0, otherwise = 0
-        for (name, frame) in unique(after) {
-            guard let old = beforeFrames[name], old != frame else { continue }
+        for (old, frame) in pairs {
+            guard old != frame else { continue }
             // The midpoint along the axis, the other axis fixed. Size ALONG the axis may
             // change: Chromium clips an element leaving the view to the view's edge
             // (probe 2026-10-03, mimic article: a heading at AX y 243, h 38 read y 112,
