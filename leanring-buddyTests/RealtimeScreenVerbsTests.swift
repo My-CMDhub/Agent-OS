@@ -95,6 +95,26 @@ struct RealtimeScreenVerbsTests {
         #expect(models.candidates.first?.frame == CGRect(x: 20, y: 600, width: 200, height: 24))
     }
 
+    // Scenario A4, three runs 2026-10-02: "click sign in" offered the button AND the
+    // page sentence "… Sign in to see your feed.", and the voice asked which.
+    @Test func anExactlyNamedControlIsNotSecondGuessedByASentenceHoldingItsWords() {
+        let window = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let page: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(window), "elements": [
+            element("AXWindow", "Mimic Social", window),
+            element("AXButton", "Sign in", CGRect(x: 1080, y: 740, width: 70, height: 28)),
+            element("AXStaticText", "Catch up with people you know. Sign in to see your feed.", CGRect(x: 40, y: 600, width: 420, height: 18),
+                    actions: [], source: "value"),
+            element("AXStaticText", "Sign in help", CGRect(x: 40, y: 560, width: 80, height: 18), actions: [], source: "value")
+        ]]
+        func offered(_ words: String) -> [String] {
+            RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: page, words: words, screens: [window]).candidates.map(\.name)
+        }
+        #expect(offered("sign in") == ["Sign in"])
+        #expect(offered("Sign in") == ["Sign in"])
+        // No exact control: the words are found wherever they are.
+        #expect(offered("feed") == ["Catch up with people you know. Sign in to see your feed."])
+    }
+
     @Test func aTruncatedWalkIsReportedAsAnIncompleteListing() {
         var snapshot = cursorSnapshot
         snapshot["walkStopReasons"] = ["nodeLimit"]

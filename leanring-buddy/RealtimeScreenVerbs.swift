@@ -115,6 +115,12 @@ nonisolated enum RealtimeScreenVerbs {
         /// For a label that publishes no action: the nearest named ancestor
         /// that does and holds it (`press_element` presses that).
         var pressAncestor: RealtimeScreenPressTarget? = nil
+
+        /// press_element has something to click (`RealtimeScreenCandidate.clickTarget`).
+        var isClickable: Bool {
+            RealtimeScreenCandidate(name: name, role: role, frame: frame, position: "", subrole: subrole, pressable: pressable,
+                                    pressAncestor: pressAncestor).clickTarget != nil
+        }
     }
 
     /// Every NAMED element the owner can see in the frontmost window, in tree
@@ -175,7 +181,15 @@ nonisolated enum RealtimeScreenVerbs {
     static func screenOffer(fromSnapshotResponse response: [String: Any], words: String, screens: [CGRect],
                             screenshotDisplay: CGRect? = nil, limit: Int = maximumScreenCandidates) -> RealtimeScreenOffer {
         let (pool, hidden) = visiblePool(fromSnapshotResponse: response, screens: screens, screenshotDisplay: screenshotDisplay)
-        let offered = ranked(pool.map(\.name), words: words, limit: limit).map { pool[$0] }
+        var offered = ranked(pool.map(\.name), words: words, limit: limit).map { pool[$0] }
+        // A control that IS the name is the answer, not one of two (scenario A4, three
+        // runs 2026-10-02: "sign in" offered the button and the sentence "… Sign in to
+        // see your feed.", and the voice asked which). Only bare text goes; another
+        // control holding the words is still a real choice.
+        let query = rankingTokens(words)
+        if !query.isEmpty, offered.contains(where: { labelTokens($0.name) == query && $0.isClickable }) {
+            offered.removeAll { labelTokens($0.name) != query && !$0.isClickable }
+        }
         // Neighbours only from what is offered anyway (review 2026-09-30).
         let neighbours = offered.map { (name: $0.name, frame: $0.frame) }
         let display = visibleWindow(fromSnapshotResponse: response, screens: screens, screenshotDisplay: screenshotDisplay)
@@ -192,6 +206,15 @@ nonisolated enum RealtimeScreenVerbs {
         )
     }
 
+    /// The words a query ranks by, and a name's own (its "(⇧⌘L)" shortcut dropped).
+    static func rankingTokens(_ words: String) -> [String] {
+        RealtimeVoiceVerbs.foldedTokens(words).filter { !RealtimeVoiceVerbs.ignoredQueryWords.contains($0) }
+    }
+
+    static func labelTokens(_ name: String) -> [String] {
+        rankingTokens(name.replacingOccurrences(of: #"\s*\([^()]*\)\s*$"#, with: "", options: .regularExpression))
+    }
+
     /// Indices of `names`, best first, by tier: the query IS the name (4), the
     /// query's words run in order inside it (3), every distinctive query word is
     /// in it (2), some are (1). A generic UI noun counts only in tiers 4 and 3.
@@ -200,16 +223,14 @@ nonisolated enum RealtimeScreenVerbs {
     /// shortcut aside), tree order. Matching is the menu
     /// matcher's `tokensMatch`; no match, no candidate.
     static func ranked(_ names: [String], words: String, limit: Int) -> [Int] {
-        let queryTokens = RealtimeVoiceVerbs.foldedTokens(words).filter { !RealtimeVoiceVerbs.ignoredQueryWords.contains($0) }
+        let queryTokens = rankingTokens(words)
         let distinctive = Set(queryTokens).subtracting(genericUINouns)
         let shortcuts = words.split(separator: " ").map(String.init).filter { $0.contains { "\u{2318}\u{2325}\u{21E7}\u{2303}".contains($0) } }
         guard !queryTokens.isEmpty || !shortcuts.isEmpty else { return [] }
         typealias Score = (tier: Int, matched: Int, whole: Int, shortcut: Int, length: Int, index: Int)
         let scored: [Score] = names.enumerated().compactMap { index, name in
             let tokens = RealtimeVoiceVerbs.foldedTokens(name).filter { !RealtimeVoiceVerbs.ignoredQueryWords.contains($0) }
-            let label = RealtimeVoiceVerbs.foldedTokens(name.replacingOccurrences(of: #"\s*\([^()]*\)\s*$"#, with: "",
-                                                                                  options: .regularExpression))
-                .filter { !RealtimeVoiceVerbs.ignoredQueryWords.contains($0) }
+            let label = labelTokens(name)
             let matched = distinctive.filter { word in tokens.contains { RealtimeVoiceVerbs.tokensMatch(word, $0) } }.count
             // "agent" is a word of "New Agent" but only the start of "AgentPlan".
             let whole = queryTokens.filter(tokens.contains).count
