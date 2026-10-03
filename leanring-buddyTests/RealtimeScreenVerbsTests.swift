@@ -361,6 +361,21 @@ struct RealtimeScreenVerbsTests {
         } else { Issue.record("pointed at a password box") }
     }
 
+    /// Scenario A8 2026-10-03: Gemini sent press_element with a CSS selector as the name
+    /// and pixels (251, 494) as x, y, was told only "x and y are fractions", and gave up.
+    /// The refusal now says what to do instead: find it by its words and press that name.
+    @Test func aPositionOffTheScreenshotIsToldToAimByName() async {
+        let call = RealtimeToolCall(callID: "a8", name: "press_element", appName: "Cursor",
+                                    elementName: "rso > div:nth-child(1) > .LC20lb", x: 251, y: 494)
+        guard case .failure(let refusal) = await resolve(call, display: screen) else { Issue.record("pressed a pixel position"); return }
+        #expect(refusal.error == "positionOutOfRange")
+        #expect(refusal.message.contains("find_on_screen"))
+        #expect(refusal.message.contains("Nothing was pressed"))
+        let name = RealtimeVoiceVerbs.openAIDeclarations.first { $0["name"] as? String == "press_element" }
+            .flatMap { (($0["parameters"] as? [String: Any])?["properties"] as? [String: Any])?["name"] as? [String: Any] }
+        #expect((name?["description"] as? String)?.contains("never a CSS selector") == true)
+    }
+
     @Test func underPointerIsTheElementUnderTheMouseAtKeyDown() async throws {
         let general = RealtimeScreenTarget(candidate: candidate("General", CGRect(x: 40, y: 640, width: 60, height: 16), role: "AXStaticText"),
                                            point: CGPoint(x: 70, y: 648), app: cursorBundle, source: .underPointer)

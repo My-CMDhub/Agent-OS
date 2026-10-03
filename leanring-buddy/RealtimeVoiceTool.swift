@@ -821,7 +821,12 @@ nonisolated enum RealtimeOpenAppTool {
                 return refuse("noScreenshotPosition", "no screenshot was taken this turn, so a position in it names nothing; aim by name")
             }
             guard let point = RealtimeScreenVerbs.screenshotPoint(x: x, y: y, display: screenshotDisplay) else {
-                return refuse("positionOutOfRange", "x and y are fractions of the screenshot, each from 0 to 1")
+                // Scenario A8 2026-10-03: Gemini sent pixels (251, 494) and a CSS selector as the
+                // name, heard only "fractions", and gave up. Point it at the name instead.
+                let nothing = isPress ? (call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : "pressed") : "done"
+                return refuse("positionOutOfRange", "x and y are fractions of the screenshot, each from 0 to 1, never pixels. Nothing was "
+                    + "\(nothing). Aim by name instead: call find_on_screen now with a few words printed on it (for a search result, "
+                    + "words of its title), then call this again with the name it returns.")
             }
             if let name = call.elementName, let offer = chosen.offer, let source = chosen.source {
                 let named = offer.elements.filter { $0.name == name }

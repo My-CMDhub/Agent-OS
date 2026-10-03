@@ -92,7 +92,9 @@ nonisolated enum RealtimeVoiceVerbs {
                                               description: "The app in front, for example \"Cursor\". Leave it out to mean the app in front.")
     /// How a position in the screenshot is asked for (`RealtimePointFormat`).
     private static func positionParameters(_ format: RealtimePointFormat, gemini: Bool) -> [Parameter] {
-        let name = Parameter(name: "name", required: false, description: "The element's name exactly as find_on_screen returned it.")
+        // Scenario A8 2026-10-03: Gemini sent "rso > div:nth-child(1) > … .LC20lb" as the name.
+        let name = Parameter(name: "name", required: false, description: "The element's name exactly as find_on_screen returned it, "
+                                + "or as printed on screen; never a CSS selector or code.")
         // Live 2026-10-02 (rows 2, 19): the model sent underPointer for "let's point it" and "in Google Chrome".
         let underPointer = Parameter(name: "underPointer", kind: .flag, required: false,
                                      description: "Only when the owner says \"this one\", \"here\" or \"where my cursor is\": true for the "
