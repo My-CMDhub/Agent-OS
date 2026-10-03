@@ -84,6 +84,47 @@ nonisolated enum ScenarioRunnerAX {
     /// Clicky has no automation grant), then the NEW window whose title carries
     /// the nonce. nil when none appears — and then nothing was opened by us that
     /// we could name, so nothing is closed either.
+    /// Where the runner's window goes so no floating window covers it (a privacy
+    /// prompt at 590,152 260x262 hid part of every mimic page, 2026-10-03): the
+    /// wider free side beside the obstacles, the right on a tie. Top-left
+    /// coordinates. nil when nothing is in the way or neither side is wide enough.
+    nonisolated static func placementClear(of obstacles: [CGRect], screen: CGRect, minimumWidth: CGFloat) -> CGRect? {
+        let blocking = obstacles.map { $0.intersection(screen) }.filter { !$0.isNull && !$0.isEmpty }
+        guard let first = blocking.first else { return nil }
+        let union = blocking.dropFirst().reduce(first) { $0.union($1) }
+        let left = CGRect(x: screen.minX, y: screen.minY, width: union.minX - screen.minX, height: screen.height)
+        let right = CGRect(x: union.maxX, y: screen.minY, width: screen.maxX - union.maxX, height: screen.height)
+        let wider = right.width >= left.width ? right : left
+        return wider.width >= minimumWidth ? wider : nil
+    }
+
+    /// Floating windows of other processes on the main display (window levels
+    /// 3-20: floating, modal and utility panels — a privacy prompt is 8), top-left.
+    /// Menu-bar items (24-25) and full-screen overlays (1000) are not in the way.
+    static func floatingWindowFrames() -> [CGRect] {
+        let own = ProcessInfo.processInfo.processIdentifier
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        return windows.compactMap { window in
+            guard let layer = window[kCGWindowLayer as String] as? Int, (3...20).contains(layer),
+                  window[kCGWindowOwnerPID as String] as? Int32 != own,
+                  let bounds = window[kCGWindowBounds as String] as? [String: Any] else { return nil }
+            return CGRect(dictionaryRepresentation: bounds as CFDictionary)
+        }
+    }
+
+    /// Moves OUR window (found by its nonce) clear of floating windows; never another.
+    static func placeClearOfFloatingWindows(_ window: AXUIElement) -> CGRect? {
+        guard let main = NSScreen.screens.first else { return nil }
+        let visible = main.visibleFrame
+        let screen = CGRect(x: visible.minX, y: main.frame.height - visible.maxY, width: visible.width, height: visible.height)
+        guard let target = placementClear(of: floatingWindowFrames(), screen: screen, minimumWidth: 500) else { return nil }
+        var origin = target.origin
+        var size = target.size
+        if let position = AXValueCreate(.cgPoint, &origin) { AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position) }
+        if let extent = AXValueCreate(.cgSize, &size) { AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, extent) }
+        return target
+    }
+
     static func openChromeWindow(urls: [URL], nonce: String) -> ScenarioWindow? {
         guard let chromeURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: chromeBundleIdentifier), !urls.isEmpty else { return nil }
         let before = Set(chromeWindows().map { AccessibilityElementKey(element: $0.window) })
@@ -99,6 +140,7 @@ nonisolated enum ScenarioRunnerAX {
             }.map { ScenarioWindow(element: $0.window, processIdentifier: $0.processIdentifier, nonce: nonce) }
             return found != nil
         }
+        if let found { _ = placeClearOfFloatingWindows(found.element) }
         return found
     }
 

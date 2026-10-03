@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Testing
 @testable import Clicky
@@ -93,5 +94,16 @@ import Testing
         }
         #expect(await passed("Nothing on screen says \"settings,\" sir. Shall I look in the Chrome menu?"))
         #expect(!(await passed("The settings page is open, sir.")))
+    }
+
+    /// The runner's window keeps clear of a floating window (a privacy prompt at
+    /// 590,152 260x262 covered the mimic pages, 2026-10-03), on the wider free side.
+    @Test func theRunnersWindowIsPlacedClearOfAFloatingWindow() {
+        let screen = CGRect(x: 0, y: 25, width: 1440, height: 875)
+        let prompt = CGRect(x: 590, y: 152, width: 260, height: 262)
+        let placed = ScenarioRunnerAX.placementClear(of: [prompt], screen: screen, minimumWidth: 500)
+        #expect(placed == CGRect(x: 850, y: 25, width: 590, height: 875))
+        #expect(ScenarioRunnerAX.placementClear(of: [], screen: screen, minimumWidth: 500) == nil, "nothing in the way: left alone")
+        #expect(ScenarioRunnerAX.placementClear(of: [CGRect(x: 400, y: 100, width: 700, height: 300)], screen: screen, minimumWidth: 500) == nil)
     }
 }
