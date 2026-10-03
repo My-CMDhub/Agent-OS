@@ -115,6 +115,39 @@ struct RealtimeScreenVerbsTests {
         #expect(offered("feed") == ["Catch up with people you know. Sign in to see your feed."])
     }
 
+    // Scenario A6, three runs 2026-10-02: "where is the phone number" offered only
+    // the label "Phone: "; the number beside it shares no word with the question.
+    @Test func aLabelBringsTheValueBesideIt() {
+        let window = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let page: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(window), "elements": [
+            element("AXWindow", "Mimic Plumbing", window),
+            element("AXHeading", "Call", CGRect(x: 340, y: 520, width: 60, height: 24), actions: []),
+            element("AXStaticText", "Phone: ", CGRect(x: 340, y: 489, width: 55, height: 19), actions: [], source: "value"),
+            element("AXStaticText", "(02) 5550 1234", CGRect(x: 395, y: 489, width: 114, height: 19), actions: [], source: "value"),
+            element("AXStaticText", "Unit 4, 18 Example Lane", CGRect(x: 395, y: 440, width: 200, height: 19), actions: [], source: "value")
+        ]]
+        let offer = RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: page, words: "phone number", screens: [window])
+        #expect(offer.candidates.map(\.name) == ["Phone: ", "(02) 5550 1234"])
+        #expect(offer.candidates.last?.position.contains("right of 'Phone: '") == true)
+        // A label with no colon names nothing beside it.
+        #expect(RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: page, words: "call", screens: [window]).candidates.map(\.name) == ["Call"])
+    }
+
+    // Scenario C1: a label's value may be a key. A secret-shaped name is never offered.
+    @Test func aSecretShapedNameIsNeverOffered() {
+        let window = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let key = "sk-" + "test-" + "WKbsDEkGZoDiPCFdcERFmdDnHQrroDno"
+        let page: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(window), "elements": [
+            element("AXWindow", "Mimic Developer", window),
+            element("AXStaticText", "Your key: ", CGRect(x: 40, y: 600, width: 70, height: 18), actions: [], source: "value"),
+            element("AXStaticText", key, CGRect(x: 110, y: 600, width: 300, height: 18), actions: [], source: "value")
+        ]]
+        let offer = RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: page, words: "your key", screens: [window])
+        #expect(offer.candidates.map(\.name) == ["Your key: "])
+        #expect(offer.privacyDroppedCount == 1)
+        #expect(RealtimeScreenVerbs.liveCandidates(named: key, fromSnapshotResponse: page, screens: [window]).isEmpty)
+    }
+
     @Test func aTruncatedWalkIsReportedAsAnIncompleteListing() {
         var snapshot = cursorSnapshot
         snapshot["walkStopReasons"] = ["nodeLimit"]

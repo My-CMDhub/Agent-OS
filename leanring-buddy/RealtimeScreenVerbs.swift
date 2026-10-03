@@ -148,6 +148,12 @@ nonisolated enum RealtimeScreenVerbs {
                 hidden += 1
                 continue
             }
+            // A secret-shaped name is never a target or an offer (scenario C1: a
+            // label's value may be a key); the wire's scrub is the second net.
+            if !SecretScanner.matches(in: name).isEmpty {
+                hidden += 1
+                continue
+            }
             guard ActionSafetyKernel.unreachableFrameReason(frame, visibleBounds: visible) == nil else { continue }
             let parentIndex = element["parent"] as? Int
             if let parentIndex, elements.indices.contains(parentIndex),
@@ -190,6 +196,12 @@ nonisolated enum RealtimeScreenVerbs {
         if !query.isEmpty, offered.contains(where: { labelTokens($0.name) == query && $0.isClickable }) {
             offered.removeAll { labelTokens($0.name) != query && !$0.isClickable }
         }
+        // A label brings the value beside it (scenario A6: "where is the phone
+        // number" offered only "Phone: "; the number shares no word with the question).
+        offered = Array(offered.flatMap { element -> [PoolElement] in
+            guard let value = valueBeside(element, in: pool), !offered.contains(where: { $0.name == value.name }) else { return [element] }
+            return [element, value]
+        }.prefix(limit))
         // Neighbours only from what is offered anyway (review 2026-09-30).
         let neighbours = offered.map { (name: $0.name, frame: $0.frame) }
         let display = visibleWindow(fromSnapshotResponse: response, screens: screens, screenshotDisplay: screenshotDisplay)
@@ -213,6 +225,17 @@ nonisolated enum RealtimeScreenVerbs {
 
     static func labelTokens(_ name: String) -> [String] {
         rankingTokens(name.replacingOccurrences(of: #"\s*\([^()]*\)\s*$"#, with: "", options: .regularExpression))
+    }
+
+    /// The text right of a label ending in ":" on the same line ("Phone: " ->
+    /// "(02) 5550 1234"), within a neighbour's reach; nil for anything else.
+    static func valueBeside(_ label: PoolElement, in pool: [PoolElement]) -> PoolElement? {
+        guard label.name.trimmingCharacters(in: .whitespaces).hasSuffix(":") else { return nil }
+        let row = label.frame
+        return pool.filter { other in
+            other.name != label.name && abs(other.frame.midY - row.midY) <= row.height / 2
+                && other.frame.minX >= row.maxX - 4 && other.frame.minX - row.maxX <= neighbourReachPoints
+        }.min { $0.frame.minX < $1.frame.minX }
     }
 
     /// Indices of `names`, best first, by tier: the query IS the name (4), the
