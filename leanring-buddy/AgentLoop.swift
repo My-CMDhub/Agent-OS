@@ -770,6 +770,42 @@ extension AgentLoop {
         launched.union(taskTabs.compactMap { bundle, tabs in frontTabs[bundle].map(tabs.contains) == true ? bundle : nil })
     }
 
+    /// One step's task tabs, re-anchored after its own ok requests.
+    final class BoundTabs<Key: Hashable>: @unchecked Sendable {
+        let lock = NSLock()
+        var tabs: [String: Key]
+        init(_ tabs: [String: Key]) { self.tabs = tabs }
+    }
+
+    /// The harness answer for one step, with the task's tabs re-checked just
+    /// before each mutating request goes out. 2026-10-03 brief: the tab was read
+    /// at the start of a step (`liveExecute`), but the act came after the heard
+    /// check, the offer lookups and any confirmation card; a tab the owner
+    /// switched to in between was acted in as the task's. `boundTabs`: per
+    /// browser, the task's tab that was in front when the step began. Our own ok
+    /// request may move the tab (a link opening one), so it re-anchors after
+    /// one. An unreadable tab or request fails closed.
+    nonisolated static func tabGuardedAnswer<Key: Hashable>(_ answer: @escaping @Sendable (String) -> String, boundTabs: [String: Key],
+                                                            readTab: @escaping @Sendable (String) -> Key?) -> @Sendable (String) -> String {
+        let bound = BoundTabs(boundTabs)
+        return { line in
+            let verb = (try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])?["verb"] as? String
+            guard verb.flatMap(HarnessVerb.init(rawValue:))?.isMutating ?? true else { return answer(line) }
+            let expected = bound.lock.withLock { bound.tabs }
+            if let moved = expected.first(where: { readTab($0.key) != $0.value })?.key {
+                return MeasurementLogFile.jsonLine(["ok": false, "error": "taskTabChanged", "app": moved,
+                    "message": "the owner switched browser tabs since this step began, so nothing was done in the tab now in front. "
+                        + "it is the owner's tab, not the task's: look again before acting."]) ?? "{\"ok\":false,\"error\":\"taskTabChanged\"}"
+            }
+            let response = answer(line)
+            if (try? JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: Any])?["ok"] as? Bool == true {
+                let now = expected.keys.compactMap { bundle in readTab(bundle).map { (bundle, $0) } }
+                bound.lock.withLock { now.forEach { bound.tabs[$0.0] = $0.1 } }
+            }
+            return response
+        }
+    }
+
     /// The browser's selected tab in its front window, read off main.
     nonisolated static func frontTab(of bundle: String) -> AccessibilityElementKey? {
         guard let browser = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { return nil }
@@ -840,6 +876,9 @@ extension AgentLoop {
             Dictionary(uniqueKeysWithValues: tabBrowsers.compactMap { bundle in frontTab(of: bundle).map { (bundle, $0) } })
         }.value
         marks.agentOpenedBundles = openedByTask(launched: carry.launchedBundles, taskTabs: carry.taskTabs, frontTabs: frontTabs)
+        // The task's tabs in front now, re-read before each mutating request (`tabGuardedAnswer`).
+        let boundTabs = frontTabs.filter { carry.taskTabs[$0.key]?.contains($0.value) == true }
+        let answer = boundTabs.isEmpty ? harnessAnswer : tabGuardedAnswer(harnessAnswer, boundTabs: boundTabs, readTab: frontTab(of:))
         marks.agentStartBundle = carry.startBundle
         marks.heardText = heard
         marks.heardCompleteUptime = now
@@ -851,7 +890,7 @@ extension AgentLoop {
         let filled = await RealtimeOpenAppTool.withFrontmostApp(call)
         marks.toolCalls = [filled]
         marks.decisions = [RealtimeToolDecision(call: filled, callUptime: now)]
-        let dispatch = await RealtimeVoiceConnection.runToolCall(filled, decisionIndex: 0, in: marks, harnessAnswer: harnessAnswer,
+        let dispatch = await RealtimeVoiceConnection.runToolCall(filled, decisionIndex: 0, in: marks, harnessAnswer: answer,
                                                                  checksSite: checksSite,
                                                                  confirmationWaitSeconds: min(RealtimeOpenAppTool.confirmationWaitSeconds,
                                                                                               max(1, confirmationWaitSeconds)),

@@ -557,6 +557,27 @@ struct AgentLoopTests {
         #expect(AgentLoop.doneChallenge(summary: "According to the article, the bridge opened in 1932.", evidence: [], receipts: []) == nil)
     }
 
+    /// 2026-10-03 brief: the task's tab was checked at the start of a step, but the act
+    /// came later (after the heard check and any card). A mutating request re-reads the
+    /// bound tab just before it goes out and refuses if the owner switched tabs.
+    @Test func aMutatingRequestRefusesWhenTheOwnerSwitchedTheTasksTab() {
+        final class Box: @unchecked Sendable { var tab: String? = "task"; var sent: [String] = [] }
+        let box = Box()
+        let guarded = AgentLoop.tabGuardedAnswer({ line in box.sent.append(line); return "{\"ok\":true}" },
+                                                 boundTabs: ["com.google.Chrome": "task"], readTab: { _ in box.tab })
+        let press = "{\"verb\":\"click\",\"title\":\"Post\",\"expectApp\":\"com.google.Chrome\"}"
+        let read = "{\"verb\":\"snapshot\",\"expectApp\":\"com.google.Chrome\"}"
+        #expect(guarded(press).contains("\"ok\":true"))
+        box.tab = "owners"
+        let refused = guarded(press)
+        #expect(refused.contains("taskTabChanged"))
+        #expect(box.sent.count == 1, "the refused press never reached the harness")
+        #expect(guarded(read).contains("\"ok\":true"), "a read goes out whatever tab is in front")
+        box.tab = nil
+        #expect(guarded(press).contains("taskTabChanged"), "an unreadable tab is not the task's")
+        #expect(guarded("not json").contains("taskTabChanged"), "an unparseable request counts as mutating")
+    }
+
 }
 
 /// A harness that answers from a script, one line per request, and keeps what it was asked.
