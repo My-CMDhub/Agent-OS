@@ -475,6 +475,18 @@ struct AgentLoopTests {
         #expect(S.taskWords(heard: "x", asked: answering, now: 100 + S.askOwnerAnswerWindowSeconds + 1).words == "x")
     }
 
+    /// 4: the done check skipped any sentence holding page, site, shows, lists or notes,
+    /// so "The comment was posted to the page." passed with no receipt. Only words a
+    /// sentence attributes to the page ("the article says …", "according to …") are exempt.
+    @MainActor @Test func aSentenceNamingThePageStillClaimsWhatItSaysWasDone() {
+        #expect(AgentLoop.doneChallenge(summary: "The comment was posted to the page.", evidence: [], receipts: []) != nil)
+        #expect(AgentLoop.doneChallenge(summary: "The post was shared on the site.", evidence: [], receipts: []) != nil)
+        #expect(AgentLoop.doneChallenge(summary: "The page was opened and the form submitted.", evidence: [], receipts: []) != nil)
+        #expect(AgentLoop.doneChallenge(summary: "The article says the bridge opened in 1932.", evidence: [], receipts: []) == nil)
+        #expect(AgentLoop.doneChallenge(summary: "According to the page, the shop opened in 2019.", evidence: [], receipts: []) == nil)
+        #expect(AgentLoop.doneChallenge(summary: "The page lists three plans launched in 2024.", evidence: [], receipts: []) == nil)
+    }
+
     // MARK: Runner findings 2026-10-03 (voice)
 
     @Test func internalWordsSpokenAloudAreFound() {

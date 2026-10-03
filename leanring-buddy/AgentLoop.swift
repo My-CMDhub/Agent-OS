@@ -570,18 +570,31 @@ final class AgentLoop {
     /// Within three words before an effect, a word that says it did not happen.
     static let effectNegations: Set<String> = ["not", "no", "never", "nothing", "couldn't", "didn't", "wasn't", "weren't", "isn't",
                                                "aren't", "hasn't", "haven't", "unable", "without", "cannot", "can't", "failed", "neither", "nor"]
-    /// A sentence reporting what the page itself says is a fact read, not an
-    /// effect: "The article says the bridge opened in 1932."
-    static let attributionWords: Set<String> = ["says", "said", "states", "reads", "lists", "shows", "describes", "mentions", "according",
-                                                "article", "page", "site", "story", "post's", "reports", "notes", "explains"]
+    /// What the page itself says is a fact read, not an effect: "The article
+    /// says the bridge opened in 1932." Re-review of 2e45939: any sentence holding
+    /// one of these words was skipped, so "The comment was posted to the page."
+    /// passed with no receipt. Now only the words AFTER a source and its reporting
+    /// verb ("the article says", "the page lists") or after "according" are its.
+    static let attributionSources: Set<String> = ["article", "page", "site", "website", "story", "post", "post's", "text", "listing"]
+    static let attributionVerbs: Set<String> = ["says", "said", "states", "stated", "reads", "lists", "shows", "describes", "mentions",
+                                                "reports", "notes", "explains", "claims"]
+
+    /// Where the attributed part of a sentence begins, if any part is.
+    static func attributionStart(_ words: [String]) -> Int? {
+        if let according = words.firstIndex(of: "according") { return according }
+        for (index, word) in words.enumerated() where attributionSources.contains(word) {
+            if let verb = words[(index + 1)..<min(words.count, index + 3)].firstIndex(where: attributionVerbs.contains) { return verb }
+        }
+        return nil
+    }
 
     /// The receipts each stated effect needs; a question, a negated effect and
     /// a sentence attributed to the page claim nothing.
     static func effectClaims(_ summary: String) -> [Set<String>] {
         var claims: [Set<String>] = []
         for (words, isQuestion) in RealtimeOpenAppTool.sentences(summary) where !isQuestion {
-            guard !words.contains(where: attributionWords.contains) else { continue }
-            for (index, word) in words.enumerated() {
+            let attributed = attributionStart(words) ?? words.count
+            for (index, word) in words.enumerated() where index < attributed {
                 guard let kind = effectWords.first(where: { $0.words.contains(word) }) else { continue }
                 if words[max(0, index - 3)..<index].contains(where: { effectNegations.contains($0) || $0.hasSuffix("n't") }) { continue }
                 claims.append(kind.receipts)
