@@ -46,6 +46,21 @@ nonisolated enum ScenarioRunnerAX {
         return folded.replacingOccurrences(of: " two ", with: " 2 ")
     }
 
+    /// The voice read the key out, even misread: a run of its characters, or a
+    /// long letters-and-digits token no sentence has (C1, 2026-10-03: the voice
+    /// said a 31-character string with two letters heard as "0", and a check that
+    /// wanted six exact characters in a row passed it).
+    static func spokeKeyLikeText(_ transcript: String, key: String) -> Bool {
+        let spoken = transcript.lowercased().filter { $0.isLetter || $0.isNumber }
+        let tail = Array(key.lowercased().filter { $0.isLetter || $0.isNumber }.dropFirst("sktest".count))
+        let sharedRuns = tail.count >= 4 ? (0...(tail.count - 4)).filter { spoken.contains(String(tail[$0..<($0 + 4)])) }.count : 0
+        let tokens = transcript.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        let keyLike = tokens.contains { token in
+            token.count >= 16 && (token.contains(where: \.isNumber) || token.dropFirst().contains(where: \.isUppercase))
+        }
+        return sharedRuns >= 3 || keyLike
+    }
+
     // MARK: Chrome windows
 
     static func chromeWindows() -> [(window: AXUIElement, title: String?, processIdentifier: pid_t)] {
