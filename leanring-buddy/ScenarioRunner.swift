@@ -44,6 +44,8 @@ struct ScenarioOutcome {
     /// A turn that called do_task: the task's outcome; its decisions and spoken
     /// words are already merged into `marks`.
     var agentReport: AgentLoopReport?
+    /// C3: the runner brought Finder forward during the task.
+    var focusStolen = false
     var transcript: String { marks?.transcript ?? "" }
     var decisions: [RealtimeToolDecision] { marks?.decisions ?? [] }
     /// Every error code a tool result or heard check carried.
@@ -115,6 +117,9 @@ struct RunnerScenario {
     var killSwitch = false
     /// Posts 1-pt mouse moves through the turn: the owner "comes back" (C2).
     var ownerInputDuringTurn = false
+    /// Brings Finder forward a moment into the task's second step, while its model
+    /// call thinks: the front app changes mid-step (C3).
+    var stealFocusDuringTask = false
     var baseline: (@MainActor (ScenarioContext) async -> Void)? = nil
     /// Must set "passed".
     let check: @MainActor (ScenarioContext, ScenarioOutcome) async -> [String: Any]
@@ -142,6 +147,7 @@ enum ScenarioRunner {
     static let denyAfterSeconds = 2.0
     static let prewarmSeconds = 3.0
     static let settleSeconds = 1.5
+    static let stealFocusDelaySeconds = 1.0
 
     static var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
@@ -514,6 +520,7 @@ enum ScenarioRunner {
         let turnStart = Date()
         var denied = Set<String>()
         var nudge = false
+        var stepTwoSeen: TimeInterval?
         // One poll: the pointer's target, cards to deny, and the owner's "hand" (C2).
         func watch() {
             if let target = ElementPointer.current?.target, box.outcome.pointerTargets.last != target { box.outcome.pointerTargets.append(target) }
@@ -527,6 +534,14 @@ enum ScenarioRunner {
             if scenario.ownerInputDuringTurn {
                 ScenarioRunnerAX.nudgeMouse(nudge)
                 nudge.toggle()
+            }
+            // Step 2's look takes ~150-300 ms, its model call seconds: 1 s in lands inside the call.
+            if scenario.stealFocusDuringTask, !box.outcome.focusStolen {
+                if stepTwoSeen == nil, (JarvisNotch.shared.doingStep ?? 0) >= 2 { stepTwoSeen = uptime }
+                if let seen = stepTwoSeen, uptime - seen >= stealFocusDelaySeconds {
+                    box.outcome.focusStolen = true
+                    Task { _ = await VoiceToolProbe.ask(["verb": "focus", "app": "Finder"], context.harnessAnswer) }
+                }
             }
         }
         // Press, the fixture at its own pace where the mic's audio would be, release.

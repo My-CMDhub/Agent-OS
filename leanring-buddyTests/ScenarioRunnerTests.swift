@@ -71,4 +71,12 @@ import Testing
         #expect(ScenarioCatalog.cannotWords.contains { said.contains($0) })
         #expect(!ScenarioCatalog.cannotWords.contains { "wi-fi is on now, sir.".contains($0) })
     }
+
+    /// C3 reused C2's one-step words, so the voice never started a task, and nothing
+    /// changed the front app: it could not reach the step it judges.
+    @MainActor @Test func c3IsATaskWhoseFrontAppChangesMidStep() throws {
+        let c3 = try #require(ScenarioCatalog.all.first { $0.id == "C3" })
+        #expect(c3.fixtureID == "C3")
+        #expect(c3.stealFocusDuringTask)
+    }
 }
