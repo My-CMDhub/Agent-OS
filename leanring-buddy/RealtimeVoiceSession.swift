@@ -366,6 +366,7 @@ final class RealtimeVoiceSession {
             liveTurn?.marks = marks
             marks.screenshotDisplayFrame = screenshotDisplayFrame
             marks.screenshotPixelSize = screenshotPixelSize
+            marks.screenshotGuard = (try? screenshotResult.get())?.secretGuard?.outcome ?? withheld?.outcome
             // Beside the audio, never ahead of it; before the release, so on Gemini
             // it stays inside the owner's activity. Not into a turn that replaced this one.
             let contextSend = Task { @MainActor in

@@ -47,6 +47,9 @@ final class RealtimeTurnMarks {
     var screenshotDisplayFrame: CGRect?
     /// That screenshot's size in pixels: what a native OpenAI position is in (`RealtimePointFormat`).
     var screenshotPixelSize: CGSize?
+    /// What the credential guard did to the key-down screenshot: `clean`, `redacted`
+    /// or `withheld` (`ScreenSecretGuard.Report.outcome`); nil when none was taken.
+    var screenshotGuard: String?
     /// The element under the owner's mouse at key-down (`underPointer`).
     var keyDownPointer: RealtimeScreenTarget?
     /// What the previous answer SAID (`transcript`), carried only when the owner

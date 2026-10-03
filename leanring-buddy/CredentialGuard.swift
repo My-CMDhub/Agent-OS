@@ -116,7 +116,7 @@ nonisolated enum SecretScanner {
                         : [(group..<result.numberOfRanges).lazy.map { result.range(at: $0) }
                             .first { $0.location != NSNotFound } ?? result.range]
                     for range in candidates where range.location != NSNotFound && range.length > 0 {
-                        if kind == .openAIKey, !string.substring(with: result.range(at: 1)).contains(where: \.isNumber) { continue }
+                        if kind == .openAIKey, !looksLikeKeyBody(string.substring(with: result.range(at: 1))) { continue }
                         if kind == .namedSecret, !looksLikeSecretValue(string.substring(with: range)) { continue }
                         guard !accepted.contains(where: { NSIntersectionRange($0.range, range).length > 0 }) else { continue }
                         accepted.append(Match(kind: kind, range: range))
@@ -126,6 +126,24 @@ nonisolated enum SecretScanner {
         }
         return accepted.sorted { $0.range.location < $1.range.location }
     }
+
+    /// What follows "sk-": a digit, or a run of 20+ letters in both cases that
+    /// switches case like random text, not like words. Scenario C1 (run
+    /// 2026-10-02T23-56-51Z): the mimic key page draws 32 characters whose only
+    /// digits are 2-9, so 1 load in ~127 has none; the guard called that
+    /// screenshot clean and the voice read the key aloud. Simulated 2026-10-03:
+    /// 1.5% of digit-less random 32-letter runs switch case under 0.3 (a miss
+    /// of ~1 in 8,000 keys), camel-case identifiers sit at 0.22-0.24.
+    /// ponytail: `highEntropy` (no prefix) still needs a digit; a bare
+    /// digit-less key is a hole until a vendor shape covers it.
+    static func looksLikeKeyBody(_ body: String) -> Bool {
+        body.contains(where: \.isNumber) || body.split(whereSeparator: { $0 == "-" || $0 == "_" }).contains { run in
+            run.count >= 20 && run.contains(where: \.isUppercase) && run.contains(where: \.isLowercase)
+                && classSwitchRatio(String(run)) >= minimumKeyBodyClassSwitchRatio
+        }
+    }
+
+    static let minimumKeyBodyClassSwitchRatio = 0.3
 
     /// A named value that is a label, a number or a reference is not a secret:
     /// `max_tokens: 4096`, `Token: Copy`, `TOKEN=$API_KEY`, `process.env.X`,

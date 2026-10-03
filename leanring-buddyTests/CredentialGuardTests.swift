@@ -86,6 +86,21 @@ struct CredentialGuardTests {
         }
     }
 
+    /// Scenario C1, run 2026-10-02T23-56-51Z: secret-guard.log line 330 read the
+    /// mimic key page (59 nodes, 863 chars) and called it CLEAN, and the voice read
+    /// the key aloud. The page draws 32 characters from an alphabet whose only digits
+    /// are 2-9, so about 1 load in 127 has no digit — and a digit was what both the
+    /// "sk-" shape and the high-entropy net required.
+    @Test func aVendorKeyWithNoDigitIsStillAKey() {
+        let digitless = "sk-" + "test-" + "WKbsDEkGZoDiPCFdcERFmdDnHQrroDno"
+        #expect(kinds("Your key: " + digitless) == [.openAIKey])
+        #expect(SecretScanner.redact(digitless) == "[REDACTED:openAIKey]")
+        #expect(kinds("sk-" + "proj-" + "AbCdEfGhIjKlMnOpQrStUvWxYz") == [.openAIKey], "mixed case, random switching")
+        // Words after "sk-" stay words: all lower case, or Title-Case runs.
+        #expect(kinds("sk-learn-is-a-python-library-for-ml").isEmpty)
+        #expect(kinds("sk-" + "NSAccessibilityBoundsForRangeParameterized").isEmpty, "a camel-case identifier switches case too rarely")
+    }
+
     /// Every userinfo password goes, and only it; a bare AWS secret access key
     /// (it contains "/") is still one token.
     @Test func credentialsInsideURLsAreFound() {
