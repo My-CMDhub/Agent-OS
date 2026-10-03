@@ -485,6 +485,54 @@ struct RealtimeScreenVerbsTests {
         #expect(refusal.message.contains("ask the owner which one"))
     }
 
+    /// Owner ruling 2026-10-03 (C4 03-34-52Z asked "which draft?" after "delete the first
+    /// draft"): an ordinal in the owner's OWN words picks from the numbered top-to-bottom
+    /// order; no ordinal, two ordinals, one past the end, or a tie at that rank still asks.
+    @Test func anOrdinalTheOwnerSaidPicksFromTheNumberedOrder() {
+        let top = candidate("Delete", CGRect(x: 1000, y: 600, width: 80, height: 30))
+        let middle = candidate("Delete", CGRect(x: 1000, y: 400, width: 80, height: 30))
+        let bottom = candidate("Delete", CGRect(x: 1000, y: 200, width: 80, height: 30))
+        let found = RealtimeScreenLookup(candidates: [middle, bottom, top], app: nil)
+        func picked(_ heard: String?, _ lookup: RealtimeScreenLookup = found) -> RealtimeScreenCandidate? {
+            guard case .success(let target) = RealtimeOpenAppTool.liveTarget(named: "Delete", found: lookup, nothing: "pressed", heard: heard)
+            else { return nil }
+            #expect(target.source == .heardOrdinal)
+            return target.candidate
+        }
+        #expect(picked("Delete the first draft") == top)
+        #expect(picked("press the top one") == top)
+        #expect(picked("the 2nd Delete") == middle)
+        #expect(picked("click the second delete button") == middle)
+        #expect(picked("delete the last draft") == bottom)
+        #expect(picked("the bottom Delete") == bottom)
+        #expect(picked(nil) == nil)
+        #expect(picked("delete the draft") == nil)
+        #expect(picked("the first, no, the second one") == nil)
+        #expect(picked("the fourth Delete") == nil)
+        let beside = candidate("Delete", CGRect(x: 1200, y: 600, width: 80, height: 30))
+        #expect(picked("the first Delete", RealtimeScreenLookup(candidates: [top, beside, bottom], app: nil)) == nil)
+        #expect(picked("the last Delete", RealtimeScreenLookup(candidates: [top, beside, bottom], app: nil)) == bottom)
+    }
+
+    /// The ordinal reaches the press through resolveScreenTarget's `heard` — the
+    /// transcript — and never from the model's arguments alone.
+    @Test func theHeardOrdinalAimsAPressByName() async throws {
+        let top = candidate("Delete", CGRect(x: 1000, y: 600, width: 80, height: 30))
+        let lower = candidate("Delete", CGRect(x: 1000, y: 400, width: 80, height: 30))
+        func resolve(_ name: String, heard: String?) async -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
+            await RealtimeOpenAppTool.resolveScreenTarget(
+                call: RealtimeToolCall(callID: "o", name: "press_element", appName: "Chrome", elementName: name),
+                thisTurn: nil, previousTurn: nil, followUpConfirmed: nil, confirmedByYes: false, now: 1_000,
+                screenshotDisplay: screen, keyDownPointer: nil, ordinalWords: heard,
+                lookUp: { _ in .success(RealtimeScreenLookup(candidates: [lower, top], app: "com.google.Chrome")) },
+                hitTest: { _ in .nothing })
+        }
+        #expect(try await resolve("Delete", heard: "Delete the first draft").get().candidate == top)
+        if case .failure(let refusal) = await resolve("first Delete", heard: "delete the draft") {
+            #expect(refusal.error == "elementAmbiguous")
+        } else { Issue.record("took the ordinal from the model's arguments") }
+    }
+
     /// C4 live (03-07-01Z): "Delete" with a position and no find this turn was hit-tested
     /// and came back nothingAtPoint — the name was ignored. A name with a position is
     /// looked up by name; the position picks only by lying inside exactly one.

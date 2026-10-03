@@ -812,10 +812,12 @@ nonisolated enum RealtimeOpenAppTool {
     /// something ("this", "here", the cursor) — rows 2 and 19 sent it for
     /// "let's point it" and "in Google Chrome". nil (no transcript) keeps the
     /// pointer, as before.
+    /// `ordinalWords`: the owner's words, for an ordinal that picks one of several
+    /// ("delete the first draft"); nil for an agent step.
     static func resolveScreenTarget(call: RealtimeToolCall, thisTurn: RealtimeStandingOffer?, previousTurn: RealtimeStandingOffer?,
                                     followUpConfirmed: Bool?, confirmedByYes: Bool, now: TimeInterval,
                                     screenshotDisplay: CGRect?, screenshotStale: Bool = false, keyDownPointer: RealtimeScreenTarget?,
-                                    heard: String? = nil,
+                                    heard: String? = nil, ordinalWords: String? = nil,
                                     lookUp: ((String) async -> Result<RealtimeScreenLookup, RealtimeToolRefusal>)? = nil,
                                     hitTest: (CGPoint) async -> RealtimeScreenHit) async -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
         func refuse(_ error: String, _ message: String) -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
@@ -864,7 +866,7 @@ nonisolated enum RealtimeOpenAppTool {
                 }
                 if named.count > 1 {
                     return liveTarget(named: name, found: RealtimeScreenLookup(candidates: named, app: offer.app),
-                                      nothing: call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : isPress ? "pressed" : "pointed at")
+                                      nothing: call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : isPress ? "pressed" : "pointed at", heard: ordinalWords)
                 }
             }
             // A name the offer does not hold is looked up on the live screen, and the position
@@ -877,7 +879,7 @@ nonisolated enum RealtimeOpenAppTool {
                                                          app: found.app, source: .liveName))
                 }
                 return liveTarget(named: name, found: found,
-                                  nothing: call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : isPress ? "pressed" : "pointed at")
+                                  nothing: call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : isPress ? "pressed" : "pointed at", heard: ordinalWords)
             }
             switch await hitTest(point) {
             case .element(let candidate, let app):
@@ -903,7 +905,7 @@ nonisolated enum RealtimeOpenAppTool {
                 return .success(RealtimeScreenTarget(candidate: named[0], point: CGPoint(x: named[0].frame.midX, y: named[0].frame.midY),
                                                      app: offer.app, source: source))
             }
-            if named.count > 1 { return liveTarget(named: name, found: RealtimeScreenLookup(candidates: named, app: offer.app), nothing: nothing) }
+            if named.count > 1 { return liveTarget(named: name, found: RealtimeScreenLookup(candidates: named, app: offer.app), nothing: nothing, heard: ordinalWords) }
         }
         guard let lookUp else {
             return refuse("notOffered", "Nothing was \(nothing). That name was not among what find_on_screen returned; "
@@ -913,13 +915,14 @@ nonisolated enum RealtimeOpenAppTool {
         case .failure(let refusal):
             return .failure(refusal)
         case .success(let found):
-            return liveTarget(named: name, found: found, nothing: nothing)
+            return liveTarget(named: name, found: found, nothing: nothing, heard: ordinalWords)
         }
     }
 
     /// One visible match acts; several are listed for the model to ask about
     /// (name, kind, where — never a pixel); none is notFound.
-    static func liveTarget(named name: String, found: RealtimeScreenLookup, nothing: String) -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
+    static func liveTarget(named name: String, found: RealtimeScreenLookup, nothing: String,
+                           heard: String? = nil) -> Result<RealtimeScreenTarget, RealtimeToolRefusal> {
         let shown = UntrustedText(name).forDisplay
         switch found.candidates.count {
         case 0:
@@ -930,15 +933,55 @@ nonisolated enum RealtimeOpenAppTool {
             return .success(RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY),
                                                  app: found.app, source: .liveName))
         default:
+            // Owner ruling 2026-10-03: an ordinal the owner said ("the first draft") picks one.
+            if let picked = heardOrdinalPick(found.candidates, heard: heard) {
+                return .success(RealtimeScreenTarget(candidate: picked, point: CGPoint(x: picked.frame.midX, y: picked.frame.midY),
+                                                     app: found.app, source: .heardOrdinal))
+            }
             // Numbered top to bottom (AppKit: higher maxY is higher on screen): C4 live 02-51-12Z
             // listed three "Delete (right side)" and "the first draft" could not be told apart.
             let ordinals = ["1st", "2nd", "3rd", "4th", "5th"]
-            let listed = found.candidates.sorted { $0.frame.maxY > $1.frame.maxY }.prefix(5).enumerated()
+            let listed = topToBottom(found.candidates).prefix(5).enumerated()
                 .map { "\($1.described) (\($1.position), \(ordinals[$0]) from the top)" }.joined(separator: "; ")
             return .failure(RealtimeToolRefusal(error: "elementAmbiguous", message: "\(found.candidates.count) visible elements match \(shown): "
                 + "\(listed). Nothing was \(nothing). If the owner's words already say which one (\"the first\", \"the last\"), aim at "
                 + "that one by its position in the screenshot; otherwise ask the owner which one."))
         }
+    }
+
+    /// The order `elementAmbiguous` numbers candidates in: top to bottom (AppKit: higher maxY is higher).
+    static func topToBottom(_ candidates: [RealtimeScreenCandidate]) -> [RealtimeScreenCandidate] {
+        candidates.sorted { $0.frame.maxY > $1.frame.maxY }
+    }
+
+    /// An ordinal word's place in that order; -1 is the last.
+    static let ordinalPlaces: [String: Int] = ["first": 0, "1st": 0, "top": 0, "topmost": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2,
+                                              "fourth": 3, "4th": 3, "fifth": 4, "5th": 4, "last": -1, "bottom": -1, "bottommost": -1]
+
+    /// The one place the owner's words name, or nil when they name none or more than one.
+    /// `before`: only an ordinal followed within two words by one of these counts ("first result").
+    static func heardOrdinal(_ heard: String?, before nouns: Set<String>? = nil) -> Int? {
+        guard let heard else { return nil }
+        let tokens = RealtimeVoiceVerbs.foldedTokens(heard)
+        let places = Set(tokens.indices.compactMap { index -> Int? in
+            guard let place = ordinalPlaces[tokens[index]] else { return nil }
+            guard let nouns else { return place }
+            return tokens[(index + 1)..<min(index + 3, tokens.count)].contains(where: nouns.contains) ? place : nil
+        })
+        return places.count == 1 ? places.first : nil
+    }
+
+    /// The candidate at the heard place in the numbered order — never one that ties
+    /// its neighbour's height (side by side has no "first"), never past the end.
+    /// The owner's transcript only: the model's arguments never pick (owner ruling 2026-10-03).
+    static func heardOrdinalPick(_ candidates: [RealtimeScreenCandidate], heard: String?, before nouns: Set<String>? = nil) -> RealtimeScreenCandidate? {
+        guard let place = heardOrdinal(heard, before: nouns) else { return nil }
+        let ordered = topToBottom(candidates)
+        let index = place < 0 ? ordered.count - 1 : place
+        guard ordered.indices.contains(index) else { return nil }
+        let level = ordered[index].frame.maxY
+        let tied = [index - 1, index + 1].contains { ordered.indices.contains($0) && abs(ordered[$0].frame.maxY - level) < 1 }
+        return tied ? nil : ordered[index]
     }
 
     /// Words that point at something on screen: "this one", "here", "where my cursor is".
@@ -1344,6 +1387,8 @@ nonisolated enum RealtimeOpenAppTool {
         case underPointer
         /// A name no offer held, found on the live screen (`liveTarget`).
         case liveName
+        /// One of several, picked by an ordinal in the owner's words (`heardOrdinal`).
+        case heardOrdinal
     }
 
     /// Ask-then-confirm spans turns: the model searches, asks, and the owner

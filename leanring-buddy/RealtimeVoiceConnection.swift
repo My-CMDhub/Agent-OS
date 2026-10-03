@@ -957,6 +957,9 @@ final class RealtimeVoiceConnection {
                 screenshotStale: RealtimeOpenAppTool.screenshotIsStale(decisions: Array(turn.decisions[..<decisionIndex]),
                                                                       freshLookOutcome: turn.freshLookOutcome),
                 keyDownPointer: turn.keyDownPointer, heard: heardWords,
+                // Ordinals pick only in a voice turn: an agent step's words are the whole
+                // task, whose "first" may mean another step's thing.
+                ordinalWords: turn.isAgentStep ? nil : heardWords,
                 lookUp: { name in
                     // By bundle, as `dispatch` aims: "Chrome" is Google Chrome's word, not its name.
                     let appName = call.appName
