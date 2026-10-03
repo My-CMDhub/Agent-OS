@@ -210,6 +210,14 @@ nonisolated enum RealtimeScreenVerbs {
         if !query.isEmpty, offered.contains(where: { labelTokens($0.name) == query && $0.isClickable }) {
             offered.removeAll { labelTokens($0.name) != query && !$0.isClickable }
         }
+        // On a web page, when the best match is in the page, the browser's own
+        // controls are not offered beside it (C3/A5 2026-10-03: "the search box"
+        // offered the page's Search field with Chrome's address bar and Tab search,
+        // and the voice asked which). A query the browser answers best still finds it.
+        let elements = response["elements"] as? [[String: Any]] ?? []
+        if let best = offered.first, inPage(best, elements: elements) {
+            offered.removeAll { !inPage($0, elements: elements) }
+        }
         // A label brings the value beside it (scenario A6: "where is the phone
         // number" offered only "Phone: "; the number shares no word with the question).
         offered = Array(offered.flatMap { element -> [PoolElement] in
@@ -230,6 +238,19 @@ nonisolated enum RealtimeScreenVerbs {
             privacyDroppedCount: hidden,
             listingIncomplete: !((response["walkStopReasons"] as? [String]) ?? []).isEmpty
         )
+    }
+
+    /// Inside the page: under an `AXWebArea` (or one itself), by the snapshot's parent links.
+    static func inPage(_ element: PoolElement, elements: [[String: Any]]) -> Bool {
+        if element.role == "AXWebArea" { return true }
+        var next = element.parent
+        var hops = 0
+        while let index = next, elements.indices.contains(index), hops < 100 {
+            if elements[index]["role"] as? String == "AXWebArea" { return true }
+            next = elements[index]["parent"] as? Int
+            hops += 1
+        }
+        return false
     }
 
     /// The names of the text fields the owner can see (the pool: never a password

@@ -376,6 +376,29 @@ struct RealtimeScreenVerbsTests {
         #expect((name?["description"] as? String)?.contains("never a CSS selector") == true)
     }
 
+    /// C3 (01-17-35Z) and A5 (02-09-59Z): "type … in the search box" on a page whose
+    /// field is named "Search" offered it beside Chrome's "Address and search bar" and
+    /// "Tab search", and the voice asked which. On a web page, when the best match is
+    /// in the page, the browser's own controls are not offered beside it; a query
+    /// the browser's control answers best still finds it.
+    @Test func thePageOutranksTheBrowsersOwnControls() {
+        let snapshot: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(screen), "elements": [
+            element("AXWindow", "Mimic Search", screen),
+            element("AXPopUpButton", "Tab search", CGRect(x: 10, y: 870, width: 30, height: 24)),
+            element("AXTextField", "Address and search bar", CGRect(x: 200, y: 840, width: 900, height: 28)),
+            element("AXWebArea", "Mimic Search", CGRect(x: 0, y: 0, width: 1440, height: 820), actions: []),            // 3
+            element("AXTextField", "Search", CGRect(x: 100, y: 600, width: 400, height: 28), parent: 3),
+            element("AXTextField", "Your name", CGRect(x: 100, y: 500, width: 400, height: 28), parent: 3)
+        ]]
+        func offered(_ words: String) -> [String] {
+            RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: snapshot, words: words, screens: [screen]).candidates.map(\.name)
+        }
+        #expect(offered("search box").contains("Search"))
+        #expect(!offered("search box").contains("Address and search bar"))
+        #expect(!offered("search box").contains("Tab search"))
+        #expect(offered("address bar").first == "Address and search bar")
+    }
+
     /// A9 live (02-30-16Z): told to find the field, the voice searched "What do you want
     /// to talk about?", "Create a post" and "Post" — the composer is named "Text editor for
     /// creating content" and its placeholder is CSS — and gave up. An unaimed typing
