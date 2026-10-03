@@ -167,15 +167,29 @@ nonisolated enum RealtimeScreenVerbs {
             let windowArea = window.width * window.height
             var ancestor: RealtimeScreenPressTarget?
             var next = parentIndex
+            // `HarnessPolicy.controlLabelled`'s path: up to 3 levels, through labels and anonymous groups only.
+            var labelPath = HarnessPolicy.labelRoles.contains(role)
+            var levels = 0
             while !pressable, ancestor == nil, let index = next, elements.indices.contains(index) {
                 let candidate = elements[index]
+                levels += 1
+                // A label inside a link or button is pressed through it even when nothing
+                // publishes AXPress (Chrome in some modes publishes none, 2026-10-03): the
+                // role is the witness, as `HarnessPolicy.controlLabelled` judges it — a
+                // Google result's heading came back notPressable here while the harness
+                // would have retargeted it to its link.
                 if let ancestorName = candidate["name"] as? String, let ancestorRole = candidate["role"] as? String, ancestorRole != "AXWindow",
-                   publishesPress(candidate),
+                   publishesPress(candidate)
+                    || (labelPath && levels <= HarnessPolicy.labelToControlLevels && HarnessPolicy.labelledControlRoles.contains(ancestorRole)
+                        && UntrustedText(ancestorName).isPlausibleControlLabel),
                    let ancestorFrame = self.frame(candidate["frame"]), ancestorFrame.contains(CGPoint(x: frame.midX, y: frame.midY)),
                    // A whole pane is no press target, as it is no snap target.
                    ancestorFrame.width * ancestorFrame.height <= windowArea / 3 {
                     ancestor = RealtimeScreenPressTarget(name: ancestorName, role: ancestorRole, frame: ancestorFrame)
                 }
+                let candidateRole = candidate["role"] as? String ?? ""
+                labelPath = labelPath && (HarnessPolicy.labelRoles.contains(candidateRole)
+                                          || (candidateRole == "AXGroup" && (candidate["name"] as? String) == nil))
                 next = candidate["parent"] as? Int
             }
             pool.append(PoolElement(name: name, role: role, subrole: subrole, frame: frame, pressable: pressable, parent: parentIndex,

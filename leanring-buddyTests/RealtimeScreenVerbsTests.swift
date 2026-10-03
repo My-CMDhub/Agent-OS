@@ -148,6 +148,29 @@ struct RealtimeScreenVerbsTests {
         #expect(RealtimeScreenVerbs.liveCandidates(named: key, fromSnapshotResponse: page, screens: [window]).isEmpty)
     }
 
+    // Agent-loop build 2026-10-03 (B1): a Google result's heading came back notPressable
+    // on the voice path while the harness (00df8e5) retargets that heading to its link.
+    // That Chrome published AXPress on nothing, so the role is the witness on both paths.
+    @Test func aHeadingInsideALinkIsPressedThroughTheLinkWithoutAXPress() {
+        let window = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let link = CGRect(x: 170, y: 600, width: 587, height: 60)
+        let page: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(window), "elements": [
+            element("AXWindow", "Google Search", window),
+            element("AXLink", "Superloop - Fast Internet superloop.com", link, actions: []),                        // 1
+            element("AXGroup", nil, link, actions: [], parent: 1),                                                 // 2 anonymous
+            element("AXHeading", "Superloop - Fast Internet", CGRect(x: 170, y: 630, width: 400, height: 24), actions: [], parent: 2),
+            element("AXGroup", "Sponsored", link, actions: [], parent: 1),                                          // 4 named group
+            element("AXHeading", "Ad title", CGRect(x: 170, y: 605, width: 300, height: 20), actions: [], parent: 4)
+        ]]
+        func pressed(_ name: String) -> RealtimeScreenPressTarget? {
+            RealtimeScreenVerbs.liveCandidates(named: name, fromSnapshotResponse: page, screens: [window]).first?.clickTarget
+        }
+        #expect(pressed("Superloop - Fast Internet")?.role == "AXLink")
+        #expect(pressed("Superloop - Fast Internet")?.name == "Superloop - Fast Internet superloop.com")
+        // A named group on the way up is a thing of its own, exactly as the harness stops there.
+        #expect(pressed("Ad title") == nil)
+    }
+
     @Test func aTruncatedWalkIsReportedAsAnIncompleteListing() {
         var snapshot = cursorSnapshot
         snapshot["walkStopReasons"] = ["nodeLimit"]
