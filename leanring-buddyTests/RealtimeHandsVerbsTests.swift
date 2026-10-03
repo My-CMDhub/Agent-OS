@@ -110,13 +110,13 @@ struct RealtimeHandsVerbsTests {
             named("AXTextField", "secret", CGRect(x: 300, y: 300, width: 200, height: 20), subrole: "AXSecureTextField"),
             named("AXTextField", "what the owner typed", CGRect(x: 300, y: 250, width: 200, height: 20), source: "value")
         ], within: bounds)
-        let change = HarnessScroll.change(before: before, after: after)
+        let change = HarnessScroll.change(before: before, after: after, direction: .down)
         #expect(change.moved)
         #expect(change.newlyVisible == ["Experience", "Skills"], "never a password box or a typed value")
-        #expect(!HarnessScroll.change(before: before, after: before).moved)
+        #expect(!HarnessScroll.change(before: before, after: before, direction: .down).moved)
         // Only a frame moved: it scrolled, and nothing new came into view.
         let shifted = before.map { (name: $0.name, frame: $0.frame.offsetBy(dx: 0, dy: 40)) }
-        let nudged = HarnessScroll.change(before: before, after: shifted)
+        let nudged = HarnessScroll.change(before: before, after: shifted, direction: .down)
         #expect(nudged.moved && nudged.newlyVisible.isEmpty)
     }
 

@@ -150,20 +150,43 @@ struct HandsReviewTests {
     @Test func aScrollIsJudgedByPositionsAndTheScrollBar() {
         let clockBefore = [(name: "About", frame: CGRect(x: 300, y: 400, width: 100, height: 20)), (name: "12:41", frame: CGRect(x: 1300, y: 880, width: 40, height: 16))]
         let clockAfter = [(name: "About", frame: CGRect(x: 300, y: 400, width: 100, height: 20)), (name: "12:42", frame: CGRect(x: 1300, y: 880, width: 40, height: 16))]
-        #expect(!HarnessScroll.change(before: clockBefore, after: clockAfter).moved, "a clock tick is not a scroll")
+        #expect(!HarnessScroll.change(before: clockBefore, after: clockAfter, direction: .down).moved, "a clock tick is not a scroll")
         let typing = clockBefore + [(name: "Owner is typing…", frame: CGRect(x: 300, y: 100, width: 200, height: 16))]
-        #expect(!HarnessScroll.change(before: clockBefore, after: typing).moved, "an indicator appearing is not a scroll")
+        #expect(!HarnessScroll.change(before: clockBefore, after: typing, direction: .down).moved, "an indicator appearing is not a scroll")
+        // Down: the content goes UP the screen, AppKit y grows.
         let moved = [(name: "About", frame: CGRect(x: 300, y: 600, width: 100, height: 20))]
-        #expect(HarnessScroll.change(before: clockBefore, after: moved).moved)
-        // Two pages: nothing shared, everything new.
-        let replaced = [(name: "Skills", frame: CGRect(x: 300, y: 400, width: 100, height: 20))]
-        #expect(HarnessScroll.change(before: clockBefore, after: replaced).moved)
+        #expect(HarnessScroll.change(before: clockBefore, after: moved, direction: .down).moved)
         #expect(HarnessScroll.outcome(moved: true, barBefore: nil, barAfter: nil, direction: .down) == .moved)
         #expect(HarnessScroll.outcome(moved: false, barBefore: 0.4, barAfter: 0.6, direction: .down) == .moved, "the bar moved")
         #expect(HarnessScroll.outcome(moved: false, barBefore: 1, barAfter: 1, direction: .down) == .atEnd)
         #expect(HarnessScroll.outcome(moved: false, barBefore: 0, barAfter: 0, direction: .up) == .atEnd)
         #expect(HarnessScroll.outcome(moved: false, barBefore: 0, barAfter: 0, direction: .down) == .notObserved)
         #expect(HarnessScroll.outcome(moved: false, barBefore: nil, barAfter: nil, direction: .down) == .notObserved)
+    }
+
+    // Scenario A3, run 2026-10-02T23-51-05Z: scroll answered ok, "confirmed",
+    // while the page's own scroll offset stayed 0. "Moved" must be the content
+    // moving the way it was asked to, and nothing weaker.
+    @Test func aScrollIsConfirmedOnlyByContentMovingTheWayAsked() {
+        let heading = CGRect(x: 300, y: 400, width: 300, height: 30)
+        let before = [(name: "The restoration", frame: heading), (name: "Visiting", frame: CGRect(x: 300, y: 200, width: 120, height: 30))]
+        // Nothing in view shared: a different window or page, never proof of a scroll.
+        let replaced = [(name: "Skills", frame: heading)]
+        #expect(!HarnessScroll.change(before: before, after: replaced, direction: .down).moved)
+        // Shifted the wrong way (a late layout pushing content down) is not a scroll down.
+        let pushedDown = before.map { (name: $0.name, frame: $0.frame.offsetBy(dx: 0, dy: -40)) }
+        #expect(!HarnessScroll.change(before: before, after: pushedDown, direction: .down).moved)
+        #expect(HarnessScroll.change(before: before, after: pushedDown, direction: .up).moved)
+        // Sideways or resized is a re-layout, not a vertical scroll.
+        let sideways = before.map { (name: $0.name, frame: $0.frame.offsetBy(dx: 30, dy: 0)) }
+        #expect(!HarnessScroll.change(before: before, after: sideways, direction: .down).moved)
+        // Two elements sharing a name are never paired with each other's frame.
+        let twins = [(name: "Read more", frame: CGRect(x: 300, y: 500, width: 80, height: 16)),
+                     (name: "Read more", frame: CGRect(x: 300, y: 300, width: 80, height: 16))]
+        #expect(!HarnessScroll.change(before: twins, after: twins, direction: .down).moved, "nothing moved")
+        // The bar moving the wrong way is not the scroll asked for.
+        #expect(HarnessScroll.outcome(moved: false, barBefore: 0.6, barAfter: 0.4, direction: .down) == .notObserved)
+        #expect(HarnessScroll.outcome(moved: false, barBefore: 0.6, barAfter: 0.4, direction: .up) == .moved)
     }
 
     // 10. Insert puts the caret at the end first; a selection still standing is the owner's, and is never typed over.

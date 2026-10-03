@@ -2267,10 +2267,19 @@ final class HarnessServer {
             for attempt in 0..<5 {
                 Thread.sleep(forTimeInterval: attempt == 0 ? 0.15 : 0.2)
                 let barAfter = HarnessScroll.scrollBarValue(of: container?.accessibilityElement, horizontal: direction.isHorizontal)
+                // The SAME window (A3, 2026-10-02: a scroll "confirmed" with the page
+                // unmoved), its frames taken relative to where it stood before: a
+                // window that moved or animated is not content that scrolled.
                 guard let later = try? AccessibilityTreeWalker.snapshotFocusedWindow(),
-                      later.bundleIdentifier == snapshot.bundleIdentifier, let laterRoot = later.rootNode else { continue }
-                let change = HarnessScroll.change(
-                    before: before, after: HarnessScroll.visibleNames(fromNamedElements: Self.namedElements(in: laterRoot), within: bounds))
+                      later.bundleIdentifier == snapshot.bundleIdentifier, let laterRoot = later.rootNode,
+                      let window = rootNode.accessibilityElement, let laterWindow = laterRoot.accessibilityElement,
+                      CFEqual(window, laterWindow) else { continue }
+                let dx = windowFrame.minX - laterRoot.frameInAppKitCoordinates.minX
+                let dy = windowFrame.minY - laterRoot.frameInAppKitCoordinates.minY
+                let after = HarnessScroll.visibleNames(fromNamedElements: Self.namedElements(in: laterRoot),
+                                                       within: bounds.offsetBy(dx: -dx, dy: -dy))
+                    .map { (name: $0.name, frame: $0.frame.offsetBy(dx: dx, dy: dy)) }
+                let change = HarnessScroll.change(before: before, after: after, direction: direction)
                 last = (HarnessScroll.outcome(moved: change.moved, barBefore: barBefore, barAfter: barAfter, direction: direction),
                         change.newlyVisible)
                 if last.outcome == .moved { return last }
@@ -2321,7 +2330,7 @@ final class HarnessServer {
         let outcome = observed?.outcome ?? .notObserved
         switch outcome {
         case .moved:
-            response["verification"] = ["status": "confirmed", "evidence": "elements in view moved, or the scroll bar did"]
+            response["verification"] = ["status": "confirmed", "evidence": "elements in view shifted as scrolling \(direction.rawValue) moves them, or the scroll bar did"]
             response["ok"] = true
         case .atEnd:
             response["verification"] = ["status": "atEnd", "evidence": "the scroll bar is already at that end"]

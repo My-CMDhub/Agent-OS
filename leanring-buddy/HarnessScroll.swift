@@ -43,14 +43,14 @@ enum ScrollOutcome: String { case moved, atEnd, notObserved }
 enum HarnessScroll {
     static let barEpsilon = 0.0005
 
-    /// Moved if the same elements moved (`change`) or the scroll bar's value
-    /// did; else at the end if the bar sits at the end it was asked to go
-    /// toward; else not observed. No bar (a web area): never "at the end".
+    /// Moved if the same elements moved the way asked (`change`) or the scroll
+    /// bar's value went that way; else at the end if the bar sits at the end it
+    /// was asked to go toward; else not observed. No bar (a web area): never "at the end".
     static func outcome(moved: Bool, barBefore: Double?, barAfter: Double?, direction: ScrollDirection) -> ScrollOutcome {
         if moved { return .moved }
-        if let barBefore, let barAfter, abs(barAfter - barBefore) > barEpsilon { return .moved }
-        guard let bar = barAfter ?? barBefore else { return .notObserved }
         let towardTheEnd = direction == .down || direction == .right
+        if let barBefore, let barAfter, (towardTheEnd ? barAfter - barBefore : barBefore - barAfter) > barEpsilon { return .moved }
+        guard let bar = barAfter ?? barBefore else { return .notObserved }
         return (towardTheEnd ? bar >= 1 - barEpsilon : bar <= barEpsilon) ? .atEnd : .notObserved
     }
 
@@ -125,19 +125,45 @@ enum HarnessScroll {
         }
     }
 
-    /// Moved: an element in view before and after changed PLACE — a clock
-    /// ticking or a typing indicator appearing changes names, not positions
-    /// (review 2026-10-01) — or nothing in view is shared at all (two pages on).
+    /// Moved: elements in view before and after shifted the way the content goes
+    /// for `direction` (AppKit, y up: down moves content UP), along that axis
+    /// only, same size — and they outnumber the elements that changed any other
+    /// way. A clock ticking or an indicator appearing changes names, not
+    /// positions (review 2026-10-01). Scenario A3 (run 2026-10-02T23-51-05Z)
+    /// answered "confirmed" while the page's offset stayed 0, when "moved" was
+    /// any frame change or NOTHING shared at all: a re-layout, a different
+    /// window, two same-named elements read against each other's frame.
+    /// Same-named elements are left out: nothing says which is which.
+    /// ponytail: a scroll so long that nothing in view is shared (10 pages of a
+    /// web area, which publishes no scroll bar) reads notObserved — honest, not
+    /// proven; compare against the off-screen tree if that ever matters.
     /// newlyVisible: names in view after that were not before, once each, capped.
-    static func change(before: [(name: String, frame: CGRect)], after: [(name: String, frame: CGRect)]) -> (moved: Bool, newlyVisible: [String]) {
-        let beforeFrames = Dictionary(before.map { ($0.name, $0.frame) }, uniquingKeysWith: { first, _ in first })
-        let shared = after.filter { beforeFrames[$0.name] != nil }
-        let moved = shared.contains { beforeFrames[$0.name] != $0.frame } || (shared.isEmpty && !before.isEmpty && !after.isEmpty)
+    static func change(before: [(name: String, frame: CGRect)], after: [(name: String, frame: CGRect)],
+                       direction: ScrollDirection) -> (moved: Bool, newlyVisible: [String]) {
+        func unique(_ items: [(name: String, frame: CGRect)]) -> [String: CGRect] {
+            Dictionary(grouping: items, by: \.name).compactMapValues { $0.count == 1 ? $0[0].frame : nil }
+        }
+        let beforeFrames = unique(before)
+        var along = 0, otherwise = 0
+        for (name, frame) in unique(after) {
+            guard let old = beforeFrames[name], old != frame else { continue }
+            let dx = frame.minX - old.minX, dy = frame.minY - old.minY
+            let sameSize = abs(frame.width - old.width) < 1 && abs(frame.height - old.height) < 1
+            let shift: CGFloat
+            switch direction {
+            case .down: shift = abs(dx) < 1 ? dy : 0
+            case .up: shift = abs(dx) < 1 ? -dy : 0
+            case .right: shift = abs(dy) < 1 ? -dx : 0
+            case .left: shift = abs(dy) < 1 ? dx : 0
+            }
+            if sameSize && shift >= 1 { along += 1 } else { otherwise += 1 }
+        }
+        let beforeNames = Set(before.map(\.name))
         var newlyVisible: [String] = []
-        for item in after where beforeFrames[item.name] == nil && !newlyVisible.contains(item.name) {
+        for item in after where !beforeNames.contains(item.name) && !newlyVisible.contains(item.name) {
             newlyVisible.append(item.name)
         }
-        return (moved, Array(newlyVisible.prefix(maximumNewlyVisible)))
+        return (along > 0 && along > otherwise, Array(newlyVisible.prefix(maximumNewlyVisible)))
     }
 
     /// Wheel steps for `pages` of a container `extent` points long on the scroll axis.
