@@ -1030,6 +1030,8 @@ struct AgentLoopReadOnlyTests {
         observation.lines = ["Finder is in front."]
         let text = AgentLoop.observationBlocks(observation, step: 1).compactMap { $0["text"] as? String }.joined()
         #expect(text.contains("the desktop is in front") && text.contains("find_menu_items") && text.contains("Finder is in front."))
+        observation.look = "applicationNotListed"
+        #expect(!AgentLoop.observationBlocks(observation, step: 1).compactMap { $0["text"] as? String }.joined().contains("desktop is in front"))
         observation.look = "secureField"
         #expect(AgentLoop.observationBlocks(observation, step: 1).compactMap { $0["text"] as? String }.joined().contains("(secureField)"))
     }
