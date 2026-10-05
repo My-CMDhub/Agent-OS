@@ -143,6 +143,18 @@ nonisolated enum ScreenOCR {
         return recognize(image: image, region: region)
     }
 
+    /// Vision loads its text model on a process's first request: measured live
+    /// 2026-10-06 (--vision-probe), the pointer close-up took 514 ms cold and 35 ms
+    /// warm against its 350 ms deadline, so the first key-down after launch always
+    /// lost it. One throwaway read of a blank tile, once per process; blocks the caller.
+    static func warmUp() { _ = warmedUp }
+    private static let warmedUp: Void = {
+        guard let context = CGContext(data: nil, width: 64, height: 64, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+              let image = context.makeImage() else { return }
+        _ = recognize(image: image, region: CGRect(x: 0, y: 0, width: 64, height: 64))
+    }()
+
     static func recognize(image: CGImage, region: CGRect) -> [OCRLine] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate

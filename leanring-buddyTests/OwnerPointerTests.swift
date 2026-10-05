@@ -12,6 +12,7 @@
 
 import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
 @testable import Clicky
 
@@ -95,5 +96,30 @@ struct OwnerPointerTests {
         #expect((result["pointedAt"] as? String) == "the words \"Launch demo\"")
         #expect(result["approximate"] == nil)
         #expect(result["where"] as? String != nil)
+    }
+
+    // Live 2026-10-06, --vision-probe: the close-up took 514 ms cold and 35 ms warm
+    // against its 350 ms deadline, so the first key-down after launch always lost it;
+    // with the warm-up first, 68 ms in a fresh process. Timing is the probe's to
+    // prove (a parallel test host measured 625 ms for the same call); this pins that
+    // the warm-up runs once per process and leaves the close-up working.
+    @Test func theWarmUpRunsOncePerProcessAndTheCloseUpStillWorks() throws {
+        let width = Int(pixels.width), height = Int(pixels.height)
+        let context = try #require(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = try #require(context.makeImage())
+        let jpeg = NSMutableData()
+        let destination = try #require(CGImageDestinationCreateWithData(jpeg, "public.jpeg" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        #expect(CGImageDestinationFinalize(destination))
+
+        ScreenOCR.warmUp()
+        let again = Date()
+        ScreenOCR.warmUp()
+        #expect(Date().timeIntervalSince(again) < 0.05, "a second warm-up must not read again")
+        let closeUp = ScreenOCR.pointerCloseUp(screenshotJPEG: jpeg as Data, mouse: CGPoint(x: 700, y: 450), display: display, imagePixels: pixels)
+        #expect(closeUp != nil)
     }
 }

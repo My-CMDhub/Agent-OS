@@ -217,6 +217,8 @@ final class RealtimeVoiceSession {
     /// start, after each turn, and when the picker changes — not at key-down.
     func prewarm() {
         Task { _ = try? await readyConnection() }
+        // The pointer close-up's OCR, off main: cold it overruns its key-down deadline.
+        DispatchQueue.global(qos: .utility).async { ScreenOCR.warmUp() }
     }
 
     /// Reconnects lazily: a session the server closed (idle limits, Gemini's
