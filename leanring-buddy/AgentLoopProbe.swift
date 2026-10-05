@@ -76,7 +76,7 @@ enum AgentLoopProbe {
                 break
             }
             var result: [String: Any] = ["id": id]
-            let chromeBefore = Set(VoiceToolProbe.windowServerWindowNumbers(bundleIdentifier: ScenarioRunner.chromeBundleIdentifier) ?? [])
+            let chromeBefore = VoiceToolProbe.windowServerSurfaces(bundleIdentifier: ScenarioRunner.chromeBundleIdentifier) ?? []
             let context = ScenarioContext(harnessAnswer: harnessAnswer)
             let nonce = String(UUID().uuidString.prefix(8))
             let urls = names.compactMap { ScenarioRunner.pageURL($0, nonce: nonce, query: query) }
@@ -156,9 +156,11 @@ enum AgentLoopProbe {
             // Undo, by identity: our window only.
             result["cleanup"] = await Task.detached { ScenarioRunnerAX.close(window) }.value
             try? await Task.sleep(for: .seconds(1))
-            let chromeAfter = Set(VoiceToolProbe.windowServerWindowNumbers(bundleIdentifier: ScenarioRunner.chromeBundleIdentifier) ?? [])
-            let missing = chromeBefore.subtracting(chromeAfter)
-            result["ownerChromeWindowsIntact"] = missing.isEmpty
+            let chromeAfter = VoiceToolProbe.windowServerSurfaces(bundleIdentifier: ScenarioRunner.chromeBundleIdentifier)
+            let ownerCheck = VoiceToolProbe.ownerWindowCheck(before: chromeBefore, after: chromeAfter)
+            let missing = ownerCheck.missing ?? []
+            result["ownerChromeWindowsIntact"] = ownerCheck.record["intact"]
+            result["ownerWindowCheck"] = ownerCheck.record
             results.append(result)
             print("🤖 agent-loop probe \(id): \(result["status"] ?? "?") \(outcome.name) steps=\(loop.step) \(wallMs) ms")
             if !missing.isEmpty {
@@ -193,7 +195,7 @@ enum AgentLoopProbe {
                 let ours = min(HarnessHands.ownInput.secondsSinceLastPost ?? .infinity, ProcessInfo.processInfo.systemUptime - runStart)
                 if idle + 1 < ours { results.append(["id": id, "status": "aborted", "reason": "ownerReturned"]); return results }
                 var result: [String: Any] = ["id": id, "mode": connector ? "connector" : "screen"]
-                let chromeBefore = Set(VoiceToolProbe.windowServerWindowNumbers(bundleIdentifier: ScenarioRunner.chromeBundleIdentifier) ?? [])
+                let chromeBefore = VoiceToolProbe.windowServerSurfaces(bundleIdentifier: ScenarioRunner.chromeBundleIdentifier) ?? []
                 let nonce = String(UUID().uuidString.prefix(8))
                 guard let url = ScenarioRunner.pageURL("article.html", nonce: nonce) else {
                     results.append(result.merging(["status": "startFailed"]) { _, new in new })
@@ -238,9 +240,11 @@ enum AgentLoopProbe {
                 result["modelMs"] = modelMilliseconds(run: loop.runID)
                 result["cleanup"] = await Task.detached { ScenarioRunnerAX.close(window) }.value
                 try? await Task.sleep(for: .seconds(1))
-                let chromeAfter = Set(VoiceToolProbe.windowServerWindowNumbers(bundleIdentifier: ScenarioRunner.chromeBundleIdentifier) ?? [])
-                let missing = chromeBefore.subtracting(chromeAfter)
-                result["ownerChromeWindowsIntact"] = missing.isEmpty
+                let chromeAfter = VoiceToolProbe.windowServerSurfaces(bundleIdentifier: ScenarioRunner.chromeBundleIdentifier)
+                let check = VoiceToolProbe.ownerWindowCheck(before: chromeBefore, after: chromeAfter)
+                let missing = check.missing ?? []
+                result["ownerChromeWindowsIntact"] = check.record["intact"]
+                result["ownerWindowCheck"] = check.record
                 result["status"] = missing.isEmpty ? "ran" : "aborted"
                 results.append(result)
                 print("🤖 agent speed \(id) \(result["mode"] ?? "?"): \(outcome.name) steps=\(loop.step) \(result["wallMs"] ?? "?") ms")

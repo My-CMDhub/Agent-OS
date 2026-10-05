@@ -52,10 +52,11 @@ struct VoiceToolProbeCleanupTests {
     }
 
     @Test func anyPreexistingWindowGoneIsAnAbort() {
-        #expect(VoiceToolProbe.preexistingWindowsMissing(before: [10, 11], after: [10, 11, 99]).isEmpty)
-        #expect(VoiceToolProbe.preexistingWindowsMissing(before: [10, 11], after: [10]) == [11])
-        // Unreadable, or the app quit: every one of them is gone.
-        #expect(VoiceToolProbe.preexistingWindowsMissing(before: [10, 11], after: nil) == [10, 11])
+        let gone: (Int) -> Bool = { _ in false }
+        #expect(VoiceToolProbe.preexistingWindowsMissing(before: [10, 11], after: [10, 11, 99], stillExists: gone) == [])
+        #expect(VoiceToolProbe.preexistingWindowsMissing(before: [10, 11], after: [10], stillExists: gone) == [11])
+        // Unreadable: unknown, never "every one of them is gone" (R3, 2026-10-05 — see OwnerWindowCheckTests).
+        #expect(VoiceToolProbe.preexistingWindowsMissing(before: [10, 11], after: nil, stillExists: gone) == nil)
     }
 
     @Test func theMainFrameIsReadFromTheHarnessesOwnWireShape() throws {

@@ -30,6 +30,15 @@
 import AppKit
 import Foundation
 
+/// A window-server surface: number, bounds (top-left, like AX) and title.
+/// The title is the owner's (a page, a document): `ownerWindowCheck` keeps
+/// only its length and, when it is a URL, its host.
+nonisolated struct WindowServerSurface: Equatable {
+    let number: Int
+    let bounds: CGRect
+    let title: String?
+}
+
 extension VoiceToolProbe {
     static let menuProbeOpenAICostCapUSD = 0.55
     static let menuProbeDefaultRunsPerStack = 5
@@ -192,7 +201,7 @@ extension VoiceToolProbe {
     /// Space. Not AX: `kAXWindows` is scoped to the active Space and read 0 for
     /// Chrome straight after a focus in the first run (7D6CDDBB), so a count taken
     /// that way "rose" 0 -> 1 on runs where nothing was pressed. Counts need no
-    /// Screen Recording; titles are never read.
+    /// Screen Recording; titles are read only by `windowServerSurfaces`.
     static func windowServerCount(bundleIdentifier: String) -> Int? {
         windowServerWindowNumbers(bundleIdentifier: bundleIdentifier)?.count
     }
@@ -207,6 +216,11 @@ extension VoiceToolProbe {
 
     /// Numbers with bounds (window-server coordinates: top-left origin, like AX).
     static func windowServerWindows(bundleIdentifier: String, onScreenOnly: Bool = false) -> [(number: Int, bounds: CGRect)]? {
+        windowServerSurfaces(bundleIdentifier: bundleIdentifier, onScreenOnly: onScreenOnly)?.map { ($0.number, $0.bounds) }
+    }
+
+    /// The same, with each title — for `ownerWindowCheck`'s record, which keeps only its shape.
+    static func windowServerSurfaces(bundleIdentifier: String, onScreenOnly: Bool = false) -> [WindowServerSurface]? {
         guard let processIdentifier = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first?.processIdentifier,
               let windows = CGWindowListCopyWindowInfo(onScreenOnly ? [.optionOnScreenOnly, .excludeDesktopElements] : [.optionAll, .excludeDesktopElements],
                                                        kCGNullWindowID) as? [[String: Any]] else { return nil }
@@ -216,7 +230,7 @@ extension VoiceToolProbe {
                   let boundsDictionary = window[kCGWindowBounds as String] as? NSDictionary,
                   let bounds = CGRect(dictionaryRepresentation: boundsDictionary), bounds.height >= 100,
                   let number = window[kCGWindowNumber as String] as? Int else { return nil }
-            return (number, bounds)
+            return WindowServerSurface(number: number, bounds: bounds, title: window[kCGWindowName as String] as? String)
         }
     }
 
@@ -231,11 +245,47 @@ extension VoiceToolProbe {
         return RealtimeVoiceVerbs.foldedTokens(path.last ?? "").first == "new"
     }
 
-    /// Windows that existed before the run and the window server no longer
-    /// lists. An unreadable list, or an app that is gone, loses all of them.
-    nonisolated static func preexistingWindowsMissing(before: Set<Int>, after: [Int]?) -> Set<Int> {
-        guard let after else { return before }
-        return before.subtracting(after)
+    /// Windows that existed before the run and are gone. Gone means the window
+    /// server has no description of the number at all: a surface that shrank
+    /// under the 100 pt filter (a bubble, a popup host) only left the list. An
+    /// unreadable list is unknown (nil), never "all gone". R3 (2026-10-05
+    /// 10-41-24Z) aborted on "owner window gone" while Chrome's own log shows
+    /// no window closed (2026-10-06 investigation).
+    nonisolated static func preexistingWindowsMissing(before: Set<Int>, after: [Int]?, stillExists: (Int) -> Bool = windowExists) -> Set<Int>? {
+        guard let after else { return nil }
+        return before.subtracting(after).filter { !stillExists($0) }
+    }
+
+    /// The window server still describes this number: any layer, any size, any Space.
+    nonisolated static func windowExists(_ number: Int) -> Bool {
+        guard number > 0, let pointer = UnsafeRawPointer(bitPattern: UInt(number)) else { return false }
+        var values: [UnsafeRawPointer?] = [pointer]
+        guard let array = CFArrayCreate(kCFAllocatorDefault, &values, 1, nil),
+              let descriptions = CGWindowListCreateDescriptionFromArray(array) as? [[String: Any]] else { return false }
+        return !descriptions.isEmpty
+    }
+
+    /// One owner-window check, written whole — R3's abort left a single bool.
+    /// Before, after and missing: numbers, bounds, and of each title only its
+    /// length and, when it is a URL, its host. Titles are the owner's.
+    nonisolated static func ownerWindowCheck(before: [WindowServerSurface], after: [WindowServerSurface]?, stillExists: (Int) -> Bool = windowExists)
+        -> (missing: Set<Int>?, record: [String: Any]) {
+        let beforeNumbers = Set(before.map(\.number))
+        let missing = preexistingWindowsMissing(before: beforeNumbers, after: after?.map(\.number), stillExists: stillExists)
+        let unlisted = after.map { beforeNumbers.subtracting($0.map(\.number)).subtracting(missing ?? []) } ?? []
+        func entry(_ surface: WindowServerSurface) -> [String: Any] {
+            let bounds: [String: Int] = ["x": Int(surface.bounds.minX.rounded()), "y": Int(surface.bounds.minY.rounded()),
+                                         "w": Int(surface.bounds.width.rounded()), "h": Int(surface.bounds.height.rounded())]
+            let url = surface.title.flatMap { URL(string: $0) }
+            return ["number": surface.number, "bounds": bounds,
+                    "titleLength": surface.title.map { $0.count as Any } ?? NSNull(),
+                    "titleHost": (url?.scheme != nil ? url?.host : nil) ?? NSNull()]
+        }
+        return (missing, ["intact": missing.map { $0.isEmpty as Any } ?? NSNull(),
+                          "before": before.map(entry),
+                          "after": after.map { $0.map(entry) as Any } ?? NSNull(),
+                          "missing": before.filter { missing?.contains($0.number) == true }.map(entry),
+                          "unlistedButPresent": unlisted.sorted()])
     }
 
     /// The harness's main window (AppKit coordinates) is the window-server
@@ -593,8 +643,8 @@ extension VoiceToolProbe {
                     try? await Task.sleep(for: .milliseconds(100))
                 }
                 let missing = preexistingWindowsMissing(before: before, after: windowServerWindowNumbers(bundleIdentifier: bundleIdentifier))
-                if !missing.isEmpty {
-                    return (closed, outcome(response), "preexistingWindowGone:\(bundleIdentifier):\(missing.count)of\(before.count)")
+                if let missing, !missing.isEmpty {
+                    return (closed, outcome(response), "preexistingWindowGone:\(bundleIdentifier):\(missing.count)of\(before.count):\(missing.sorted())")
                 }
                 guard response["ok"] as? Bool == true, windowServerWindowNumbers(bundleIdentifier: bundleIdentifier)?.contains(front) == false else {
                     return (closed, outcome(response), nil)

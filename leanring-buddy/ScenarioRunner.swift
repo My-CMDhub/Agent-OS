@@ -399,7 +399,8 @@ enum ScenarioRunner {
     ) async -> (result: [String: Any], spentUSD: Double, answers: [String: Any], abort: String?) {
         var result: [String: Any] = [:]
         let context = ScenarioContext(harnessAnswer: harnessAnswer)
-        let chromeWindowsBefore = Set(VoiceToolProbe.windowServerWindowNumbers(bundleIdentifier: chromeBundleIdentifier) ?? [])
+        let chromeSurfacesBefore = VoiceToolProbe.windowServerSurfaces(bundleIdentifier: chromeBundleIdentifier) ?? []
+        let chromeWindowsBefore = Set(chromeSurfacesBefore.map(\.number))
         let runningBefore = Set(scenario.quitIfLaunched.filter { !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty })
         var cleanup: [String: Any] = [:]
         var killSwitchCreated = false
@@ -492,10 +493,12 @@ enum ScenarioRunner {
         }
         if !quit.isEmpty { cleanup["quit"] = quit }
         // Every Chrome window the owner had must still be there.
-        let chromeAfter = await settledWindowNumbers(bundleIdentifier: chromeBundleIdentifier)
-        let missing = chromeWindowsBefore.subtracting(chromeAfter ?? [])
-        let leftOpen = Set(chromeAfter ?? []).subtracting(chromeWindowsBefore)
-        cleanup["ownerChromeWindowsIntact"] = missing.isEmpty
+        let chromeAfter = await settledWindowSurfaces(bundleIdentifier: chromeBundleIdentifier)
+        let check = VoiceToolProbe.ownerWindowCheck(before: chromeSurfacesBefore, after: chromeAfter)
+        let missing = check.missing ?? []
+        let leftOpen = Set(chromeAfter?.map(\.number) ?? []).subtracting(chromeWindowsBefore)
+        cleanup["ownerChromeWindowsIntact"] = check.record["intact"]
+        cleanup["ownerWindowCheck"] = check.record
         if !leftOpen.isEmpty { cleanup["newChromeSurfacesLeftOpen"] = leftOpen.count }
         result["cleanup"] = cleanup
         var abort = missing.isEmpty ? nil : "\(missing.count) Chrome window(s) that existed before \(scenario.id) are gone — stopped at once"
@@ -556,12 +559,12 @@ enum ScenarioRunner {
     }
 
     /// Window-server numbers once closes have finished animating (≤ 3 s).
-    private static func settledWindowNumbers(bundleIdentifier: String) async -> Set<Int>? {
-        var last = VoiceToolProbe.windowServerWindowNumbers(bundleIdentifier: bundleIdentifier).map(Set.init)
+    private static func settledWindowSurfaces(bundleIdentifier: String) async -> [WindowServerSurface]? {
+        var last = VoiceToolProbe.windowServerSurfaces(bundleIdentifier: bundleIdentifier)
         for _ in 0..<6 {
             try? await Task.sleep(for: .milliseconds(500))
-            let now = VoiceToolProbe.windowServerWindowNumbers(bundleIdentifier: bundleIdentifier).map(Set.init)
-            if now == last { return now }
+            let now = VoiceToolProbe.windowServerSurfaces(bundleIdentifier: bundleIdentifier)
+            if now.map({ Set($0.map(\.number)) }) == last.map({ Set($0.map(\.number)) }) { return now }
             last = now
         }
         return last
