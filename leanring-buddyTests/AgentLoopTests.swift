@@ -990,6 +990,18 @@ struct AgentLoopReadOnlyTests {
         #expect(AgentLoop.readOnlyRefusal(["verb": "menu", "path": [] as [String]], focusedField: { nil }) != nil)
     }
 
+    /// Generality suite 2026-10-06: a task asked from the desktop started blind
+    /// (applicationNotCapturable x50). The guard stands; the model is told why.
+    @MainActor @Test func aDesktopFirstLookSaysTheDesktopIsInFront() {
+        var observation = AgentObservation()
+        observation.look = "applicationNotCapturable"
+        observation.lines = ["Finder is in front."]
+        let text = AgentLoop.observationBlocks(observation, step: 1).compactMap { $0["text"] as? String }.joined()
+        #expect(text.contains("the desktop is in front") && text.contains("find_menu_items") && text.contains("Finder is in front."))
+        observation.look = "secureField"
+        #expect(AgentLoop.observationBlocks(observation, step: 1).compactMap { $0["text"] as? String }.joined().contains("(secureField)"))
+    }
+
     /// The model is told the scope, so it does not spend steps on refusals.
     @MainActor @Test func theGoalTextNamesTheScope() async {
         let script = Script([toolUse("ask_owner", ["question": "Which Farza?"])])

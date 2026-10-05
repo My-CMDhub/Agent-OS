@@ -677,7 +677,13 @@ final class AgentLoop {
         if let jpeg = observation.jpeg {
             blocks.append(["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": jpeg.base64EncodedString()]])
         }
+        // Generality suite 2026-10-06: a task asked from the desktop had its first look
+        // refused applicationNotCapturable (Finder, no window) 50 times and started blind.
+        // The capture guard stands; the model is told what that refusal means.
         let picture = observation.jpeg != nil ? "The screenshot above is the window in front now."
+            : observation.look == "applicationNotCapturable"
+            ? "No screenshot this step: the app in front has no window on screen — the desktop is in front, so there is nothing of it "
+                + "to see. Its menu bar still works (find_menu_items); or open or focus the app the task needs."
             : "No screenshot this step (\(observation.look)): never guess what is on screen; find_on_screen and read_page still read names."
         blocks.append(["type": "text", "text": (["Step \(step) of at most \(maximumSteps)."] + observation.lines + [picture]).joined(separator: " ")])
         return blocks
