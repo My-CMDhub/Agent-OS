@@ -389,6 +389,9 @@ final class HarnessConfirmations: ObservableObject {
             /// The headline: the action as a question, with the app — "Type this
             /// and submit it in "Chrome"?". Our words plus the escaped app name.
             case question
+            /// Destructive questions only: one short warning, always drawn
+            /// (owner's ruling 2026-10-05, 19:15). The long reason stays in Details.
+            case warning
             /// The text the action would type, escaped in full — the quote.
             case preview
             /// The where line under the question: container › target.
@@ -404,7 +407,7 @@ final class HarnessConfirmations: ObservableObject {
             /// (question), container and target (place), typed text (preview).
             /// Role, point, app id, effect words and the reason sit behind Details,
             /// which can be opened before answering. A test holds the split.
-            var isAlwaysVisible: Bool { self == .question || self == .preview || self == .place }
+            var isAlwaysVisible: Bool { [.question, .warning, .preview, .place].contains(self) }
         }
         let kind: Kind
         let text: String
@@ -425,6 +428,7 @@ final class HarnessConfirmations: ObservableObject {
         // No name: the bundle id stands in, so the collapsed card still says which app.
         let app = (appName ?? shape.bundleIdentifier).map { UntrustedText($0).forDisplayInFull } ?? "unnamed app"
         var lines = [CardLine(kind: .question, text: question(for: shape, app: app))]
+        if destructive { lines.append(CardLine(kind: .warning, text: destructiveWarning(for: shape))) }
         if let text = shape.text { lines.append(CardLine(kind: .preview, text: UntrustedText(text).forDisplayInFull)) }
         // The app is in the question, so the where line starts inside it.
         let place = (shape.withinNamed.map { [UntrustedText($0).forDisplayInFull] } ?? []) + [target]
@@ -477,6 +481,14 @@ final class HarnessConfirmations: ObservableObject {
         }
         if shape.thenConfirm { phrase += " and submit it" }
         return "\(phrase) in \(app)?"
+    }
+
+    /// The always-visible warning on a destructive question. Our words only,
+    /// from the verb and mode — never from the kernel's reason, which quotes
+    /// app-written text. What the kernel matched is in Details.
+    static func destructiveWarning(for shape: Shape) -> String {
+        if shape.verb == "type", shape.mode == "replace" { return "Replaces everything in this field" }
+        return "Destructive \u{2014} may not be undoable"
     }
 
     /// Our own verb in the header. A verb not named here is shown as itself,

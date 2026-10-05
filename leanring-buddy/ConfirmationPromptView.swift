@@ -27,7 +27,7 @@ struct ConfirmationPromptView: View {
     /// The card's sections, top to bottom. Every `CardLine.Kind` is here (a test
     /// holds it), so no line a ticket binds can be left off the card. The first
     /// group is always drawn; the second opens under Details.
-    static let alwaysVisibleSections: [HarnessConfirmations.CardLine.Kind] = [.question, .preview, .place]
+    static let alwaysVisibleSections: [HarnessConfirmations.CardLine.Kind] = [.question, .warning, .preview, .place]
     static let detailSections: [HarnessConfirmations.CardLine.Kind] = [.qualifier, .effect]
     static var cardSections: [HarnessConfirmations.CardLine.Kind] { alwaysVisibleSections + detailSections }
     /// Opening Details or a long preview moves the buttons; the move is this
@@ -259,6 +259,14 @@ struct ConfirmationPromptView: View {
                 CountdownRing(expiresAt: ticket.expiresAt)
             }
             VStack(alignment: .leading, spacing: 6) {
+                // No colour (cyan means proof, and the card is notch black): a glyph
+                // and weight mark it, and the second chime already sounded.
+                ForEach(Array(texts(.warning).enumerated()), id: \.offset) { _, text in
+                    Label(text, systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Self.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 ForEach(Array(texts(.preview).enumerated()), id: \.offset) { _, text in
                     previewText(text, ticketID: ticket.id)
                 }

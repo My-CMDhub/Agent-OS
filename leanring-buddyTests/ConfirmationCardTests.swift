@@ -167,6 +167,27 @@ struct ConfirmationCardTests {
         #expect(visible(full, "Mail").first == "Type this and submit it in \"Mail\"?")
     }
 
+    /// Owner's ruling 2026-10-05, 19:15: a destructive card carries one short
+    /// warning without opening Details; a calm card carries none.
+    @Test func aDestructiveCardWarnsWithoutOpeningDetails() {
+        let shapes: [HarnessConfirmations.Shape] = [
+            .init(verb: "press", bundleIdentifier: "com.apple.finder", rawTarget: "Delete"),
+            .init(verb: "menu", bundleIdentifier: "com.apple.finder", rawTarget: "File \u{203A} Move to Bin"),
+            .init(verb: "type", bundleIdentifier: "com.apple.TextEdit", rawTarget: "<focused>", text: "x", mode: "replace"),
+            .init(verb: "type", bundleIdentifier: "com.apple.TextEdit", rawTarget: "<focused>", text: "x", mode: "insert")
+        ]
+        for shape in shapes {
+            let serious = HarnessConfirmations.cardLines(for: shape, appName: "App", destructive: true)
+            let collapsed = serious.filter(\.kind.isAlwaysVisible)
+            #expect(collapsed.contains(.init(kind: .warning, text: HarnessConfirmations.destructiveWarning(for: shape))),
+                    "\(shape.verb) is destructive but its collapsed card does not warn")
+            #expect(!HarnessConfirmations.cardLines(for: shape, appName: "App").contains { $0.kind == .warning })
+            #expect(HarnessConfirmations.destructiveWarning(for: shape).unicodeScalars.count <= 40)
+        }
+        let replace = shapes[2]
+        #expect(HarnessConfirmations.destructiveWarning(for: replace) == "Replaces everything in this field")
+    }
+
     @Test func aLongTypedTextIsShortenedWithACountNeverCut() {
         let text = String(repeating: "abc ", count: 60)
         let preview = TypedTextPreview(text)
