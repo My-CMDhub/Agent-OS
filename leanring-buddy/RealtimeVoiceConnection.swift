@@ -1006,6 +1006,8 @@ final class RealtimeVoiceConnection {
             turn.decisions[decisionIndex].offeredElementsBeforeCall = (thisTurnScreenOffer ?? turn.previousTurnScreenOffer)?.elements
         } else {
             turn.decisions[decisionIndex].offeredBeforeCall = offered
+            // annotate's underPointer shapes: the key-down pointer, as point_at's.
+            if call.name == RealtimeVoiceVerbs.annotateName { screenTarget = turn.keyDownPointer }
         }
         // The owner pressed the key again while this call waited: whatever
         // it would do answers a turn nobody is waiting on. Never run it.

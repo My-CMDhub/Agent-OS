@@ -98,6 +98,8 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
     var url: String? = nil
     /// do_task only: the owner's whole multi-step request.
     var goal: String? = nil
+    /// annotate only: what to draw, and round what.
+    var shapes: [RealtimeAnnotation]? = nil
 
     /// From a provider's argument object, whichever tool it is.
     static func parsed(callID: String, name: String, arguments: [String: Any]?) -> RealtimeToolCall {
@@ -121,6 +123,14 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
                                     direction: text(arguments?["direction"]), amount: number(arguments?["amount"]),
                                     text: typed, mode: text(arguments?["mode"]),
                                     point: (arguments?["point"] as? [Any])?.compactMap(number))
+        }
+        // annotate: each shape as sent; `RealtimeAnnotate.validated` judges them. Its app is `app` only.
+        let shapes = (arguments?["shapes"] as? [[String: Any]])?.map { shape in
+            RealtimeAnnotation(shape: (shape["shape"] as? String) ?? "", name: text(shape["name"]),
+                               underPointer: (shape["underPointer"] as? Bool) ?? false, text: shape["text"] as? String)
+        }
+        guard name != RealtimeVoiceVerbs.annotateName else {
+            return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["app"]), shapes: shapes)
         }
         return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["name"]) ?? text(arguments?["app"]),
                                 words: words, path: path, what: text(arguments?["what"]), url: text(arguments?["url"]),
@@ -182,7 +192,7 @@ nonisolated enum RealtimeOpenAppTool {
 
     hands: scroll scrolls the window in front (direction up, down, left or right; amount in pages), at an area named like point_at, or the main area when none is given; its result names what came into view. type_text types text into a field: aim it by the field's name, the words printed in or beside it, such as "search"; a position only for a field with no words; no aim only for a field with keyboard focus; it never presses enter and sends nothing, so say what you typed and let the owner send it; type only text the owner gave or asked for. close closes the tab, the window, or quits the app in front (what tab, window or app); quitting shows the owner a card, and the app may still ask to save.
 
-    screen: you can point at and press what you can see. to point, call point_at; to click, call press_element (it also clicks into a field). aim either by the element's name as printed on screen, which is looked up on the live screen, or by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image), or with underPointer true only when the owner says "this one", "here" or "where my cursor is"; a request that names the thing ("click sign in", "where is the phone number") is aimed by that name, never underPointer. for "where is X", call find_on_screen with X's words, then point_at the element that is X at once and say where it is; when a label such as "Phone:" sits beside its value, point at the value, not the label. if a result lists several matches, ask which one, unless the owner's words already pick one by order ("the first", "the last"): then press it by that name, and the order picks it. a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. something you can see that find_on_screen does not list (drawn on a canvas, an icon that is only a picture) is pressed by sight: call press_element with its x and y AND the words printed on it; it is clicked only if those words are read back at that point. never say you can't do something you can see.
+    screen: you can point at and press what you can see. to point, call point_at; to click, call press_element (it also clicks into a field). aim either by the element's name as printed on screen, which is looked up on the live screen, or by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image), or with underPointer true only when the owner says "this one", "here" or "where my cursor is"; a request that names the thing ("click sign in", "where is the phone number") is aimed by that name, never underPointer. for "where is X", call find_on_screen with X's words, then point_at the element that is X at once and say where it is; when a label such as "Phone:" sits beside its value, point at the value, not the label. if a result lists several matches, ask which one, unless the owner's words already pick one by order ("the first", "the last"): then press it by that name, and the order picks it. a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. to show the owner where things are while you explain, call annotate: a box, circle, arrow, underline or short label round elements by their printed names, or round the owner's pointer; it changes nothing. something you can see that find_on_screen does not list (drawn on a canvas, an icon that is only a picture) is pressed by sight: call press_element with its x and y AND the words printed on it; it is clicked only if those words are read back at that point. never say you can't do something you can see.
 
     tasks: when one request needs more than one step (search then open a result, open a page and read or summarise it, fill several fields, write then post), or names two or more actions, or asks you to act and then answer ("and tell me", summarise, find out, which is the cheapest), call do_task once with the owner's whole request as the goal and say only a few words, such as that you are on it; never do the first step yourself and then ask "shall i…?", and never press the first link yourself and report from there: "open the plans page and tell me the cheapest plan" is one do_task. a question to look up on the web (what a site says, the latest commit or news, a price, the cheapest plan) is a do_task too: the task runner answers it from the web without opening a browser; open_url only when the owner asks to see the page. a single step stays with the tools above. system lines later report the task's progress and its outcome; say each briefly in your own words, and claim only what they say happened.
 
@@ -406,6 +416,10 @@ nonisolated enum RealtimeOpenAppTool {
             request = ["verb": "menu", "path": path, "expectApp": expectApp ?? appName]
         case RealtimeVoiceVerbs.findOnScreenName:
             guard call.words != nil else { return refuse("missingWords", "find_on_screen needs a few words to look for") }
+            request = ["verb": "snapshot", "expectApp": expectApp ?? appName, "forModel": true]
+        case RealtimeVoiceVerbs.annotateName:
+            // The find_on_screen read (policy, forModel); `dispatch` resolves and draws.
+            if case .failure(let refusal) = RealtimeAnnotate.validated(call.shapes) { return .failure(refusal) }
             request = ["verb": "snapshot", "expectApp": expectApp ?? appName, "forModel": true]
         case RealtimeVoiceVerbs.scrollName:
             guard let direction = call.direction.flatMap(ScrollDirection.init(rawValue:)) else {
@@ -666,6 +680,26 @@ nonisolated enum RealtimeOpenAppTool {
             var dispatch = finished(result, waited: false, harnessResponse: response)
             dispatch.screenOffer = offer
             return checked(dispatch)
+        }
+        // annotate: the shapes resolved on that read, drawn on Clicky's own overlay; the
+        // elements never leave here. `screenTarget` is the key-down pointer, for underPointer.
+        if call.name == RealtimeVoiceVerbs.annotateName {
+            var result = toolResult(fromHarnessResponse: response)
+            if response["ok"] as? Bool == true, case .success(let shapes) = RealtimeAnnotate.validated(call.shapes) {
+                let displays: [CGRect]
+                if let screens { displays = screens } else { displays = await MainActor.run { NSScreen.screens.map(\.frame) } }
+                let resolved = RealtimeAnnotate.resolve(shapes, snapshotResponse: response, screens: displays, pointer: screenTarget)
+                if !resolved.drawn.isEmpty { await MainActor.run { AnnotationOverlay.show(resolved.drawn) } }
+                result["ok"] = !resolved.drawn.isEmpty
+                result["drawn"] = resolved.drawn.map(\.described)
+                if !resolved.notDrawn.isEmpty { result["notDrawn"] = resolved.notDrawn }
+                if resolved.drawn.isEmpty {
+                    result["error"] = "nothingDrawn"
+                    result["message"] = "none of the shapes could be placed; nothing was drawn"
+                }
+            }
+            response["elements"] = nil
+            return checked(finished(result, waited: false, harnessResponse: response))
         }
         // close: the app's own close item from the listing, pressed through `menu`
         // (a "Quit" is a card), and a quit proved by the app no longer running.
@@ -1140,7 +1174,8 @@ nonisolated enum RealtimeOpenAppTool {
     /// Each kind of claim, and the tools whose ok result is its receipt.
     static let kindClaims: [(phrases: [String], receipts: Set<String>)] = [
         (pressClaimPhrases, [RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName]),
-        (pointClaimPhrases, [RealtimeVoiceVerbs.pointAtName, RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName]),
+        (pointClaimPhrases, [RealtimeVoiceVerbs.pointAtName, RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName,
+                             RealtimeVoiceVerbs.annotateName]),
         (["scrolled"], [RealtimeVoiceVerbs.scrollName]),
         (["typed"], [RealtimeVoiceVerbs.typeTextName]),
         (["closed"], [RealtimeVoiceVerbs.closeName]),
@@ -1332,7 +1367,8 @@ nonisolated enum RealtimeOpenAppTool {
     static func pointWhenTelling(reply: String, decisions: [RealtimeToolDecision], answer: @escaping @Sendable (String) -> String,
                                  screens: [CGRect], screenshotDisplay: CGRect?,
                                  stillCurrent: @escaping @MainActor () -> Bool = { true }) async -> String? {
-        let pointed = decisions.contains { [RealtimeVoiceVerbs.pointAtName, RealtimeVoiceVerbs.pressElementName].contains($0.call.name)
+        let pointed = decisions.contains { [RealtimeVoiceVerbs.pointAtName, RealtimeVoiceVerbs.pressElementName,
+                                            RealtimeVoiceVerbs.annotateName].contains($0.call.name)
             && $0.dispatch?.harnessConfirmed == true }
         let targets = instructedTargets(in: reply)
         guard !pointed, !targets.isEmpty else { return nil }
@@ -1661,6 +1697,9 @@ nonisolated enum RealtimeOpenAppTool {
             let subject = captionName(call.elementName ?? "")
             return dispatch.harnessConfirmed ? .toolCall(title: "\(subject.isEmpty ? "It" : subject) \u{2014} here")
                 : .harnessAnswered(ok: false, subject: subject, error: error)
+        case RealtimeVoiceVerbs.annotateName:
+            // A drawing shows, it proves nothing happened: an intent caption, never the cyan proof.
+            return dispatch.harnessConfirmed ? .toolCall(title: "Showing you") : .harnessAnswered(ok: false, subject: "", error: error)
         case RealtimeVoiceVerbs.pressElementName:
             return .harnessAnswered(ok: dispatch.harnessConfirmed, subject: captionName(call.elementName ?? "it"), error: error)
         case RealtimeVoiceVerbs.pressMenuName:

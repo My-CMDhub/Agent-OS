@@ -593,3 +593,91 @@ nonisolated struct RealtimeScreenOffer: Equatable, Sendable {
     /// The walk hit a limit, so a missing control may simply be unread.
     let listingIncomplete: Bool
 }
+
+/// One shape `annotate` was asked to draw.
+nonisolated struct RealtimeAnnotation: Equatable, Sendable {
+    let shape: String
+    let name: String?
+    let underPointer: Bool
+    let text: String?
+}
+
+/// `annotate` (owner 2026-10-05: "draw something meaningful while explaining"):
+/// shapes round elements named the way point_at names them, or round the
+/// owner's pointer. Read-only: it reads the find_on_screen pool and draws on
+/// Clicky's own click-through window, so no kernel and no ticket. The model's
+/// label text is shown on screen, so it must be a plain short label.
+nonisolated enum RealtimeAnnotate {
+    static let kinds = ["box", "circle", "arrow", "underline", "label"]
+    static let maximumShapes = 6
+    /// A caption, not a paragraph: it sits beside a control.
+    static let maximumLabelLength = 40
+    /// How long a drawing stays when nothing clears it first (the next press does).
+    static let holdSeconds = 6.0
+
+    /// One shape resolved to an exact frame (AppKit), ready to draw.
+    struct Drawn: Equatable, Sendable {
+        let kind: String
+        let frame: CGRect
+        let label: String?
+        /// "box round button \"Save\"": what the model is told was drawn.
+        let described: String
+    }
+
+    static func validated(_ shapes: [RealtimeAnnotation]?) -> Result<[RealtimeAnnotation], RealtimeToolRefusal> {
+        func refuse(_ error: String, _ message: String) -> Result<[RealtimeAnnotation], RealtimeToolRefusal> {
+            .failure(RealtimeToolRefusal(error: error, message: message))
+        }
+        guard let shapes, !shapes.isEmpty else { return refuse("missingShapes", "annotate needs at least one shape; nothing was drawn") }
+        guard shapes.count <= maximumShapes else {
+            return refuse("tooManyShapes", "at most \(maximumShapes) shapes at a time; nothing was drawn. Draw the ones that matter most.")
+        }
+        for shape in shapes {
+            guard kinds.contains(shape.shape) else {
+                return refuse("invalidShape", "shape is one of \(kinds.joined(separator: ", ")); nothing was drawn")
+            }
+            guard shape.name != nil || shape.underPointer else {
+                return refuse("missingTarget", "each shape needs the element's name as printed on screen, or underPointer; nothing was drawn")
+            }
+            if shape.shape == "label", shape.text == nil {
+                return refuse("invalidLabel", "a label shape needs its text; nothing was drawn")
+            }
+            if let text = shape.text, !UntrustedText(text).isPlausibleControlLabel || text.count > maximumLabelLength {
+                return refuse("invalidLabel", "a label is one short line of at most \(maximumLabelLength) characters; nothing was drawn")
+            }
+        }
+        return .success(shapes)
+    }
+
+    /// Each shape's frame from a `forModel` snapshot (the find_on_screen pool,
+    /// exact then normalised — point_at's live lookup), or the key-down pointer:
+    /// its element, else a small square round the point. A name that is not
+    /// there, or names two, is not drawn and says why.
+    static func resolve(_ shapes: [RealtimeAnnotation], snapshotResponse: [String: Any], screens: [CGRect],
+                        pointer: RealtimeScreenTarget?) -> (drawn: [Drawn], notDrawn: [String]) {
+        var drawn: [Drawn] = []
+        var notDrawn: [String] = []
+        for shape in shapes {
+            if shape.underPointer {
+                guard let pointer else { notDrawn.append("\(shape.shape): nothing was read under the owner's pointer"); continue }
+                let side = ElementPointer.approximateSidePoints
+                let frame = pointer.candidate?.frame
+                    ?? CGRect(x: pointer.point.x - side / 2, y: pointer.point.y - side / 2, width: side, height: side)
+                drawn.append(Drawn(kind: shape.shape, frame: frame, label: shape.text,
+                                   described: "\(shape.shape) round " + (pointer.candidate.map(\.described) ?? "the owner's pointer")))
+                continue
+            }
+            guard let name = shape.name else { continue }
+            let found = RealtimeScreenVerbs.liveCandidates(named: name, fromSnapshotResponse: snapshotResponse, screens: screens)
+            switch found.count {
+            case 1:
+                drawn.append(Drawn(kind: shape.shape, frame: found[0].frame, label: shape.text, described: "\(shape.shape) round \(found[0].described)"))
+            case 0:
+                notDrawn.append("\(shape.shape): nothing visible is called \(UntrustedText(name).forDisplay)")
+            default:
+                notDrawn.append("\(shape.shape): \(found.count) visible elements are called \(UntrustedText(name).forDisplay); name one more exactly")
+            }
+        }
+        return (drawn, notDrawn)
+    }
+}

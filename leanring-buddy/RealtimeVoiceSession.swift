@@ -405,8 +405,9 @@ final class RealtimeVoiceSession {
     // MARK: Push-to-talk
 
     func pressed() {
-        // A new request takes the last pointer away (its audio end is still known here).
+        // A new request takes the last pointer and drawing away (its audio end is still known here).
         ElementPointer.hide()
+        AnnotationOverlay.hide()
         // Barge-in: a new press silences whatever is still being said.
         let previousLineWasOpen = liveTurn != nil
         let previousAudioWasPlaying = isReplyAudioPlaying

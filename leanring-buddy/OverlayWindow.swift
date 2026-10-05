@@ -964,3 +964,129 @@ struct AccessibilityElementBoxesView: View {
         .allowsHitTesting(false)
     }
 }
+
+/// Where an `annotate` arrow runs: from 80 pt up and to the left of its
+/// target to just short of the target's left edge — or from the right when the
+/// left would leave the screen. AppKit coordinates.
+nonisolated enum AnnotationGeometry {
+    static let arrowReach: CGFloat = 80
+    static let arrowGap: CGFloat = 4
+
+    static func arrow(to target: CGRect, on screen: CGRect) -> (start: CGPoint, tip: CGPoint) {
+        let fromLeft = target.minX - arrowGap - arrowReach >= screen.minX
+        let tip = CGPoint(x: fromLeft ? target.minX - arrowGap : target.maxX + arrowGap, y: target.midY)
+        let rise = min(arrowReach * 0.6, max(0, screen.maxY - tip.y - 2))
+        let start = CGPoint(x: tip.x + (fromLeft ? -arrowReach : arrowReach), y: tip.y + rise)
+        return (CGPoint(x: min(max(start.x, screen.minX + 2), screen.maxX - 2), y: start.y), tip)
+    }
+}
+
+/// `annotate`'s drawing: every shape of one call on click-through windows
+/// (one per screen it touches), never key or main, cleared after
+/// `RealtimeAnnotate.holdSeconds` or by the next press (`hide`). A new call
+/// replaces the last. Main thread only, like `ElementHighlightOverlay`.
+enum AnnotationOverlay {
+    private static var windows: [OverlayWindow] = []
+    private static var generation = 0
+
+    static func hide() {
+        generation += 1
+        windows.forEach { $0.orderOut(nil) }
+        windows = []
+    }
+
+    static func show(_ shapes: [RealtimeAnnotate.Drawn], seconds: Double = RealtimeAnnotate.holdSeconds) {
+        hide()
+        let shown = generation
+        for screen in NSScreen.screens {
+            let here = shapes.filter { screen.frame.intersects($0.frame) }
+            guard !here.isEmpty else { continue }
+            let overlay = OverlayWindow(screen: screen)
+            overlay.collectionBehavior.insert(.ignoresCycle)
+            overlay.contentView = NSHostingView(rootView: AnnotationView(shapes: here, screenFrame: screen.frame))
+            overlay.orderFrontRegardless()
+            windows.append(overlay)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+            guard generation == shown else { return }
+            hide()
+        }
+    }
+
+    /// The windows now showing, for the live probe's window-server witness.
+    static var windowNumbers: [Int] { windows.map(\.windowNumber) }
+}
+
+private struct AnnotationView: View {
+    let shapes: [RealtimeAnnotate.Drawn]
+    let screenFrame: CGRect
+    private let color = Color.orange
+
+    /// AppKit point to this view's top-left space.
+    private func flipped(_ point: CGPoint) -> CGPoint {
+        CGPoint(x: point.x - screenFrame.minX, y: screenFrame.height - (point.y - screenFrame.minY))
+    }
+
+    private func rect(_ frame: CGRect, margin: CGFloat) -> CGRect {
+        let grown = frame.insetBy(dx: -margin, dy: -margin)
+        let origin = flipped(CGPoint(x: grown.minX, y: grown.maxY))
+        return CGRect(origin: origin, size: grown.size)
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(Array(shapes.enumerated()), id: \.offset) { _, shape in
+                mark(shape)
+                if let label = shape.label {
+                    caption(label, over: rect(shape.frame, margin: 6))
+                }
+            }
+        }
+        .frame(width: screenFrame.width, height: screenFrame.height, alignment: .topLeading)
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder private func mark(_ shape: RealtimeAnnotate.Drawn) -> some View {
+        switch shape.kind {
+        case "box":
+            let box = rect(shape.frame, margin: 4)
+            RoundedRectangle(cornerRadius: 5).stroke(color, lineWidth: 3)
+                .frame(width: box.width, height: box.height).position(x: box.midX, y: box.midY)
+        case "circle":
+            let ring = rect(shape.frame, margin: 10)
+            Ellipse().stroke(color, lineWidth: 3)
+                .frame(width: ring.width, height: ring.height).position(x: ring.midX, y: ring.midY)
+        case "underline":
+            let under = rect(shape.frame, margin: 0)
+            Path { path in
+                path.move(to: CGPoint(x: under.minX, y: under.maxY + 3))
+                path.addLine(to: CGPoint(x: under.maxX, y: under.maxY + 3))
+            }.stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+        case "arrow":
+            let geometry = AnnotationGeometry.arrow(to: shape.frame, on: screenFrame)
+            let start = flipped(geometry.start), tip = flipped(geometry.tip)
+            let angle = atan2(tip.y - start.y, tip.x - start.x)
+            Path { path in
+                path.move(to: start)
+                path.addLine(to: tip)
+                for side in [-1.0, 1.0] {
+                    path.move(to: tip)
+                    path.addLine(to: CGPoint(x: tip.x - 14 * cos(angle + side * .pi / 7), y: tip.y - 14 * sin(angle + side * .pi / 7)))
+                }
+            }.stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+        default:
+            EmptyView()   // "label": the caption alone
+        }
+    }
+
+    private func caption(_ text: String, over target: CGRect) -> some View {
+        Text(text)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundColor(.black)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(RoundedRectangle(cornerRadius: 5).fill(color))
+            .fixedSize()
+            .position(x: target.midX, y: max(target.minY - 14, 14))
+    }
+}

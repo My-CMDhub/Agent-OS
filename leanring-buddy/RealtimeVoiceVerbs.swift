@@ -39,14 +39,16 @@ nonisolated enum RealtimeVoiceVerbs {
     static let openURLName = "open_url"
     /// A multi-step request handed to the agent loop (`AgentLoop`, spec 2026-10-03): returns at once.
     static let doTaskName = "do_task"
+    /// Shapes drawn round named elements while explaining (`RealtimeAnnotate`, owner 2026-10-05).
+    static let annotateName = "annotate"
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName,
                                             findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
-                                            openURLName, doTaskName]
+                                            openURLName, doTaskName, annotateName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
     /// on reads) and default to the app in front when the call names none.
-    static let readOnlyToolNames: Set<String> = [findMenuItemsName, findOnScreenName, pointAtName]
+    static let readOnlyToolNames: Set<String> = [findMenuItemsName, findOnScreenName, pointAtName, annotateName]
 
     /// The tools that aim at an element on screen, by name, position or pointer.
     static func isScreenTargetTool(_ toolName: String) -> Bool {
@@ -71,7 +73,7 @@ nonisolated enum RealtimeVoiceVerbs {
 
     // MARK: Declarations
 
-    private enum Kind { case text, list, number, flag, numberList }
+    private indirect enum Kind { case text, list, number, flag, numberList, objectList([Parameter]) }
 
     private struct Parameter {
         let name: String
@@ -193,6 +195,21 @@ nonisolated enum RealtimeVoiceVerbs {
                     parameters: [Parameter(name: "url", description: "The full http or https address, for example \"https://www.linkedin.com/\"."),
                                  Parameter(name: "app", required: false,
                                            description: "The browser, for example \"Google Chrome\". Leave it out for the default browser.")]),
+        Declaration(name: annotateName,
+                    description: "Draws on the owner's screen, while you explain, to show where things are: a box, circle, arrow, "
+                        + "underline or short label round elements of the window in front, each named exactly as point_at names it (as "
+                        + "printed on screen), or round the owner's pointer. Changes nothing in any app; the drawing clears after a few "
+                        + "seconds or at the owner's next press. At most \(RealtimeAnnotate.maximumShapes) shapes. The result says what was drawn.",
+                    parameters: [appInFront,
+                                 Parameter(name: "shapes", kind: .objectList([
+                                    Parameter(name: "shape", description: "What to draw.", options: RealtimeAnnotate.kinds),
+                                    Parameter(name: "name", required: false, description: "The element's name exactly as printed on screen."),
+                                    Parameter(name: "underPointer", kind: .flag, required: false,
+                                              description: "true to draw round what is under the owner's mouse pointer instead of a name."),
+                                    Parameter(name: "text", required: false,
+                                              description: "A short caption beside it, at most \(RealtimeAnnotate.maximumLabelLength) characters; "
+                                                + "needed for a label.")
+                                 ]), description: "The shapes, in the order to draw them.")]),
         Declaration(name: closeName,
                     description: "Closes the tab or the window in front, or quits the app in front, through the app's own menu. Quitting "
                         + "shows the owner a card first; the app may still ask to save, and that answer is the owner's.",
@@ -244,6 +261,12 @@ nonisolated enum RealtimeVoiceVerbs {
         switch parameter.kind {
         case .list: return ["type": type("array"), "items": ["type": type("string")], "description": parameter.description]
         case .numberList: return ["type": type("array"), "items": ["type": type("number")], "description": parameter.description]
+        case .objectList(let fields):
+            return ["type": type("array"), "description": parameter.description, "items": [
+                "type": type("object"),
+                "properties": Dictionary(uniqueKeysWithValues: fields.map { ($0.name, property($0, gemini: gemini)) }),
+                "required": fields.filter(\.required).map(\.name)
+            ] as [String: Any]]
         case .number: return ["type": type("number"), "description": parameter.description]
         case .flag: return ["type": type("boolean"), "description": parameter.description]
         case .text:
@@ -404,7 +427,8 @@ nonisolated enum RealtimeVoiceVerbs {
     /// The screen pair is scoped the same way (2026-09-30): a control is read
     /// and pointed at only in the app the call named.
     static func isAppScopedMenuTool(_ toolName: String) -> Bool {
-        [findMenuItemsName, pressMenuName, findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName].contains(toolName)
+        [findMenuItemsName, pressMenuName, findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
+         annotateName].contains(toolName)
     }
 
     /// One name an app answers to: its file name in an Applications folder, or
@@ -548,6 +572,8 @@ nonisolated enum RealtimeVoiceVerbs {
             return "Typing\u{2026}"
         case openURLName:
             return "Opening \(call.url.flatMap { URL(string: $0)?.host }.map(RealtimeOpenAppTool.captionName) ?? "the page")\u{2026}"
+        case annotateName:
+            return "Showing you\u{2026}"
         case closeName:
             switch call.what {
             case "tab": return "Closing the tab\u{2026}"
@@ -562,7 +588,7 @@ nonisolated enum RealtimeVoiceVerbs {
     /// Only these count as the receipt for completion words: a find is a read.
     /// do_task only starts the loop: its "started" is no receipt for "done".
     static func isActingTool(_ toolName: String) -> Bool {
-        toolName != findMenuItemsName && toolName != findOnScreenName && toolName != doTaskName
+        toolName != findMenuItemsName && toolName != findOnScreenName && toolName != doTaskName && toolName != annotateName
     }
 }
 
