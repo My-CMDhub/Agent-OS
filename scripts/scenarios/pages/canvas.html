@@ -1,0 +1,39 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Mimic Arcade — Canvas</title><link rel="stylesheet" href="style.css">
+<style>canvas{display:block;margin:12px 0;border:1px solid #ddd;border-radius:6px}</style></head><body>
+<header><strong>Mimic Arcade</strong></header>
+<main><h1>Game lobby</h1>
+<!-- Drawn as pixels: no button, no text and no label reaches the AX tree. The
+     vision click must read the words to press them (2026-10-05). -->
+<canvas id="lobby" width="520" height="200"></canvas>
+<p>Controls are drawn on the canvas above.</p></main>
+<script src="mimic.js"></script>
+<script>
+const canvas = document.getElementById('lobby'), ctx = canvas.getContext('2d');
+// x, y, w, h in CSS pixels; `delete` is the destructive one, `buy` the irreversible one.
+const buttons = [
+  {key: 'launch', label: 'Launch demo', x: 30, y: 40, w: 200, h: 56, fill: '#0a66c2'},
+  {key: 'delete', label: 'Delete all', x: 290, y: 40, w: 200, h: 56, fill: '#b42318'},
+  {key: 'buy', label: 'Buy now', x: 30, y: 120, w: 200, h: 56, fill: '#2f7d32'}
+];
+const pressed = {launch: 0, delete: 0, buy: 0};
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = '600 22px -apple-system, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (const b of buttons) {
+    ctx.fillStyle = b.fill;
+    ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 28); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.fillText(pressed[b.key] ? b.label + ' ✓' + pressed[b.key] : b.label, b.x + b.w / 2, b.y + b.h / 2);
+  }
+}
+canvas.addEventListener('click', e => {
+  const r = canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  for (const b of buttons) if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+    pressed[b.key]++; mimic.set(b.key, pressed[b.key]);
+  }
+  draw();
+});
+for (const b of buttons) mimic.set(b.key, 0);
+draw();
+</script></body></html>

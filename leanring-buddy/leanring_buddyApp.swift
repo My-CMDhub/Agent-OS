@@ -192,6 +192,18 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // The vision click, the owner-pointer close-up, OCR pointer snapping and
+        // annotate, live on the canvas mimic page in a Chrome window it opens
+        // and closes by identity; cards denied. Refuses --harness-dry-run.
+        if CommandLine.arguments.contains("--vision-probe") {
+            confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
+            Task { @MainActor in
+                await VisionProbe.run(harness: self.harnessServer, confirmations: self.confirmations)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // Walks Finder / System Settings / Cursor on main and on a background
         // queue, writes ~/Library/Logs/Clicky/ax-thread-probe.log, then quits.
         if CommandLine.arguments.contains("--ax-thread-probe") {
