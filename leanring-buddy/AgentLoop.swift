@@ -134,7 +134,7 @@ actor AgentLoopModel {
 
     init(provider: AgentModelProvider = .configured) {
         self.provider = provider
-        model = provider == .gemini ? AgentLoopGemini.models[0] : Self.preferred
+        model = provider == .gemini ? AgentLoopGemini.firstModel() : Self.preferred
     }
 
     /// Sonnet 5.5 refuses `disabled`; `between_tools` is its no-extended-thinking

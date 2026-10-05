@@ -60,6 +60,13 @@ struct AgentLoopGeminiTests {
         #expect(!AgentLoopModel.geminiShouldFallBack(AgentModelError(status: 400, body: "bad request")))
     }
 
+    @Test func aRunCanPinTheFirstModelOnlyToAListedOne() {
+        #expect(AgentLoopGemini.firstModel(arguments: []) == "gemini-3.1-pro-preview")
+        #expect(AgentLoopGemini.firstModel(arguments: ["--agent-model=gemini-3.8-flash"]) == "gemini-3.8-flash")
+        #expect(AgentLoopGemini.firstModel(arguments: ["--agent-model=gpt-5"]) == "gemini-3.1-pro-preview", "an unlisted id never reaches the worker")
+        #expect(AgentLoopGemini.firstModel(arguments: ["--agent-model="]) == "gemini-3.1-pro-preview")
+    }
+
     @MainActor @Test func eachBackendGetsOnlyItsOwnWebTools() {
         func names(_ body: [String: Any]) -> [String] { ((body["tools"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String } }
         let gemini = names(AgentLoop.requestBody(messages: [], provider: .gemini))

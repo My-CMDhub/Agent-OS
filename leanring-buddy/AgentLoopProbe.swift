@@ -29,7 +29,7 @@ enum AgentLoopProbe {
         let directory = MeasurementLogFile.directoryURL.appendingPathComponent("agent-loop-probe/\(stamp)", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         var meta: [String: Any] = ["timestamp": stamp, "provider": AgentModelProvider.configured.rawValue,
-                                   "preferredModel": AgentModelProvider.configured == .gemini ? AgentLoopGemini.models[0] : AgentLoopModel.preferred]
+                                   "preferredModel": AgentModelProvider.configured == .gemini ? AgentLoopGemini.firstModel() : AgentLoopModel.preferred]
         var results: [[String: Any]] = []
         defer {
             if let line = MeasurementLogFile.jsonLine(["run": meta, "scenarios": results]) {

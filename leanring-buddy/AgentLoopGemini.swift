@@ -30,6 +30,14 @@ nonisolated enum AgentModelProvider: String {
 nonisolated enum AgentLoopGemini {
     /// Strongest first; must match the worker's GEMINI_GENERATE_MODELS.
     static let models = ["gemini-3.1-pro-preview", "gemini-3.8-flash", "gemini-2.5-pro"]
+    static let pinArgument = "--agent-model="
+
+    /// The first model the loop tries: `models[0]`, or a run's `--agent-model=<id>`
+    /// (benchmarks) when that id is on the list. Fallback still walks down from it.
+    static func firstModel(arguments: [String] = CommandLine.arguments) -> String {
+        let pinned = arguments.last { $0.hasPrefix(pinArgument) }.map { String($0.dropFirst(pinArgument.count)) }
+        return pinned.flatMap { models.contains($0) ? $0 : nil } ?? models[0]
+    }
     static let webLookupName = "web_lookup"
     /// Per task.
     static let webLookupCap = 5
