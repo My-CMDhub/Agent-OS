@@ -1180,7 +1180,8 @@ extension AgentLoop {
     /// `labelTitle`: the element the screen-target resolution read from the
     /// tree (or OCR), which the harness re-reads at the point — never the
     /// model's description. Unreadable: refused.
-    nonisolated static func readOnlyRefusal(_ request: [String: Any]?, focusedField: () -> FieldIdentity?) -> String? {
+    nonisolated static func readOnlyRefusal(_ request: [String: Any]?, focusedField: () -> FieldIdentity?,
+                                            frontAppMarksRead: () -> Bool = { false }) -> String? {
         guard let request, let verb = (request["verb"] as? String).flatMap(HarnessVerb.init(rawValue:)) else {
             return "the request could not be read"
         }
@@ -1189,6 +1190,11 @@ extension AgentLoop {
         case .scroll, .openURL, .focus, .launch:
             return nil
         case .click, .press, .select:
+            // Owner's ruling R2: opening a conversation or message marks it read, and the sender may see it.
+            if verb == .select || listItemRoles.contains(request["role"] as? String ?? ""), frontAppMarksRead() {
+                return "opening an item in a messaging or mail app marks it read and the sender may see that; read the previews in the "
+                    + "list as they are, without opening any"
+            }
             let names = [request["title"], request["labelTitle"]].compactMap { $0 as? String }.filter { !$0.allSatisfy(\.isWhitespace) }
             guard !names.isEmpty else { return "a press of something with no name cannot be judged" }
             return names.lazy.compactMap(reachingWord).first.map { "pressing an element named with \"\($0)\" reaches people or changes something" }
@@ -1207,14 +1213,33 @@ extension AgentLoop {
         }
     }
 
+    /// A conversation or message in a list: what a press there opens.
+    nonisolated static let listItemRoles: Set<String> = ["AXRow", "AXCell", "AXStaticText", "AXOutlineRow"]
+
+    /// Owner's ruling R2 (2026-10-06): the app sends read receipts or marks mail read
+    /// on open — it declares `public.app-category.social-networking` (Messages,
+    /// WhatsApp, measured) or handles mailto: (Mail declares productivity). Chrome
+    /// and its web apps declare no category, so LinkedIn on the web is not covered.
+    nonisolated static func marksReadOnOpen(category: String?, isMailClient: Bool) -> Bool {
+        isMailClient || category == "public.app-category.social-networking"
+    }
+
+    nonisolated static func liveFrontAppMarksRead() -> Bool {
+        guard let url = AccessibilityTreeWalker.focusedApplication()?.bundleURL else { return false }
+        let category = Bundle(url: url)?.infoDictionary?["LSApplicationCategoryType"] as? String
+        let mailClients = NSWorkspace.shared.urlsForApplications(toOpen: URL(string: "mailto:owner@example.com")!)
+        return marksReadOnOpen(category: category, isMailClient: mailClients.contains { $0.standardizedFileURL == url.standardizedFileURL })
+    }
+
     /// The harness answer with the read-only judge in front: a refused request
     /// never reaches the harness (so no card, no audit line) and comes back as
     /// `readOnlyTask`.
     nonisolated static func readOnlyGuardedAnswer(_ answer: @escaping @Sendable (String) -> String,
-                                                  readFocusedField: @escaping @Sendable () -> FieldIdentity?) -> @Sendable (String) -> String {
+                                                  readFocusedField: @escaping @Sendable () -> FieldIdentity?,
+                                                  frontAppMarksRead: @escaping @Sendable () -> Bool = { false }) -> @Sendable (String) -> String {
         { line in
             let request = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
-            guard let reason = readOnlyRefusal(request, focusedField: readFocusedField) else { return answer(line) }
+            guard let reason = readOnlyRefusal(request, focusedField: readFocusedField, frontAppMarksRead: frontAppMarksRead) else { return answer(line) }
             // `target`: the judged name, for the run's report (the model's result keeps only the message).
             let target = (request?["labelTitle"] ?? request?["title"] ?? request?["verb"]) as? String
             return MeasurementLogFile.jsonLine(["ok": false, "error": "readOnlyTask", "target": target.map { String($0.prefix(80)) } ?? NSNull(),
@@ -1302,7 +1327,7 @@ extension AgentLoop {
         let boundTabs = frontTabs.filter { carry.taskTabs[$0.key]?.contains($0.value) == true }
         var answer = boundTabs.isEmpty ? harnessAnswer : tabGuardedAnswer(harnessAnswer, boundTabs: boundTabs, readTab: frontTab(of:))
         // Outermost: a read-only task's refusal needs no tab read and never reaches the harness.
-        if carry.readOnly { answer = readOnlyGuardedAnswer(answer, readFocusedField: liveFocusedField) }
+        if carry.readOnly { answer = readOnlyGuardedAnswer(answer, readFocusedField: liveFocusedField, frontAppMarksRead: liveFrontAppMarksRead) }
         marks.agentStartBundle = carry.startBundle
         marks.heardText = heard
         marks.heardCompleteUptime = now

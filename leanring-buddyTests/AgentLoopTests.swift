@@ -545,6 +545,30 @@ struct AgentLoopTests {
         #expect(decision.outcome != .match && decision.outcome != .noAppHeard)
     }
 
+    /// Owner's ruling R2, 2026-10-06: reading must not mark things read. A
+    /// read-only task in an app that sends read receipts — declared category
+    /// social-networking, or a mail client — never selects or opens a list item:
+    /// it reads the previews. Buttons and tabs still go through.
+    @Test func ownerRulingR2AReadOnlyTaskNeverOpensAConversationInAMessagingOrMailApp() {
+        func refusal(_ request: [String: Any], marksRead: Bool) -> String? {
+            AgentLoop.readOnlyRefusal(request, focusedField: { nil }, frontAppMarksRead: { marksRead })
+        }
+        let row: [String: Any] = ["verb": "select", "title": "Ada Lovelace", "role": "AXRow"]
+        #expect(refusal(row, marksRead: false) == nil)
+        let refused = refusal(row, marksRead: true)
+        #expect(refused?.contains("preview") == true)
+        #expect(refusal(["verb": "click", "title": "Ada Lovelace", "role": "AXCell"], marksRead: true) != nil)
+        #expect(refusal(["verb": "click", "title": "Ada Lovelace", "role": "AXStaticText"], marksRead: true) != nil)
+        #expect(refusal(["verb": "click", "title": "Chats", "role": "AXButton"], marksRead: true) == nil)
+        #expect(refusal(["verb": "click", "title": "Ada Lovelace", "role": "AXCell"], marksRead: false) == nil)
+        // The category, measured 2026-10-06: Messages and WhatsApp declare social-networking; Mail
+        // declares productivity and is the mailto: handler; Chrome and its web apps declare none.
+        #expect(AgentLoop.marksReadOnOpen(category: "public.app-category.social-networking", isMailClient: false))
+        #expect(AgentLoop.marksReadOnOpen(category: "public.app-category.productivity", isMailClient: true))
+        #expect(!AgentLoop.marksReadOnOpen(category: "public.app-category.productivity", isMailClient: false))
+        #expect(!AgentLoop.marksReadOnOpen(category: nil, isMailClient: false))
+    }
+
     // MARK: Re-review of 2e45939
 
     /// B: open_url's answer names the default browser, usually already running, and
