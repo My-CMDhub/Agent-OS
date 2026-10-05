@@ -270,4 +270,25 @@ struct HandsReviewTests {
         guard case .failure(let refusal) = refused else { Issue.record("the voice tool typed a line break"); return }
         #expect(refusal.error == "controlCharacterInText")
     }
+
+    /// Live 2026-10-06 on a local mimic page in Chrome: type at the label "Password hint"
+    /// resolved to the right field (an anonymous AXTextField below it) and the kernel
+    /// refused it as "not a plain label" — the field's own name was checked, and a web
+    /// field has none. A field reached through its label is named by that label; a
+    /// password box reached that way is still refused, and a field with neither name is too.
+    @Test func aFieldReachedThroughItsLabelIsNamedByTheLabel() {
+        let typing = ActionSafetyKernel.TypingContext(mode: .insert, settableAttributes: [kAXSelectedTextAttribute, kAXValueAttribute],
+                                                      currentValueLength: 0, aimedByFocus: false)
+        func decide(_ subrole: String?, label: String?) -> SafetyDecision {
+            let field = AccessibilityElementNode(role: "AXTextField", subrole: subrole, title: nil, value: nil,
+                                                 frameInAppKitCoordinates: CGRect(x: 48, y: 300, width: 147, height: 22), depth: 3,
+                                                 children: [], publishedActionNames: [])
+            return ActionSafetyKernel.evaluate(intent: ElementActionIntent(role: nil, title: label ?? "", action: .type), resolvedNode: field,
+                                               matchCount: 1, visibleBounds: CGRect(x: 0, y: 0, width: 1440, height: 900),
+                                               typing: typing, labelTitle: label)
+        }
+        #expect(decide(nil, label: "Password hint") == .allow)
+        guard case .refuse = decide("AXSecureTextField", label: "Password:") else { Issue.record("a password box was not refused"); return }
+        guard case .refuse = decide(nil, label: nil) else { Issue.record("a field with no name at all was not refused"); return }
+    }
 }

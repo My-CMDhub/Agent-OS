@@ -525,7 +525,9 @@ enum ActionSafetyKernel {
         // description and an empty value.
         if typing?.aimedByFocus != true {
             // A text field may be named only by its placeholder (review 2026-10-01).
-            guard let name = targetName, name.isPlausibleControlLabel else {
+            // A field reached through its label is named by it: a web field has no name of its own (live 2026-10-06).
+            let typedLabel = intent.action == .type ? labelTitle.map(UntrustedText.init) : nil
+            guard let name = targetName ?? typedLabel, name.isPlausibleControlLabel else {
                 return .refuse(reason: implausibleNameRefusalReason)
             }
         }
