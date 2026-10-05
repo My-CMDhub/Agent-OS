@@ -205,7 +205,11 @@ nonisolated enum HandsProbe {
         }
         guard let probeWindow else {
             summary["outcome"] = "windowNotFound"
-            summary["note"] = "no new Chrome window titled with the nonce appeared; nothing was clicked, typed or closed"
+            summary["note"] = "no new Chrome window titled with the nonce appeared in time; nothing was clicked or typed"
+            // One that opens late is still the probe's: closed by its nonce (2026-10-06 investigation, window 1982).
+            summary["lateWindow"] = ScenarioRunnerAX.sweepLateWindows(find: {
+                chromeWindows().filter { !windowsBefore.contains(AccessibilityElementKey(element: $0.window)) && ($0.title?.contains(nonce) ?? false) }
+            }, close: { close($0.window, processIdentifier: $0.processIdentifier) })
             return
         }
         summary["windowMs"] = Int(Date().timeIntervalSince(openStartedAt) * 1000)

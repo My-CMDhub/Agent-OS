@@ -468,7 +468,10 @@ enum ScenarioRunner {
         }
         // Windows that carry the run's nonce and were never recorded (the start gave up
         // waiting for them): closed by that identity, each by its own close button.
-        if let nonce = context.nonce {
+        if let nonce = context.nonce, context.window == nil {
+            // The start never found its window: one that opens late is still the run's (09-09-44Z's 1982).
+            cleanup["lateWindow"] = await Task.detached { ScenarioRunnerAX.sweepLateRunnerWindows(nonce: nonce) }.value
+        } else if let nonce = context.nonce {
             let recorded = context.window?.element
             let strays = await Task.detached {
                 ScenarioRunnerAX.runnerWindows(nonce: nonce).filter { stray in recorded.map { !CFEqual($0, stray.element) } ?? true }

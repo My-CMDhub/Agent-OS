@@ -171,6 +171,25 @@ nonisolated enum ScenarioRunnerAX {
             .map { ScenarioWindow(element: $0.window, processIdentifier: $0.processIdentifier, nonce: nonce) }
     }
 
+    /// A start that gave up may still have opened its window: Chrome answered after
+    /// the deadline on 2026-10-05 09-09-44Z, and window 1982, left open, became the
+    /// owner's main window for the evening (2026-10-06 investigation). So wait up to
+    /// the window deadline for any window carrying the run's identity, then close
+    /// each by its own close button — what was created, never a count.
+    static func sweepLateWindows<W>(waitSeconds: Double = windowDeadlineSeconds, find: () -> [W], close: (W) -> [String: Any]) -> [String: Any] {
+        var late: [W] = []
+        let appeared = HarnessHands.waitUntil(seconds: waitSeconds) {
+            late = find()
+            return !late.isEmpty
+        }
+        return ["nonceWindowAppearedLater": appeared, "closed": late.map(close)]
+    }
+
+    /// `sweepLateWindows` for a run's own Chrome window, by the nonce in its title.
+    static func sweepLateRunnerWindows(nonce: String) -> [String: Any] {
+        sweepLateWindows(find: { runnerWindows(nonce: nonce) }, close: { close($0) })
+    }
+
     /// Chrome is frontmost and its focused window IS ours.
     static func isInFront(_ window: ScenarioWindow) -> Bool {
         let read = HarnessHands.browserWindow(processIdentifier: window.processIdentifier)

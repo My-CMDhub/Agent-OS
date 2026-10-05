@@ -82,6 +82,8 @@ enum AgentLoopProbe {
             let urls = names.compactMap { ScenarioRunner.pageURL($0, nonce: nonce, query: query) }
             guard let window = await Task.detached(operation: { ScenarioRunnerAX.openChromeWindow(urls: urls, nonce: nonce) }).value else {
                 result["status"] = "startFailed"
+                // A window that opens late is still ours: closed by its nonce, never left as an "owner" window.
+                result["lateWindow"] = await Task.detached { ScenarioRunnerAX.sweepLateRunnerWindows(nonce: nonce) }.value
                 results.append(result)
                 continue
             }
@@ -193,9 +195,14 @@ enum AgentLoopProbe {
                 var result: [String: Any] = ["id": id, "mode": connector ? "connector" : "screen"]
                 let chromeBefore = Set(VoiceToolProbe.windowServerWindowNumbers(bundleIdentifier: ScenarioRunner.chromeBundleIdentifier) ?? [])
                 let nonce = String(UUID().uuidString.prefix(8))
-                guard let url = ScenarioRunner.pageURL("article.html", nonce: nonce),
-                      let window = await Task.detached(operation: { ScenarioRunnerAX.openChromeWindow(urls: [url], nonce: nonce) }).value else {
+                guard let url = ScenarioRunner.pageURL("article.html", nonce: nonce) else {
                     results.append(result.merging(["status": "startFailed"]) { _, new in new })
+                    continue
+                }
+                guard let window = await Task.detached(operation: { ScenarioRunnerAX.openChromeWindow(urls: [url], nonce: nonce) }).value else {
+                    // 09-09-44Z's commit/screen: this window opened late and stayed open all evening (window 1982).
+                    let late = await Task.detached { ScenarioRunnerAX.sweepLateRunnerWindows(nonce: nonce) }.value
+                    results.append(result.merging(["status": "startFailed", "lateWindow": late]) { _, new in new })
                     continue
                 }
                 _ = await ScenarioRunner.waitFor(seconds: 5) { await Task.detached { ScenarioRunnerAX.isInFront(window) ? true : nil }.value }
