@@ -335,6 +335,49 @@ struct RealtimeHeardCheckTests {
         #expect(decide("Type Kubernetes in Zorbit.", text: "Kubernetes") == .appNameUnclear)
     }
 
+    // Live 2026-10-05 run 5185A552: "check his posts related to HeyClicky" with an app
+    // named HeyClicky installed refused every press in Chrome as heardNamedMismatch.
+    // A word that is the TOPIC of the request is not the app to act in.
+    @Test func theTopicOfARequestIsNotTheAppToActIn() {
+        let apps = installed + [app("/Applications/HeyClicky.app"), app("/Users/o/Applications/LinkedIn.app"),
+                                app("/System/Applications/Utilities/Terminal.app")]
+        let chrome = URL(fileURLWithPath: "/Applications/Google Chrome.app", isDirectory: true)
+        func decide(_ transcript: String, named: String = "Google Chrome", tool: String = "press_element") -> RealtimeHeardCheck.Decision {
+            RealtimeHeardCheck.decide(transcript: transcript, named: named, among: apps, toolName: tool, frontmostApp: chrome,
+                                      namedIsBrowser: named == "Google Chrome")
+        }
+        let goal = "Go to LinkedIn in my browser, search for Farza or find him in my network, check his posts related to "
+            + "HeyClicky, watch the videos if possible, and give me a small report, without taking any other actions."
+        for tool in ["press_element", "type_text", "press_menu"] {
+            #expect(decide(goal, tool: tool).refusalError == nil, "\(tool)")
+        }
+        #expect(decide("Search Google for Cursor tips.").outcome == .noAppHeard)
+        #expect(decide("Find posts about HeyClicky.").outcome == .noAppHeard)
+        // LinkedIn is installed here too, so "on LinkedIn" may still ask about LinkedIn; never about HeyClicky.
+        #expect(!decide("On LinkedIn, show me HeyClicky's posts.").heardApps.contains("HeyClicky"))
+        #expect(decide("Look for videos on HeyClicky in Chrome.").outcome == .match)
+
+        // Where to act still names the app, and a mishearing there still refuses.
+        let open = decide("open HeyClicky")
+        #expect(open.outcome == .heardNamedMismatch)
+        #expect(open.heardApps == ["HeyClicky"])
+        #expect(decide("open HeyClicky", named: "HeyClicky", tool: "open_app").outcome == .match)
+        let typed = decide("type hello in HeyClicky", tool: "type_text")
+        #expect(typed.outcome == .heardNamedMismatch)
+        #expect(typed.heardApps == ["HeyClicky"])
+        // "for" is a topic only beside a search: "the settings for Cursor" is still Cursor.
+        #expect(decide("open the settings for Cursor", named: "Visual Studio Code", tool: "press_menu").outcome == .heardNamedMismatch)
+        // A possessive is a topic only when the sentence says where else to act.
+        #expect(decide("Put Finder's toolbar path thing on.", named: "TextEdit", tool: "press_menu").outcome == .heardNamedMismatch)
+        // A real wrong-app mishearing still refuses: no topic word, no place for the call's app.
+        #expect(decide("close Terminal and open Cursor", named: "Cursor", tool: "press_menu").refusalError != nil)
+        #expect(decide("close Terminal and open Cursor").refusalError != nil)
+        #expect(decide("search for Cursor tips in Terminal").outcome == .heardNamedMismatch)
+        // A bare search object may be the app itself ("search for LinkedIn"): it still asks.
+        #expect(decide("find Terminal").refusalError != nil)
+        #expect(decide("search for HeyClicky").refusalError != nil)
+    }
+
     // Live voices are slower than the fixtures: Gemini's transcript came at up to
     // 3,107 ms after the release (voice-decisions.log, 123 live turns).
     @Test func theTranscriptWaitCoversTheSlowestLiveTranscript() {

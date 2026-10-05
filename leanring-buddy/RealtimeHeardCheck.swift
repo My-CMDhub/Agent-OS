@@ -355,7 +355,8 @@ nonisolated enum RealtimeHeardCheck {
     static func readSlot(_ spoken: [String], among names: [RealtimeVoiceVerbs.AppName], menuWords: [String]) -> SlotReading {
         var slot: [String] = []
         for (index, word) in spoken.enumerated() where index == spoken.count - 1 || (index > 0 && heardSlotLeadWords.contains(spoken[index - 1])) {
-            if word.count >= 3, word.allSatisfy(\.isLetter), !slot.contains(word) { slot.append(word) }
+            // "search for Farza": what is searched for is never where the app name goes.
+            if word.count >= 3, !isTopic(spoken, from: index, to: index + 1, searches: true), word.allSatisfy(\.isLetter), !slot.contains(word) { slot.append(word) }
         }
         let appWords = Set(names.flatMap { name -> [String] in
             let tokens = RealtimeVoiceVerbs.foldedTokens(name.name)
@@ -470,6 +471,7 @@ nonisolated enum RealtimeHeardCheck {
         }
         var heard = withoutContent(appsMentioned(in: transcript, among: names), contentWords: contentWords,
                                    namedPaths: namedPaths, among: names)
+        heard = withoutTopics(heard, transcript: transcript, namedPaths: namedPaths, among: names, namedIsBrowser: namedIsBrowser)
         heard = withoutWordsInsideTheNamedApp(heard, transcript: transcript, namedPaths: namedPaths, among: names,
                                               targetWords: targetWords, frontmostApp: frontmostApp, namedIsBrowser: namedIsBrowser)
         let heardNames = heard.apps.map(RealtimeVoiceVerbs.displayName)
@@ -658,9 +660,25 @@ nonisolated enum RealtimeHeardCheck {
         let namedWords = Set(names.filter { namedPaths.contains(path($0.url)) }
             .flatMap { RealtimeVoiceVerbs.foldedTokens($0.name) }.filter { !genericNameWords.contains($0) })
             .union(namedIsBrowser ? ["browser"] : [])
-        /// Each mention: where it starts and where it ends (exclusive).
-        func mentions(of url: URL) -> [Range<Int>] {
-            tokens(of: url).flatMap { name -> [Range<Int>] in
+        let kept = heard.apps.filter { app in
+            guard !namedPaths.contains(path(app)) else { return true }
+            let said = mentionRanges(of: app, in: spoken, among: names)
+            guard !said.isEmpty else { return true }
+            if said.allSatisfy({ $0.lowerBound > 0 && negationWords.contains(spoken[$0.lowerBound - 1]) }) { return false }
+            let named = said.contains { $0.lowerBound > 0 && namingLeadWords.contains(spoken[$0.lowerBound - 1]) }
+            if !named, tokens(of: app).contains(where: { name in name.allSatisfy(target.contains) }) { return false }
+            return !said.contains { mention in placesInside([Array(spoken[mention])], containerWords: namedWords, spoken: spoken) }
+        }
+        guard kept.count != heard.apps.count else { return heard }
+        return HeardApps(apps: kept, ambiguousWord: heard.ambiguousWord, tier: kept.isEmpty ? nil : heard.tier)
+    }
+
+    /// Each mention of an app in `spoken`: its full name, or one distinctive word
+    /// of a longer one. Where it starts and where it ends (exclusive).
+    static func mentionRanges(of url: URL, in spoken: [String], among names: [RealtimeVoiceVerbs.AppName]) -> [Range<Int>] {
+        let wanted = url.standardizedFileURL.path
+        return names.filter { $0.url.standardizedFileURL.path == wanted }.map { RealtimeVoiceVerbs.foldedTokens($0.name) }
+            .filter { !$0.isEmpty }.flatMap { name -> [Range<Int>] in
                 spoken.indices.compactMap { start -> Range<Int>? in
                     if spoken[start...].starts(with: name) { return start..<(start + name.count) }
                     if name.count > 1, name.contains(spoken[start]), spoken[start].count >= 4,
@@ -668,15 +686,87 @@ nonisolated enum RealtimeHeardCheck {
                     return nil
                 }
             }
+    }
+
+    // MARK: The topic of a request is not the app (pure)
+
+    /// Live 2026-10-05 run 5185A552: "check his posts related to HeyClicky", with an
+    /// app named HeyClicky installed, refused every press in Chrome as
+    /// heardNamedMismatch. The app slot is filled only by words that say WHERE to
+    /// act; a word the request is ABOUT never fills it.
+    static let topicLeadWords: Set<String> = ["about", "regarding"]
+    /// "for" is a topic only near one of these: "search Google for Cursor tips",
+    /// never "open the settings for Cursor" (the D66FC598 class).
+    static let searchWords: Set<String> = ["search", "searching", "find", "look", "looking", "google"]
+    /// "HeyClicky posts", "HeyClicky's videos", "videos on HeyClicky".
+    static let topicNouns: Set<String> = ["post", "posts", "video", "videos", "article", "articles", "news", "tips", "tutorial",
+                                          "tutorials", "review", "reviews", "updates", "content", "comments", "mentions"]
+    static let topicFillerWords = containerFillerWords.union(["his", "her", "their", "its", "our", "your", "an", "some", "any"])
+
+    /// Whether the words `spoken[start..<end]` are what the request is about.
+    /// `searches`: a search object ("search for Farza", "look up X") counts too.
+    /// Only the app slot reads it: "search for LinkedIn" may mean the LinkedIn app,
+    /// so dropping an installed app takes a stronger marker (HandsVoiceTests row 15),
+    /// and so does a bare "find Terminal".
+    static func isTopic(_ spoken: [String], from start: Int, to end: Int, searches: Bool = false) -> Bool {
+        var follow = end
+        if follow < spoken.count, spoken[follow] == "s" { follow += 1 }
+        if follow < spoken.count, topicNouns.contains(spoken[follow]) { return true }
+        guard let lead = spoken[..<start].lastIndex(where: { !topicFillerWords.contains($0) }) else { return false }
+        let before = lead > 0 ? spoken[lead - 1] : ""
+        switch spoken[lead] {
+        case let word where topicLeadWords.contains(word): return true
+        case "search", "searching": return searches
+        case "up": return searches && before == "look"
+        case "to": return ["related", "relating", "relevant"].contains(before)
+        case "on", "of": return topicNouns.contains(before)
+        case "for": return searches && spoken[max(0, lead - 4)..<lead].contains(where: searchWords.contains)
+        default: return false
+        }
+    }
+
+    /// Drops an app other than the call's when no mention of it names where to
+    /// act (right after `namingLeadWords`, not as a topic) and every mention is
+    /// either a topic or in a sentence that already places the action in the
+    /// call's app ("in my browser" for a browser, "in Chrome"). "open HeyClicky"
+    /// and "type hello in HeyClicky" still name HeyClicky. Only prepositions
+    /// place: "close Terminal and open Cursor" keeps asking.
+    static func withoutTopics(_ heard: HeardApps, transcript: String, namedPaths: Set<String>,
+                              among names: [RealtimeVoiceVerbs.AppName], namedIsBrowser: Bool) -> HeardApps {
+        func path(_ url: URL) -> String { url.standardizedFileURL.path }
+        guard heard.apps.contains(where: { !namedPaths.contains(path($0)) }) else { return heard }
+        // The token index each sentence starts at: the same tokens as the whole, since
+        // foldedTokens splits on these marks anyway.
+        var sentenceStarts: [Int] = []
+        var spoken: [String] = []
+        for sentence in transcript.split(whereSeparator: { ".!?;\n".contains($0) }) {
+            sentenceStarts.append(spoken.count)
+            spoken += RealtimeVoiceVerbs.foldedTokens(String(sentence))
+        }
+        let namedTokens = names.filter { namedPaths.contains(path($0.url)) }.map { RealtimeVoiceVerbs.foldedTokens($0.name) }
+        let namedPlaceWords = Set(namedTokens.flatMap { $0 }.filter { !genericNameWords.contains($0) } + namedTokens.map { $0.joined() })
+            .union(namedIsBrowser ? ["browser"] : [])
+        func sentence(of index: Int) -> Range<Int> {
+            let start = sentenceStarts.last { $0 <= index } ?? 0
+            return start..<(sentenceStarts.first { $0 > index } ?? spoken.count)
+        }
+        func placesTheCallsApp(_ range: Range<Int>) -> Bool {
+            range.contains { index in
+                guard containerPrepositions.contains(spoken[index]), !(spoken[index] == "on" && index > 0 && topicNouns.contains(spoken[index - 1])),
+                      let next = spoken[(index + 1)...].firstIndex(where: { !containerFillerWords.contains($0) }) else { return false }
+                return namedPlaceWords.contains(spoken[next])
+            }
+        }
+        func namesWhere(_ mention: Range<Int>) -> Bool {
+            guard !isTopic(spoken, from: mention.lowerBound, to: mention.upperBound),
+                  let lead = spoken[..<mention.lowerBound].lastIndex(where: { !topicFillerWords.contains($0) }) else { return false }
+            return namingLeadWords.contains(spoken[lead])
         }
         let kept = heard.apps.filter { app in
             guard !namedPaths.contains(path(app)) else { return true }
-            let said = mentions(of: app)
-            guard !said.isEmpty else { return true }
-            if said.allSatisfy({ $0.lowerBound > 0 && negationWords.contains(spoken[$0.lowerBound - 1]) }) { return false }
-            let named = said.contains { $0.lowerBound > 0 && namingLeadWords.contains(spoken[$0.lowerBound - 1]) }
-            if !named, tokens(of: app).contains(where: { name in name.allSatisfy(target.contains) }) { return false }
-            return !said.contains { mention in placesInside([Array(spoken[mention])], containerWords: namedWords, spoken: spoken) }
+            let said = mentionRanges(of: app, in: spoken, among: names)
+            guard !said.isEmpty, !said.contains(where: namesWhere) else { return true }
+            return !said.allSatisfy { isTopic(spoken, from: $0.lowerBound, to: $0.upperBound) || placesTheCallsApp(sentence(of: $0.lowerBound)) }
         }
         guard kept.count != heard.apps.count else { return heard }
         return HeardApps(apps: kept, ambiguousWord: heard.ambiguousWord, tier: kept.isEmpty ? nil : heard.tier)
