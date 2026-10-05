@@ -172,6 +172,9 @@ import Testing
         #expect(ScenarioRunnerReal.changedLines(before: " M a.swift\n?? b/\n", after: " M a.swift\n?? b/\n").isEmpty)
         #expect(ScenarioRunnerReal.changedLines(before: " M a.swift\n", after: " M a.swift\n M AgentLoop.swift\n") == [" M AgentLoop.swift"])
         #expect(ScenarioRunnerReal.changedLines(before: " M a.swift\n", after: "") == ["gone:  M a.swift"])
+        // 08-27-14Z: another builder committed mid-turn — a line gone is reported, not a change Cursor made.
+        #expect(!ScenarioRunnerReal.repoWasChanged(["gone:  M leanring-buddy/AgentLoop.swift"]))
+        #expect(ScenarioRunnerReal.repoWasChanged(["gone: 1\t0\ta.swift", "3\t0\ta.swift"]), "an edit to an already-changed file")
     }
 
     /// Model time is the gap before each call (from the key-up, then from the previous answer);

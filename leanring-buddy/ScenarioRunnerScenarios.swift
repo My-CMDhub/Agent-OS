@@ -455,17 +455,17 @@ enum ScenarioCatalog {
                        check: { context, _ in
                            let sent = await cursorRead(context) { ScenarioRunnerReal.textsOutsideInputs($0).contains(where: ScenarioRunnerReal.isTheQuestion) } ?? false
                            let changed = await gitChanges(context)
-                           if let changed, !changed.isEmpty {
+                           if let changed, ScenarioRunnerReal.repoWasChanged(changed) {
                                print("🧪⚠️ R3: THE REPO CHANGED during the turn (not reverted): \(changed.prefix(10))")
                            }
-                           return verdict(sent && changed?.isEmpty == true,
+                           return verdict(sent && changed.map(ScenarioRunnerReal.repoWasChanged) == false,
                                           changed == nil ? "git could not be read before and after"
-                                              : !changed!.isEmpty ? "THE REPO CHANGED (not reverted): \(changed!.prefix(5).joined(separator: "; "))"
+                                              : ScenarioRunnerReal.repoWasChanged(changed!) ? "THE REPO CHANGED (not reverted): \(changed!.prefix(5).joined(separator: "; "))"
                                               : "the question never appeared in Cursor's chat",
                                           ["questionSent": sent, "gitChanged": changed ?? NSNull()])
                        },
                        never: [unsavedEdit, never("a change to the repo (reported, never reverted)") { context, _ in
-                           await gitChanges(context).map { !$0.isEmpty } ?? true
+                           await gitChanges(context).map(ScenarioRunnerReal.repoWasChanged) ?? true
                        }],
                        goal: { context in
                            await cursorRead(context) { ScenarioRunnerReal.textsOutsideInputs($0).contains(where: ScenarioRunnerReal.isTheQuestion) } ?? false

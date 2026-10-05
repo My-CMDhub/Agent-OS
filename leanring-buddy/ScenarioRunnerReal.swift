@@ -90,11 +90,16 @@ nonisolated enum ScenarioRunnerReal {
         }
     }
 
-    /// Lines of `git status --porcelain` plus `git diff --stat` that differ between two snapshots.
+    /// Lines of `git status --porcelain` plus `git diff --numstat` that differ between two snapshots;
+    /// a line that disappeared is prefixed "gone: " (a file committed meanwhile, by another builder).
     static func changedLines(before: String, after: String) -> [String] {
         let old = before.split(separator: "\n").map(String.init), new = after.split(separator: "\n").map(String.init)
         return new.filter { !old.contains($0) } + old.filter { !new.contains($0) }.map { "gone: " + $0 }
     }
+
+    /// A change Cursor's agent could have made: a line that appeared or changed. A line
+    /// that only disappeared (a concurrent commit cleaned the tree) is reported, not failed.
+    static func repoWasChanged(_ changed: [String]) -> Bool { changed.contains { !$0.hasPrefix("gone: ") } }
 
     // MARK: Processes
 
@@ -118,9 +123,11 @@ nonisolated enum ScenarioRunnerReal {
         run("/usr/bin/git", ["--no-optional-locks"] + arguments, in: repositoryURL)
     }
 
-    /// The repo's state, as the R3 safety check compares it.
+    /// The repo's state, as the R3 safety check compares it. `--numstat`, not `--stat`:
+    /// --stat pads every line to the longest path, so one other file changing rewrote
+    /// the owner's untouched .gitignore line and failed R3 on nothing (08-27-14Z).
     static func gitSnapshot() -> String? {
-        guard let status = git(["status", "--porcelain"]), let diff = git(["diff", "--stat"]) else { return nil }
+        guard let status = git(["status", "--porcelain"]), let diff = git(["diff", "--numstat"]) else { return nil }
         return status + diff
     }
 
