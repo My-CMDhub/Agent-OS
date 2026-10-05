@@ -758,7 +758,8 @@ final class AgentLoop {
 
     static let readOnlyNote = "This task is read-only, by the owner's words: look, scroll, follow links, tabs and search results, search, "
         + "and play a video (muted if you can). Never press anything that sends, posts, comments, likes or reacts, connects, follows, "
-        + "messages, shares, saves, joins, applies, closes or deletes, and type only into a search field: such a step is refused as readOnlyTask."
+        + "messages, shares, saves, joins, applies, closes or deletes, and type only into a search field: such a step is refused as readOnlyTask. "
+        + "Menu items that show or navigate (View, Go, Window, Help search, Get Info, Show…, Sort By) may be pressed."
 
 
     /// agent-loop.log's args: `loggedArguments` with the words a page or the
@@ -1111,6 +1112,25 @@ extension AgentLoop {
         "pay", "buy", "purchase", "checkout", "order", "donate", "withdraw", "ignore", "edit", "write", "add", "create", "upload",
         "retweet", "tweet", "recommend", "request", "sign", "logout", "signout", "poke"]
 
+    /// Generality suite 2026-10-06: G03, G07, G11 and G17 lost every menu to
+    /// `readOnlyTask` — View, Go, Help search, File > Get Info, Product > Scheme.
+    /// A menu item is judged by what its words say it does: one that makes,
+    /// saves, moves, edits content, prints or reaches people is refused; one that
+    /// shows or navigates passes. Whole words of every path component, so the
+    /// Format and Insert menus refuse whole and "Edit > Find" passes.
+    /// ponytail: a word list; an item that changes something without one of these
+    /// words passes the read-only layer — the kernel's own lists still judge it.
+    nonisolated static let changingMenuWords: Set<String> = [
+        "new", "save", "saved", "delete", "close", "quit", "send", "share", "post", "duplicate", "rename", "move", "paste", "cut",
+        "undo", "redo", "format", "insert", "import", "export", "print", "empty", "erase", "install", "update", "updates", "remove",
+        "clear", "reset", "revert", "restore", "trash", "eject", "burn", "compress", "archive", "make", "add", "create", "replace",
+        "merge", "sign", "log", "logout", "shut", "restart", "sleep", "lock", "force", "publish", "submit", "invite", "reply",
+        "forward", "upload", "download", "sync", "encrypt", "bold", "italic", "underline", "apply", "accept", "join", "subscribe"]
+
+    nonisolated static func changingMenuWord(_ title: String) -> String? {
+        title.lowercased().split { !$0.isLetter }.map(String.init).first(where: changingMenuWords.contains)
+    }
+
     /// What a field is, by its own AX role, subrole and label (never its value).
     nonisolated struct FieldIdentity: Sendable {
         let role: String
@@ -1150,6 +1170,12 @@ extension AgentLoop {
             let names = [request["title"], request["labelTitle"]].compactMap { $0 as? String }.filter { !$0.allSatisfy(\.isWhitespace) }
             guard !names.isEmpty else { return "a press of something with no name cannot be judged" }
             return names.lazy.compactMap(reachingWord).first.map { "pressing an element named with \"\($0)\" reaches people or changes something" }
+        case .menu:
+            // Judged by the item's own AX title path (`find_menu_items` offered it), never the model's words.
+            guard let path = request["path"] as? [String], !path.isEmpty else { return "a menu press with no path cannot be judged" }
+            return path.lazy.compactMap(changingMenuWord).first.map {
+                "the menu item \"\(path.joined(separator: " > "))\" makes, changes or reaches people (\"\($0)\")"
+            }
         case .type:
             let field = request["target"] as? String == "focused" ? focusedField()
                 : (request["role"] as? String).map { FieldIdentity(role: $0, subrole: nil, label: request["title"] as? String) }

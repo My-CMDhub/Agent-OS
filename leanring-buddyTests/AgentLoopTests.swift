@@ -933,6 +933,29 @@ struct AgentLoopReadOnlyTests {
         #expect(box.sent.count == 19)
     }
 
+    /// Generality suite 2026-10-06: G03, G07, G11 and G17 lost every menu to
+    /// `readOnlyTask`. A menu item is judged by its own AX title path: showing and
+    /// navigating pass, anything that makes, changes or reaches people does not.
+    @Test func aReadOnlyTaskJudgesAMenuItemByWhatItDoes() {
+        func refused(_ path: [String]) -> Bool { AgentLoop.readOnlyRefusal(["verb": "menu", "path": path], focusedField: { nil }) != nil }
+        for path in [["View", "as List"], ["View", "Sort By", "Name"], ["Go", "Downloads"], ["Window", "Minimize"],
+                     ["Help", "Search"], ["File", "Get Info"], ["View", "Show Path Bar"], ["View", "Month"], ["Product", "Scheme", "Clicky"],
+                     ["Edit", "Find", "Find…"], ["Edit", "Copy"], ["Finder", "Settings…"], ["View", "Arrange By", "Kind"],
+                     ["Window", "Bring All to Front"], ["View", "Enter Full Screen"]] {
+            #expect(!refused(path), "\(path)")
+        }
+        for path in [["File", "New Folder"], ["File", "Save…"], ["Edit", "Delete"], ["File", "Close Window"], ["Calculator", "Quit Calculator"],
+                     ["Message", "Send"], ["File", "Share", "Mail"], ["File", "Duplicate"], ["File", "Rename…"], ["File", "Move to Trash"],
+                     ["Edit", "Paste"], ["Edit", "Cut"], ["Edit", "Undo Typing"], ["Edit", "Redo"], ["Format", "Font", "Bold"],
+                     ["Insert", "Table"], ["File", "Import…"], ["File", "Export as PDF…"], ["File", "Print…"], ["Finder", "Empty Bin…"],
+                     ["Disk Utility", "Erase…"], ["Software", "Install Update"], ["App", "Check for Updates…"], ["File", "Post"],
+                     ["Edit", "Clear"], ["File", "Revert To", "Last Saved"], ["Apple", "Log Out Dhruv…"], ["Apple", "Shut Down…"]] {
+            #expect(refused(path), "\(path)")
+        }
+        #expect(AgentLoop.readOnlyRefusal(["verb": "menu"], focusedField: { nil }) != nil, "a menu press with no path cannot be judged")
+        #expect(AgentLoop.readOnlyRefusal(["verb": "menu", "path": [] as [String]], focusedField: { nil }) != nil)
+    }
+
     /// The model is told the scope, so it does not spend steps on refusals.
     @MainActor @Test func theGoalTextNamesTheScope() async {
         let script = Script([toolUse("ask_owner", ["question": "Which Farza?"])])
