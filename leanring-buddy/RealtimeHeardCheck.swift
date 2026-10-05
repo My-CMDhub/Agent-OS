@@ -252,9 +252,13 @@ nonisolated enum RealtimeHeardCheck {
     ///   app's name ("switch to monitor").
     /// Review of 00c2221: matched anywhere, ordinary words named apps — "go to
     /// the home page" (Home), "what does this code do" (VS Code), "keyboard
-    /// shortcuts", "this site's settings", "what time". So "a reminder", "a new
-    /// note" and "the Privacy and Security settings" no longer name their apps:
-    /// the owner's call (generality G05, G21, G16).
+    /// shortcuts", "this site's settings", "what time".
+    /// Owner's ruling R1 (2026-10-06): a BUILT-IN app (/System/Applications) is
+    /// the default for its own noun — its one-word name, singular or plural,
+    /// anywhere ("a reminder", "a new note"), unless it is an everyday word
+    /// (`ownNameEverydayWords`); and System Settings for a settings word beside
+    /// a pane word ("the privacy settings", `namesASettingsPane`). A third-party
+    /// app still needs its cue, and a different app heard is refused by `decide`.
     static func wordsNameTheApp(transcript: String?, named: String, among names: [RealtimeVoiceVerbs.AppName]) -> Bool {
         guard let transcript, case .resolved(let url) = RealtimeVoiceVerbs.resolveApp(named: named, among: names) else { return false }
         let spoken = RealtimeVoiceVerbs.foldedTokens(withoutWebAddresses(transcript))
@@ -270,13 +274,44 @@ nonisolated enum RealtimeHeardCheck {
         let own = names.filter { path($0.url) == path(url) }.map { RealtimeVoiceVerbs.foldedTokens($0.name) }.filter { !$0.isEmpty }
         let otherForms = Set(names.filter { path($0.url) != path(url) }.flatMap { RealtimeVoiceVerbs.foldedTokens($0.name) }.flatMap(forms))
         let said = " " + spoken.joined(separator: " ") + " "
+        // Owner's ruling R1 (2026-10-06): a built-in app is the default for its own noun.
+        let builtIn = path(url).hasPrefix("/System/Applications/")
+        if builtIn, url.lastPathComponent == "System Settings.app", namesASettingsPane(spoken) { return true }
         return own.contains { tokens in
-            if tokens.count == 1 { return !forms(tokens[0]).isDisjoint(with: cued) }
+            if tokens.count == 1 {
+                if builtIn, !ownNameEverydayWords.contains(tokens[0]), !forms(tokens[0]).isDisjoint(with: Set(spoken)) { return true }
+                return !forms(tokens[0]).isDisjoint(with: cued)
+            }
             if said.contains(" " + tokens.joined(separator: " ") + " ") { return true }
             return tokens.contains { token in
                 token.count >= 4 && !partialNameStopWords.contains(token) && !genericNameWords.contains(token)
                     && forms(token).isDisjoint(with: otherForms) && !forms(token).isDisjoint(with: cued)
             }
+        }
+    }
+
+    /// Built-in one-word app names that are everyday words: they still need a cue word (R1 keeps them out).
+    static let ownNameEverydayWords: Set<String> = [
+        "home", "music", "shortcuts", "photos", "messages", "passwords", "preview", "news", "books", "clock", "maps", "stocks",
+        "weather", "tips", "journal", "games", "phone", "chess", "tv", "contacts", "podcasts", "siri", "image", "freeform", "mail"]
+    /// System Settings' pane words (macOS 15). ponytail: a hand list; a pane added later needs adding.
+    static let settingsPaneWords: Set<String> = [
+        "privacy", "security", "wifi", "wi", "bluetooth", "network", "vpn", "notifications", "sound", "focus", "screen",
+        "appearance", "accessibility", "siri", "spotlight", "desktop", "dock", "displays", "display", "wallpaper", "saver",
+        "battery", "energy", "lock", "login", "users", "groups", "passwords", "internet", "accounts", "keyboard",
+        "trackpad", "mouse", "printers", "scanners", "sharing", "storage", "language", "region", "airdrop", "handoff",
+        "startup", "wallet"]
+    static let settingsWords: Set<String> = ["settings", "setting", "preferences", "preference"]
+    /// A page's settings are the page's ("this site's privacy settings"): not System Settings.
+    static let webPlaceWords: Set<String> = ["site", "sites", "page", "website", "browser", "tab", "chrome", "safari", "account", "profile"]
+
+    /// "the privacy settings", "Privacy and Security settings", "bluetooth in settings":
+    /// a settings word with a pane word at most three words before or after it.
+    static func namesASettingsPane(_ spoken: [String]) -> Bool {
+        guard spoken.allSatisfy({ !webPlaceWords.contains($0) }) else { return false }
+        return spoken.indices.contains { index in
+            settingsWords.contains(spoken[index])
+                && spoken[max(0, index - 3)..<min(spoken.count, index + 4)].contains(where: settingsPaneWords.contains)
         }
     }
 

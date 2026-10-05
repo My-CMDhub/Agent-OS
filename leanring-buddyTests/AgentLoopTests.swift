@@ -485,7 +485,6 @@ struct AgentLoopTests {
         #expect(!heard("switch to code", "Visual Studio Code"))
         #expect(!heard("show my keyboard shortcuts", "Shortcuts"))
         #expect(!heard("change this site's settings", "System Settings"))
-        #expect(!heard("open the Privacy and Security settings", "System Settings"))
         #expect(!heard("find it on my iphone", "iPhone Mirroring"))
         #expect(!heard("what time is it in Sydney", "Time Machine"))
         #expect(!heard("open time", "Time Machine"))
@@ -494,15 +493,56 @@ struct AgentLoopTests {
         #expect(!heard("show me photos of cats", "Photos"))
         #expect(!heard("what is my password", "Passwords"))
         #expect(!heard("go to the store", "App Store"))
-        #expect(!heard("create a reminder called JARVIS test reminder", "Reminders"))
-        #expect(!heard("write it in a new note titled JARVIS test 2", "Notes"))
-        #expect(!heard("show me my calendars", "Calendar"))
         // Wrong app, a word inside another name, a shared word, a sound-alike: never.
         #expect(!heard("make a new TextEdit document", "Notes"))
         #expect(!heard("write a note", "Keynote"))
         #expect(!heard("show me the system details", "System Settings"))
         #expect(!heard("open it in kasa", "Cursor"))
         #expect(!heard("", "Calendar"))
+    }
+
+    /// Owner's ruling R1, 2026-10-06: a BUILT-IN one-word app's own name, singular
+    /// or plural, names it anywhere ("a reminder", "a new note"), and a settings
+    /// word beside a pane name names System Settings ("the privacy settings").
+    /// Everyday words (home, code, music, shortcuts…) still never do, a
+    /// third-party app needs the cue, and a page's settings are not System Settings.
+    @Test func ownerRulingR1ABuiltInAppsOwnNameInflectedAndASettingsPaneNameTheApp() {
+        func app(_ name: String, _ path: String) -> RealtimeVoiceVerbs.AppName {
+            RealtimeVoiceVerbs.AppName(name: name, url: URL(fileURLWithPath: path), isFileName: true)
+        }
+        let names = [app("Calendar", "/System/Applications/Calendar.app"), app("Notes", "/System/Applications/Notes.app"),
+                     app("Reminders", "/System/Applications/Reminders.app"), app("System Settings", "/System/Applications/System Settings.app"),
+                     app("Keynote", "/Applications/Keynote.app"), app("Home", "/System/Applications/Home.app"),
+                     app("Music", "/System/Applications/Music.app"), app("Shortcuts", "/System/Applications/Shortcuts.app"),
+                     app("Messages", "/System/Applications/Messages.app"), app("Photos", "/System/Applications/Photos.app"),
+                     app("Things", "/Applications/Things3.app"), app("Visual Studio Code", "/Applications/Visual Studio Code.app"),
+                     app("Todoist", "/Applications/Todoist.app")]
+        func heard(_ words: String, _ named: String) -> Bool {
+            RealtimeHeardCheck.wordsNameTheApp(transcript: words, named: named, among: names)
+        }
+        #expect(heard("create a reminder called JARVIS test reminder", "Reminders"))
+        #expect(heard("write it in a new note titled JARVIS test 2", "Notes"))
+        #expect(heard("add a new note", "Notes"))
+        #expect(heard("show me my calendars", "Calendar"))
+        #expect(heard("open the Privacy and Security settings", "System Settings"))
+        #expect(heard("show me the privacy settings", "System Settings"))
+        #expect(heard("turn off bluetooth in settings", "System Settings"))
+        #expect(heard("open display preferences", "System Settings"))
+        // Everyday words, a page's settings, a settings word with no pane, a third-party app without its cue: never.
+        #expect(!heard("go to the home page", "Home"))
+        #expect(!heard("turn the music down", "Music"))
+        #expect(!heard("show my keyboard shortcuts", "Shortcuts"))
+        #expect(!heard("read my messages aloud", "Messages"))
+        #expect(!heard("show me photos of cats", "Photos"))
+        #expect(!heard("what does this code do", "Visual Studio Code"))
+        #expect(!heard("change this site's privacy settings", "System Settings"))
+        #expect(!heard("open the settings", "System Settings"))
+        #expect(!heard("open the privacy policy", "System Settings"))
+        #expect(!heard("do things later", "Things"))
+        #expect(!heard("write a note", "Keynote"))
+        // A different app named still refuses: the reminder goes to Todoist, never Reminders.
+        let decision = RealtimeHeardCheck.decide(transcript: "create a reminder in Todoist", named: "Reminders", among: names)
+        #expect(decision.outcome != .match && decision.outcome != .noAppHeard)
     }
 
     // MARK: Re-review of 2e45939
