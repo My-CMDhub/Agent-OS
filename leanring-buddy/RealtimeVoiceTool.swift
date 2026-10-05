@@ -685,6 +685,7 @@ nonisolated enum RealtimeOpenAppTool {
                                                                 screenshotDisplay: screenshotDisplay)
                 result["candidates"] = madeOffer.candidates.map(\.jsonObject)
                 if madeOffer.listingIncomplete { result["listingIncomplete"] = true }
+                if response["thinTree"] as? Bool == true { result["note"] = FirstSightWake.thinTreeNote }
                 offer = madeOffer
             }
             response["elements"] = nil

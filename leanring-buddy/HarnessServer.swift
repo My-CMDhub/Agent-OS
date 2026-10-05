@@ -1883,7 +1883,12 @@ final class HarnessServer {
             // forModel: every NAMED element, any role, with its nearest listed
             // ancestor — the voice loop offers what is visible, and a label
             // inside a button is that button (`RealtimeScreenVerbs.visiblePool`).
-            "elements": request.forModel ? Self.namedElements(in: rootNode) : actionable.map(Self.summarise)
+            "elements": request.forModel ? Self.namedElements(in: rootNode) : actionable.map(Self.summarise),
+            "thinTree": snapshot.nodeCount < FirstSightWake.thinTreeNodes,
+            "firstSightWake": snapshot.firstSightWake.map { ["nodesBefore": $0.nodesBefore, "nodesAfter": $0.nodesAfter,
+                                                             "milliseconds": $0.milliseconds,
+                                                             "manualAccessibilityAXError": Int($0.manualAccessibilityError),
+                                                             "enhancedUserInterfaceAXError": Int($0.enhancedUserInterfaceError)] } ?? NSNull()
         ]
     }
 

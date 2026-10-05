@@ -406,6 +406,8 @@ struct AccessibilityWindowSnapshot {
     /// Which source named the app this walk treated as frontmost. Nil for a
     /// walk of a window the caller named, which was never "whatever is in front".
     var frontmostSource: AccessibilityTreeWalker.FrontmostSource? = nil
+    /// Set on the one walk that woke a thin app (`FirstSightWake`).
+    var firstSightWake: FirstSightWake.Outcome? = nil
 
     /// The process that was walked. The capture that follows a failed
     /// resolution photographs THIS app — never a second frontmost read, which
@@ -765,6 +767,16 @@ enum AccessibilityTreeWalker {
             timeLimitInSeconds: timeLimitInSeconds
         )
         snapshot.frontmostSource = target.frontmostSource
+        // A minimized window draws nothing, so its tree is thin for a reason no switch changes:
+        // live 2026-10-06, the owner's Cursor read 8 -> 8 after the full 3.2 s — its one window was minimized.
+        if snapshot.nodeCount < FirstSightWake.thinTreeNodes, !FirstSightWake.isMinimized(target.window),
+           FirstSightWake.claim(target.application.processIdentifier) {
+            snapshot = FirstSightWake.wake(snapshot, of: target.application) { [target] in
+                try? snapshotWindow(target.window, of: target.application, maximumDepth: maximumDepth,
+                                    maximumNodeCount: maximumNodeCount, timeLimitInSeconds: timeLimitInSeconds)
+            }
+            snapshot.frontmostSource = target.frontmostSource
+        }
         return snapshot
     }
 
@@ -1387,4 +1399,83 @@ extension AccessibilityElementNode {
     func wireDescendants() -> [AccessibilityElementNode] {
         [self] + (hidesChildrenFromWire ? [] : children.flatMap { $0.wireDescendants() })
     }
+}
+
+/// Generality suite / coverage audit 2026-10-06: Electron apps start blind —
+/// Cursor 8 nodes, VS Code 12, Notion 15 at first contact — and the
+/// `AXManualAccessibility` write every walk already makes plus one 1.5 s
+/// re-walk did not change it (Claude Desktop grew 9 -> 345 only 17 min later).
+/// So on FIRST SIGHT of any app whose window walk is under `thinTreeNodes`,
+/// once per process: write `AXManualAccessibility` and `AXEnhancedUserInterface`
+/// (Chromium's own switch; it slows window animations for window managers,
+/// which is why only a thin app gets it), then re-walk every 250 ms for up to
+/// 3 s until the tree reaches `thinTreeNodes`. Before, after and ms go to
+/// `first-sight-wake.log`. While a tree stays thin, the snapshot says so and
+/// the voice/agent read tells the model the vision click is the route.
+nonisolated enum FirstSightWake {
+    static let thinTreeNodes = 20
+    static let pollSeconds = 3.0
+    static let pollIntervalSeconds = 0.25
+
+    struct Outcome: Equatable {
+        let nodesBefore: Int
+        let nodesAfter: Int
+        let milliseconds: Int
+        let manualAccessibilityError: Int32
+        let enhancedUserInterfaceError: Int32
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var claimed: Set<pid_t> = []
+
+    /// True exactly once per process: that caller wakes it.
+    static func claim(_ processIdentifier: pid_t) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return claimed.insert(processIdentifier).inserted
+    }
+
+    static func wake(_ snapshot: AccessibilityWindowSnapshot, of application: NSRunningApplication,
+                     rewalk: () -> AccessibilityWindowSnapshot?) -> AccessibilityWindowSnapshot {
+        let started = ProcessInfo.processInfo.systemUptime
+        let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
+        AXUIElementSetMessagingTimeout(applicationElement, 0.5)
+        let manual = AccessibilityTreeWalker.requestManualAccessibility(from: applicationElement)
+        let enhanced = AXUIElementSetAttributeValue(applicationElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        var latest = snapshot
+        // Live 2026-10-06, the first suite run with this: Reminders' welcome window (16 nodes)
+        // and a new TextEdit document (12) refused both writes (-25205, -25208) and still paid
+        // 3.2 s of polling for a tree that was never gated. Only an app that took a switch waits.
+        while acceptedASwitch(manual: manual, enhanced: enhanced), latest.nodeCount < thinTreeNodes,
+              ProcessInfo.processInfo.systemUptime - started < pollSeconds {
+            Thread.sleep(forTimeInterval: pollIntervalSeconds)
+            guard let again = rewalk() else { break }
+            latest = again
+        }
+        let outcome = Outcome(nodesBefore: snapshot.nodeCount, nodesAfter: latest.nodeCount,
+                              milliseconds: Int(((ProcessInfo.processInfo.systemUptime - started) * 1000).rounded()),
+                              manualAccessibilityError: manual.rawValue, enhancedUserInterfaceError: enhanced.rawValue)
+        latest.firstSightWake = outcome
+        MeasurementLogFile.appendJSONLine(["app": application.bundleIdentifier ?? "?", "nodesBefore": outcome.nodesBefore,
+                                           "nodesAfter": outcome.nodesAfter, "ms": outcome.milliseconds,
+                                           "manualAccessibilityAXError": Int(outcome.manualAccessibilityError),
+                                           "enhancedUserInterfaceAXError": Int(outcome.enhancedUserInterfaceError)],
+                                          toFileNamed: "first-sight-wake.log")
+        return latest
+    }
+
+    static func isMinimized(_ window: AXUIElement) -> Bool {
+        var value: CFTypeRef?
+        return AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &value) == .success && (value as? Bool) == true
+    }
+
+    /// A native app answers both writes with an error (-25205 attributeUnsupported,
+    /// -25208 notImplemented): its tree was never gated, so there is nothing to wait for.
+    static func acceptedASwitch(manual: AXError, enhanced: AXError) -> Bool {
+        manual == .success || enhanced == .success
+    }
+
+    /// What the model is told about a window whose structure stayed thin.
+    static let thinTreeNote = "This app publishes almost no structure to read (under \(thinTreeNodes) elements), so names may be "
+        + "missing here. Aim by sight: call press_element with x and y in the screenshot AND the words printed on the thing; "
+        + "it is clicked where those words are read."
 }
