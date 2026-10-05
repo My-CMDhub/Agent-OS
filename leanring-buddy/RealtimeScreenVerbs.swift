@@ -514,6 +514,11 @@ nonisolated struct RealtimeScreenCandidate: Equatable, Sendable {
         return clickable ? RealtimeScreenPressTarget(name: name, role: role, frame: frame) : pressAncestor
     }
 
+    /// AX itself can press it: it publishes AXPress, is a control by role, or sits in
+    /// a pressable element that holds it. Otherwise a named press at its point goes
+    /// by sight (`visionClick`), and the harness re-checks with this same rule.
+    var axCanPress: Bool { pressable || HarnessHands.activeRoles.contains(role) || pressAncestor != nil }
+
     var jsonObject: [String: Any] { ["name": name, "role": roleWord, "where": position] }
 
     /// "group \"Models\"": what was actually aimed at, for the model to repeat.

@@ -471,6 +471,7 @@ final class HarnessConfirmations: ObservableObject {
             }
         case "press": phrase = "Press a control"
         case "click": phrase = "Click a control"
+        case "visionClick": phrase = "Click what is drawn here"
         case "select": phrase = "Select an item"
         case "open": phrase = "Open an item"
         case "menu": phrase = "Choose a menu item"
@@ -515,6 +516,7 @@ final class HarnessConfirmations: ObservableObject {
             }
         case "press": return "Presses \(target) in \(app)"
         case "click": return "Clicks \(target) in \(app)"
+        case "visionClick": return "Clicks where \(target) is drawn in \(app), found by reading the screen"
         case "select": return "Selects \(target) in \(app)"
         case "open": return "Opens \(target) in \(app) (AXOpen)"
         case "menu": return "Chooses \(target) from \(app)'s menus"

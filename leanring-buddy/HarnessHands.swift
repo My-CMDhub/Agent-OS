@@ -191,6 +191,39 @@ enum HarnessHands {
         return nil
     }
 
+    // MARK: vision click — pure
+
+    /// The region photographed for the words at a point: room for a button's
+    /// label either side of it, clipped to the window.
+    static let visionCropSize = CGSize(width: 400, height: 120)
+
+    static func visionCropRegion(around point: CGPoint, window: CGRect) -> CGRect {
+        CGRect(x: point.x - visionCropSize.width / 2, y: point.y - visionCropSize.height / 2,
+               width: visionCropSize.width, height: visionCropSize.height).intersection(window)
+    }
+
+    /// "This one" stands for a target with no words only while the owner's
+    /// mouse is still this close to it.
+    static let ownerPointerReachPoints: CGFloat = 16
+    /// After the hover move, before the "before" picture: a CSS hover transition is ~0.2 s.
+    static let visionHoverSettleSeconds = 0.3
+    /// When the region is looked at again after the click, cumulative ~1.6 s.
+    static let visionVerifyWaits: [Double] = [0.15, 0.25, 0.4, 0.8]
+
+    /// The kernel on what was READ at the point, exactly as on an AX name: the
+    /// OCR line is the target's name and the model's label is word-checked
+    /// beside it (`labelTitle`), so an irreversible word in either refuses, a
+    /// destructive or publishing word asks, a sentence of the page (not a plain
+    /// label) or a box off the window refuses. The role is a stand-in: a drawn
+    /// control has none, so "AXButton" lets the words alone decide — which is
+    /// the owner's rule for this rung (destructive asks, irreversible refuses).
+    static func visionClickDecision(ocrText: String, label: String?, frame: CGRect, windowFrame: CGRect) -> SafetyDecision {
+        let drawn = AccessibilityElementNode(role: "AXButton", subrole: nil, title: ocrText, value: nil,
+                                             frameInAppKitCoordinates: frame, depth: 0, children: [])
+        return ActionSafetyKernel.evaluate(intent: ElementActionIntent(role: nil, title: ocrText, action: .click), resolvedNode: drawn,
+                                           matchCount: 1, visibleBounds: windowFrame, labelTitle: label)
+    }
+
     // MARK: type — pure
 
     enum AfterWrite: Equatable {
@@ -789,6 +822,64 @@ enum HarnessHands {
             return .failure(HandsRefusal(code: "eventCreationFailed", message: "the click event could not be created; nothing was clicked"))
         }
         return .success(topLeft)
+    }
+
+    /// The vision click's (e): the topmost thing drawn at the point (top-left)
+    /// is this app's, inside its FOCUSED window — so no other window, and no
+    /// other window of its own, covers it. Returns that window's AppKit frame.
+    static func visionWindow(atTopLeft point: CGPoint, processIdentifier: pid_t) -> Result<CGRect, HandsRefusal> {
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, RealtimeScreenHitTest.messagingTimeoutSeconds)
+        var hit: AXUIElement?
+        var hitProcess: pid_t = 0
+        guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &hit) == .success, let hit,
+              AXUIElementGetPid(hit, &hitProcess) == .success else { return .failure(hitRefusal(.unreadable)!) }
+        if hitProcess == getpid() { return .failure(hitRefusal(.harnessItself)!) }
+        guard hitProcess == processIdentifier else { return .failure(hitRefusal(.otherApp)!) }
+        var window: AXUIElement?
+        var current: AXUIElement? = hit
+        for _ in 0..<64 {
+            guard let node = current else { break }
+            AXUIElementSetMessagingTimeout(node, RealtimeScreenHitTest.messagingTimeoutSeconds)
+            var role: AnyObject?
+            AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &role)
+            if role as? String == kAXWindowRole { window = node; break }
+            var parent: AnyObject?
+            guard AXUIElementCopyAttributeValue(node, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            current = (parent as! AXUIElement)
+        }
+        let application = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.5)
+        var focused: AnyObject?
+        guard let window, AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID(), CFEqual(window, focused) else {
+            return .failure(HandsRefusal(code: "visionNotInFocusedWindow",
+                                         message: "what is drawn at that point is not in the app's focused window; nothing was clicked"))
+        }
+        guard let frame = liveAppKitFrame(of: window) else {
+            return .failure(HandsRefusal(code: "frameUnreadable", message: "the window's frame could not be read; nothing was clicked"))
+        }
+        return .success(frame)
+    }
+
+    /// The owner's mouse is still within reach of `point` (top-left, CGEvent's origin).
+    static func mouseIsNear(topLeft point: CGPoint) -> Bool {
+        guard let location = CGEvent(source: nil)?.location else { return false }
+        return hypot(location.x - point.x, location.y - point.y) <= ownerPointerReachPoints
+    }
+
+    /// The pointer moved onto `point` (top-left) with no button: hover, before a
+    /// vision click's "before" picture.
+    @discardableResult
+    static func postMouseMove(atTopLeft point: CGPoint) -> Bool {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)
+        else { return false }
+        move.flags = []
+        ownInput.mark()
+        move.post(tap: .cghidEventTap)
+        return true
     }
 
     /// How long a focus change gets to show in the app's own focus read.

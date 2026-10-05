@@ -245,7 +245,12 @@ nonisolated enum JarvisNotchReason {
         "pageHostDiffers": "it opened another site",
         "ownerActive": "you\u{2019}re using the keyboard",
         "caretNotAtEnd": "the caret is mid-text",
-        "fieldNotFocused": "couldn\u{2019}t focus the field"
+        "fieldNotFocused": "couldn\u{2019}t focus the field",
+        // The vision click (2026-10-05).
+        "visionLabelMismatch": "other words are drawn there",
+        "visionNoText": "no words there to confirm it",
+        "axElementAtPoint": "that one goes by its name",
+        "visionNotInFocusedWindow": "it\u{2019}s not in the front window"
     ]
 
     /// `subject` is the app HEARD for a heard-vs-named mismatch ("heard

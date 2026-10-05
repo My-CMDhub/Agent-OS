@@ -182,7 +182,7 @@ nonisolated enum RealtimeOpenAppTool {
 
     hands: scroll scrolls the window in front (direction up, down, left or right; amount in pages), at an area named like point_at, or the main area when none is given; its result names what came into view. type_text types text into a field: aim it by the field's name, the words printed in or beside it, such as "search"; a position only for a field with no words; no aim only for a field with keyboard focus; it never presses enter and sends nothing, so say what you typed and let the owner send it; type only text the owner gave or asked for. close closes the tab, the window, or quits the app in front (what tab, window or app); quitting shows the owner a card, and the app may still ask to save.
 
-    screen: you can point at and press what you can see. to point, call point_at; to click, call press_element (it also clicks into a field). aim either by the element's name as printed on screen, which is looked up on the live screen, or by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image), or with underPointer true only when the owner says "this one", "here" or "where my cursor is"; a request that names the thing ("click sign in", "where is the phone number") is aimed by that name, never underPointer. for "where is X", call find_on_screen with X's words, then point_at the element that is X at once and say where it is; when a label such as "Phone:" sits beside its value, point at the value, not the label. if a result lists several matches, ask which one, unless the owner's words already pick one by order ("the first", "the last"): then press it by that name, and the order picks it. a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. never say you can't do something you can see.
+    screen: you can point at and press what you can see. to point, call point_at; to click, call press_element (it also clicks into a field). aim either by the element's name as printed on screen, which is looked up on the live screen, or by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image), or with underPointer true only when the owner says "this one", "here" or "where my cursor is"; a request that names the thing ("click sign in", "where is the phone number") is aimed by that name, never underPointer. for "where is X", call find_on_screen with X's words, then point_at the element that is X at once and say where it is; when a label such as "Phone:" sits beside its value, point at the value, not the label. if a result lists several matches, ask which one, unless the owner's words already pick one by order ("the first", "the last"): then press it by that name, and the order picks it. a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. something you can see that find_on_screen does not list (drawn on a canvas, an icon that is only a picture) is pressed by sight: call press_element with its x and y AND the words printed on it; it is clicked only if those words are read back at that point. never say you can't do something you can see.
 
     tasks: when one request needs more than one step (search then open a result, open a page and read or summarise it, fill several fields, write then post), or names two or more actions, or asks you to act and then answer ("and tell me", summarise, find out, which is the cheapest), call do_task once with the owner's whole request as the goal and say only a few words, such as that you are on it; never do the first step yourself and then ask "shall i…?", and never press the first link yourself and report from there: "open the plans page and tell me the cheapest plan" is one do_task. a question to look up on the web (what a site says, the latest commit or news, a price, the cheapest plan) is a do_task too: the task runner answers it from the web without opening a browser; open_url only when the owner asks to see the page. a single step stays with the tools above. system lines later report the task's progress and its outcome; say each briefly in your own words, and claim only what they say happened.
 
@@ -462,6 +462,14 @@ nonisolated enum RealtimeOpenAppTool {
             }
             let nearPoint: [String: Any] = ["x": Double(screenTarget.point.x), "y": Double(screenTarget.point.y)]
             guard let target = screenTarget.candidate else {
+                // By sight (`visionClick`): words the harness must read back at the point, or
+                // the owner's own pointer ("click this one") with nothing AX can name under it.
+                if isPress, (screenTarget.source == .vision && call.elementName != nil) || screenTarget.source == .underPointer {
+                    request = ["verb": "visionClick", "nearPoint": nearPoint, "expectApp": expectApp ?? appName]
+                    if let name = call.elementName { request["title"] = name }
+                    if screenTarget.source == .underPointer { request["ownerPointed"] = true }
+                    break
+                }
                 if isPress { return refuse("nothingAtPoint", "nothing that can be pressed is at that position; nothing was pressed") }
                 request = ["verb": "highlight", "target": "point", "pointer": true, "nearPoint": nearPoint, "speechHold": true,
                            "seconds": RealtimeScreenVerbs.pointHoldSeconds, "expectApp": expectApp ?? appName]
@@ -728,7 +736,8 @@ nonisolated enum RealtimeOpenAppTool {
               case .success(let ticketLine) = harnessRequestLine(for: call, ticket: ticket, expectApp: named?.bundleIdentifier,
                                                                     offered: offered, offeredApp: offeredApp,
                                                                     screenTarget: screenTarget) else {
-            return checked(finished(RealtimeHandsVerbs.result(pressedResult(toolResult(fromHarnessResponse: response), call: call, target: screenTarget),
+            return checked(finished(RealtimeHandsVerbs.result(pressedResult(toolResult(fromHarnessResponse: response), call: call, target: screenTarget,
+                                                                            response: response),
                                                               call: call, target: screenTarget, response: response),
                                     waited: false, harnessResponse: response))
         }
@@ -738,14 +747,30 @@ nonisolated enum RealtimeOpenAppTool {
             try? await Task.sleep(for: .milliseconds(pollMilliseconds))
             response = harnessResponseObject(await Task.detached { answer(ticketLine) }.value)
         } while response["error"] as? String == "confirmationPending" && ProcessInfo.processInfo.systemUptime < deadline
-        return checked(finished(RealtimeHandsVerbs.result(pressedResult(toolResult(fromHarnessResponse: response), call: call, target: screenTarget),
+        return checked(finished(RealtimeHandsVerbs.result(pressedResult(toolResult(fromHarnessResponse: response), call: call, target: screenTarget,
+                                                                            response: response),
                                                           call: call, target: screenTarget, response: response),
                                 waited: true, harnessResponse: response))
     }
 
     /// press_element's result says WHAT was pressed; the rest is the harness's.
-    static func pressedResult(_ result: [String: Any], call: RealtimeToolCall, target: RealtimeScreenTarget?) -> [String: Any] {
-        guard call.name == RealtimeVoiceVerbs.pressElementName, let candidate = target?.candidate else { return result }
+    /// A press by sight says so, and what was read at the point — app-drawn words,
+    /// quoted and escaped (`UntrustedText`), never a line of their own.
+    static func pressedResult(_ result: [String: Any], call: RealtimeToolCall, target: RealtimeScreenTarget?,
+                              response: [String: Any] = [:]) -> [String: Any] {
+        guard call.name == RealtimeVoiceVerbs.pressElementName else { return result }
+        if response["method"] as? String == "vision" {
+            var result = result
+            result["method"] = "vision"
+            if let text = response["ocrText"] as? String {
+                result["ocrText"] = UntrustedText(text).forDisplay
+                result["target"] = "the words \(UntrustedText(text).forDisplay) drawn at that point"
+            } else if response["witness"] as? String == "ownerPointer" {
+                result["target"] = "what is drawn under the owner's pointer"
+            }
+            return result
+        }
+        guard let candidate = target?.candidate else { return result }
         var result = result
         let clicked = candidate.clickTarget
         result["target"] = clicked.map { $0.name == candidate.name && $0.frame == candidate.frame } ?? true ? candidate.described
@@ -902,6 +927,11 @@ nonisolated enum RealtimeOpenAppTool {
             case .element(let candidate, _) where call.name == RealtimeVoiceVerbs.typeTextName
                 && !RealtimeScreenVerbs.textInputRoles.contains(candidate.role):
                 return refuse("noFieldAtPoint", "no text field is at that position; nothing was typed. " + typeByNameAdvice)
+            // AX names something there it cannot press (a canvas inside a labelled group): the
+            // named press goes by sight at the model's own point (`visionClick`).
+            case .element(let candidate, _) where call.name == RealtimeVoiceVerbs.pressElementName && call.elementName != nil
+                && !candidate.axCanPress:
+                return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .vision))
             case .element(let candidate, let app):
                 return .success(RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY),
                                                      app: app, source: .screenshotPoint))
@@ -912,7 +942,15 @@ nonisolated enum RealtimeOpenAppTool {
                 if call.name == RealtimeVoiceVerbs.typeTextName {
                     return refuse("noFieldAtPoint", "no text field is at that position; nothing was typed. " + typeByNameAdvice)
                 }
-                if isPress { return refuse("nothingAtPoint", "nothing that can be pressed is at that position; nothing was pressed") }
+                // Nothing AX can name: the last rung is sight — only for a name, which the words
+                // read at the point must match (`visionClick`). A bare position names nothing to read.
+                if call.name == RealtimeVoiceVerbs.pressElementName, call.elementName != nil {
+                    return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .vision))
+                }
+                if isPress {
+                    return refuse("nothingAtPoint", "nothing that can be pressed is at that position; nothing was pressed. If it is drawn "
+                        + "there with words on it, call press_element again with its x and y AND the name printed on it.")
+                }
                 return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .screenshotPoint))
             }
         }
@@ -1423,6 +1461,8 @@ nonisolated enum RealtimeOpenAppTool {
         case liveName
         /// One of several, picked by an ordinal in the owner's words (`heardOrdinal`).
         case heardOrdinal
+        /// press_element at a named position AX cannot press: the harness's `visionClick`.
+        case vision
     }
 
     /// Ask-then-confirm spans turns: the model searches, asks, and the owner

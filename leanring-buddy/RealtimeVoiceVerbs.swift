@@ -162,7 +162,9 @@ nonisolated enum RealtimeVoiceVerbs {
         Declaration(name: pressElementName,
                     description: "Presses (clicks) one element in the window of the app in front. Aim it exactly as point_at: a name find_on_screen "
                         + "returned, OR x and y fractions of the screenshot, OR underPointer. Safety checks run first; a destructive press shows the "
-                        + "owner a card to approve, and some things are refused. The result says what was pressed and whether it was verified.",
+                        + "owner a card to approve, and some things are refused. The result says what was pressed and whether it was verified. "
+                        + "Something visible that find_on_screen does not list (drawn on a canvas, a picture-only icon) is pressed by sight: give "
+                        + "its x and y AND the words printed on it; it is clicked only where those words are read back.",
                     parameters: [appInFront] + positionParameters),
         Declaration(name: scrollName,
                     description: "Scrolls the window of the app in front, as a trackpad would. Aim it at an area by a name find_on_screen "

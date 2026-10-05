@@ -89,6 +89,9 @@ struct HarnessRawRequest: Decodable {
     /// click (`axPress` / `click`) and type (`axWrite` / `keystrokes`) only: run
     /// that one method and no fallback — how the hands probe measures each.
     let method: String?
+    /// visionClick only: the owner's words named a pointer location and the
+    /// point is where their mouse was. Honoured only while the mouse is still there.
+    let ownerPointed: Bool?
 }
 
 struct HarnessPoint: Decodable {
@@ -148,13 +151,17 @@ enum HarnessVerb: String, CaseIterable {
     /// Open an http/https page in the default or a named browser.
     case openURL
 
+    /// The last rung: click what is drawn at a point that AX cannot name, only
+    /// when the words OCR reads there are the caller's label (`visionClickResponse`).
+    case visionClick
+
     /// Whether this verb can change the world. The kill switch stops these and
     /// leaves the read-only pair working, so an operator who tripped it can
     /// still look at the machine and find out why.
     var isMutating: Bool {
         switch self {
         case .ping, .snapshot, .menus, .windows, .look, .status, .highlight: return false
-        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL: return true
+        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick: return true
         }
     }
 
@@ -179,7 +186,8 @@ enum HarnessVerb: String, CaseIterable {
         // `launch` targets an application, not an element: `evaluateLaunch`.
         // `highlight` resolves exactly like a press but performs nothing — see `highlightResponse`.
         // `openURL` targets a page in a browser, not an element: `openURLResponse`.
-        case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight, .scroll, .openURL: return nil
+        // `visionClick` aims at a point, not a name in the tree: `visionClickResponse`.
+        case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight, .scroll, .openURL, .visionClick: return nil
         }
     }
 }
@@ -293,6 +301,8 @@ struct HarnessRequest: Equatable {
     var forcedTypeMethod: TypeMethod? = nil
     /// openURL only, validated by `decode`.
     var url: URL? = nil
+    /// visionClick only: see `HarnessRawRequest.ownerPointed`.
+    var ownerPointed: Bool = false
 }
 
 // MARK: - Pure decision logic
@@ -515,6 +525,20 @@ enum HarnessPolicy {
             return .failure(.invalidField(field: "url", value: UntrustedText(stray).forDisplay))
         }
 
+        // visionClick: a point to look at, and the words to read there — or the
+        // owner's own pointer. The words go on a card and into the audit, so a
+        // plain label only. `ownerPointed` belongs to this verb alone.
+        if verb == .visionClick {
+            guard raw.nearPoint != nil else { return .failure(.missingField("nearPoint")) }
+            let title = raw.title ?? ""
+            if title.isEmpty, raw.ownerPointed != true { return .failure(.missingField("title")) }
+            if !title.isEmpty, !UntrustedText(title).isPlausibleControlLabel {
+                return .failure(.invalidField(field: "title", value: UntrustedText(title).forDisplay))
+            }
+        } else if raw.ownerPointed == true {
+            return .failure(.invalidField(field: "ownerPointed", value: "true"))
+        }
+
         var mode = TypeMode.insert
         if verb == .type {
             guard !(raw.text ?? "").isEmpty else {
@@ -567,7 +591,8 @@ enum HarnessPolicy {
             scrollPages: scrollPages,
             forcedClickMethod: forcedClickMethod,
             forcedTypeMethod: forcedTypeMethod,
-            url: url
+            url: url,
+            ownerPointed: raw.ownerPointed ?? false
         ))
     }
 
@@ -1732,6 +1757,9 @@ final class HarnessServer {
 
         case .scroll:
             return scrollResponse(request, dryRun: dryRun, startedAt: startedAt)
+
+        case .visionClick:
+            return visionClickResponse(request, dryRun: dryRun, startedAt: startedAt)
         }
     }
 
@@ -2110,6 +2138,7 @@ final class HarnessServer {
         if let statusItem = request.statusItem, !statusItem.isEmpty { return statusItem }
         if request.aimAtFocus { return "<focused>" }
         if request.aimAtWindow { return "<window>" }
+        if request.verb == .visionClick { return "<the owner's pointer>" }
         return request.app
     }
 
@@ -2992,6 +3021,164 @@ final class HarnessServer {
         }
         response["verification"] = ["status": "confirmed", "evidence": evidence]
         return finish("confirmed")
+    }
+
+    // MARK: visionClick
+
+    /// The ladder's last rung (owner 2026-10-05): a click on what is DRAWN at a
+    /// point AX cannot press — a canvas, an image-only button. The model names
+    /// the words on it; Vision OCR, run here on our own capture (every guard
+    /// `look` has: policy, one-app filter, secure-field inspection, secret
+    /// blackout), must read those words AT the point — a witness that is not
+    /// the model. The kernel then judges the words read, as it judges an AX
+    /// name, and a card is a ticket like any other. Verified by the region's
+    /// own pixels changing; otherwise `notObserved`, never done.
+    private func visionClickResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        var response: [String: Any] = ["dryRun": dryRun, "method": "vision"]
+        func fail(_ code: String, _ message: String?, kernel: String = "n/a", outcome: String? = nil) -> [String: Any] {
+            response["ok"] = false
+            response["error"] = code
+            if let message { response["message"] = message }
+            audit(request, dryRun: dryRun, kernel: kernel, outcome: outcome ?? code, startedAt: startedAt)
+            return response
+        }
+        guard let point = request.nearPoint else { return fail("missingField", "missing required field \"nearPoint\"") }
+        guard let application = AccessibilityTreeWalker.frontmost().application else {
+            return fail("noFrontmostApplication", "nothing is frontmost")
+        }
+        guard !LockScreenGuard.isLockScreen(application.bundleIdentifier) else {
+            return fail("screenIsLocked", "the screen is locked — there is nothing of the user's to click")
+        }
+        // (d) Only in the app the caller expects (the one named, or the one in front).
+        if let refusal = frontmostChangedRefusal(request, name: application.localizedName, bundleIdentifier: application.bundleIdentifier,
+                                                 dryRun: dryRun, startedAt: startedAt) {
+            return response.merging(refusal) { _, new in new }
+        }
+        response["application"] = application.localizedName ?? "unknown"
+        response["bundleIdentifier"] = application.bundleIdentifier ?? "unknown"
+        let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
+        let topLeft = SyntheticScroller.topLeftCentre(ofAppKitFrame: CGRect(origin: point, size: .zero), primaryDisplayHeightInPoints: primaryHeight)
+
+        // (e) The app's focused window is what is drawn at the point: nothing covers it.
+        let windowFrame: CGRect
+        switch HarnessHands.visionWindow(atTopLeft: topLeft, processIdentifier: application.processIdentifier) {
+        case .failure(let refusal): return fail(refusal.code, refusal.message)
+        case .success(let frame): windowFrame = frame
+        }
+        guard windowFrame.contains(point) else {
+            return fail("targetNotOnScreen", "the point is outside the app's focused window; nothing was clicked")
+        }
+        // (a) AX first, by the hit test's own snap: a control AX can press is pressed by
+        // name, never by sight, and a password box is never clicked.
+        let screens = DispatchQueue.main.sync { NSScreen.screens.map(\.frame) }
+        switch RealtimeScreenHitTest.hit(atAppKitPoint: point, primaryDisplayHeight: primaryHeight, screens: screens) {
+        case .refused(let error):
+            return fail(error, error == "secureField" ? "that point is a password field; nothing was clicked" : Self.harnessItselfMessage)
+        case .element(let candidate, _) where candidate.axCanPress:
+            response["axElement"] = candidate.described
+            return fail("axElementAtPoint", "AX names \(candidate.described) at that point; press it by that name instead. Nothing was clicked.")
+        default:
+            break
+        }
+
+        // (b) The words at the point, from a capture that passed every guard `look` has.
+        let crop = HarnessHands.visionCropRegion(around: point, window: windowFrame)
+        let captured = escalationPayload(plan: EscalationPlan(tier: .element, reason: "the words drawn at the point", region: crop,
+                                                              resolver: "visionClick", candidates: [], application: application),
+                                         capture: true)
+        if let code = captured.errorCode {
+            return fail(code, (captured.payload["message"] as? String) ?? "the region could not be photographed; nothing was clicked")
+        }
+        guard let path = captured.payload["imagePath"] as? String, let jpeg = FileManager.default.contents(atPath: path),
+              let region = RealtimeScreenVerbs.frame(captured.payload["region"]) else {
+            return fail("captureFailed", "the photograph of the region could not be read back; nothing was clicked")
+        }
+        let ocrStartedAt = Date()
+        let lines = ScreenOCR.recognize(jpeg: jpeg, region: region)
+        response["ocrMilliseconds"] = elapsedMilliseconds(since: ocrStartedAt)
+        response["ocrLineCount"] = lines.count
+        let label = request.title
+        var read: (text: String, frame: CGRect)?
+        if !label.isEmpty {
+            switch ScreenOCR.witness(lines: lines, point: point, label: label) {
+            case .matched(let text, let frame): read = (text, frame)
+            case .mismatch(let text):
+                response["ocrText"] = text
+                return fail("visionLabelMismatch", "the words drawn at that point read \(UntrustedText(text).forDisplay), not "
+                    + "\(UntrustedText(label).forDisplay); nothing was clicked")
+            case .noText: break
+            }
+        } else if let word = ScreenOCR.wordBox(at: point, in: lines) {
+            read = (ScreenOCR.line(holding: word, in: lines)?.text ?? word.text, word.frame)
+        }
+        // (c) No words: only the owner's own pointer, still there, says what it is.
+        let ownerPointerHolds = request.ownerPointed && HarnessHands.mouseIsNear(topLeft: topLeft)
+        guard read != nil || ownerPointerHolds else {
+            return fail("visionNoText", request.ownerPointed
+                ? "no words are drawn at that point and the owner's pointer has moved off it; nothing was clicked"
+                : "no words could be read at that point, so nothing confirms what it is; nothing was clicked")
+        }
+        response["ocrText"] = read?.text ?? NSNull()
+        response["witness"] = read != nil ? "ocr" : "ownerPointer"
+
+        // The kernel judges what was read; the owner's pointer with no words is the owner's choice.
+        let decision = read.map {
+            HarnessHands.visionClickDecision(ocrText: $0.text, label: label.isEmpty ? nil : label, frame: $0.frame, windowFrame: windowFrame)
+        } ?? .allow
+        let composed = applyAppPolicy(to: decision, bundleIdentifier: application.bundleIdentifier, into: &response)
+        let gated = gate(composed, request: request, appName: application.localizedName, bundleIdentifier: application.bundleIdentifier,
+                         dryRun: dryRun, into: &response)
+        guard gated.executable else { return fail(gated.outcome, gated.note, kernel: gated.decision) }
+        guard !dryRun else {
+            response["ok"] = true
+            response["performed"] = ["status": "skipped", "reason": "dry run — nothing was performed"]
+            audit(request, dryRun: dryRun, kernel: gated.decision, outcome: "dryRun", startedAt: startedAt)
+            return response
+        }
+
+        // Act, then look. Hover first, so a hover highlight is in BOTH pictures and only
+        // the click's own change counts. These pictures never leave this function.
+        guard let display = EscalationLadder.display(holding: region, among: EscalationLadder.displays()) else {
+            return fail("captureFailed", "the region is on no display; nothing was clicked", kernel: gated.decision)
+        }
+        func grey() -> [UInt8] {
+            guard case .success(let outcome) = EscalationLadder.captureSynchronously(
+                region: region, on: display, processIdentifier: application.processIdentifier) else { return [] }
+            return ScreenOCR.greyThumbnail(jpeg: outcome.jpeg)
+        }
+        phaseTiming.actionStarting()
+        HarnessHands.postMouseMove(atTopLeft: topLeft)
+        Thread.sleep(forTimeInterval: HarnessHands.visionHoverSettleSeconds)
+        let before = grey()
+        // Re-checked at the last moment: the owner may have switched apps, or a window come over the point.
+        guard HarnessHands.targetIsFrontmost(application.processIdentifier) else {
+            phaseTiming.actionReturned()
+            return fail(HarnessHands.frontmostChangedRefusal.code, HarnessHands.frontmostChangedRefusal.message, kernel: gated.decision)
+        }
+        if case .failure(let refusal) = HarnessHands.visionWindow(atTopLeft: topLeft, processIdentifier: application.processIdentifier) {
+            phaseTiming.actionReturned()
+            return fail(refusal.code, refusal.message, kernel: gated.decision)
+        }
+        guard HarnessHands.postClick(atTopLeft: topLeft) else {
+            phaseTiming.actionReturned()
+            return fail("eventCreationFailed", "the click event could not be created; nothing was clicked", kernel: gated.decision)
+        }
+        phaseTiming.actionReturned()
+        response["performed"] = ["status": "sent", "pointTopLeft": Self.pointJSON(topLeft).point]
+        var changed = false
+        for wait in HarnessHands.visionVerifyWaits where !changed {
+            Thread.sleep(forTimeInterval: wait)
+            changed = ScreenOCR.changed(before: before, after: grey())
+        }
+        phaseTiming.verified(walks: 0, path: "pixels")
+        guard changed else {
+            response["verification"] = ["status": "notObserved", "evidence": "the region's pixels did not change"]
+            return fail("notVerified", "the click was sent and nothing in that region changed", kernel: gated.decision, outcome: "notObserved")
+        }
+        response["verification"] = ["status": "confirmed", "evidence": "the region's pixels changed"]
+        response["ok"] = true
+        audit(request, dryRun: dryRun, kernel: gated.decision, outcome: "confirmed", startedAt: startedAt)
+        return response
     }
 
     // MARK: menu / menus
