@@ -343,6 +343,64 @@ enum HarnessPolicy {
         return nil
     }
 
+    /// The text field a label names, for `type` aimed at a label. Generality
+    /// suite 2026-10-06: "Save As:" (TextEdit) and Font Book's "Search" resolved
+    /// to the AXStaticText beside the field and the kernel refused typing into
+    /// it. In order, each only when it picks out one field:
+    /// 1. the app's own link (`linked`: AXServesAsTitleForUIElements /
+    ///    AXLinkedUIElements on the label, or the field's AXTitleUIElement);
+    /// 2. the nearest text input to the label's right on its row, or below it,
+    ///    inside the label's own container — two equally near is no answer;
+    /// 3. a text input in the window whose title, description or placeholder IS
+    ///    the name (a toolbar label sits under its field, so 2 misses it).
+    /// The kernel then judges the field like any other (a password box refuses).
+    static func fieldLabelled(by label: AccessibilityElementNode, chain: [AccessibilityElementNode], name: String,
+                              linked: (AccessibilityElementNode) -> Bool) -> AccessibilityElementNode? {
+        guard chain.count >= 2, let window = chain.first else { return nil }
+        func inputs(under root: AccessibilityElementNode) -> [AccessibilityElementNode] {
+            (AccessibilityElementNode.textInputRoles.contains(root.role) ? [root] : []) + root.children.flatMap(inputs(under:))
+        }
+        let fields = inputs(under: window)
+        let tied = fields.filter(linked)
+        if tied.count == 1 { return tied[0] }
+        let labelFrame = label.frameInAppKitCoordinates
+        // AppKit coordinates: "below" is a smaller y.
+        let near = inputs(under: chain[chain.count - 2]).compactMap { field -> (AccessibilityElementNode, CGFloat)? in
+            let frame = field.frameInAppKitCoordinates
+            guard frame.width > 0, frame.height > 0 else { return nil }
+            if frame.minY < labelFrame.maxY, frame.maxY > labelFrame.minY, frame.minX >= labelFrame.maxX - 2 {
+                return (field, frame.minX - labelFrame.maxX)
+            }
+            if frame.minX < labelFrame.maxX, frame.maxX > labelFrame.minX, frame.maxY <= labelFrame.minY + 2 {
+                return (field, labelFrame.minY - frame.maxY)
+            }
+            return nil
+        }.sorted { $0.1 < $1.1 }
+        if let nearest = near.first { return near.count == 1 || near[1].1 - nearest.1 >= 1 ? nearest.0 : nil }
+        let named = fields.filter { $0.fieldLabel?.raw == name }
+        return named.count == 1 ? named[0] : nil
+    }
+
+    /// `fieldLabelled`'s `linked`, read live: the label's own AXServesAsTitleForUIElements and
+    /// AXLinkedUIElements once, then each candidate field's AXTitleUIElement (one read per field).
+    static func liveLabelLink(_ label: AccessibilityElementNode) -> (AccessibilityElementNode) -> Bool {
+        guard let labelElement = label.accessibilityElement else { return { _ in false } }
+        func elements(_ element: AXUIElement, _ attribute: String) -> [AXUIElement] {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return [] }
+            return (value as? [AXUIElement]) ?? []
+        }
+        let served = elements(labelElement, "AXServesAsTitleForUIElements") + elements(labelElement, "AXLinkedUIElements")
+        return { field in
+            guard let fieldElement = field.accessibilityElement else { return false }
+            if served.contains(where: { CFEqual($0, fieldElement) }) { return true }
+            var title: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(fieldElement, kAXTitleUIElementAttribute as CFString, &title) == .success,
+                  let title, CFGetTypeID(title) == AXUIElementGetTypeID() else { return false }
+            return CFEqual(title, labelElement)
+        }
+    }
+
     static func decode(line: String) -> Result<HarnessRequest, HarnessRequestError> {
         guard let data = line.data(using: .utf8) else {
             return .failure(.malformedJSON("not valid UTF-8"))
@@ -2603,6 +2661,14 @@ final class HarnessServer {
            let control = HarnessPolicy.controlLabelled(byLastOf: chain) {
             resolvedNode = control
             labelTitle = namedNode.displayName?.raw ?? labelTitle
+            response["retargetedFrom"] = Self.summarise(namedNode)
+        }
+        // A label names the field it labels: type goes there, judged as that field.
+        if action == .type, !request.aimAtFocus, !AccessibilityElementNode.textInputRoles.contains(namedNode.role),
+           let chain = ElementReachability.ancestorChain(to: namedNode, from: rootNode),
+           let field = HarnessPolicy.fieldLabelled(by: namedNode, chain: chain, name: request.title ?? "",
+                                                   linked: HarnessPolicy.liveLabelLink(namedNode)) {
+            resolvedNode = field
             response["retargetedFrom"] = Self.summarise(namedNode)
         }
         response["resolved"] = Self.summarise(resolvedNode)

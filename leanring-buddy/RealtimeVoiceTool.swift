@@ -447,8 +447,13 @@ nonisolated enum RealtimeOpenAppTool {
             // Never `thenConfirm`: typing never presses Enter or sends.
             request = ["verb": "type", "text": text, "mode": mode, "expectApp": expectApp ?? appName]
             if let screenTarget {
+                // No field that can be named there (most fields are anonymous, and a document's
+                // text area is too big to snap to): the FOCUSED field, only if the point lies in it.
                 guard let candidate = screenTarget.candidate else {
-                    return refuse("nothingAtPoint", "no field that can be named is at that position; nothing was typed")
+                    request["target"] = "focused"
+                    request["nearPoint"] = ["x": Double(screenTarget.point.x), "y": Double(screenTarget.point.y)]
+                    request["requireAtPoint"] = true
+                    break
                 }
                 guard expectApp == nil || screenTarget.app == expectApp else {
                     return refuse("notOffered", "Nothing was typed. Aim only at what this turn's find_on_screen, screenshot or pointer named.")
@@ -962,8 +967,12 @@ nonisolated enum RealtimeOpenAppTool {
             switch await hitTest(point) {
             // Typing goes only into the text field the point lies in, never what the snap
             // found nearest (C2 03-34-52Z: the page heading, refused by the kernel).
+            // Typing goes only into the text field the point lies in, never what the snap
+            // found nearest (C2 03-34-52Z: the page heading, refused by the kernel). A label
+            // (AXStaticText) goes to the harness, which types into the field it labels or refuses
+            // (generality suite 2026-10-06: the Save sheet's "Save As:").
             case .element(let candidate, _) where call.name == RealtimeVoiceVerbs.typeTextName
-                && !RealtimeScreenVerbs.textInputRoles.contains(candidate.role):
+                && !RealtimeScreenVerbs.textInputRoles.contains(candidate.role) && candidate.role != "AXStaticText":
                 return refuse("noFieldAtPoint", "no text field is at that position; nothing was typed. " + typeByNameAdvice)
             // AX names something there it cannot press (a canvas inside a labelled group): the
             // named press goes by sight at the model's own point (`visionClick`).
@@ -977,8 +986,11 @@ nonisolated enum RealtimeOpenAppTool {
                 return refuse(error, error == "secureField" ? "that is a password field; nothing was done"
                     : error == "policyRefused" ? "the owner's policy refuses this app; nothing was done" : "that is Clicky itself; nothing was done")
             case .nothing:
+                // Nothing nameable: a field is usually anonymous, and a document's text area is
+                // too big to snap to (generality suite 2026-10-06, TextEdit). The FOCUSED field
+                // takes it, and only if the point lies inside that field — never by sight.
                 if call.name == RealtimeVoiceVerbs.typeTextName {
-                    return refuse("noFieldAtPoint", "no text field is at that position; nothing was typed. " + typeByNameAdvice)
+                    return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .screenshotPoint))
                 }
                 // Nothing AX can name: the last rung is sight — only for a name, which the words
                 // read at the point must match (`visionClick`). A bare position names nothing to read.

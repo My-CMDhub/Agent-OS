@@ -188,8 +188,10 @@ struct VisionClickTests {
         else { Issue.record("a bare position was clicked") }
         // Typing never goes by sight.
         let type = RealtimeToolCall(callID: "c", name: "type_text", appName: "Google Chrome", elementName: "Launch demo", x: 0.25, y: 0.5, text: "hi")
-        if case .failure(let refusal) = await resolve(type, hit: .nothing) { #expect(refusal.error == "noFieldAtPoint") }
-        else { Issue.record("typed by sight") }
+        // Generality suite 2026-10-06: an anonymous field at the point is the FOCUSED field's,
+        // checked by the harness against the point — still never a vision target.
+        if case .success(let target) = await resolve(type, hit: .nothing) { #expect(target.source != .vision && target.candidate == nil) }
+        else { Issue.record("an anonymous field at the point was refused") }
     }
 
     @Test func theReceiptSaysItWasDoneBySightAndWhatWasRead() {

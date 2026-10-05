@@ -174,7 +174,9 @@ struct RealtimeHandsVerbsTests {
         #expect(error(line(RealtimeToolCall(callID: "t", name: "type_text", appName: finder))) == "missingText")
         #expect(error(line(RealtimeToolCall(callID: "t", name: "type_text", appName: finder, text: "x", mode: "overwrite"))) == "invalidMode")
         // A position with nothing nameable there: scrolled at the point, never typed into.
-        #expect(error(line(type, atPoint)) == "nothingAtPoint")
+        // Generality suite 2026-10-06: the focused field, only if the point lies in it.
+        let focusedAtPoint = object(try line(type, atPoint).get())
+        #expect(focusedAtPoint["target"] as? String == "focused" && focusedAtPoint["requireAtPoint"] as? Bool == true)
     }
 
     private func menuItem(_ path: [String], shortcut: String? = nil, enabled: Bool = true, submenu: Bool = false) -> [String: Any] {

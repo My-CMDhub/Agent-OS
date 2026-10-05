@@ -141,11 +141,15 @@ struct HandsVoiceTests {
                 screenshotDisplay: screen, keyDownPointer: nil, hitTest: { _ in hit })
         }
         #expect(try await type(x: 0.4, y: 0.32, hit: .element(field, app: chromeBundle)).get().candidate == field)
-        for hit in [RealtimeScreenHit.element(heading, app: chromeBundle), .nothing] {
+        for hit in [RealtimeScreenHit.element(heading, app: chromeBundle)] {
             guard case .failure(let refusal) = await type(x: 0.4, y: 0.2, hit: hit) else { Issue.record("typed into \(hit)"); continue }
             #expect(refusal.error == "noFieldAtPoint")
             #expect(refusal.message.contains("type_text again with name"))
         }
+        // Generality suite 2026-10-06: nothing nameable there (an anonymous field) goes to the
+        // FOCUSED field, which the harness accepts only if the point lies inside it.
+        let anonymous = try await type(x: 0.4, y: 0.2, hit: .nothing).get()
+        #expect(anonymous.candidate == nil && anonymous.source == .screenshotPoint)
         guard case .failure(let pixels) = await type(x: 0.77, y: 332, hit: .element(field, app: chromeBundle)) else { Issue.record("typed at a pixel"); return }
         #expect(pixels.error == "positionOutOfRange" && pixels.message.contains("type_text again with name"))
     }
