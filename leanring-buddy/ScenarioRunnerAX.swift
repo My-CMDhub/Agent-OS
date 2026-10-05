@@ -180,7 +180,13 @@ nonisolated enum ScenarioRunnerAX {
     /// Our window's own close button, and nothing else.
     static func close(_ window: ScenarioWindow) -> [String: Any] {
         func present() -> Bool { chromeWindows().contains { CFEqual($0.window, window.element) } }
-        guard present() else { return ["closed": true, "note": "already gone"] }
+        // `kAXWindows` is the active Space only: when the Space changed under the run
+        // (R7, 08-09-43Z) the window was reported "already gone" and left open.
+        if !present() {
+            NSRunningApplication(processIdentifier: window.processIdentifier)?.activate()
+            HarnessHands.waitUntil(seconds: 3) { present() }
+        }
+        guard present() else { return ["closed": false, "note": "not visible even with Chrome brought forward: closed already, or on another Space"] }
         var button: AnyObject?
         guard AXUIElementCopyAttributeValue(window.element, kAXCloseButtonAttribute as CFString, &button) == .success,
               let button, CFGetTypeID(button) == AXUIElementGetTypeID() else {
@@ -240,17 +246,23 @@ nonisolated enum ScenarioRunnerAX {
     }
 
     /// Google's first result: the first link holding a heading, outside Google's own hosts.
-    static func firstResultHost(_ window: ScenarioWindow) -> String? {
-        guard let root = nodes(window).first else { return nil }
-        func firstResult(in node: AccessibilityElementNode) -> String? {
+    static func firstResultHost(_ window: ScenarioWindow) -> String? { resultHosts(window, limit: 1).first }
+
+    /// Google's results in page order: each link holding a heading, outside Google's own hosts.
+    static func resultHosts(_ window: ScenarioWindow, limit: Int = 10) -> [String] {
+        guard let root = nodes(window).first else { return [] }
+        var hosts: [String] = []
+        func collect(_ node: AccessibilityElementNode) {
+            guard hosts.count < limit else { return }
             if node.role == "AXLink", node.children.contains(where: { $0.flattenedDescendants().contains { $0.role == "AXHeading" } }),
                let element = node.accessibilityElement, let host = url(of: element)?.host, !host.contains("google.") {
-                return host
+                hosts.append(host)
+                return
             }
-            for child in node.children { if let host = firstResult(in: child) { return host } }
-            return nil
+            node.children.forEach(collect)
         }
-        return firstResult(in: root)
+        collect(root)
+        return hosts
     }
 
     /// The AppKit frame of the first text element whose name contains `text`.

@@ -46,6 +46,15 @@ struct ScenarioOutcome {
     var agentReport: AgentLoopReport?
     /// C3: the runner brought Finder forward during the task.
     var focusStolen = false
+    /// Section R's clock (system uptime): the key-up, the checker's first sight of
+    /// the goal state, and the answer delivered (the turn's line, or the task's end).
+    var releaseUptime: TimeInterval?
+    var goalSeenUptime: TimeInterval?
+    var answerUptime: TimeInterval?
+    /// The owner turn's own calls (before a task's are merged in): the voice model's steps.
+    var voiceDecisions: [RealtimeToolDecision] = []
+    /// agent-loop.log step lines this turn's task wrote.
+    var agentSteps: [[String: Any]] = []
     var transcript: String { marks?.transcript ?? "" }
     var decisions: [RealtimeToolDecision] { marks?.decisions ?? [] }
     /// Every error code a tool result or heard check carried.
@@ -79,6 +88,8 @@ struct ScenarioWindow {
 final class ScenarioContext {
     let harnessAnswer: @Sendable (String) -> String
     var window: ScenarioWindow?
+    /// Section R: Cursor's window on this repo (the owner's or the run's — closed only by the run, at its end).
+    var cursor: ScenarioWindow?
     /// The nonce the start opened its window with: cleanup closes every window
     /// carrying it, found or not when the start gave up.
     var nonce: String?
@@ -86,6 +97,9 @@ final class ScenarioContext {
     var baseline: [String: Any] = [:]
     /// Read before the turn and NEVER reported: C1's fake key.
     var secret: String?
+    /// Section R's working state, not reported as such (a checker copies what matters
+    /// into its evidence): R3's git snapshot, R2's new shell, R6's result list.
+    var notes: [String: Any] = [:]
     let startedAt = Date()
     init(harnessAnswer: @escaping @Sendable (String) -> String) { self.harnessAnswer = harnessAnswer }
 }
@@ -104,6 +118,9 @@ struct RunnerScenario {
         case googleSearch(String)
         /// TextEdit must not be running (B4): a running one holds the owner's documents.
         case textEditNotRunning
+        /// Section R: Cursor's window on this repo in front, opened by the run if none is
+        /// visible; skipped when Cursor is not running or the window holds unsaved edits.
+        case cursorRepo
     }
     enum CardPolicy { case deny, expire }
 
@@ -127,6 +144,12 @@ struct RunnerScenario {
     /// Must set "passed".
     let check: @MainActor (ScenarioContext, ScenarioOutcome) async -> [String: Any]
     var never: [ScenarioNever] = []
+    /// Section R: polled from the key-up; its first true is when the turn was done.
+    var goal: (@MainActor (ScenarioContext) async -> Bool)? = nil
+    /// Done also needs the spoken answer delivered (R5, R7).
+    var doneNeedsAnswer = false
+    /// What a person takes (benchmark.md's "human estimate").
+    var humanEstimate: String? = nil
 
     var fixtureID: String { utterance ?? id }
 }
@@ -151,6 +174,13 @@ enum ScenarioRunner {
     static let prewarmSeconds = 3.0
     static let settleSeconds = 1.5
     static let stealFocusDelaySeconds = 1.0
+    /// A goal read takes 0-400 ms (Cursor's tree ~800 nodes): done is credited when a
+    /// read that saw the goal FINISHES, so it is late by at most one read plus this.
+    static let goalPollMilliseconds = 250
+    /// After the turn, how long the goal may still appear (a page still loading).
+    static let goalGraceSeconds = 4.0
+    /// Section R: Cursor's window the run opened (closed at the run's end, never mid-run).
+    static var cursorWindowOpenedByRun: ScenarioWindow?
 
     static var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
@@ -176,7 +206,7 @@ enum ScenarioRunner {
         let wanted = CommandLine.arguments.first { $0.hasPrefix("--scenario-ids=") }
             .map { $0.dropFirst("--scenario-ids=".count).split(separator: ",").map(String.init) }
         let stacks = stacksArgument()
-        let scenarios = wanted.map { ids in ids.compactMap { id in ScenarioCatalog.all.first { $0.id == id } } } ?? ScenarioCatalog.all
+        let scenarios = wanted.map { ids in ids.compactMap { id in ScenarioCatalog.catalog.first { $0.id == id } } } ?? ScenarioCatalog.all
         let utterances = loadUtterances()
         meta["scenarios"] = scenarios.map(\.id)
         meta["stacks"] = stacks.map(\.rawValue)
@@ -256,6 +286,10 @@ enum ScenarioRunner {
         }
         if meta["outcome"] == nil { meta["outcome"] = "ran" }
         meta["estimatedOpenAIUSD"] = openAISpentUSD
+        if let window = cursorWindowOpenedByRun {
+            meta["cursorRunWindow"] = await Task.detached { ScenarioRunnerReal.closeRunWindow(window) }.value
+            cursorWindowOpenedByRun = nil
+        }
         // Chrome launched for the run: its windows are the run's.
         if !chromeRunningAtStart {
             NSRunningApplication.runningApplications(withBundleIdentifier: chromeBundleIdentifier).forEach { $0.terminate() }
@@ -396,10 +430,32 @@ enum ScenarioRunner {
                 : check["passed"] as? Bool == true ? "passed" : "failed"
             result["check"] = check
             result["never"] = nevers
+            // The task's own model was unreachable (credit, network): the run measured the
+            // provider, not J.A.R.V.I.S. — never counted as a product failure.
+            if result["status"] as? String != "passed", case .failed(let reason)? = outcome.agentReport?.outcome,
+               loopModelUnavailable(reason: reason) {
+                result["status"] = "loopModelUnavailable"
+                result["reason"] = String(reason.prefix(200))
+            }
+        } else if let skip = started.evidence["skip"] as? String {
+            result["status"] = "skipped"
+            result["reason"] = skip
         } else {
             result["status"] = "startFailed"
         }
         result.merge(summary(of: outcome)) { _, new in new }
+        if let release = outcome.releaseUptime, scenario.goal != nil {
+            func ms(_ uptime: TimeInterval?) -> Int? { uptime.map { Int((($0 - release) * 1000).rounded()) } }
+            let goalMs = ms(outcome.goalSeenUptime), answerMs = ms(outcome.answerUptime)
+            result["goalSeenMs"] = goalMs ?? NSNull()
+            result["answerMs"] = answerMs ?? NSNull()
+            let done = scenario.doneNeedsAnswer ? goalMs.flatMap { goal in answerMs.map { max(goal, $0) } } : goalMs
+            result["doneMs"] = done ?? NSNull()
+            result["breakdown"] = ScenarioRunnerReal.breakdown(
+                release: release,
+                voiceCalls: outcome.voiceDecisions.map { ($0.call.name, $0.callUptime, $0.dispatch?.answeredUptime, $0.dispatch?.harnessMilliseconds ?? 0) },
+                freshLookMs: outcome.line?.freshLookMs, agentSteps: outcome.agentSteps)
+        }
         if stack == .openAIRealtime { result["estimatedCostUSD"] = spent }
 
         // Undo, by identity: the runner's window, then apps the scenario launched.
@@ -420,6 +476,9 @@ enum ScenarioRunner {
             }.value
             if !strays.isEmpty { cleanup["strayRunnerWindows"] = strays }
         }
+        if let cursor = context.cursor {
+            cleanup["cursor"] = await Task.detached { [baseline = context.baseline] in cleanUpCursor(cursor, baseline: baseline) }.value
+        }
         var quit: [String] = []
         for bundleIdentifier in scenario.quitIfLaunched where !runningBefore.contains(bundleIdentifier) {
             for application in NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier) {
@@ -436,11 +495,61 @@ enum ScenarioRunner {
         cleanup["ownerChromeWindowsIntact"] = missing.isEmpty
         if !leftOpen.isEmpty { cleanup["newChromeSurfacesLeftOpen"] = leftOpen.count }
         result["cleanup"] = cleanup
-        let abort = missing.isEmpty ? nil : "\(missing.count) Chrome window(s) that existed before \(scenario.id) are gone — stopped at once"
+        var abort = missing.isEmpty ? nil : "\(missing.count) Chrome window(s) that existed before \(scenario.id) are gone — stopped at once"
+        // The runner's window was not seen and a surface it opened is still there: it is
+        // open somewhere the run cannot reach (another Space). Stop rather than pile up more.
+        if abort == nil, (cleanup["window"] as? [String: Any])?["closed"] as? Bool == false, !leftOpen.isEmpty {
+            abort = "the runner's window after \(scenario.id) could not be closed (another Space?) — stopped"
+        }
 
         let answers: [String: Any] = ["heard": outcome.marks?.heardText ?? "", "said": outcome.transcript,
                                       "tools": outcome.decisions.map { RealtimeDecisionTrace.loggedArguments(for: $0.call) }]
         return (result, spent, answers, abort)
+    }
+
+    /// Undoes what a Cursor scenario made, by identity: tabs naming files that had
+    /// none before (only while nothing is unsaved), the tab in front before brought
+    /// back, and terminal shells that did not exist before (by pid).
+    /// AgentLoop's wording when its model call threw (`finish(.failed(reason: "the model could not be reached …"))`).
+    nonisolated static func loopModelUnavailable(reason: String) -> Bool { reason.hasPrefix("the model could not be reached") }
+
+    /// One scenario opens a file or two, a terminal, an agent tab: more than this
+    /// "created" means the baseline was read too early (2026-10-05 08-09-43Z read 0
+    /// tabs from a window still restoring, and cleanup closed all six) — touch nothing.
+    nonisolated static let maximumCreatedPerScenario = 2
+
+    nonisolated static func cleanUpCursor(_ cursor: ScenarioWindow, baseline: [String: Any]) -> [String: Any] {
+        var done: [String: Any] = [:]
+        // No baseline read: nothing can be known to be new, so nothing is ended.
+        if let before = baseline["cursorShells"] as? [Int], let now = ScenarioRunnerReal.cursorShells() {
+            let created = now.subtracting(before.map { pid_t($0) })
+            if created.count > maximumCreatedPerScenario {
+                done["shells"] = "\(created.count) new shells is more than one scenario makes: none ended"
+            } else {
+                let ended = ScenarioRunnerReal.endShells(created)
+                if !ended.isEmpty { done["shellsEnded"] = ended }
+            }
+        }
+        guard ScenarioRunnerReal.isPresent(cursor) else {
+            return done.merging(["window": "not on the active Space (or closed): tabs left as they are"]) { _, new in new }
+        }
+        guard ScenarioRunnerReal.hasUnsavedEdits(cursor.element) == false else {
+            done["tabs"] = "left as they are: the window has unsaved edits (or they cannot be read)"
+            return done
+        }
+        let before = Set(baseline["cursorTabs"] as? [String] ?? [])
+        let created = ScenarioRunnerReal.editorTabs(cursor).filter { !before.contains($0) }
+        if created.count > maximumCreatedPerScenario {
+            done["tabs"] = "\(created.count) new tabs is more than one scenario opens: none closed"
+        } else if !created.isEmpty {
+            done["tabsClosed"] = created.filter { ScenarioRunnerReal.closeEditorTab(named: $0, in: cursor) }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        if let active = baseline["cursorActiveFile"] as? String,
+           ScenarioRunnerReal.activeDocument(cursor.element)?.lastPathComponent != active {
+            done["reselected"] = ScenarioRunnerReal.selectEditorTab(named: active, in: cursor) ? active : "not found: \(active)"
+        }
+        return done
     }
 
     /// Window-server numbers once closes have finished animating (≤ 3 s).
@@ -491,6 +600,34 @@ enum ScenarioRunner {
             try? await Task.sleep(for: .milliseconds(500))
             let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
             return (front == "com.apple.finder", ["focus": response["ok"] ?? NSNull(), "frontmost": front ?? NSNull()])
+        case .cursorRepo:
+            guard ScenarioRunnerReal.cursorProcessIdentifier() != nil else { return (false, ["skip": "Cursor is not running"]) }
+            guard let opened = await Task.detached(operation: { ScenarioRunnerReal.repositoryWindowOpeningIfNeeded() }).value else {
+                return (false, ["error": "no Cursor window on this repo appeared"])
+            }
+            if opened.created { cursorWindowOpenedByRun = opened.window }
+            let window = opened.window
+            let title = await Task.detached { ScenarioRunnerReal.attribute(window.element, kAXTitleAttribute) as? String }.value ?? ""
+            let focus = await VoiceToolProbe.ask(["verb": "focus", "app": "Cursor", "title": title], context.harnessAnswer)
+            let front = await waitFor(seconds: 5) {
+                let read = await Task.detached { HarnessHands.browserWindow(processIdentifier: window.processIdentifier) }.value
+                return read.frontmost && read.window.map { CFEqual($0, window.element) } == true ? true : nil
+            }
+            let unsaved = await Task.detached { ScenarioRunnerReal.hasUnsavedEdits(window.element) }.value
+            var evidence: [String: Any] = ["openedByRun": cursorWindowOpenedByRun != nil, "focus": focus["ok"] ?? NSNull(),
+                                           "inFront": front == true, "unsavedEdits": unsaved ?? NSNull()]
+            if unsaved != false {
+                evidence["skip"] = unsaved == nil ? "Cursor's unsaved state cannot be read" : "the owner has unsaved editor state in Cursor"
+                return (false, evidence)
+            }
+            context.cursor = window
+            // A window still restoring its session reads 0 tabs and no terminal: wait for two
+            // reads 0.5 s apart to agree (at most 8 s) before calling anything "before".
+            let (tabs, active, shells) = await Task.detached { ScenarioRunnerReal.settledCursorState(window) }.value
+            context.baseline["cursorTabs"] = tabs
+            context.baseline["cursorActiveFile"] = active ?? NSNull()
+            if let shells { context.baseline["cursorShells"] = shells.sorted().map(Int.init) }
+            return (front == true, evidence)
         case .textEditNotRunning:
             let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.TextEdit").isEmpty
             return (!running, ["textEditRunning": running])
@@ -528,7 +665,12 @@ enum ScenarioRunner {
         let window = await Task.detached { ScenarioRunnerAX.openChromeWindow(urls: urls, nonce: nonce) }.value
         guard let window else { return (false, ["error": "windowNotFound", "note": "no new Chrome window titled with the nonce appeared"]) }
         context.window = window
-        let front = await waitFor(seconds: 5) { await Task.detached { ScenarioRunnerAX.isInFront(window) ? true : nil }.value }
+        var front = await waitFor(seconds: 5) { await Task.detached { ScenarioRunnerAX.isInFront(window) ? true : nil }.value }
+        // After a Cursor scenario Chrome may open the window behind (R5, 08-09-43Z): ask once by its title.
+        if front != true, let title = await Task.detached(operation: { ScenarioRunnerAX.windowTitle(window.element) }).value {
+            _ = await VoiceToolProbe.ask(["verb": "focus", "app": "Google Chrome", "title": title], context.harnessAnswer)
+            front = await waitFor(seconds: 3) { await Task.detached { ScenarioRunnerAX.isInFront(window) ? true : nil }.value }
+        }
         return (front == true, ["nonce": nonce, "tabs": urls.count, "inFront": front == true])
     }
 
@@ -554,9 +696,16 @@ enum ScenarioRunner {
         session.stackOverride = stack
         session.liveTurnLogFileName = liveTurnLogFileName
         // Written back to back in `writeLiveTurnLine`: the line, then its marks.
-        session.onLiveTurnLine = { line in box.lines[line.turnID] = line; box.lastLineID = line.turnID }
+        session.onLiveTurnLine = { line in
+            box.lines[line.turnID] = line
+            box.lastLineID = line.turnID
+            box.lineUptimes[line.turnID] = uptime
+        }
         session.onLiveTurnMarks = { marks in if let id = box.lastLineID, let marks { box.marks[id] = marks } }
-        session.onAgentLoopFinished = { report in box.agentReport = report }
+        session.onAgentLoopFinished = { report in
+            box.agentReport = report
+            box.agentReportUptime = uptime
+        }
         defer { session.stop() }
         session.prewarm()
         try? await Task.sleep(for: .seconds(prewarmSeconds))
@@ -610,6 +759,17 @@ enum ScenarioRunner {
             while uptime < until { watch(); try? await Task.sleep(for: .milliseconds(100)) }
         }
         let turnID = await speak(scenario.fixtureID)
+        let release = uptime
+        box.outcome.releaseUptime = release
+        // The goal's first sighting, read while the turn runs: done is that moment, not the voice's "done".
+        let goalWatch = scenario.goal.map { goal in
+            Task { @MainActor in
+                while !Task.isCancelled {
+                    if await goal(context) { box.outcome.goalSeenUptime = uptime; return }
+                    try? await Task.sleep(for: .milliseconds(goalPollMilliseconds))
+                }
+            }
+        }
         let deadline = uptime + turnTimeoutSeconds
         while uptime < deadline, let turnID, box.lines[turnID] == nil {
             watch()
@@ -617,6 +777,7 @@ enum ScenarioRunner {
         }
         // do_task returned "started": the task runs on, so wait for its end (its
         // own caps bound it), still denying cards, then judge the whole of it.
+        box.outcome.voiceDecisions = turnID.flatMap { box.marks[$0]?.decisions } ?? []
         if let turnID, let marks = box.marks[turnID],
            marks.decisions.contains(where: { $0.call.name == RealtimeVoiceVerbs.doTaskName && $0.dispatch?.harnessConfirmed == true }) {
             let agentDeadline = uptime + AgentLoop.maximumSeconds + 40
@@ -629,6 +790,12 @@ enum ScenarioRunner {
                 marks.decisions += report.decisions
             }
         }
+        if let goalWatch {
+            _ = await waitFor(seconds: goalGraceSeconds) { box.outcome.goalSeenUptime }
+            goalWatch.cancel()
+        }
+        box.outcome.answerUptime = box.agentReportUptime ?? turnID.flatMap { box.lineUptimes[$0] }
+        box.outcome.agentSteps = ScenarioRunnerReal.agentSteps(since: release)
         var outcome = box.outcome
         outcome.line = turnID.flatMap { box.lines[$0] }
         outcome.marks = turnID.flatMap { box.marks[$0] }
@@ -647,6 +814,12 @@ enum ScenarioRunner {
         }
         MeasurementLogFile.appendOwnerOnly(Data(markdown(meta: meta, results: results, latency: latency).utf8),
                                            to: directory.appendingPathComponent("report.md"))
+        if results.contains(where: { ($0["id"] as? String)?.hasPrefix("R") == true }) {
+            let estimates = Dictionary(ScenarioCatalog.realApps.compactMap { scenario in scenario.humanEstimate.map { (scenario.id, $0) } }) { first, _ in first }
+            let table = ScenarioRunnerReal.benchmarkMarkdown(results: SecretScanner.scrub(results) as? [[String: Any]] ?? results,
+                                                              humanEstimates: estimates, stamp: meta["timestamp"] as? String ?? "")
+            MeasurementLogFile.appendOwnerOnly(Data(table.utf8), to: directory.appendingPathComponent("benchmark.md"))
+        }
         print("🧪 scenario run: \(meta["outcome"] ?? "?") -> \(directory.path)")
     }
 
@@ -698,4 +871,6 @@ enum ScenarioRunner {
     var lines: [String: RealtimeLiveTurnLine] = [:]
     var marks: [String: RealtimeTurnMarks] = [:]
     var agentReport: AgentLoopReport?
+    var lineUptimes: [String: TimeInterval] = [:]
+    var agentReportUptime: TimeInterval?
 }

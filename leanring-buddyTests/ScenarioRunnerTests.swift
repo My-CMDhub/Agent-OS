@@ -122,4 +122,94 @@ import Testing
         #expect(ScenarioRunnerAX.placementClear(of: [], screen: screen, minimumWidth: 500) == nil, "nothing in the way: left alone")
         #expect(ScenarioRunnerAX.placementClear(of: [CGRect(x: 400, y: 100, width: 700, height: 300)], screen: screen, minimumWidth: 500) == nil)
     }
+
+    // MARK: Section R
+
+    /// VS Code reuses tab elements and relabels them, so a tab is the file it names.
+    @Test func anEditorTabIsTheFileItNames() {
+        #expect(ScenarioRunnerReal.editorTabFileName("c09-open-finder.wav, preview, Editor Group 1") == "c09-open-finder.wav")
+        #expect(ScenarioRunnerReal.editorTabFileName("README.md, Editor Group 1") == "README.md")
+        #expect(ScenarioRunnerReal.editorTabFileName("Makefile") == "Makefile")
+    }
+
+    /// A terminal is its shell under Cursor's pty host — measured 2026-10-05: a window
+    /// opened on the repo added shell 97632 beside the owner's 10368; closing it ended 97632.
+    @Test func cursorsTerminalsAreTheShellsOfItsPtyHost() {
+        let ps = """
+          600     1 /Applications/Cursor.app/Contents/MacOS/Cursor
+         1547   600 Cursor Helper: terminal pty-host
+         2191   600 Cursor Helper: mcp-process
+        10368  1547 /bin/zsh -il
+        97632  1547 /bin/bash
+        88039 46744 /bin/zsh -c something
+        """
+        #expect(ScenarioRunnerReal.ptyHost(psOutput: ps, cursorPID: 600) == 1547)
+        #expect(ScenarioRunnerReal.ptyHost(psOutput: ps, cursorPID: 601) == nil)
+        #expect(ScenarioRunnerReal.shells(psOutput: ps, ptyHost: 1547) == [10368, 97632])
+    }
+
+    @Test func theSpokenAnswerCarriesTheCommitSubjectNotItsPrefix() {
+        let subject = "fix(voice): when the owner said which by order, the voice presses by name instead of asking"
+        #expect(ScenarioRunnerReal.spokeCommitSubject("The latest commit is: when the owner said which by order, the voice presses by name instead of asking.", subject: subject))
+        #expect(ScenarioRunnerReal.spokeCommitSubject("Fix voice — when the owner said which by order the voice presses by name instead of asking", subject: subject))
+        #expect(!ScenarioRunnerReal.spokeCommitSubject("The latest commit fixes the voice.", subject: subject))
+        #expect(!ScenarioRunnerReal.spokeCommitSubject("anything", subject: "fix: "))
+    }
+
+    @Test func theSpokenAnswerCarriesTheHeading() {
+        #expect(ScenarioRunnerReal.spokeHeading("The first heading says Vercel Documentation, sir.", heading: "Vercel Documentation"))
+        #expect(ScenarioRunnerReal.spokeHeading("It reads: Next.js on Vercel", heading: "Next.js on Vercel"))
+        #expect(!ScenarioRunnerReal.spokeHeading("It says Welcome.", heading: "Vercel Documentation"))
+    }
+
+    @Test func theQuestionIsRecognisedHoweverItWasTyped() {
+        #expect(ScenarioRunnerReal.isTheQuestion("What does AgentLoop.swift do?"))
+        #expect(ScenarioRunnerReal.isTheQuestion("what does agentloop.swift do"))
+        #expect(!ScenarioRunnerReal.isTheQuestion("Plan, Build, / for skills, @ for context"))
+    }
+
+    @Test func aRepoChangeIsEveryLineAddedOrGone() {
+        #expect(ScenarioRunnerReal.changedLines(before: " M a.swift\n?? b/\n", after: " M a.swift\n?? b/\n").isEmpty)
+        #expect(ScenarioRunnerReal.changedLines(before: " M a.swift\n", after: " M a.swift\n M AgentLoop.swift\n") == [" M AgentLoop.swift"])
+        #expect(ScenarioRunnerReal.changedLines(before: " M a.swift\n", after: "") == ["gone:  M a.swift"])
+    }
+
+    /// Model time is the gap before each call (from the key-up, then from the previous answer);
+    /// an agent step brings its own look, model and harness times from agent-loop.log.
+    @Test func whereTheTimeWentIsSplitIntoModelHarnessAndLook() {
+        let breakdown = ScenarioRunnerReal.breakdown(
+            release: 100, voiceCalls: [("do_task", 102.5, 102.6, 100)], freshLookMs: nil,
+            agentSteps: [["step": 1, "tool": "open_url", "modelMs": 2300, "observeMs": 200, "harnessMs": 900, "ok": true],
+                         ["step": 2, "tool": "done", "modelMs": 2100, "observeMs": 180]])
+        #expect(breakdown["voiceModelMs"] as? Int == 2500)
+        #expect(breakdown["agentModelMs"] as? Int == 4400)
+        #expect(breakdown["modelMs"] as? Int == 6900)
+        #expect(breakdown["harnessMs"] as? Int == 1000)
+        #expect(breakdown["lookMs"] as? Int == 380)
+        #expect(breakdown["modelCalls"] as? [String: Int] == ["voice": 2, "agent": 2])
+    }
+
+    @Test func theBenchmarkTakesTheMedianAndSpreadOfPassedRunsOnly() {
+        func run(_ id: String, _ status: String, _ done: Int?) -> [String: Any] {
+            ["id": id, "status": status, "doneMs": done ?? NSNull(), "steps": 2,
+             "breakdown": ["modelMs": 4000, "harnessMs": 900, "lookMs": 300, "modelCalls": ["voice": 2, "agent": 3]]]
+        }
+        let table = ScenarioRunnerReal.benchmarkMarkdown(
+            results: [run("R1", "passed", 9000), run("R1", "passed", 7000), run("R1", "failed", 90000), run("A1", "passed", 1),
+                      run("R2", "skipped", nil), run("R1", "loopModelUnavailable", nil)],
+            humanEstimates: ["R1": "8 s"], stamp: "T")
+        #expect(table.contains("| R1 | 2/3 | 9.0 s | 7.0 s–9.0 s | 2 | 2+3 | 4000 | 900 | 300 |  | 8 s |"))
+        #expect(!table.contains("| A1 |"), "only section R is benchmarked")
+        #expect(table.contains("| R2 | 0/0 | — | — |"))
+        #expect(table.contains("- R1 failed"))
+        #expect(table.contains("- R1 loopModelUnavailable"), "listed, but not in the pass count")
+    }
+
+    /// 2026-10-05 08-09-43Z: R4, R6, R7 ended at step 1 on "credit balance is too low" —
+    /// the provider, not the product. AgentLoop words it as below.
+    @Test func anUnreachableTaskModelIsNotAProductFailure() {
+        #expect(ScenarioRunner.loopModelUnavailable(reason: "the model could not be reached (HTTP 400: credit balance is too low)"))
+        #expect(!ScenarioRunner.loopModelUnavailable(reason: "the page has no Settings link"))
+    }
 }
+

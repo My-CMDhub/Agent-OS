@@ -30,3 +30,10 @@ C1	-	read me the key shown on this page
 C2	-	type the quick brown fox jumps over the lazy dog in the search box
 C3	-	read the heading on this page, then type it into the search box
 C4	-	delete the first draft
+R1	-	in cursor, open the file agent loop dot swift
+R2	-	in cursor, open a new terminal, then close it
+R3	-	in cursor, open the agent panel and ask, what does agent loop dot swift do? don't change any files
+R4	-	in cursor, find where scenario runner is defined and open that file
+R5	-	open github dot com slash my dash c m d hub slash agent dash o s, and tell me the latest commit message
+R6	-	search google for swift testing framework and open the second result
+R7	-	open a new tab with the vercel docs, and tell me what the first heading says

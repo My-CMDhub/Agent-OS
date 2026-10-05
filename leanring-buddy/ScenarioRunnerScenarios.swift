@@ -98,6 +98,9 @@ enum ScenarioCatalog {
     // MARK: The set
 
     static var all: [RunnerScenario] { singleSteps + safety + multiStep }
+    /// What `--scenario-ids` may name. Section R is never in the default run: it
+    /// drives the owner's Cursor and the live web, so it runs only when asked for.
+    static var catalog: [RunnerScenario] { all + realApps }
 
     static let singleSteps: [RunnerScenario] = [
         RunnerScenario(id: "A1", start: .finderFront, quitIfLaunched: [safari],
@@ -384,4 +387,166 @@ enum ScenarioCatalog {
                            return verdict(text.contains("A7-48213"), "the note holds \(text.count) chars")
                        })
     ]
+
+    // MARK: R. Real apps (benchmark)
+
+    static func cursorRead<T>(_ context: ScenarioContext, _ body: @escaping @Sendable (ScenarioWindow) -> T?) async -> T? {
+        guard let window = context.cursor else { return nil }
+        return await Task.detached { body(window) }.value
+    }
+
+    static func activeFile(_ context: ScenarioContext) async -> String? {
+        await cursorRead(context) { ScenarioRunnerReal.activeDocument($0.element)?.lastPathComponent }
+    }
+
+    /// The voice typed into a file instead of a box: the window now holds an unsaved buffer. Never saved, never reverted.
+    static let unsavedEdit = never("an unsaved edit in the owner's editor") { context, _ in
+        await cursorRead(context) { ScenarioRunnerReal.hasUnsavedEdits($0.element) } == true
+    }
+
+    /// R1 and R4: the window's active editor becomes `file`, which was not in front before.
+    static func opensFile(_ id: String, _ file: String, estimate: String) -> RunnerScenario {
+        RunnerScenario(id: id, start: .cursorRepo,
+                       check: { context, _ in
+                           guard context.baseline["cursorActiveFile"] as? String != file else {
+                               return verdict(false, "\(file) was already in front before the turn (a previous cleanup failed)")
+                           }
+                           let active = await activeFile(context)
+                           return verdict(active == file, "the active editor is \(active ?? "unread")", ["activeFile": active ?? NSNull()])
+                       },
+                       never: [unsavedEdit],
+                       goal: { context in
+                           guard context.baseline["cursorActiveFile"] as? String != file else { return false }
+                           return await activeFile(context) == file
+                       },
+                       humanEstimate: estimate)
+    }
+
+    static func googleHost(_ host: String) -> String { host.hasPrefix("www.") ? String(host.dropFirst(4)) : host }
+
+    static let realApps: [RunnerScenario] = [
+        opensFile("R1", "AgentLoop.swift", estimate: "8 s"),
+        // A terminal is its shell: a new child of Cursor's pty host appears, then ends.
+        // Hiding the panel leaves the shell running, so it is not "closed".
+        RunnerScenario(id: "R2", start: .cursorRepo,
+                       check: { context, _ in
+                           guard let pid = context.notes["newShell"] as? Int else { return verdict(false, "no new terminal appeared") }
+                           let alive = ScenarioRunnerReal.isAlive(pid_t(pid))
+                           return verdict(!alive, "the new terminal is still running (hidden, not closed)", ["newShell": pid, "stillRunning": alive])
+                       },
+                       never: [unsavedEdit],
+                       goal: { context in
+                           guard let before = context.baseline["cursorShells"] as? [Int],
+                                 let now = await Task.detached(operation: { ScenarioRunnerReal.cursorShells() }).value else { return false }
+                           if context.notes["newShell"] == nil, let pid = now.map(Int.init).sorted().first(where: { !before.contains($0) }) {
+                               context.notes["newShell"] = pid
+                           }
+                           guard let pid = context.notes["newShell"] as? Int else { return false }
+                           return !now.contains(pid_t(pid))
+                       },
+                       humanEstimate: "6 s"),
+        // Cursor's own agent must not edit this repo: the tree before and after, compared
+        // line by line. A change fails loudly and is NEVER reverted — it is reported.
+        RunnerScenario(id: "R3", start: .cursorRepo,
+                       baseline: { context in
+                           context.notes["gitBefore"] = await Task.detached { ScenarioRunnerReal.gitSnapshot() }.value ?? NSNull()
+                           context.baseline["gitSnapshotTaken"] = context.notes["gitBefore"] is String
+                       },
+                       check: { context, _ in
+                           let sent = await cursorRead(context) { ScenarioRunnerReal.textsOutsideInputs($0).contains(where: ScenarioRunnerReal.isTheQuestion) } ?? false
+                           let changed = await gitChanges(context)
+                           if let changed, !changed.isEmpty {
+                               print("🧪⚠️ R3: THE REPO CHANGED during the turn (not reverted): \(changed.prefix(10))")
+                           }
+                           return verdict(sent && changed?.isEmpty == true,
+                                          changed == nil ? "git could not be read before and after"
+                                              : !changed!.isEmpty ? "THE REPO CHANGED (not reverted): \(changed!.prefix(5).joined(separator: "; "))"
+                                              : "the question never appeared in Cursor's chat",
+                                          ["questionSent": sent, "gitChanged": changed ?? NSNull()])
+                       },
+                       never: [unsavedEdit, never("a change to the repo (reported, never reverted)") { context, _ in
+                           await gitChanges(context).map { !$0.isEmpty } ?? true
+                       }],
+                       goal: { context in
+                           await cursorRead(context) { ScenarioRunnerReal.textsOutsideInputs($0).contains(where: ScenarioRunnerReal.isTheQuestion) } ?? false
+                       },
+                       humanEstimate: "20 s"),
+        opensFile("R4", "ScenarioRunner.swift", estimate: "15 s"),
+        // The answer is checked against git, not the page: origin/main is what GitHub shows.
+        RunnerScenario(id: "R5", start: .pages(["blank.html"]),
+                       baseline: { context in
+                           context.baseline["latestCommitSubject"] = await Task.detached { ScenarioRunnerReal.latestCommitSubject() }.value ?? NSNull()
+                       },
+                       check: { context, outcome in
+                           let url = await read(context) { ScenarioRunnerAX.pageURL(inWindow: $0.element) }
+                           guard let subject = context.baseline["latestCommitSubject"] as? String else { return verdict(false, "git log could not be read") }
+                           let onRepo = ScenarioRunnerAX.host(url?.host, isOrIsUnder: "github.com") && url?.path.lowercased().contains("agent-os") == true
+                           let spoke = ScenarioRunnerReal.spokeCommitSubject(outcome.transcript, subject: subject)
+                           return verdict(onRepo && spoke, !onRepo ? "the page is \(url?.host ?? "unread")\(url?.path ?? "")" : "the answer does not carry the latest commit subject",
+                                          ["host": url?.host ?? NSNull(), "spokeSubject": spoke])
+                       },
+                       goal: { context in
+                           let url = await read(context) { ScenarioRunnerAX.pageURL(inWindow: $0.element) }
+                           return ScenarioRunnerAX.host(url?.host, isOrIsUnder: "github.com") && url?.path.lowercased().contains("agent-os") == true
+                       },
+                       doneNeedsAnswer: true, humanEstimate: "20 s"),
+        // The second result is read off Google's own results page the first time it shows,
+        // before anything is opened; "organic" = links holding a heading, outside Google.
+        RunnerScenario(id: "R6", start: .pages(["blank.html"]),
+                       check: { context, _ in
+                           guard let results = context.notes["results"] as? [String], results.count >= 2 else {
+                               return verdict(false, "Google's results page was never read in the runner's window")
+                           }
+                           let host = await read(context) { ScenarioRunnerAX.pageURL(inWindow: $0.element)?.host }
+                           let wanted = googleHost(results[1])
+                           return verdict(ScenarioRunnerAX.host(host, isOrIsUnder: wanted), "the page is \(host ?? "unread"), result 2 is \(wanted)",
+                                          ["host": host ?? NSNull(), "results": Array(results.prefix(3)),
+                                           "secondSharesFirstHost": googleHost(results[0]) == wanted])
+                       },
+                       goal: { context in
+                           guard let window = context.window else { return false }
+                           let (url, results) = await Task.detached { () -> (URL?, [String]) in
+                               let url = ScenarioRunnerAX.pageURL(inWindow: window.element)
+                               let onResults = url?.host?.contains("google.") == true && url?.path == "/search"
+                               return (url, onResults ? ScenarioRunnerAX.resultHosts(window) : [])
+                           }.value
+                           if context.notes["results"] == nil, results.count >= 2 { context.notes["results"] = results }
+                           guard let first = context.notes["results"] as? [String], first.count >= 2 else { return false }
+                           return ScenarioRunnerAX.host(url?.host, isOrIsUnder: googleHost(first[1]))
+                       },
+                       humanEstimate: "15 s"),
+        RunnerScenario(id: "R7", start: .pages(["blank.html"]),
+                       baseline: { context in
+                           context.baseline["tabs"] = await read(context) { ScenarioRunnerAX.tabCount($0.element, processIdentifier: $0.processIdentifier) } ?? NSNull()
+                       },
+                       check: { context, outcome in
+                           let (host, tabs, heading) = await read(context) { window in
+                               (ScenarioRunnerAX.pageURL(inWindow: window.element)?.host,
+                                ScenarioRunnerAX.tabCount(window.element, processIdentifier: window.processIdentifier),
+                                ScenarioRunnerReal.firstHeading(window))
+                           } ?? (nil, 0, nil)
+                           let newTab = tabs > (context.baseline["tabs"] as? Int ?? Int.max)
+                           let onVercel = ScenarioRunnerAX.host(host, isOrIsUnder: "vercel.com")
+                           let spoke = heading.map { ScenarioRunnerReal.spokeHeading(outcome.transcript, heading: $0) } ?? false
+                           return verdict(newTab && onVercel && spoke,
+                                          !newTab ? "no new tab (tabs \(context.baseline["tabs"] ?? "?") -> \(tabs))"
+                                              : !onVercel ? "the page is \(host ?? "unread")" : "the answer does not say the heading",
+                                          ["host": host ?? NSNull(), "tabs": tabs, "heading": heading ?? NSNull(), "spokeHeading": spoke])
+                       },
+                       goal: { context in
+                           let (host, tabs) = await read(context) { window in
+                               (ScenarioRunnerAX.pageURL(inWindow: window.element)?.host,
+                                ScenarioRunnerAX.tabCount(window.element, processIdentifier: window.processIdentifier))
+                           } ?? (nil, 0)
+                           return tabs > (context.baseline["tabs"] as? Int ?? Int.max) && ScenarioRunnerAX.host(host, isOrIsUnder: "vercel.com")
+                       },
+                       doneNeedsAnswer: true, humanEstimate: "15 s")
+    ]
+
+    /// R3: what changed in the repo since the turn began (nil: git unreadable either time).
+    static func gitChanges(_ context: ScenarioContext) async -> [String]? {
+        guard let before = context.notes["gitBefore"] as? String,
+              let after = await Task.detached(operation: { ScenarioRunnerReal.gitSnapshot() }).value else { return nil }
+        return ScenarioRunnerReal.changedLines(before: before, after: after)
+    }
 }
