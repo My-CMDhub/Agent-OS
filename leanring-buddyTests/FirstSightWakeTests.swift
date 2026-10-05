@@ -21,12 +21,18 @@ struct FirstSightWakeTests {
         #expect(!FirstSightWake.claim(pid))
     }
 
-    /// Live 2026-10-06: Reminders and TextEdit (native, small windows) refused both
-    /// switches and paid 3.2 s of polling each. Only an app that took one waits.
-    @Test func onlyAnAppThatTookASwitchIsWaitedFor() {
-        #expect(!FirstSightWake.acceptedASwitch(manual: .attributeUnsupported, enhanced: .notImplemented))
-        #expect(FirstSightWake.acceptedASwitch(manual: .success, enhanced: .attributeUnsupported))
-        #expect(FirstSightWake.acceptedASwitch(manual: .attributeUnsupported, enhanced: .success))
+    /// Live 2026-10-06: Reminders and TextEdit (native, small windows) refused the
+    /// switch and paid 3.2 s of polling each. Only an app that took it waits.
+    @Test func onlyAnAppThatTookTheSwitchIsWaitedFor() {
+        #expect(!FirstSightWake.acceptedTheSwitch(.attributeUnsupported))
+        #expect(FirstSightWake.acceptedTheSwitch(.success))
+    }
+
+    /// Review of 349bd49: Clicky itself is never woken, and only a thin tree is.
+    @Test func onlyAThinOtherAppIsWoken() {
+        #expect(FirstSightWake.shouldWake(nodeCount: 8, bundleIdentifier: "com.todesktop.230313mzl4w4u92"))
+        #expect(!FirstSightWake.shouldWake(nodeCount: 8, bundleIdentifier: Bundle.main.bundleIdentifier))
+        #expect(!FirstSightWake.shouldWake(nodeCount: 20, bundleIdentifier: "com.microsoft.VSCode"))
     }
 
     @Test func aThinTreeTellsTheModelToAimBySight() async {

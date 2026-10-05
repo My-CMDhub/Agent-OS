@@ -1837,7 +1837,7 @@ final class HarnessServer {
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: "policyRefused", startedAt: startedAt)
             return ["ok": false, "error": "policyRefused", "message": reason]
         }
-        let snapshot: AccessibilityWindowSnapshot
+        var snapshot: AccessibilityWindowSnapshot
         do {
             snapshot = try AccessibilityTreeWalker.snapshotFocusedWindow()
         } catch {
@@ -1855,6 +1855,11 @@ final class HarnessServer {
                                                        policy: loadedPolicy) {
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: "policyRefused", startedAt: startedAt)
             return ["ok": false, "error": "policyRefused", "message": reason]
+        }
+        // After the policy and expectApp checks, never on Clicky, never on an app the policy refuses:
+        // a thin app's first sight (`FirstSightWake`) writes to the app.
+        if HarnessAppPolicy.verdict(for: snapshot.bundleIdentifier, in: loadedPolicy).0 != .refuse {
+            snapshot = FirstSightWake.wakeIfThin(snapshot)
         }
 
         guard let rootNode = snapshot.rootNode else {
@@ -1889,8 +1894,7 @@ final class HarnessServer {
             "thinTree": snapshot.nodeCount < FirstSightWake.thinTreeNodes,
             "firstSightWake": snapshot.firstSightWake.map { ["nodesBefore": $0.nodesBefore, "nodesAfter": $0.nodesAfter,
                                                              "milliseconds": $0.milliseconds,
-                                                             "manualAccessibilityAXError": Int($0.manualAccessibilityError),
-                                                             "enhancedUserInterfaceAXError": Int($0.enhancedUserInterfaceError)] } ?? NSNull()
+                                                             "manualAccessibilityAXError": Int($0.manualAccessibilityError)] } ?? NSNull()
         ]
     }
 

@@ -767,16 +767,6 @@ enum AccessibilityTreeWalker {
             timeLimitInSeconds: timeLimitInSeconds
         )
         snapshot.frontmostSource = target.frontmostSource
-        // A minimized window draws nothing, so its tree is thin for a reason no switch changes:
-        // live 2026-10-06, the owner's Cursor read 8 -> 8 after the full 3.2 s — its one window was minimized.
-        if snapshot.nodeCount < FirstSightWake.thinTreeNodes, !FirstSightWake.isMinimized(target.window),
-           FirstSightWake.claim(target.application.processIdentifier) {
-            snapshot = FirstSightWake.wake(snapshot, of: target.application) { [target] in
-                try? snapshotWindow(target.window, of: target.application, maximumDepth: maximumDepth,
-                                    maximumNodeCount: maximumNodeCount, timeLimitInSeconds: timeLimitInSeconds)
-            }
-            snapshot.frontmostSource = target.frontmostSource
-        }
         return snapshot
     }
 
@@ -1404,14 +1394,16 @@ extension AccessibilityElementNode {
 /// Generality suite / coverage audit 2026-10-06: Electron apps start blind —
 /// Cursor 8 nodes, VS Code 12, Notion 15 at first contact — and the
 /// `AXManualAccessibility` write every walk already makes plus one 1.5 s
-/// re-walk did not change it (Claude Desktop grew 9 -> 345 only 17 min later).
-/// So on FIRST SIGHT of any app whose window walk is under `thinTreeNodes`,
-/// once per process: write `AXManualAccessibility` and `AXEnhancedUserInterface`
-/// (Chromium's own switch; it slows window animations for window managers,
-/// which is why only a thin app gets it), then re-walk every 250 ms for up to
-/// 3 s until the tree reaches `thinTreeNodes`. Before, after and ms go to
-/// `first-sight-wake.log`. While a tree stays thin, the snapshot says so and
-/// the voice/agent read tells the model the vision click is the route.
+/// re-walk did not change it. So on FIRST SIGHT, once per process, of an app
+/// whose window walk is under `thinTreeNodes`: write `AXManualAccessibility`
+/// again and, only if the app took it, re-walk every 250 ms for up to 3 s until
+/// the tree reaches `thinTreeNodes` (VS Code 12 -> 364 in 2,298 ms, live).
+/// Before, after and ms go to `first-sight-wake.log`. While a tree stays thin,
+/// the snapshot says so and find_on_screen tells the model to aim by sight.
+/// Review of 349bd49: called only from the harness's `snapshot` read, AFTER its
+/// policy and expectApp checks (never inside ActionVerifier's walks), never on
+/// Clicky, and no `AXEnhancedUserInterface` — it answered -25208 on every
+/// Electron app measured and breaks window moves elsewhere.
 nonisolated enum FirstSightWake {
     static let thinTreeNodes = 20
     static let pollSeconds = 3.0
@@ -1422,7 +1414,6 @@ nonisolated enum FirstSightWake {
         let nodesAfter: Int
         let milliseconds: Int
         let manualAccessibilityError: Int32
-        let enhancedUserInterfaceError: Int32
     }
 
     private static let lock = NSLock()
@@ -1434,44 +1425,46 @@ nonisolated enum FirstSightWake {
         return claimed.insert(processIdentifier).inserted
     }
 
-    static func wake(_ snapshot: AccessibilityWindowSnapshot, of application: NSRunningApplication,
-                     rewalk: () -> AccessibilityWindowSnapshot?) -> AccessibilityWindowSnapshot {
-        let started = ProcessInfo.processInfo.systemUptime
-        let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
-        AXUIElementSetMessagingTimeout(applicationElement, 0.5)
-        let manual = AccessibilityTreeWalker.requestManualAccessibility(from: applicationElement)
-        let enhanced = AXUIElementSetAttributeValue(applicationElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-        var latest = snapshot
-        // Live 2026-10-06, the first suite run with this: Reminders' welcome window (16 nodes)
-        // and a new TextEdit document (12) refused both writes (-25205, -25208) and still paid
-        // 3.2 s of polling for a tree that was never gated. Only an app that took a switch waits.
-        while acceptedASwitch(manual: manual, enhanced: enhanced), latest.nodeCount < thinTreeNodes,
-              ProcessInfo.processInfo.systemUptime - started < pollSeconds {
-            Thread.sleep(forTimeInterval: pollIntervalSeconds)
-            guard let again = rewalk() else { break }
-            latest = again
-        }
-        let outcome = Outcome(nodesBefore: snapshot.nodeCount, nodesAfter: latest.nodeCount,
-                              milliseconds: Int(((ProcessInfo.processInfo.systemUptime - started) * 1000).rounded()),
-                              manualAccessibilityError: manual.rawValue, enhancedUserInterfaceError: enhanced.rawValue)
-        latest.firstSightWake = outcome
-        MeasurementLogFile.appendJSONLine(["app": application.bundleIdentifier ?? "?", "nodesBefore": outcome.nodesBefore,
-                                           "nodesAfter": outcome.nodesAfter, "ms": outcome.milliseconds,
-                                           "manualAccessibilityAXError": Int(outcome.manualAccessibilityError),
-                                           "enhancedUserInterfaceAXError": Int(outcome.enhancedUserInterfaceError)],
-                                          toFileNamed: "first-sight-wake.log")
-        return latest
+    static func shouldWake(nodeCount: Int, bundleIdentifier: String?) -> Bool {
+        nodeCount < thinTreeNodes && !HarnessServer.isHarnessItself(bundleIdentifier: bundleIdentifier)
     }
 
+    /// A native app answers -25205 (attributeUnsupported): its tree was never gated.
+    /// Live 2026-10-06: Reminders, TextEdit and Notes each paid 3.2 s of polling before this.
+    static func acceptedTheSwitch(_ manual: AXError) -> Bool { manual == .success }
+
+    /// A minimized window draws nothing: live 2026-10-06, the owner's Cursor read 8 -> 8
+    /// after the full 3.2 s, its one window minimized.
     static func isMinimized(_ window: AXUIElement) -> Bool {
         var value: CFTypeRef?
         return AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &value) == .success && (value as? Bool) == true
     }
 
-    /// A native app answers both writes with an error (-25205 attributeUnsupported,
-    /// -25208 notImplemented): its tree was never gated, so there is nothing to wait for.
-    static func acceptedASwitch(manual: AXError, enhanced: AXError) -> Bool {
-        manual == .success || enhanced == .success
+    /// The snapshot, re-walked until it grows if this is a thin app's first sight; else unchanged.
+    static func wakeIfThin(_ snapshot: AccessibilityWindowSnapshot) -> AccessibilityWindowSnapshot {
+        guard shouldWake(nodeCount: snapshot.nodeCount, bundleIdentifier: snapshot.bundleIdentifier),
+              let application = snapshot.application, let window = snapshot.rootNode?.accessibilityElement,
+              !isMinimized(window), claim(application.processIdentifier) else { return snapshot }
+        let started = ProcessInfo.processInfo.systemUptime
+        let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
+        AXUIElementSetMessagingTimeout(applicationElement, 0.5)
+        let manual = AccessibilityTreeWalker.requestManualAccessibility(from: applicationElement)
+        var latest = snapshot
+        while acceptedTheSwitch(manual), latest.nodeCount < thinTreeNodes, ProcessInfo.processInfo.systemUptime - started < pollSeconds {
+            Thread.sleep(forTimeInterval: pollIntervalSeconds)
+            guard var again = try? AccessibilityTreeWalker.snapshotWindow(window, of: application) else { break }
+            again.frontmostSource = snapshot.frontmostSource
+            latest = again
+        }
+        let outcome = Outcome(nodesBefore: snapshot.nodeCount, nodesAfter: latest.nodeCount,
+                              milliseconds: Int(((ProcessInfo.processInfo.systemUptime - started) * 1000).rounded()),
+                              manualAccessibilityError: manual.rawValue)
+        latest.firstSightWake = outcome
+        MeasurementLogFile.appendJSONLine(["app": application.bundleIdentifier ?? "?", "nodesBefore": outcome.nodesBefore,
+                                           "nodesAfter": outcome.nodesAfter, "ms": outcome.milliseconds,
+                                           "manualAccessibilityAXError": Int(outcome.manualAccessibilityError)],
+                                          toFileNamed: "first-sight-wake.log")
+        return latest
     }
 
     /// What the model is told about a window whose structure stayed thin.
