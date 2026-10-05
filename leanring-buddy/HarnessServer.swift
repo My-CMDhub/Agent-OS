@@ -1705,7 +1705,8 @@ final class HarnessServer {
         // `look` is read-only but takes a photograph, and a policy `refuse` is
         // "do not touch this app" — a picture of it counts.
         // A voice read hands names to a remote model, so it asks the policy too.
-        if request.verb.isMutating || request.verb == .look || request.forModel {
+        // A pointer sent to a bare position photographs the words there to aim (`ocrWord`).
+        if request.verb.isMutating || request.verb == .look || request.forModel || request.aimAtPoint {
             switch HarnessAppPolicy.load(from: Self.policyURL) {
             case .loaded(let policy, _): loadedPolicy = policy
             case .missing: break
@@ -2403,6 +2404,20 @@ final class HarnessServer {
             response.merge(refusal) { _, new in new }
             return response
         }
+        // Words drawn there: the pointer lands on that word's own box, read by OCR from
+        // a capture that passed every guard `look` has — exact, never a guessed pixel.
+        if let frontmost, let word = ocrWord(at: point, of: frontmost) {
+            phaseTiming.actionStarting()
+            let seconds = request.highlightSeconds, speechHold = request.speechHold
+            DispatchQueue.main.async { ElementPointer.show(word.frame, role: "AXStaticText", seconds: seconds, followSpeech: speechHold) }
+            response["ok"] = true
+            response["pointer"] = true
+            response["snappedTo"] = "ocrWord"
+            response["ocrText"] = word.line
+            Self.attachFrame(word.frame, to: &response, key: "drawnRect")
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "highlighted", startedAt: startedAt)
+            return response
+        }
         let side = ElementPointer.approximateSidePoints
         let ring = CGRect(x: point.x - side / 2, y: point.y - side / 2, width: side, height: side)
         guard CompanionScreenCaptureUtility.bestDisplayIndex(for: ring, among: DispatchQueue.main.sync { NSScreen.screens.map(\.frame) }) != nil else {
@@ -2420,6 +2435,26 @@ final class HarnessServer {
         Self.attachFrame(ring, to: &response, key: "drawnRect")
         audit(request, dryRun: dryRun, kernel: "n/a", outcome: "highlighted", startedAt: startedAt)
         return response
+    }
+
+    /// The word OCR reads at `point` in `application`'s own windows, and the line
+    /// it sits in: a guarded crop around the point (`escalationPayload`: the
+    /// policy's `refuse`, the one-app filter, secure fields, secrets). nil when
+    /// nothing was read there, or the capture was refused.
+    static let ocrLabelLength = 40
+
+    private func ocrWord(at point: CGPoint, of application: NSRunningApplication) -> (frame: CGRect, line: String)? {
+        let crop = CGRect(x: point.x - HarnessHands.visionCropSize.width / 2, y: point.y - HarnessHands.visionCropSize.height / 2,
+                          width: HarnessHands.visionCropSize.width, height: HarnessHands.visionCropSize.height)
+        let captured = escalationPayload(plan: EscalationPlan(tier: .element, reason: "the words drawn at the point", region: crop,
+                                                              resolver: "pointer", candidates: [], application: application), capture: true)
+        guard captured.errorCode == nil, let path = captured.payload["imagePath"] as? String,
+              let jpeg = FileManager.default.contents(atPath: path), let region = RealtimeScreenVerbs.frame(captured.payload["region"]) else { return nil }
+        let lines = ScreenOCR.recognize(jpeg: jpeg, region: region)
+        guard let word = ScreenOCR.wordBox(at: point, in: lines) else { return nil }
+        // A short line is the label the word belongs to ("Launch demo"): marked whole; a long one, the word.
+        guard let line = ScreenOCR.line(holding: word, in: lines) else { return (word.frame, word.text) }
+        return (line.text.count <= Self.ocrLabelLength ? line.frame : word.frame, line.text)
     }
 
     /// Walk, check `expectApp`, and resolve the request's element — or write the

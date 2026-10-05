@@ -785,7 +785,11 @@ nonisolated enum RealtimeOpenAppTool {
         var result = toolResult(fromHarnessResponse: response)
         if result["ok"] as? Bool == true, let target {
             let drawn = RealtimeScreenVerbs.frame(response["drawnRect"])
-            if let candidate = target.candidate, response["approximate"] as? Bool != true {
+            // A position whose words the harness read: the pointer is on that word box, exactly.
+            if response["snappedTo"] as? String == "ocrWord", let text = response["ocrText"] as? String {
+                result["pointedAt"] = "the words \(UntrustedText(text).forDisplay)"
+                result["where"] = RealtimeScreenVerbs.positionPhrase(of: drawn ?? CGRect(origin: target.point, size: .zero), neighbours: [], screens: screens)
+            } else if let candidate = target.candidate, response["approximate"] as? Bool != true {
                 result["pointedAt"] = candidate.described
                 let frame = drawn ?? candidate.frame
                 // Unmoved: the offer's neighbour still stands beside it.
@@ -1351,11 +1355,60 @@ nonisolated enum RealtimeOpenAppTool {
         return dispatched.harnessConfirmed ? "pointed" : ((dispatched.result["error"] as? String) ?? "failed")
     }
 
+    /// The owner's pointer in the key-down screenshot, in the space the tools
+    /// take (`RealtimePointFormat`): fractions; Gemini native [y, x] 0-1000;
+    /// OpenAI native pixels of the image. nil off the screenshot's display.
+    static func pointerPosition(mouse: CGPoint, display: CGRect, format: RealtimePointFormat, stack: VoiceStackChoice,
+                                pixels: CGSize?) -> String? {
+        guard display.contains(mouse), display.width > 0, display.height > 0 else { return nil }
+        let x = (mouse.x - display.minX) / display.width, y = (display.maxY - mouse.y) / display.height
+        switch (format, stack) {
+        case (.native, .geminiLive):
+            return "point [y, x] [\(Int((y * 1000).rounded())), \(Int((x * 1000).rounded()))]"
+        case (.native, .openAIRealtime):
+            guard let pixels else { return nil }
+            return "x \(Int((x * pixels.width).rounded())), y \(Int((y * pixels.height).rounded())) pixels"
+        case (.fractions, _):
+            return String(format: "x %.3f, y %.3f", x, y)
+        }
+    }
+
+    /// Sent at key-down: where the owner's pointer is (the tools' own space),
+    /// what AX names there, the words drawn under it, and that a close-up went
+    /// before the screenshot. Names and words are app-written: quoted and
+    /// escaped (`UntrustedText`). nil when there is nothing to say.
+    static func ownerPointerContextLine(candidate: RealtimeScreenCandidate?, appName: String?, position: String?,
+                                        wordsUnderPointer: String?, closeUpSent: Bool) -> String? {
+        guard candidate != nil || position != nil || wordsUnderPointer != nil else { return nil }
+        var line = "system context, not the owner's words: the owner's mouse pointer is"
+        if let position { line += " at \(position) in the screenshot" }
+        if let candidate {
+            line += (position == nil ? "" : ",") + " over \(candidate.described)" + (appName.map { " in \(UntrustedText($0).forDisplay)" } ?? "")
+        }
+        if let wordsUnderPointer { line += "; the words under it read \(UntrustedText(wordsUnderPointer).forDisplay)" }
+        if closeUpSent { line += "; the close-up image sent just before the screenshot is centred on it, with a red crosshair on the pointer" }
+        return line + "."
+    }
+
+    /// What "this one" aims at (`underPointer`): the element AX named under the
+    /// mouse, or — nothing nameable — the point itself (a ring, or a press by
+    /// sight). Never over a password box or Clicky itself; nil with no read.
+    static func keyDownPointerTarget(hit: RealtimeScreenHit?, mouse: CGPoint) -> RealtimeScreenTarget? {
+        switch hit {
+        case .element(let candidate, let app)?:
+            return RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY), app: app,
+                                        source: .underPointer)
+        case .nothing?:
+            return RealtimeScreenTarget(candidate: nil, point: mouse, app: nil, source: .underPointer)
+        case .refused?, nil:
+            return nil
+        }
+    }
+
     /// Sent at key-down beside the frontmost line: the element under the
     /// owner's mouse, by role and name, quoted — never a value.
     static func pointerContextLine(candidate: RealtimeScreenCandidate, appName: String?) -> String {
-        "system context, not the owner's words: the owner's mouse pointer is over \(candidate.described)"
-            + (appName.map { " in \(UntrustedText($0).forDisplay)" } ?? "") + "."
+        ownerPointerContextLine(candidate: candidate, appName: appName, position: nil, wordsUnderPointer: nil, closeUpSent: false) ?? ""
     }
 
     /// What the model is told when the named app is not one installed app.

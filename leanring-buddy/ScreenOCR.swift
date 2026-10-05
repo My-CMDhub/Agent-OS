@@ -89,6 +89,35 @@ nonisolated enum ScreenOCR {
         lines.first { $0.words.contains(word) || ($0.words.isEmpty && $0.frame == word.frame) }
     }
 
+    // MARK: The owner's pointer, close up (pure)
+
+    /// The close-up around the owner's pointer, in the key-down screenshot's own
+    /// pixels (top-left origin, like the image): a square of `sidePoints` kept
+    /// inside the image, and where the pointer is in it. nil off the display.
+    /// Multiplied before divided, so a whole-pixel answer stays whole.
+    static func pointerCrop(mouse: CGPoint, display: CGRect, imagePixels: CGSize,
+                            sidePoints: CGFloat = 240) -> (rect: CGRect, mark: CGPoint)? {
+        guard display.contains(mouse), display.width > 0, display.height > 0, imagePixels.width > 0, imagePixels.height > 0 else { return nil }
+        let mark = CGPoint(x: (mouse.x - display.minX) * imagePixels.width / display.width,
+                           y: (display.maxY - mouse.y) * imagePixels.height / display.height)
+        let side = CGSize(width: min(sidePoints * imagePixels.width / display.width, imagePixels.width),
+                          height: min(sidePoints * imagePixels.height / display.height, imagePixels.height))
+        let origin = CGPoint(x: min(max(mark.x - side.width / 2, 0), imagePixels.width - side.width).rounded(),
+                             y: min(max(mark.y - side.height / 2, 0), imagePixels.height - side.height).rounded())
+        let rect = CGRect(origin: origin, size: CGSize(width: side.width.rounded(), height: side.height.rounded()))
+        return (rect, CGPoint(x: mark.x - rect.minX, y: mark.y - rect.minY))
+    }
+
+    /// A pixel rectangle of the screenshot (top-left origin) back on screen, in AppKit points.
+    static func appKitRegion(ofPixelRect rect: CGRect, display: CGRect, imagePixels: CGSize) -> CGRect {
+        guard imagePixels.width > 0, imagePixels.height > 0 else { return .zero }
+        let width = rect.width * display.width / imagePixels.width
+        let height = rect.height * display.height / imagePixels.height
+        return CGRect(x: display.minX + rect.minX * display.width / imagePixels.width,
+                      y: display.maxY - rect.minY * display.height / imagePixels.height - height,
+                      width: width, height: height)
+    }
+
     // MARK: Did the region change? (pure)
 
     /// A pixel this far apart (0-255 grey) moved; less is JPEG noise.
@@ -137,6 +166,43 @@ nonisolated enum ScreenOCR {
             }
             return OCRLine(text: text, frame: points(observation.boundingBox), words: words)
         }
+    }
+
+    /// The owner's pointer at key-down, close up: the crop of the (already
+    /// guarded) key-down screenshot with a red crosshair on the pointer, and the
+    /// words OCR reads under it — read BEFORE the crosshair is drawn.
+    struct PointerCloseUp: Sendable {
+        let jpeg: Data
+        let wordsUnderPointer: String?
+    }
+
+    static func pointerCloseUp(screenshotJPEG: Data, mouse: CGPoint, display: CGRect, imagePixels: CGSize) -> PointerCloseUp? {
+        guard let (rect, mark) = pointerCrop(mouse: mouse, display: display, imagePixels: imagePixels),
+              let source = CGImageSourceCreateWithData(screenshotJPEG as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil), let cropped = image.cropping(to: rect) else { return nil }
+        let lines = recognize(image: cropped, region: appKitRegion(ofPixelRect: rect, display: display, imagePixels: imagePixels))
+        let words = wordBox(at: mouse, in: lines).map { line(holding: $0, in: lines)?.text ?? $0.text }
+        let width = cropped.width, height = cropped.height
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        context.draw(cropped, in: CGRect(x: 0, y: 0, width: width, height: height))
+        // CGContext is bottom-left; the mark is top-left like the image.
+        let centre = CGPoint(x: mark.x, y: CGFloat(height) - mark.y)
+        let gap: CGFloat = 7, arm: CGFloat = 22
+        context.setStrokeColor(red: 1, green: 0.1, blue: 0.1, alpha: 1)
+        context.setLineWidth(2)
+        for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+            context.move(to: CGPoint(x: centre.x + dx * gap, y: centre.y + dy * gap))
+            context.addLine(to: CGPoint(x: centre.x + dx * arm, y: centre.y + dy * arm))
+        }
+        context.strokePath()
+        context.strokeEllipse(in: CGRect(x: centre.x - gap, y: centre.y - gap, width: gap * 2, height: gap * 2))
+        guard let marked = context.makeImage() else { return nil }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, "public.jpeg" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, marked, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return PointerCloseUp(jpeg: output as Data, wordsUnderPointer: words)
     }
 
     /// The image as `width`-wide 8-bit grey, for `changed`; [] when it does not decode.

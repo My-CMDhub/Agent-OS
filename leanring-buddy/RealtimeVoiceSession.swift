@@ -103,6 +103,8 @@ final class RealtimeVoiceSession {
     /// fallback on another 0.5 s. The line is a hint, so it gets this long from
     /// key-down — about the capture it runs beside (~230-350 ms) — or is skipped.
     nonisolated static let frontmostReadDeadlineSeconds: Double = 0.3
+    /// The pointer close-up's crop, OCR and crosshair: ~0.1 s for a 320 px crop; past this it is skipped.
+    nonisolated static let pointerCloseUpDeadlineSeconds: Double = 0.35
 
     /// `read`'s answer, or nil once `seconds` pass — whichever comes first. The
     /// read cannot be cancelled (a blocked AX call returns when it returns); a
@@ -506,7 +508,22 @@ final class RealtimeVoiceSession {
             var screenshotDisplayFrame: CGRect?
             var screenshotPixelSize: CGSize?
             let screenshotResult = await screenshotTask.result
+            // The owner's pointer, close up (owner 2026-10-05: "let the model know precisely
+            // what and where I am targeting"): a crop of this guarded screenshot with a
+            // crosshair, and the words OCR reads under it - never over a password box or
+            // Clicky itself. Sent BEFORE the screenshot, so the screenshot stays the last
+            // image (Gemini Live reads its video frames as a stream).
+            let pointerHit = await pointerTask.value
+            var pointerCloseUp: ScreenOCR.PointerCloseUp?
+            if let screenshot = try? screenshotResult.get(), RealtimeOpenAppTool.keyDownPointerTarget(hit: pointerHit, mouse: mouse) != nil {
+                let (jpeg, display) = (screenshot.imageData, screenshot.displayFrame)
+                let size = CGSize(width: screenshot.screenshotWidthInPixels, height: screenshot.screenshotHeightInPixels)
+                pointerCloseUp = await Self.value(within: Self.pointerCloseUpDeadlineSeconds) {
+                    ScreenOCR.pointerCloseUp(screenshotJPEG: jpeg, mouse: mouse, display: display, imagePixels: size)
+                }
+            }
             if let screenshot = try? screenshotResult.get() {
+                if let pointerCloseUp { try await connection.sendScreenshot(pointerCloseUp.jpeg) }
                 try await connection.sendScreenshot(screenshot.imageData)
                 screenshotDisplayFrame = screenshot.displayFrame
                 screenshotPixelSize = CGSize(width: screenshot.screenshotWidthInPixels, height: screenshot.screenshotHeightInPixels)
@@ -528,6 +545,7 @@ final class RealtimeVoiceSession {
             // it stays inside the owner's activity. Not into a turn that replaced this one.
             let stoppedLine = agentStoppedLine
             agentStoppedLine = nil
+            let closeUp = pointerCloseUp
             let contextSend = Task { @MainActor in
                 if let guardLine, connection.turn === marks {
                     try? await connection.sendContextText(guardLine)
@@ -543,11 +561,18 @@ final class RealtimeVoiceSession {
                 if connection.pointFormat == .native, connection.stack == .openAIRealtime, let screenshotPixelSize, connection.turn === marks {
                     try? await connection.sendContextText(RealtimeOpenAppTool.screenshotSizeContextLine(pixels: screenshotPixelSize))
                 }
-                guard case .element(let candidate, let app)? = await pointerTask.value, connection.turn === marks else { return }
-                marks.keyDownPointer = RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY),
-                                                            app: app, source: .underPointer)
-                let appName = app.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first?.localizedName }
-                try? await connection.sendContextText(RealtimeOpenAppTool.pointerContextLine(candidate: candidate, appName: appName))
+                // Where, in the tools' own space; what AX names there; the words under it.
+                guard connection.turn === marks, let pointer = RealtimeOpenAppTool.keyDownPointerTarget(hit: pointerHit, mouse: mouse) else { return }
+                marks.keyDownPointer = pointer
+                let appName = pointer.app.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first?.localizedName }
+                let position = screenshotDisplayFrame.flatMap {
+                    RealtimeOpenAppTool.pointerPosition(mouse: mouse, display: $0, format: connection.pointFormat, stack: connection.stack,
+                                                        pixels: screenshotPixelSize)
+                }
+                if let line = RealtimeOpenAppTool.ownerPointerContextLine(candidate: pointer.candidate, appName: appName, position: position,
+                                                                          wordsUnderPointer: closeUp?.wordsUnderPointer, closeUpSent: closeUp != nil) {
+                    try? await connection.sendContextText(line)
+                }
             }
             for await pcmChunk in audioStream {
                 try await connection.appendAudio(pcmChunk)
