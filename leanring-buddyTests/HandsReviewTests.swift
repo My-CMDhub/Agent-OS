@@ -249,4 +249,25 @@ struct HandsReviewTests {
                                              response: ["resolved": ["role": "AXTextArea"]])
         #expect(bare["typedInto"] as? String == "the field with keyboard focus")
     }
+
+    /// 2026-10-06: in a chat app Return SENDS. The voice tool refused a line break,
+    /// but the harness's own `type` took one from any socket caller and wrote it by
+    /// AX. Now no caller's text carries a control character, and no verb or tool
+    /// presses a key — Return can only come from the owner's own hands.
+    @Test func noTypingPathCarriesReturnAndNoVerbPressesAKey() {
+        for text in ["hello\n", "hello\r", "line\r\nnext", "a\u{2028}b", "tab\there"] {
+            let line = String(decoding: try! JSONSerialization.data(withJSONObject: ["verb": "type", "target": "focused", "text": text]), as: UTF8.self)
+            guard case .failure(let error) = HarnessPolicy.decode(line: line) else { Issue.record("\(text.debugDescription) decoded"); continue }
+            #expect(error.code == "invalidField")
+        }
+        guard case .success = HarnessPolicy.decode(line: #"{"verb":"type","target":"focused","text":"JARVIS test draft"}"#) else {
+            Issue.record("one plain line was refused"); return
+        }
+        #expect(HarnessVerb.allCases.allSatisfy { !$0.rawValue.lowercased().contains("key") })
+        #expect(RealtimeVoiceVerbs.allToolNames.allSatisfy { !$0.contains("key") && !$0.contains("return") && !$0.contains("enter") })
+        let refused = RealtimeOpenAppTool.harnessRequestLine(
+            for: RealtimeToolCall(callID: "t", name: "type_text", appName: "net.whatsapp.WhatsApp", text: "hi\n"), expectApp: "net.whatsapp.WhatsApp")
+        guard case .failure(let refusal) = refused else { Issue.record("the voice tool typed a line break"); return }
+        #expect(refusal.error == "controlCharacterInText")
+    }
 }

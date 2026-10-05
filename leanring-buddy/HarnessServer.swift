@@ -606,6 +606,12 @@ enum HarnessPolicy {
             guard !(raw.text ?? "").isEmpty else {
                 return .failure(.missingField("text"))
             }
+            // Return SENDS in a chat composer and runs a command in a terminal: no caller's
+            // text may carry a line break, by any typing path (AX write or keystrokes).
+            // ponytail: refused everywhere, a multi-line document editor too; allow per role when one needs it.
+            guard !HarnessHands.containsControlCharacters(raw.text ?? "") else {
+                return .failure(.invalidField(field: "text", value: "a line break or another control character (Return sends a message)"))
+            }
             if let requestedMode = raw.mode {
                 guard let parsed = TypeMode(rawValue: requestedMode) else {
                     return .failure(.invalidField(field: "mode", value: requestedMode))
