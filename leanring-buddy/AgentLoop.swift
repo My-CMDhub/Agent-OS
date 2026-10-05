@@ -327,6 +327,9 @@ final class AgentLoop {
     /// Which tool list the request carries: Anthropic's web tools for Claude,
     /// web_lookup for Gemini (`live` sets it from the model).
     var provider: AgentModelProvider = .claude
+    /// The owner's words made it explore-only (`isReadOnlyTask`); `live` sets it
+    /// and guards every request (`readOnlyGuardedAnswer`). Here it only tells the model.
+    var readOnly = false
 
     init(dependencies: Dependencies) {
         self.dependencies = dependencies
@@ -376,7 +379,7 @@ final class AgentLoop {
             let observation = await dependencies.observe()
             var content = pending
             if messages.isEmpty {
-                content.append(["type": "text", "text": Self.goalText(goal: goal, heard: heard)])
+                content.append(["type": "text", "text": Self.goalText(goal: goal, heard: heard, readOnly: readOnly)])
             }
             content += Self.observationBlocks(observation, step: step)
             messages.append(["role": "user", "content": content])
@@ -744,11 +747,17 @@ final class AgentLoop {
 
     /// What Claude is told of the goal: the owner's words when known (they are
     /// what every guard judges by), and the request as passed on; both redacted.
-    static func goalText(goal: String, heard: String?) -> String {
+    static func goalText(goal: String, heard: String?, readOnly: Bool = false) -> String {
         var text = "The owner's goal: \(SecretScanner.redact(goal))"
         if let heard, !heard.allSatisfy(\.isWhitespace) { text += "\nThe owner's own words: \(SecretScanner.redact(heard))" }
+        if readOnly { text += "\n" + readOnlyNote }
         return text
     }
+
+    static let readOnlyNote = "This task is read-only, by the owner's words: look, scroll, follow links, tabs and search results, search, "
+        + "and play a video (muted if you can). Never press anything that sends, posts, comments, likes or reacts, connects, follows, "
+        + "messages, shares, saves, joins, applies, closes or deletes, and type only into a search field: such a step is refused as readOnlyTask."
+
 
     /// agent-loop.log's args: `loggedArguments` with the words a page or the
     /// owner wrote (find words, element names, menu paths) as lengths.
@@ -976,6 +985,8 @@ extension AgentLoop {
             frontBundle: { await frontApp()?.bundleIdentifier }
         ))
         carry.runID = loop.runID
+        carry.readOnly = isReadOnlyTask(words: heard)
+        loop.readOnly = carry.readOnly
         loop.provider = model.provider
         return loop
     }
@@ -995,6 +1006,8 @@ extension AgentLoop {
         var taskTabs: [String: Set<AccessibilityElementKey>] = [:]
         /// The app in front when the owner asked, else at the task's first look (`agentStartBundle`).
         var startBundle: String?
+        /// The owner's words made the task explore-only: every request passes `readOnlyGuardedAnswer`.
+        var readOnly = false
     }
 
     /// What an ok open makes the task's own (re-review of 2e45939): the harness's
@@ -1051,6 +1064,117 @@ extension AgentLoop {
             }
             return response
         }
+    }
+
+    // MARK: Read-only scope (2026-10-05 brief)
+
+    /// "…without taking any other actions", "just look", "only search", "don't
+    /// send": the owner's words make a task explore-only. A task that only asks
+    /// to find, check, show or tell — no word that makes or sends anything — is
+    /// one by default. Judged on the owner's words, never the model's goal.
+    nonisolated static func isReadOnlyTask(words: String) -> Bool {
+        let text = words.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+        if readOnlyPhrases.contains(where: { text.range(of: $0, options: .regularExpression) != nil }) { return true }
+        let tokens = Set(text.split { !($0.isLetter || $0 == "'") }.map(String.init))
+        return tokens.isDisjoint(with: actingWords) && !tokens.isDisjoint(with: exploringWords)
+    }
+
+    nonisolated static let readOnlyPhrases = [
+        #"\bwithout (taking|doing|making) (any )?(other |more |further )?(actions?|steps?|changes?)\b"#,
+        #"\b(just|only) (look|looking|browse|browsing|search|searching|read|reading|check|checking|explore|exploring|watch|watching|find|research)\b"#,
+        #"\bread[- ]only\b"#,
+        #"\b(don't|dont|do not|never) (send|post|connect|message|follow|like|comment|reply|share|interact|touch|click|press|act\b|do anything|change anything)"#
+    ]
+    /// Words that ask to make, send or change something: such a task is not read-only by default.
+    nonisolated static let actingWords: Set<String> = [
+        "type", "write", "send", "post", "message", "reply", "comment", "connect", "follow", "like", "share", "ask", "fill", "submit",
+        "create", "new", "close", "delete", "remove", "rename", "move", "save", "edit", "change", "add", "install", "buy", "order",
+        "book", "sign", "run", "enter", "paste", "download", "upload", "enable", "disable", "set", "turn", "quit", "empty", "pay",
+        "publish", "invite", "accept", "apply", "join", "subscribe", "draft", "compose", "email", "dm", "call", "schedule"]
+    nonisolated static let exploringWords: Set<String> = [
+        "find", "look", "check", "search", "show", "tell", "what", "what's", "whats", "which", "who", "where", "when", "how", "read",
+        "summarise", "summarize", "report", "browse", "see", "watch", "explore", "research", "compare", "list", "review", "scan"]
+
+    /// A pressed element named with one of these reaches people or changes
+    /// something (LinkedIn's own labels: "Invite Farza to connect", "React Like",
+    /// "Send in a private message", "Start a post"). Whole words, so "Posts",
+    /// "Connections" and "3 comments" — navigation — pass.
+    nonisolated static let reachingWords: Set<String> = [
+        "connect", "follow", "follows", "following", "followed", "unfollow", "message", "messages", "messaging", "send", "sending",
+        "sent", "post", "comment", "commenting", "like", "liked", "unlike", "dislike", "react", "reacted", "repost", "reposted",
+        "share", "shared", "sharing", "endorse", "endorsed", "join", "joined", "subscribe", "subscribed", "unsubscribe", "accept",
+        "accepted", "invite", "invited", "apply", "applied", "save", "saved", "unsave", "close", "delete", "remove", "report",
+        "block", "hide", "dismiss", "mark", "archive", "pin", "unpin", "publish", "submit", "reply", "vote", "upvote", "downvote",
+        "pay", "buy", "purchase", "checkout", "order", "donate", "withdraw", "ignore", "edit", "write", "add", "create", "upload",
+        "retweet", "tweet", "recommend", "request", "sign", "logout", "signout", "poke"]
+
+    /// What a field is, by its own AX role, subrole and label (never its value).
+    nonisolated struct FieldIdentity: Sendable {
+        let role: String
+        let subrole: String?
+        let label: String?
+    }
+
+    nonisolated static func isSearchField(_ field: FieldIdentity) -> Bool {
+        if field.role == "AXSearchField" || field.subrole == "AXSearchField" { return true }
+        guard ["AXTextField", "AXComboBox", "AXTextArea"].contains(field.role), let label = field.label else { return false }
+        return label.lowercased().split { !$0.isLetter }.contains("search")
+    }
+
+    /// The word in an element's own name that makes pressing it more than navigation.
+    nonisolated static func reachingWord(_ name: String) -> String? {
+        let words = name.lowercased().split { !$0.isLetter }.map(String.init)
+        if let word = words.first(where: reachingWords.contains) { return word }
+        return zip(words, words.dropFirst()).first { $0.0 == "log" && ["out", "in"].contains($0.1) }.map { "\($0.0) \($0.1)" }
+    }
+
+    /// Why a read-only task may not send this harness request, nil when it is
+    /// navigation: scroll, open a page (the site check already ran), bring an app
+    /// forward, press what the target's own name says is not reaching people,
+    /// type into a search field. The names judged are the request's `title` /
+    /// `labelTitle`: the element the screen-target resolution read from the
+    /// tree (or OCR), which the harness re-reads at the point — never the
+    /// model's description. Unreadable: refused.
+    nonisolated static func readOnlyRefusal(_ request: [String: Any]?, focusedField: () -> FieldIdentity?) -> String? {
+        guard let request, let verb = (request["verb"] as? String).flatMap(HarnessVerb.init(rawValue:)) else {
+            return "the request could not be read"
+        }
+        guard verb.isMutating else { return nil }
+        switch verb {
+        case .scroll, .openURL, .focus, .launch:
+            return nil
+        case .click, .press, .select:
+            let names = [request["title"], request["labelTitle"]].compactMap { $0 as? String }.filter { !$0.allSatisfy(\.isWhitespace) }
+            guard !names.isEmpty else { return "a press of something with no name cannot be judged" }
+            return names.lazy.compactMap(reachingWord).first.map { "pressing an element named with \"\($0)\" reaches people or changes something" }
+        case .type:
+            let field = request["target"] as? String == "focused" ? focusedField()
+                : (request["role"] as? String).map { FieldIdentity(role: $0, subrole: nil, label: request["title"] as? String) }
+            return field.map(isSearchField) == true ? nil : "typing goes only into a search field"
+        default:
+            return "\(verb.rawValue) is not navigation"
+        }
+    }
+
+    /// The harness answer with the read-only judge in front: a refused request
+    /// never reaches the harness (so no card, no audit line) and comes back as
+    /// `readOnlyTask`.
+    nonisolated static func readOnlyGuardedAnswer(_ answer: @escaping @Sendable (String) -> String,
+                                                  readFocusedField: @escaping @Sendable () -> FieldIdentity?) -> @Sendable (String) -> String {
+        { line in
+            let request = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            guard let reason = readOnlyRefusal(request, focusedField: readFocusedField) else { return answer(line) }
+            // `target`: the judged name, for the run's report (the model's result keeps only the message).
+            let target = (request?["labelTitle"] ?? request?["title"] ?? request?["verb"]) as? String
+            return MeasurementLogFile.jsonLine(["ok": false, "error": "readOnlyTask", "target": target.map { String($0.prefix(80)) } ?? NSNull(),
+                "message": "nothing was done: this task is read-only by the owner's words, and \(reason). Look, scroll, follow links, "
+                    + "search, or report what you see instead."]) ?? "{\"ok\":false,\"error\":\"readOnlyTask\"}"
+        }
+    }
+
+    /// The focused element of the app in front: role, subrole, label.
+    nonisolated static func liveFocusedField() -> FieldIdentity? {
+        AccessibilityTypePerformer.focusedNode().map { FieldIdentity(role: $0.role, subrole: $0.subrole, label: $0.fieldLabel?.raw) }
     }
 
     /// The browser's selected tab in its front window, read off main.
@@ -1125,7 +1249,9 @@ extension AgentLoop {
         marks.agentOpenedBundles = openedByTask(launched: carry.launchedBundles, taskTabs: carry.taskTabs, frontTabs: frontTabs)
         // The task's tabs in front now, re-read before each mutating request (`tabGuardedAnswer`).
         let boundTabs = frontTabs.filter { carry.taskTabs[$0.key]?.contains($0.value) == true }
-        let answer = boundTabs.isEmpty ? harnessAnswer : tabGuardedAnswer(harnessAnswer, boundTabs: boundTabs, readTab: frontTab(of:))
+        var answer = boundTabs.isEmpty ? harnessAnswer : tabGuardedAnswer(harnessAnswer, boundTabs: boundTabs, readTab: frontTab(of:))
+        // Outermost: a read-only task's refusal needs no tab read and never reaches the harness.
+        if carry.readOnly { answer = readOnlyGuardedAnswer(answer, readFocusedField: liveFocusedField) }
         marks.agentStartBundle = carry.startBundle
         marks.heardText = heard
         marks.heardCompleteUptime = now

@@ -857,3 +857,91 @@ struct AgentLoopBatchTests {
         #expect(script.narrations.first?.contains("pressed") == true)
     }
 }
+
+// MARK: - Read-only task scope (2026-10-05 brief)
+
+/// "…without taking any other actions": an exploring task may navigate, scroll,
+/// search and play; anything that reaches people is refused locally, by the
+/// target's own AX name and role, before the harness sees the request.
+struct AgentLoopReadOnlyTests {
+
+    static let linkedInGoal = "Go to LinkedIn in my browser, search for Farza or find him in my network, check his posts related to "
+        + "HeyClicky, watch the videos if possible, and give me a small report, without taking any other actions."
+
+    @Test func theOwnersWordsMakeATaskReadOnlyAndExploringDefaultsToIt() {
+        for words in [Self.linkedInGoal, "just look at my notifications", "only search for flights, don't book anything",
+                      "check Farza's profile but don't connect", "Find the Superloop plans. Do not send anything.",
+                      "What's the cheapest Superloop NBN plan?", "show me the latest commit on github"] {
+            #expect(AgentLoop.isReadOnlyTask(words: words), "\(words)")
+        }
+        for words in ["In Cursor, open a new terminal, then close it",
+                      "In Cursor, open the agent panel and ask: what does AgentLoop.swift do? Don't change any files",
+                      "write a LinkedIn post about HeyClicky", "message Farza that I loved the demo", "type hello into the note"] {
+            #expect(!AgentLoop.isReadOnlyTask(words: words), "\(words)")
+        }
+    }
+
+    private static func request(_ verb: String, _ fields: [String: Any] = [:]) -> String {
+        MeasurementLogFile.jsonLine(["verb": verb, "expectApp": "com.google.Chrome"].merging(fields) { _, new in new }) ?? ""
+    }
+
+    @Test func aReadOnlyTaskRefusesWhatReachesPeopleBeforeTheHarness() {
+        final class Box: @unchecked Sendable { var sent: [String] = []; var focused: AgentLoop.FieldIdentity? }
+        let box = Box()
+        let guarded = AgentLoop.readOnlyGuardedAnswer({ line in box.sent.append(line); return "{\"ok\":true}" },
+                                                      readFocusedField: { box.focused })
+        func refused(_ line: String) -> Bool { guarded(line).contains("\"error\":\"readOnlyTask\"") }
+
+        // LinkedIn's own labels for what reaches people, by any role.
+        for name in ["Connect", "Invite Farza Haq to connect", "Follow", "Following", "Message", "Send", "Send now", "Like",
+                     "React Like", "Comment", "Repost", "Send in a private message", "Share", "Endorse", "Join", "Subscribe",
+                     "Accept", "Apply", "Easy Apply", "Save", "Save to collection", "Close", "Delete", "Start a post", "Reply", "Sign out"] {
+            #expect(refused(Self.request("click", ["title": name, "role": "AXButton"])), "\(name)")
+            #expect(refused(Self.request("click", ["title": name, "role": "AXLink"])), "\(name) as a link")
+        }
+        // A label pressed through its button is judged by the label's words too.
+        #expect(refused(Self.request("click", ["title": "Farza", "labelTitle": "Follow", "role": "AXButton"])))
+        #expect(refused(Self.request("press", ["title": "Message"])))
+        #expect(refused(Self.request("select", ["title": "Delete"])))
+        #expect(refused(Self.request("click", ["role": "AXButton"])), "a press with no name cannot be judged")
+        #expect(refused(Self.request("menu", ["path": ["File", "Close Tab"]])))
+        #expect(refused(Self.request("open", ["title": "notes.txt"])))
+        #expect(refused("not json"))
+        // Typing goes only into a search field, by its own role and name.
+        #expect(refused(Self.request("type", ["text": "hi", "mode": "insert", "title": "Add a comment…", "role": "AXTextArea"])))
+        #expect(refused(Self.request("type", ["text": "hi", "mode": "insert", "title": "Write a message…", "role": "AXTextArea"])))
+        box.focused = AgentLoop.FieldIdentity(role: "AXTextArea", subrole: nil, label: "Write a message…")
+        #expect(refused(Self.request("type", ["text": "hi", "mode": "insert", "target": "focused"])))
+        box.focused = nil
+        #expect(refused(Self.request("type", ["text": "hi", "mode": "insert", "target": "focused"])), "an unreadable field is not a search field")
+        #expect(box.sent.isEmpty, "nothing refused reached the harness")
+
+        // Navigation, search and play go through.
+        for name in ["Farza Haq", "Posts", "People", "Show all posts", "Play", "Play video", "See more", "My Network", "Connections",
+                     "3 comments", "Next"] {
+            #expect(!refused(Self.request("click", ["title": name, "role": "AXLink"])), "\(name)")
+        }
+        #expect(!refused(Self.request("scroll", ["direction": "down"])))
+        #expect(!refused(Self.request("openURL", ["url": "https://www.linkedin.com/"])))
+        #expect(!refused(Self.request("focus", ["app": "Google Chrome"])))
+        #expect(!refused(Self.request("type", ["text": "Farza", "mode": "replace", "title": "Search", "role": "AXComboBox"])))
+        #expect(!refused(Self.request("type", ["text": "Farza", "mode": "replace", "title": "x", "role": "AXSearchField"])))
+        box.focused = AgentLoop.FieldIdentity(role: "AXTextField", subrole: nil, label: "Search")
+        #expect(!refused(Self.request("type", ["text": "Farza", "mode": "insert", "target": "focused"])))
+        #expect(!refused(Self.request("snapshot")))
+        #expect(!refused(Self.request("look")))
+        #expect(box.sent.count == 19)
+    }
+
+    /// The model is told the scope, so it does not spend steps on refusals.
+    @MainActor @Test func theGoalTextNamesTheScope() async {
+        let script = Script([toolUse("ask_owner", ["question": "Which Farza?"])])
+        let agent = loop(script)
+        agent.readOnly = true
+        _ = await agent.run(goal: Self.linkedInGoal, heard: Self.linkedInGoal)
+        let first = ((script.bodies[0]["messages"] as? [[String: Any]])?.first?["content"] as? [[String: Any]] ?? [])
+            .compactMap { $0["text"] as? String }.joined()
+        #expect(first.contains("read-only"))
+        #expect(!AgentLoop.goalText(goal: "x", heard: nil).contains("read-only"))
+    }
+}
