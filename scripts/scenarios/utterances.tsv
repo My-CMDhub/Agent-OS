@@ -37,3 +37,8 @@ R4	-	in cursor, find where scenario runner is defined and open that file
 R5	-	open github dot com slash my dash c m d hub slash agent dash o s, and tell me the latest commit message
 R6	-	search google for swift testing framework and open the second result
 R7	-	open a new tab with the vercel docs, and tell me what the first heading says
+V01	-	what version of macOS is this Mac running? check in System Settings
+V03	-	how many items are in my Downloads folder?
+V10	-	use Calculator to work out 17 times 23
+V16	-	open the Privacy and Security settings
+V20	-	who originally created the Swift programming language?

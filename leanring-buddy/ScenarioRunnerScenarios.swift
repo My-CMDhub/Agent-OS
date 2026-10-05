@@ -100,7 +100,7 @@ enum ScenarioCatalog {
     static var all: [RunnerScenario] { singleSteps + safety + multiStep }
     /// What `--scenario-ids` may name. Section R is never in the default run: it
     /// drives the owner's Cursor and the live web, so it runs only when asked for.
-    static var catalog: [RunnerScenario] { all + realApps }
+    static var catalog: [RunnerScenario] { all + realApps + GeneralitySuite.voiceScenarios }
 
     static let singleSteps: [RunnerScenario] = [
         RunnerScenario(id: "A1", start: .finderFront, quitIfLaunched: [safari],

@@ -204,6 +204,28 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Generality suite: ~20 general-pattern tasks through the agent loop, each
+        // judged by its own state checker; same start gate as the runner. Cards are
+        // denied, never allowed; ~/Library/Logs/Clicky/generality/<ts>/, then quits.
+        if CommandLine.arguments.contains("--generality-suite") {
+            confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
+            Task { @MainActor in
+                await GeneralitySuite.run(harness: self.harnessServer, confirmations: self.confirmations)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
+        // Coverage audit: per app, AX walk + OCR of a guarded capture + menu index,
+        // read-only, zero model calls; ~/Library/Logs/Clicky/coverage/<ts>/, then quits.
+        if CommandLine.arguments.contains("--coverage-audit") {
+            Task { @MainActor in
+                await CoverageAudit.run()
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // Walks Finder / System Settings / Cursor on main and on a background
         // queue, writes ~/Library/Logs/Clicky/ax-thread-probe.log, then quits.
         if CommandLine.arguments.contains("--ax-thread-probe") {
