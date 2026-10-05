@@ -205,7 +205,8 @@ nonisolated enum RealtimeVoiceVerbs {
         description: "Hands a request that needs more than one step (search then open a result, open a page and read or summarise it, "
             + "fill several fields, write then post) to the task runner, which looks, acts, checks and repeats until it is done. "
             + "Use it for every request with two or more actions, and for any that acts and then asks for an answer (\"and tell me\", "
-            + "summarise, find out): never do the first action yourself. "
+            + "summarise, find out): never do the first action yourself. Also every question to look up on the web (\"what does "
+            + "this site say\", \"the latest\", \"the cheapest\"): it answers from the web without opening a browser. "
             + "Returns at once with status started; progress and the outcome arrive later as system lines.",
         parameters: [Parameter(name: "goal", description: "The owner's whole request, in their words, with any detail they gave.")])
 

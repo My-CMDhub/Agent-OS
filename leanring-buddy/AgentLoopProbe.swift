@@ -28,7 +28,8 @@ enum AgentLoopProbe {
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let directory = MeasurementLogFile.directoryURL.appendingPathComponent("agent-loop-probe/\(stamp)", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        var meta: [String: Any] = ["timestamp": stamp, "preferredModel": AgentLoopModel.preferred]
+        var meta: [String: Any] = ["timestamp": stamp, "provider": AgentModelProvider.configured.rawValue,
+                                   "preferredModel": AgentModelProvider.configured == .gemini ? AgentLoopGemini.models[0] : AgentLoopModel.preferred]
         var results: [[String: Any]] = []
         defer {
             if let line = MeasurementLogFile.jsonLine(["run": meta, "scenarios": results]) {
@@ -40,6 +41,11 @@ enum AgentLoopProbe {
         if let refusal = ScenarioRunner.refusalToStart() {
             meta["outcome"] = "refused"
             meta["reason"] = refusal
+            return
+        }
+        if CommandLine.arguments.contains("--agent-speed") {
+            results = await speedRuns(harness: harness, confirmations: confirmations)
+            meta["outcome"] = results.contains { $0["status"] as? String == "aborted" } ? "aborted" : "ran"
             return
         }
         let ids = CommandLine.arguments.first { $0.hasPrefix("--agent-scenarios=") }
@@ -160,6 +166,85 @@ enum AgentLoopProbe {
     }
 
     @MainActor private final class FinishedFlag { var value = false }
+
+    /// `--agent-loop-probe --agent-speed` (2026-10-05): read-only goals, each run
+    /// twice — web tools on (connector), and off (the screen only) — in a Chrome
+    /// window the probe opens on a local page and closes by identity. Any card
+    /// is denied. Per run: outcome, the spoken answer, steps, wall ms, model ms
+    /// (summed from agent-loop.log for the run id), the tools that ran.
+    static func speedRuns(harness: HarnessServer, confirmations: HarnessConfirmations) async -> [[String: Any]] {
+        let goals = [("commit", "Tell me the latest commit message on github.com/My-CMDhub/Agent-OS"),
+                     ("superloop", "What's the cheapest Superloop NBN plan?")]
+        let harnessAnswer: @Sendable (String) -> String = { line in harness.answer(line: line) }
+        let model = AgentLoopModel()
+        let runStart = ProcessInfo.processInfo.systemUptime
+        var results: [[String: Any]] = []
+        for (id, goal) in goals {
+            for connector in [true, false] {
+                let idle = ScenarioRunner.secondsSinceLastInput()
+                let ours = min(HarnessHands.ownInput.secondsSinceLastPost ?? .infinity, ProcessInfo.processInfo.systemUptime - runStart)
+                if idle + 1 < ours { results.append(["id": id, "status": "aborted", "reason": "ownerReturned"]); return results }
+                var result: [String: Any] = ["id": id, "mode": connector ? "connector" : "screen"]
+                let chromeBefore = Set(VoiceToolProbe.windowServerWindowNumbers(bundleIdentifier: ScenarioRunner.chromeBundleIdentifier) ?? [])
+                let nonce = String(UUID().uuidString.prefix(8))
+                guard let url = ScenarioRunner.pageURL("article.html", nonce: nonce),
+                      let window = await Task.detached(operation: { ScenarioRunnerAX.openChromeWindow(urls: [url], nonce: nonce) }).value else {
+                    results.append(result.merging(["status": "startFailed"]) { _, new in new })
+                    continue
+                }
+                _ = await ScenarioRunner.waitFor(seconds: 5) { await Task.detached { ScenarioRunnerAX.isInFront(window) ? true : nil }.value }
+                let started = Date()
+                let startUptime = ProcessInfo.processInfo.systemUptime
+                let loop = AgentLoop.live(heard: goal, harnessAnswer: harnessAnswer, model: model) { _ in }
+                loop.webToolsEnabled = connector
+                let finished = FinishedFlag()
+                let runTask = Task { @MainActor in
+                    let outcome = await loop.run(goal: goal, heard: goal)
+                    finished.value = true
+                    return outcome
+                }
+                var denied = 0
+                while !finished.value {
+                    for ticket in confirmations.tickets where ticket.createdAt >= started
+                        && HarnessConfirmations.status(of: ticket, now: Date()) == .pending {
+                        confirmations.answer(ticket.id, allow: false, scope: .once)
+                        denied += 1
+                    }
+                    try? await Task.sleep(for: .milliseconds(200))
+                }
+                let outcome = await runTask.value
+                result["wallMs"] = Int(((ProcessInfo.processInfo.systemUptime - startUptime) * 1000).rounded())
+                if case .done(let summary) = outcome { result["answer"] = SecretScanner.redact(summary) }
+                result["outcome"] = outcome.name
+                result["steps"] = loop.step
+                result["run"] = loop.runID
+                result["model"] = loop.modelUsed ?? NSNull()
+                result["cardsDenied"] = denied
+                result["tools"] = loop.receipts.map { ["step": $0.step, "tool": $0.toolName, "ok": $0.ok, "error": $0.error ?? NSNull()] as [String: Any] }
+                MeasurementLogFile.waitForPendingWrites()
+                result["modelMs"] = modelMilliseconds(run: loop.runID)
+                result["cleanup"] = await Task.detached { ScenarioRunnerAX.close(window) }.value
+                try? await Task.sleep(for: .seconds(1))
+                let chromeAfter = Set(VoiceToolProbe.windowServerWindowNumbers(bundleIdentifier: ScenarioRunner.chromeBundleIdentifier) ?? [])
+                let missing = chromeBefore.subtracting(chromeAfter)
+                result["ownerChromeWindowsIntact"] = missing.isEmpty
+                result["status"] = missing.isEmpty ? "ran" : "aborted"
+                results.append(result)
+                print("🤖 agent speed \(id) \(result["mode"] ?? "?"): \(outcome.name) steps=\(loop.step) \(result["wallMs"] ?? "?") ms")
+                if !missing.isEmpty { return results }
+            }
+        }
+        return results
+    }
+
+    /// The model ms of one run, summed from its agent-loop.log step lines.
+    static func modelMilliseconds(run: String) -> Int {
+        let url = MeasurementLogFile.directoryURL.appendingPathComponent(AgentLoop.traceFileName)
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        return text.split(separator: "\n").compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+            .filter { $0["run"] as? String == run && $0["kind"] as? String == "step" }
+            .compactMap { $0["modelMs"] as? Int }.reduce(0, +)
+    }
 
     /// Clicky's own largest on-screen window (the card, while a ticket is
     /// pending), by window id: nothing of any other app is in the picture.

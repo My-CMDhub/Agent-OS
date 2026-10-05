@@ -17,6 +17,7 @@
  *   /openai-tts         → OpenAI /v1/audio/speech, gpt-4o-mini-tts only, streamed through
  *   /gemini-live-token  → Gemini Live API ephemeral token, one use, model locked
  *   /openai-realtime-token → OpenAI Realtime ephemeral client secret (60 s), gpt-realtime-mini locked
+ *   /gemini-generate    → Gemini generateContent for the agent loop; allow-listed models, fields and tools
  *
  * Secrets:
  *   CLICKY_CLIENT_KEY, ANTHROPIC_API_KEY, ELEVENLABS_API_KEY, ASSEMBLYAI_API_KEY,
@@ -24,6 +25,8 @@
  * Vars (wrangler.toml):
  *   ELEVENLABS_VOICE_ID
  */
+
+import { buildGeminiGenerate } from "./gemini";
 
 interface Env {
   CLICKY_CLIENT_KEY?: string;
@@ -44,6 +47,7 @@ const OPENAI_TTS_PASSTHROUGH_FIELDS = ["voice", "instructions", "response_format
 const GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview";
 
 const OPENAI_REALTIME_MODEL = "gpt-realtime-mini";
+
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -76,6 +80,8 @@ export default {
           return await handleGeminiLiveToken(env);
         case "/openai-realtime-token":
           return await handleOpenAIRealtimeToken(env);
+        case "/gemini-generate":
+          return await handleGeminiGenerate(request, env);
       }
     } catch (error) {
       console.error(`[${url.pathname}] Unhandled error:`, error);
@@ -298,6 +304,21 @@ async function handleGeminiLiveToken(env: Env): Promise<Response> {
   }
   // The token only; nothing else from the upstream response leaves the worker.
   return jsonResponse({ token: createdToken.name }, 200);
+}
+
+async function handleGeminiGenerate(request: Request, env: Env): Promise<Response> {
+  if (!env.GEMINI_API_KEY) return missingSecretResponse("GEMINI_API_KEY");
+  let requested: unknown;
+  try {
+    requested = await request.json();
+  } catch {
+    return jsonResponse({ error: "body must be JSON" }, 400);
+  }
+  const built = buildGeminiGenerate(requested, env.GEMINI_API_KEY);
+  if ("error" in built) return jsonResponse({ error: built.error }, 400);
+  const response = await fetch(built.url, built.init);
+  if (!response.ok) return upstreamErrorResponse("/gemini-generate", response);
+  return new Response(await response.text(), { status: 200, headers: { "content-type": "application/json" } });
 }
 
 async function handleOpenAIRealtimeToken(env: Env): Promise<Response> {
