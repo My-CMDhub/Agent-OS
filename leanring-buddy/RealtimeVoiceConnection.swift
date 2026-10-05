@@ -1123,8 +1123,8 @@ final class RealtimeVoiceConnection {
     /// voice opened TextEdit unasked and the loop typed the summary into it).
     /// Reads are never refused (`mayRefuse`).
     nonisolated static func agentStepActsInUnnamedApp(outcome: RealtimeHeardCheck.Outcome, mayRefuse: Bool, callBundle: String?,
-                                                      startBundle: String?, openedByTask: Set<String>) -> Bool {
-        guard mayRefuse, outcome == .noAppHeard, let callBundle else { return false }
+                                                      startBundle: String?, openedByTask: Set<String>, wordsNameTheApp: Bool = false) -> Bool {
+        guard mayRefuse, outcome == .noAppHeard, !wordsNameTheApp, let callBundle else { return false }
         return callBundle != startBundle && !openedByTask.contains(callBundle)
     }
 
@@ -1227,8 +1227,10 @@ final class RealtimeVoiceConnection {
                 proceeding.heardSlot = decision.heardSlot
                 return (proceeding, true, false, pageApp)
             }
-            let unnamed = isAgentStep && agentStepActsInUnnamedApp(outcome: decision.outcome, mayRefuse: mayRefuseCall, callBundle: callBundle,
-                                                                    startBundle: agentStartBundle, openedByTask: agentOpenedBundles)
+            let unnamed = isAgentStep && agentStepActsInUnnamedApp(
+                outcome: decision.outcome, mayRefuse: mayRefuseCall, callBundle: callBundle, startBundle: agentStartBundle,
+                openedByTask: agentOpenedBundles,
+                wordsNameTheApp: RealtimeHeardCheck.wordsNameTheApp(transcript: transcript, named: named, among: RealtimeVoiceVerbs.installedAppNames()))
             // Only asked when it decides: open_app with no transcript.
             guard decision.outcome == .transcriptMissing, call.name == RealtimeOpenAppTool.name else { return (decision, true, unnamed, pageApp) }
             return (decision, RealtimeVoiceVerbs.isRunning(named: named), unnamed, pageApp)

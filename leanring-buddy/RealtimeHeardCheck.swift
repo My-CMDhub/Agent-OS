@@ -239,6 +239,43 @@ nonisolated enum RealtimeHeardCheck {
         return .none
     }
 
+    /// Whether the owner's words name the call's OWN app by that app's own name
+    /// — for an agent step's `appNotNamed` only, asked after `decide` heard no
+    /// app. Generality suite 2026-10-06: "switch Calendar to the month view" was
+    /// refused (a common-word name counts only after open/in/to/launch, and
+    /// "switch" is none), as were "a reminder" (Reminders), "a new note" (Notes)
+    /// and "the Privacy and Security settings" (System Settings). Three forms of
+    /// the installed name, no synonym list and never a sound-alike:
+    /// - the whole name, word for word or run together, anywhere;
+    /// - a one-word name's singular or plural ("note" / Notes);
+    /// - one word of a longer name, 4+ letters, that no other installed app's
+    ///   name holds in any of those forms ("settings" / System Settings, never
+    ///   "system", which System Information shares).
+    /// Safe to be generous here: a different app heard anywhere is `decide`'s
+    /// mismatch or ambiguity, which refuses before this is asked.
+    static func wordsNameTheApp(transcript: String?, named: String, among names: [RealtimeVoiceVerbs.AppName]) -> Bool {
+        guard let transcript, case .resolved(let url) = RealtimeVoiceVerbs.resolveApp(named: named, among: names) else { return false }
+        let spokenList = RealtimeVoiceVerbs.foldedTokens(withoutWebAddresses(transcript))
+        let spoken = Set(spokenList)
+        func path(_ url: URL) -> String { url.standardizedFileURL.path }
+        func forms(_ word: String) -> Set<String> {
+            var forms: Set<String> = [word, word + "s", word + "es"]
+            // Never "-es" off: "notes" would become "not".
+            if word.hasSuffix("s") { forms.insert(String(word.dropLast())) }
+            return forms
+        }
+        let own = names.filter { path($0.url) == path(url) }.map { RealtimeVoiceVerbs.foldedTokens($0.name) }.filter { !$0.isEmpty }
+        let otherForms = Set(names.filter { path($0.url) != path(url) }.flatMap { RealtimeVoiceVerbs.foldedTokens($0.name) }.flatMap(forms))
+        let said = " " + spokenList.joined(separator: " ") + " "
+        return own.contains { tokens in
+            if said.contains(" " + tokens.joined(separator: " ") + " ") || spoken.contains(tokens.joined()) { return true }
+            if tokens.count == 1 { return !forms(tokens[0]).isDisjoint(with: spoken) }
+            return tokens.contains { token in
+                token.count >= 4 && forms(token).isDisjoint(with: otherForms) && !forms(token).isDisjoint(with: spoken)
+            }
+        }
+    }
+
     // MARK: Words about the page in front (pure)
 
     /// Scenario B11 2026-10-03: "open the settings page on this site", a shop in

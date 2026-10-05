@@ -447,6 +447,40 @@ struct AgentLoopTests {
         #expect(!unnamed(.noAppHeard, bundle: "com.google.Chrome"))                       // the app the task began in
         #expect(!unnamed(.noAppHeard, bundle: "com.apple.TextEdit", opened: ["com.apple.TextEdit"]))
         #expect(!unnamed(.noAppHeard, tool: "find_on_screen", bundle: "com.apple.TextEdit")) // reads are never refused
+        // Generality suite 2026-10-06 G06: "switch Calendar to the month view" named it.
+        #expect(!RealtimeVoiceConnection.agentStepActsInUnnamedApp(outcome: .noAppHeard, mayRefuse: true, callBundle: "com.apple.iCal",
+                                                                   startBundle: "com.apple.finder", openedByTask: [], wordsNameTheApp: true))
+    }
+
+    /// Generality suite 2026-10-06 (G05, G06, G16, G21, V16): the owner's words
+    /// named the call's app by its own name — a common-word name outside the
+    /// open/in/to slot, its singular, or a word of it no other installed app has.
+    /// No synonym list, never a sound-alike.
+    @Test func theOwnersWordsNameTheCallsAppByItsOwnNameItsInflectionOrADistinctiveWord() {
+        func app(_ name: String, _ path: String) -> RealtimeVoiceVerbs.AppName {
+            RealtimeVoiceVerbs.AppName(name: name, url: URL(fileURLWithPath: path), isFileName: true)
+        }
+        let names = [app("Calendar", "/System/Applications/Calendar.app"), app("Notes", "/System/Applications/Notes.app"),
+                     app("Reminders", "/System/Applications/Reminders.app"), app("System Settings", "/System/Applications/System Settings.app"),
+                     app("System Information", "/System/Applications/Utilities/System Information.app"),
+                     app("Keynote", "/Applications/Keynote.app"), app("TextEdit", "/System/Applications/TextEdit.app"),
+                     app("Cursor", "/Applications/Cursor.app"), app("Activity Monitor", "/System/Applications/Utilities/Activity Monitor.app")]
+        func heard(_ words: String, _ named: String) -> Bool {
+            RealtimeHeardCheck.wordsNameTheApp(transcript: words, named: named, among: names)
+        }
+        #expect(heard("switch Calendar to the month view", "Calendar"))
+        #expect(heard("show me my calendars", "Calendar"))
+        #expect(heard("create a reminder called JARVIS test reminder", "Reminders"))
+        #expect(heard("write it in a new note titled JARVIS test 2", "Notes"))
+        #expect(heard("open the Privacy and Security settings", "System Settings"))
+        #expect(heard("which process is using the most memory? check the activity", "Activity Monitor"))
+        // Wrong app, a word inside another name, a shared word, a sound-alike: never.
+        #expect(!heard("make a new TextEdit document", "Notes"))
+        #expect(!heard("write a note", "Keynote"))
+        #expect(!heard("show me the system details", "System Settings"))
+        #expect(!heard("open it in kasa", "Cursor"))
+        #expect(!heard("create a reminder", "Calendar"))
+        #expect(!heard("", "Calendar"))
     }
 
     // MARK: Re-review of 2e45939
