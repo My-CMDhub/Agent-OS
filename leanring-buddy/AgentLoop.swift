@@ -765,7 +765,7 @@ final class AgentLoop {
     static let readOnlyNote = "This task is read-only, by the owner's words: look, scroll, follow links, tabs and search results, search, "
         + "and play a video (muted if you can). Never press anything that sends, posts, comments, likes or reacts, connects, follows, "
         + "messages, shares, saves, joins, applies, closes or deletes, and type only into a search field: such a step is refused as readOnlyTask. "
-        + "Menu items that show or navigate (View, Go, Window, Help search, Get Info, Show…, Sort By) may be pressed."
+        + "Only menu items that show or navigate may be pressed: the View, Go, Window and Help menus, and items like Show…, Get Info, Find, Sort By."
 
 
     /// agent-loop.log's args: `loggedArguments` with the words a page or the
@@ -1116,22 +1116,38 @@ extension AgentLoop {
         "accepted", "invite", "invited", "apply", "applied", "save", "saved", "unsave", "close", "delete", "remove", "report",
         "block", "hide", "dismiss", "mark", "archive", "pin", "unpin", "publish", "submit", "reply", "vote", "upvote", "downvote",
         "pay", "buy", "purchase", "checkout", "order", "donate", "withdraw", "ignore", "edit", "write", "add", "create", "upload",
-        "retweet", "tweet", "recommend", "request", "sign", "logout", "signout", "poke"]
+        "retweet", "tweet", "recommend", "request", "sign", "logout", "signout", "poke", "push"]
 
     /// Generality suite 2026-10-06: G03, G07, G11 and G17 lost every menu to
-    /// `readOnlyTask` — View, Go, Help search, File > Get Info, Product > Scheme.
-    /// A menu item is judged by what its words say it does: one that makes,
-    /// saves, moves, edits content, prints or reaches people is refused; one that
-    /// shows or navigates passes. Whole words of every path component, so the
-    /// Format and Insert menus refuse whole and "Edit > Find" passes.
-    /// ponytail: a word list; an item that changes something without one of these
-    /// words passes the read-only layer — the kernel's own lists still judge it.
+    /// `readOnlyTask`. A read-only task may press only a menu item that shows or
+    /// navigates, by its own AX title path: anything in the View, Go, Window or
+    /// Help menu, or an item whose title starts with Show, Hide, View, Go to,
+    /// Sort, Arrange, Find, Search, Get Info, Zoom, Enter/Exit Full Screen,
+    /// Actual Size, Bigger or Smaller. An ALLOW-list (review of 7973fde): the
+    /// first deny-list missed Product > Run, which builds and runs the owner's
+    /// code, and the kernel treats every AXMenuItem as navigation. The leaf is
+    /// then checked against `changingMenuWords` too: "Window > Move Window to
+    /// Left Side of Screen" moves the owner's window and is refused.
+    nonisolated static let showingMenus: Set<String> = ["view", "go", "window", "help"]
+    nonisolated static let showingItemPrefixes: [[String]] = [
+        ["show"], ["hide"], ["view"], ["go", "to"], ["sort"], ["arrange"], ["find"], ["search"], ["get", "info"], ["zoom"],
+        ["enter", "full", "screen"], ["exit", "full", "screen"], ["actual", "size"], ["bigger"], ["smaller"]]
+
+    nonisolated static func isShowingMenuItem(_ path: [String]) -> Bool {
+        func words(_ title: String) -> [String] { title.lowercased().split { !$0.isLetter }.map(String.init) }
+        guard let top = path.first, let leaf = path.last else { return false }
+        if showingMenus.contains(words(top).joined(separator: " ")) { return true }
+        return showingItemPrefixes.contains { words(leaf).starts(with: $0) }
+    }
+
     nonisolated static let changingMenuWords: Set<String> = [
         "new", "save", "saved", "delete", "close", "quit", "send", "share", "post", "duplicate", "rename", "move", "paste", "cut",
         "undo", "redo", "format", "insert", "import", "export", "print", "empty", "erase", "install", "update", "updates", "remove",
         "clear", "reset", "revert", "restore", "trash", "eject", "burn", "compress", "archive", "make", "add", "create", "replace",
-        "merge", "sign", "log", "logout", "shut", "restart", "sleep", "lock", "force", "publish", "submit", "invite", "reply",
-        "forward", "upload", "download", "sync", "encrypt", "bold", "italic", "underline", "apply", "accept", "join", "subscribe"]
+        "merge", "sign", "log", "logout", "shut", "restart", "sleep", "lock", "unlock", "force", "publish", "submit", "invite", "reply",
+        "forward", "upload", "download", "sync", "encrypt", "bold", "italic", "underline", "apply", "accept", "join", "subscribe",
+        "run", "build", "test", "profile", "analyze", "analyse", "commit", "push", "pull", "stash", "mark", "flag", "redirect",
+        "rotate", "crop"]
 
     nonisolated static func changingMenuWord(_ title: String) -> String? {
         title.lowercased().split { !$0.isLetter }.map(String.init).first(where: changingMenuWords.contains)
@@ -1178,10 +1194,10 @@ extension AgentLoop {
             return names.lazy.compactMap(reachingWord).first.map { "pressing an element named with \"\($0)\" reaches people or changes something" }
         case .menu:
             // Judged by the item's own AX title path (`find_menu_items` offered it), never the model's words.
-            guard let path = request["path"] as? [String], !path.isEmpty else { return "a menu press with no path cannot be judged" }
-            return path.lazy.compactMap(changingMenuWord).first.map {
-                "the menu item \"\(path.joined(separator: " > "))\" makes, changes or reaches people (\"\($0)\")"
-            }
+            guard let path = request["path"] as? [String], let leaf = path.last else { return "a menu press with no path cannot be judged" }
+            let shown = path.joined(separator: " > ")
+            guard isShowingMenuItem(path) else { return "the menu item \"\(shown)\" is not one that only shows or navigates" }
+            return changingMenuWord(leaf).map { "the menu item \"\(shown)\" makes, changes or reaches people (\"\($0)\")" }
         case .type:
             let field = request["target"] as? String == "focused" ? focusedField()
                 : (request["role"] as? String).map { FieldIdentity(role: $0, subrole: nil, label: request["title"] as? String) }

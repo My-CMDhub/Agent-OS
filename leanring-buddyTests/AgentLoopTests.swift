@@ -994,10 +994,12 @@ struct AgentLoopReadOnlyTests {
     /// navigating pass, anything that makes, changes or reaches people does not.
     @Test func aReadOnlyTaskJudgesAMenuItemByWhatItDoes() {
         func refused(_ path: [String]) -> Bool { AgentLoop.readOnlyRefusal(["verb": "menu", "path": path], focusedField: { nil }) != nil }
+        // An allow-list (review of 7973fde): the View, Go, Window and Help menus, and items that only show.
         for path in [["View", "as List"], ["View", "Sort By", "Name"], ["Go", "Downloads"], ["Window", "Minimize"],
-                     ["Help", "Search"], ["File", "Get Info"], ["View", "Show Path Bar"], ["View", "Month"], ["Product", "Scheme", "Clicky"],
-                     ["Edit", "Find", "Find…"], ["Edit", "Copy"], ["Finder", "Settings…"], ["View", "Arrange By", "Kind"],
-                     ["Window", "Bring All to Front"], ["View", "Enter Full Screen"]] {
+                     ["Help", "Search"], ["File", "Get Info"], ["View", "Show Path Bar"], ["View", "Month"],
+                     ["Edit", "Find", "Find…"], ["View", "Arrange By", "Kind"], ["Window", "Bring All to Front"],
+                     ["View", "Enter Full Screen"], ["Format", "Font", "Show Fonts"], ["View", "Actual Size"], ["Window", "Zoom"],
+                     ["Navigate", "Go to Line…"], ["Edit", "Search"]] {
             #expect(!refused(path), "\(path)")
         }
         for path in [["File", "New Folder"], ["File", "Save…"], ["Edit", "Delete"], ["File", "Close Window"], ["Calculator", "Quit Calculator"],
@@ -1005,11 +1007,19 @@ struct AgentLoopReadOnlyTests {
                      ["Edit", "Paste"], ["Edit", "Cut"], ["Edit", "Undo Typing"], ["Edit", "Redo"], ["Format", "Font", "Bold"],
                      ["Insert", "Table"], ["File", "Import…"], ["File", "Export as PDF…"], ["File", "Print…"], ["Finder", "Empty Bin…"],
                      ["Disk Utility", "Erase…"], ["Software", "Install Update"], ["App", "Check for Updates…"], ["File", "Post"],
-                     ["Edit", "Clear"], ["File", "Revert To", "Last Saved"], ["Apple", "Log Out Dhruv…"], ["Apple", "Shut Down…"]] {
+                     ["Edit", "Clear"], ["File", "Revert To", "Last Saved"], ["Apple", "Log Out Dhruv…"], ["Apple", "Shut Down…"],
+                     // Review of 7973fde: a deny-list missed these; Product > Run builds and runs the owner's code.
+                     ["Product", "Run"], ["Product", "Build"], ["Product", "Test"], ["Product", "Profile"], ["Product", "Analyze"],
+                     ["Source Control", "Commit…"], ["Source Control", "Push…"], ["Source Control", "Pull…"], ["Source Control", "Stash Changes…"],
+                     ["Message", "Mark", "As Read"], ["Message", "Flag"], ["Message", "Redirect"], ["Image", "Rotate Left"], ["Tools", "Crop"],
+                     ["Edit", "Copy"], ["Product", "Scheme", "Clicky"], ["Finder", "Settings…"],
+                     // An allowed menu still never moves the owner's windows or closes anything.
+                     ["Window", "Move Window to Left Side of Screen"], ["Window", "Close All"]] {
             #expect(refused(path), "\(path)")
         }
         #expect(AgentLoop.readOnlyRefusal(["verb": "menu"], focusedField: { nil }) != nil, "a menu press with no path cannot be judged")
         #expect(AgentLoop.readOnlyRefusal(["verb": "menu", "path": [] as [String]], focusedField: { nil }) != nil)
+        #expect(AgentLoop.reachingWord("Push to origin") == "push")
     }
 
     /// Generality suite 2026-10-06: a task asked from the desktop started blind
