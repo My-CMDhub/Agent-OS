@@ -724,7 +724,14 @@ struct RealtimeScreenVerbsTests {
         #expect(pressed["title"] as? String == "Beta settings row")
         #expect(pressed["role"] as? String == "AXGroup")
         #expect((pressed["nearPoint"] as? [String: Double])?["y"] == 712)
-        if case .failure(let refusal) = line(general) { #expect(refusal.error == "notPressable") } else { Issue.record("pressed a bare label") }
+        // Generality suite 2026-10-06 (notPressable x8): a bare label is SELECTED, never clicked —
+        // the harness walks up to the row whose selection is settable, or refuses noSelectableAncestor.
+        let selected = object(try line(general).get())
+        #expect(selected["verb"] as? String == "select")
+        #expect(selected["title"] as? String == "General")
+        #expect(selected["role"] as? String == general.role)
+        #expect(selected["requireAtPoint"] as? Bool == true)
+        #expect(selected["nearPoint"] != nil)
         // Pointing at it needs no action at all.
         let point = RealtimeOpenAppTool.harnessRequestLine(
             for: RealtimeToolCall(callID: "q", name: "point_at", appName: "Cursor", elementName: "General"),

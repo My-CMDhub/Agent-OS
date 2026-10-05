@@ -532,7 +532,9 @@ enum HarnessPolicy {
         }
         if raw.requireAtPoint == true {
             // type_text aims like press_element: the named field must be the one at the point.
-            guard verb == .press || verb == .type || verb == .click else { return .failure(.invalidField(field: "requireAtPoint", value: "true")) }
+            guard verb == .press || verb == .type || verb == .click || verb == .select else {
+                return .failure(.invalidField(field: "requireAtPoint", value: "true"))
+            }
             guard raw.nearPoint != nil else { return .failure(.missingField("nearPoint")) }
         }
 
@@ -2942,6 +2944,10 @@ final class HarnessServer {
         guard performedOK else {
             response["ok"] = false
             response["error"] = "performFailed"
+            if (response["performed"] as? [String: Any])?["status"] as? String == "noSelectableAncestor" {
+                response["message"] = "it publishes no press and is not an item in a list that can be selected; nothing was done. "
+                    + "Press the control that holds it, or point at it."
+            }
             audit(request, dryRun: dryRun, kernel: described.decision, outcome: "performFailed", startedAt: startedAt)
             return response
         }

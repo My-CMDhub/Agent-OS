@@ -500,8 +500,14 @@ nonisolated enum RealtimeOpenAppTool {
             // click at the visible centre (hands design item 1). A label publishes
             // no press: its pressable ancestor, which holds the point.
             let pressed = target.clickTarget
+            // Generality suite 2026-10-06 (notPressable x8): a list row or its label publishes no
+            // press — every app's primary navigation is a list. It is SELECTED (the harness's
+            // `select`: the container's AXSelectedRows, then the row's AXSelected, walking up from
+            // the name), or refused noSelectableAncestor; never clicked, which the kernel would ask about.
             if isPress, pressed == nil {
-                return refuse("notPressable", "\(target.described) publishes no press and sits in nothing that does; nothing was pressed. Point at it instead.")
+                request = ["verb": "select", "title": target.name, "role": target.role, "nearPoint": nearPoint, "requireAtPoint": true,
+                           "expectApp": expectApp ?? appName]
+                break
             }
             let throughAncestor = pressed.map { $0.name != target.name || $0.frame != target.frame } ?? false
             request = isPress
