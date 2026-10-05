@@ -4902,6 +4902,28 @@ final class HarnessServer {
 
     // MARK: Audit
 
+    /// An accessibility close that bypasses the harness (a probe's or the runner's
+    /// own cleanup) still leaves an audit line: which tool, which window number —
+    /// or which app, for a tab — and why. 2026-10-06: the only witness to four such
+    /// closes was Chrome's own AppKit log.
+    nonisolated static func directCloseAuditLine(tool: String, app: String?, windowNumber: Int?, why: String, closed: Bool,
+                                                 at date: Date = Date()) -> String {
+        HarnessPolicy.auditLine(at: date, id: "axClose-" + String(UUID().uuidString.prefix(8)), verb: "axClose",
+                                target: windowNumber.map { "window \($0)" } ?? "tab", app: app, session: sessionIdentifier,
+                                dryRun: false, confirmed: false, kernel: "bypassesHarness", outcome: closed ? "closed" : "notClosed",
+                                milliseconds: 0, phases: ["tool": tool, "why": why, "windowNumber": windowNumber ?? NSNull()])
+    }
+
+    /// Writes it to harness-audit.log and the day's mirror: one O_APPEND write each.
+    /// ponytail: no rotation or mirror cap here (a handful of lines per run); the next harness request rotates.
+    nonisolated static func auditDirectClose(tool: String, processIdentifier: pid_t, windowNumber: Int?, why: String, closed: Bool) {
+        let date = Date()
+        let app = NSRunningApplication(processIdentifier: processIdentifier)?.bundleIdentifier
+        let data = Data((directCloseAuditLine(tool: tool, app: app, windowNumber: windowNumber, why: why, closed: closed, at: date) + "\n").utf8)
+        _ = append(data, to: auditLogURL)
+        _ = append(data, to: auditMirrorURL(for: date))
+    }
+
     private func audit(
         _ request: HarnessRequest,
         dryRun: Bool,

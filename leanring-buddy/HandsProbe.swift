@@ -434,8 +434,11 @@ nonisolated enum HandsProbe {
               let button, CFGetTypeID(button) == AXUIElementGetTypeID() else {
             return ["closed": false, "error": "the probe window publishes no close button; it was left open"]
         }
+        let number = ScenarioRunnerAX.windowNumber(of: window, processIdentifier: processIdentifier)
         let press = AccessibilityActionPerformer.perform(kAXPressAction, on: button as! AXUIElement)
         let gone = HarnessHands.waitUntil(seconds: closeDeadlineSeconds) { !present() }
+        HarnessServer.auditDirectClose(tool: "HandsProbe.close", processIdentifier: processIdentifier, windowNumber: number,
+                                       why: "hands probe cleanup: its own window", closed: gone)
         return ["closed": gone, "axErrorRawValue": Int(press.error.rawValue),
                 "note": gone ? "only the probe's own window was closed" : "the probe window is still open; nothing else was tried"]
     }

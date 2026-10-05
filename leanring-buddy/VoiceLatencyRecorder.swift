@@ -48,6 +48,10 @@ nonisolated enum MeasurementLogFile {
     /// `directory`: a test's own, so it never writes into the owner's logs.
     static func appendJSONLine(_ object: [String: Any], toFileNamed fileName: String, rotatingAtBytes: Int? = nil,
                                in directory: URL = directoryURL) {
+        var object = object
+        // Wall-clock beside uptime: the 2026-10-06 Chrome investigation had to map
+        // agent-loop / voice-decisions / hotkey-events lines by wall = uptime - 2970.6 s.
+        if object["wall"] == nil { object["wall"] = HarnessPolicy.auditTimestampFormatter.string(from: Date()) }
         guard let line = jsonLine(object) else {
             print("⚠️ MeasurementLogFile: a \(fileName) line was not valid JSON and was dropped")
             return

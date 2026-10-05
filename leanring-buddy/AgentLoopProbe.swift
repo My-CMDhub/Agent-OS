@@ -355,6 +355,10 @@ enum AgentLoopProbe {
         let error = AXUIElementPerformAction(button, kAXPressAction as CFString)
         // 2026-10-05: one closed tab still answered at 0.8 s and was gone afterwards; wait up to 3 s.
         for _ in 0..<15 where string(tab, kAXRoleAttribute) != nil { Thread.sleep(forTimeInterval: 0.2) }
+        var processIdentifier: pid_t = 0
+        AXUIElementGetPid(tab, &processIdentifier)
+        HarnessServer.auditDirectClose(tool: "AgentLoopProbe.closeTab", processIdentifier: processIdentifier, windowNumber: nil,
+                                       why: "agent goal run cleanup: a tab the task opened", closed: string(tab, kAXRoleAttribute) == nil)
         return ["closed": string(tab, kAXRoleAttribute) == nil, "pressError": error.rawValue, "titleHadLinkedIn": title.lowercased().contains("linkedin")]
     }
 

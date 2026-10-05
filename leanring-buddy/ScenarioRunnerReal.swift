@@ -264,7 +264,10 @@ nonisolated enum ScenarioRunnerReal {
         }) else { return false }
         guard let close = tab.flattenedDescendants().first(where: { $0.role == "AXButton" && ($0.elementDescription?.raw.hasPrefix("Close") ?? false) }),
               let element = close.accessibilityElement else { return false }
-        return AccessibilityActionPerformer.perform(kAXPressAction, on: element).error == .success
+        let pressed = AccessibilityActionPerformer.perform(kAXPressAction, on: element).error == .success
+        HarnessServer.auditDirectClose(tool: "ScenarioRunnerReal.closeEditorTab", processIdentifier: window.processIdentifier, windowNumber: nil,
+                                       why: "scenario cleanup: an editor tab the scenario opened", closed: pressed)
+        return pressed
     }
 
     /// Brings back the tab that was active before (a tab the owner already had, now hidden behind the scenario's).
@@ -289,8 +292,12 @@ nonisolated enum ScenarioRunnerReal {
         guard let button = attribute(window.element, kAXCloseButtonAttribute), CFGetTypeID(button) == AXUIElementGetTypeID() else {
             return ["closed": false, "error": "no close button"]
         }
+        let number = ScenarioRunnerAX.windowNumber(of: window.element, processIdentifier: window.processIdentifier)
         let press = AccessibilityActionPerformer.perform(kAXPressAction, on: button as! AXUIElement)
-        return ["closed": HarnessHands.waitUntil(seconds: 5) { !isPresent(window) }, "axErrorRawValue": Int(press.error.rawValue)]
+        let closed = HarnessHands.waitUntil(seconds: 5) { !isPresent(window) }
+        HarnessServer.auditDirectClose(tool: "ScenarioRunnerReal.closeRunWindow", processIdentifier: window.processIdentifier, windowNumber: number,
+                                       why: "scenario cleanup: the run's own Cursor window", closed: closed)
+        return ["closed": closed, "axErrorRawValue": Int(press.error.rawValue)]
     }
 
     // MARK: Chrome

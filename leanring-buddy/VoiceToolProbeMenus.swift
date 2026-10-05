@@ -220,9 +220,13 @@ extension VoiceToolProbe {
     }
 
     /// The same, with each title — for `ownerWindowCheck`'s record, which keeps only its shape.
-    static func windowServerSurfaces(bundleIdentifier: String, onScreenOnly: Bool = false) -> [WindowServerSurface]? {
-        guard let processIdentifier = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first?.processIdentifier,
-              let windows = CGWindowListCopyWindowInfo(onScreenOnly ? [.optionOnScreenOnly, .excludeDesktopElements] : [.optionAll, .excludeDesktopElements],
+    nonisolated static func windowServerSurfaces(bundleIdentifier: String, onScreenOnly: Bool = false) -> [WindowServerSurface]? {
+        guard let processIdentifier = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first?.processIdentifier else { return nil }
+        return windowServerSurfaces(processIdentifier: processIdentifier, onScreenOnly: onScreenOnly)
+    }
+
+    nonisolated static func windowServerSurfaces(processIdentifier: pid_t, onScreenOnly: Bool = false) -> [WindowServerSurface]? {
+        guard let windows = CGWindowListCopyWindowInfo(onScreenOnly ? [.optionOnScreenOnly, .excludeDesktopElements] : [.optionAll, .excludeDesktopElements],
                                                        kCGNullWindowID) as? [[String: Any]] else { return nil }
         return windows.compactMap { window in
             guard (window[kCGWindowOwnerPID as String] as? Int).map(Int32.init) == processIdentifier,

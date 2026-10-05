@@ -187,7 +187,22 @@ nonisolated enum ScenarioRunnerAX {
 
     /// `sweepLateWindows` for a run's own Chrome window, by the nonce in its title.
     static func sweepLateRunnerWindows(nonce: String) -> [String: Any] {
-        sweepLateWindows(find: { runnerWindows(nonce: nonce) }, close: { close($0) })
+        sweepLateWindows(find: { runnerWindows(nonce: nonce) }, close: { close($0, why: "startFailed: a late window carrying n=\(nonce)") })
+    }
+
+    /// An AX window's window-server number, by frame (both top-left): exactly one
+    /// surface within 2 pt, or nil — never "nearest".
+    static func windowNumber(matching frame: CGRect, in surfaces: [WindowServerSurface]) -> Int? {
+        let hits = surfaces.filter {
+            abs($0.bounds.minX - frame.minX) <= 2 && abs($0.bounds.minY - frame.minY) <= 2
+                && abs($0.bounds.width - frame.width) <= 2 && abs($0.bounds.height - frame.height) <= 2
+        }
+        return hits.count == 1 ? hits[0].number : nil
+    }
+
+    static func windowNumber(of window: AXUIElement, processIdentifier: pid_t) -> Int? {
+        guard let frame = windowFrame(window) else { return nil }
+        return windowNumber(matching: frame, in: VoiceToolProbe.windowServerSurfaces(processIdentifier: processIdentifier) ?? [])
     }
 
     /// Chrome is frontmost and its focused window IS ours.
@@ -196,8 +211,8 @@ nonisolated enum ScenarioRunnerAX {
         return read.frontmost && read.window.map { CFEqual($0, window.element) } == true
     }
 
-    /// Our window's own close button, and nothing else.
-    static func close(_ window: ScenarioWindow) -> [String: Any] {
+    /// Our window's own close button, and nothing else. Audited (`why`), since it bypasses the harness.
+    static func close(_ window: ScenarioWindow, why: String? = nil) -> [String: Any] {
         func present() -> Bool { chromeWindows().contains { CFEqual($0.window, window.element) } }
         // `kAXWindows` is the active Space only: when the Space changed under the run
         // (R7, 08-09-43Z) the window was reported "already gone" and left open.
@@ -211,9 +226,12 @@ nonisolated enum ScenarioRunnerAX {
               let button, CFGetTypeID(button) == AXUIElementGetTypeID() else {
             return ["closed": false, "error": "the runner's window publishes no close button; it was left open"]
         }
+        let number = windowNumber(of: window.element, processIdentifier: window.processIdentifier)
         let press = AccessibilityActionPerformer.perform(kAXPressAction, on: button as! AXUIElement)
         let gone = HarnessHands.waitUntil(seconds: closeDeadlineSeconds) { !present() }
-        return ["closed": gone, "axErrorRawValue": Int(press.error.rawValue)]
+        HarnessServer.auditDirectClose(tool: "ScenarioRunnerAX.close", processIdentifier: window.processIdentifier, windowNumber: number,
+                                       why: why ?? "run cleanup: its own window, n=\(window.nonce)", closed: gone)
+        return ["closed": gone, "axErrorRawValue": Int(press.error.rawValue), "windowNumber": number ?? NSNull()]
     }
 
     // MARK: Reads
