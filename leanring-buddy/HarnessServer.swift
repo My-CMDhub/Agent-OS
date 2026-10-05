@@ -358,7 +358,9 @@ enum HarnessPolicy {
                               linked: (AccessibilityElementNode) -> Bool) -> AccessibilityElementNode? {
         guard chain.count >= 2, let window = chain.first else { return nil }
         func inputs(under root: AccessibilityElementNode) -> [AccessibilityElementNode] {
-            (AccessibilityElementNode.textInputRoles.contains(root.role) ? [root] : []) + root.children.flatMap(inputs(under:))
+            // A password box is a candidate too (review of 5ceefcf): "Password:" must reach it, and the kernel
+            // refuses it — never the nearest plain field, "Password hint".
+            (AccessibilityElementNode.textInputRoles.contains(root.role) || root.isSecure ? [root] : []) + root.children.flatMap(inputs(under:))
         }
         let fields = inputs(under: window)
         let tied = fields.filter(linked)
@@ -2676,6 +2678,8 @@ final class HarnessServer {
            let field = HarnessPolicy.fieldLabelled(by: namedNode, chain: chain, name: request.title ?? "",
                                                    linked: HarnessPolicy.liveLabelLink(namedNode)) {
             resolvedNode = field
+            // The label's own words are judged by the kernel too ("Type DELETE to confirm").
+            labelTitle = namedNode.displayName?.raw ?? labelTitle
             response["retargetedFrom"] = Self.summarise(namedNode)
         }
         response["resolved"] = Self.summarise(resolvedNode)

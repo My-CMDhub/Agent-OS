@@ -57,6 +57,13 @@ struct LabelledFieldTests {
         let under = node("AXTextField", nil, frame: CGRect(x: 100, y: 166, width: 100, height: 24))
         let tied = node("AXGroup", nil, frame: CGRect(x: 0, y: 100, width: 500, height: 200), children: [label, left, under])
         #expect(field(label, [window, tied, label]) == nil)
+        // Review of 5ceefcf: "Password:" is the secure field's label, never the plain hint below it
+        // (the kernel then refuses the secure field).
+        let passwordLabel = node("AXStaticText", "Password:", frame: CGRect(x: 100, y: 300, width: 70, height: 20))
+        let secure = node("AXSecureTextField", nil, frame: CGRect(x: 180, y: 298, width: 200, height: 24))
+        let hint = node("AXTextField", nil, frame: CGRect(x: 100, y: 260, width: 200, height: 24))
+        let login = node("AXGroup", nil, frame: CGRect(x: 0, y: 200, width: 500, height: 200), children: [passwordLabel, secure, hint])
+        #expect(field(passwordLabel, [window, login, passwordLabel]) == secure.frameInAppKitCoordinates)
         // A label with no field anywhere: nothing.
         let lone = node("AXStaticText", "Hello", frame: CGRect(x: 10, y: 10, width: 40, height: 20))
         let empty = node("AXGroup", nil, frame: CGRect(x: 0, y: 0, width: 100, height: 100), children: [lone])
