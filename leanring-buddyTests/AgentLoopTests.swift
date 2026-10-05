@@ -28,7 +28,14 @@ private final class Script {
     var timeouts: [TimeInterval] = []
     var remainingAtExecute: [TimeInterval] = []
     var checksSite: [Bool] = []
+    var narrations: [String] = []
+    var observations = 0
     init(_ replies: [[String: Any]]) { self.replies = replies }
+}
+
+/// One reply carrying several tool calls, in order.
+private func toolUses(_ calls: [(String, [String: Any])]) -> [String: Any] {
+    ["stop_reason": "tool_use", "content": calls.map { ["type": "tool_use", "id": UUID().uuidString, "name": $0.0, "input": $0.1] as [String: Any] }]
 }
 
 private func toolUse(_ name: String, _ input: [String: Any] = [:], id: String = UUID().uuidString) -> [String: Any] {
@@ -56,7 +63,7 @@ private func dispatch(ok: Bool, error: String? = nil) -> RealtimeToolDispatch {
 }
 
 @MainActor
-private func loop(_ script: Script, image: Bool = false,
+private func loop(_ script: Script, image: Bool = false, front: (() -> String?)? = nil,
                   execute: ((RealtimeToolCall) async -> RealtimeToolDispatch)? = nil) -> AgentLoop {
     AgentLoop(dependencies: AgentLoop.Dependencies(
         model: { body, timeout in
@@ -66,8 +73,12 @@ private func loop(_ script: Script, image: Bool = false,
             let reply = script.replies.count > 1 ? script.replies.removeFirst() : script.replies[0]
             return AgentModelReply(json: reply, model: "fake", milliseconds: 7)
         },
-        observe: { AgentObservation(jpeg: image ? Data([0xFF, 0xD8, 0xFF]) : nil, frame: nil, look: image ? "attached" : "noAppInFront",
-                                    lines: ["system context, not the owner's words: the app in front is \"Chrome\"."]) },
+        observe: {
+            script.observations += 1
+            return AgentObservation(jpeg: image ? Data([0xFF, 0xD8, 0xFF]) : nil, frame: nil, look: image ? "attached" : "noAppInFront",
+                                    lines: ["system context, not the owner's words: the app in front is \"Chrome\"."],
+                                    bundleIdentifier: front?())
+        },
         execute: { call, checksSite, _, remaining in
             script.executed.append(call)
             script.checksSite.append(checksSite)
@@ -77,8 +88,10 @@ private func loop(_ script: Script, image: Bool = false,
         },
         readPage: { ["ok": true, "text": "page"] },
         onStep: { script.steps.append($0) },
+        narrate: { script.narrations.append($0) },
         trace: { script.traces.append($0) },
-        uptime: { script.now }
+        uptime: { script.now },
+        frontBundle: { front?() }
     ))
 }
 
@@ -93,10 +106,9 @@ struct AgentLoopTests {
         #expect(script.traces.map { $0["kind"] as? String } == ["step", "step", "end"])
         // The card's footer: step 1/15, step 2/15, then cleared.
         #expect(script.steps == [ConfirmationStep(current: 1, total: 15), ConfirmationStep(current: 2, total: 15), nil])
-        // Thinking blocks never go back; one call per reply is asked for.
+        // Thinking blocks never go back.
         let assistant = (script.bodies[1]["messages"] as? [[String: Any]])?[1]["content"] as? [[String: Any]]
         #expect(assistant?.contains { $0["type"] as? String == "thinking" } == false)
-        #expect((script.bodies[0]["tool_choice"] as? [String: Any])?["disable_parallel_tool_use"] as? Bool == true)
     }
 
     @MainActor @Test func stopsAtTheStepCap() async {
@@ -632,8 +644,8 @@ struct AgentLoopTests {
         #expect(first["web_fetch"]?["type"] as? String == "web_fetch_20250910")
         #expect(first["web_fetch"]?["max_uses"] as? Int == 5)
         #expect(first["web_fetch"]?["max_content_tokens"] as? Int != nil)
-        // dynamic filtering (the _20260209 tools) runs code: a 400 beside disable_parallel_tool_use, measured 2026-10-05.
-        #expect((script.bodies[0]["tool_choice"] as? [String: Any])?["disable_parallel_tool_use"] as? Bool == true)
+        // The basic variants: dynamic filtering (the _20260209 tools) runs code, a 400 beside disable_parallel_tool_use (2026-10-05).
+        #expect(first["web_search"]?["type"] as? String != "web_search_20260209")
         #expect(web(script.bodies[1])["web_search"]?["max_uses"] as? Int == 1)
         #expect(web(script.bodies[2])["web_search"] == nil)
         #expect(web(script.bodies[2])["web_fetch"]?["max_uses"] as? Int == 4)
@@ -709,5 +721,139 @@ private final class HarnessScriptedAnswers: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         lines.append(line)
         return queue.count > 1 ? queue.removeFirst() : queue[0]
+    }
+}
+
+// MARK: - Several actions per model call (2026-10-05 speed brief)
+
+/// Model calls are what make the loop slow (R2: 6 Claude calls for "open a new
+/// terminal, then close it", ~2.4 s each). A reply may carry up to four tool
+/// calls for an obvious sequence; each still runs through the same execute
+/// path, and the batch stops at the first thing that needs a fresh look.
+struct AgentLoopBatchTests {
+
+    @MainActor @Test func aReplyRunsUpToFourActionsInOrderWithOneLook() async {
+        let script = Script([toolUses([("press_menu", ["app": "Cursor", "path": ["Terminal", "New Terminal"]]),
+                                       ("press_element", ["name": "Kill Terminal"])]),
+                             toolUse("done", ["summary": "I opened a new terminal and closed it.", "evidence": [1]])])
+        let outcome = await loop(script).run(goal: "open a new terminal, then close it")
+        #expect(outcome == .done(summary: "I opened a new terminal and closed it."))
+        #expect(script.executed.map(\.name) == ["press_menu", "press_element"])
+        #expect(script.bodies.count == 2, "two model calls, not three")
+        #expect(script.observations == 2, "one look per model call: only the batch's last action is followed by one")
+        // Both results go back, in call order, before the next observation.
+        let results = ((script.bodies[1]["messages"] as? [[String: Any]])?.last?["content"] as? [[String: Any]] ?? [])
+            .filter { $0["type"] as? String == "tool_result" }
+        let firstIDs = (((script.bodies[1]["messages"] as? [[String: Any]])?[1]["content"] as? [[String: Any]]) ?? [])
+            .compactMap { $0["id"] as? String }
+        #expect(results.compactMap { $0["tool_use_id"] as? String } == firstIDs)
+        #expect(firstIDs.count == 2)
+        // One "step" line per model call; the second action is an "action" line of the same step, without model ms.
+        #expect(script.traces.map { $0["kind"] as? String } == ["step", "action", "step", "end"])
+        #expect(script.traces[1]["step"] as? Int == 1 && script.traces[1]["modelMs"] == nil)
+        // Several per reply are allowed now.
+        #expect((script.bodies[0]["tool_choice"] as? [String: Any])?["disable_parallel_tool_use"] == nil)
+        #expect(AgentLoop.systemPrompt.contains("up to \(AgentLoop.maximumBatch) tool calls"))
+    }
+
+    @MainActor @Test func aBatchStopsAtTheFirstRefusalAndSaysWhatWasSkipped() async {
+        let script = Script([toolUses([("press_element", ["name": "Search"]), ("type_text", ["text": "farza"]),
+                                       ("press_element", ["name": "Go"])]),
+                             toolUse("ask_owner", ["question": "Which?"])])
+        var index = 0
+        let outcome = await loop(script, execute: { _ in
+            defer { index += 1 }
+            return index == 1 ? dispatch(ok: false, error: "elementNotFound") : dispatch(ok: true)
+        }).run(goal: "search for farza")
+        #expect(outcome == .askOwner(question: "Which?"))
+        #expect(script.executed.map(\.name) == ["press_element", "type_text"])
+        let results = ((script.bodies[1]["messages"] as? [[String: Any]])?.last?["content"] as? [[String: Any]] ?? [])
+            .filter { $0["type"] as? String == "tool_result" }
+        #expect(results.count == 3)
+        guard results.count == 3 else { return }
+        #expect((results[2]["content"] as? String)?.contains("\"error\":\"skipped\"") == true)
+        #expect((results[2]["content"] as? String)?.contains("type_text") == true, "the skip names the step that stopped the batch")
+    }
+
+    @MainActor @Test func aBatchStopsAfterACardAndWhenTheAppInFrontChangesUnexpectedly() async {
+        // A card: the owner's attention moment; the rest needs a fresh look.
+        let carded = Script([toolUses([("press_element", ["name": "Delete"]), ("press_element", ["name": "OK"])]),
+                             toolUse("ask_owner", ["question": "Next?"])])
+        _ = await loop(carded, execute: { _ in
+            RealtimeToolDispatch(result: ["ok": true], harnessMilliseconds: 5, waitedForConfirmation: true, harnessResponse: ["ok": true])
+        }).run(goal: "delete it")
+        #expect(carded.executed.map(\.name) == ["press_element"])
+
+        // The front app moved under a press: stop. An open_app moving it is expected.
+        var front = "com.todesktop.cursor"
+        let moved = Script([toolUses([("press_element", ["name": "Docs"]), ("scroll", ["direction": "down"])]),
+                            toolUse("ask_owner", ["question": "Next?"])])
+        _ = await loop(moved, front: { front }, execute: { _ in front = "com.google.Chrome"; return dispatch(ok: true) }).run(goal: "x")
+        #expect(moved.executed.map(\.name) == ["press_element"])
+
+        front = "com.todesktop.cursor"
+        let opened = Script([toolUses([("open_app", ["name": "Chrome"]), ("scroll", ["direction": "down"])]),
+                             toolUse("ask_owner", ["question": "Next?"])])
+        _ = await loop(opened, front: { front }, execute: { call in
+            if call.name == "open_app" { front = "com.google.Chrome" }
+            return dispatch(ok: true)
+        }).run(goal: "open chrome and scroll")
+        #expect(opened.executed.map(\.name) == ["open_app", "scroll"])
+    }
+
+    @MainActor @Test func onlyFourRunAndPositionsAreForTheFirstActionOnly() async {
+        let five = Script([toolUses(Array(repeating: ("scroll", ["direction": "down"]), count: 5)),
+                           toolUse("ask_owner", ["question": "Next?"])])
+        _ = await loop(five).run(goal: "scroll down")
+        #expect(five.executed.count == AgentLoop.maximumBatch)
+
+        // A position is a point in THIS step's screenshot; after an action it may point at something else.
+        let stale = Script([toolUses([("press_element", ["x": 0.5, "y": 0.2]), ("press_element", ["x": 0.5, "y": 0.6])]),
+                            toolUse("ask_owner", ["question": "Next?"])])
+        _ = await loop(stale).run(goal: "press both")
+        #expect(stale.executed.count == 1)
+        let results = ((stale.bodies[1]["messages"] as? [[String: Any]])?.last?["content"] as? [[String: Any]] ?? [])
+            .filter { $0["type"] as? String == "tool_result" }
+        #expect((results.last?["content"] as? String)?.contains("staleScreenPosition") == true)
+    }
+
+    /// The second done of R2 (980FBC67, steps 5 and 6): receipts backed the
+    /// claim, but "closed" wanted the close tool and the terminal was closed by a
+    /// press. A done in the batch after acting tools ends the task in the same call.
+    @MainActor @Test func aDoneInTheSameReplyEndsTheTaskWhenItsReceiptsBackIt() async {
+        let script = Script([toolUses([("press_menu", ["app": "Cursor", "path": ["Terminal", "New Terminal"]]),
+                                       ("press_element", ["name": "Kill Terminal"]),
+                                       ("done", ["summary": "I opened a new terminal and closed it.", "evidence": [1]])])])
+        let outcome = await loop(script).run(goal: "open a new terminal, then close it")
+        #expect(outcome == .done(summary: "I opened a new terminal and closed it."))
+        #expect(script.bodies.count == 1)
+        // Closing by a press is a close; a done citing its own step (nothing ran there) is no false citation.
+        let receipts = [AgentLoop.Receipt(step: 1, toolName: "press_menu", ok: true, error: nil),
+                        AgentLoop.Receipt(step: 2, toolName: "press_element", ok: true, error: nil)]
+        #expect(AgentLoop.doneChallenge(summary: "I opened a new terminal and closed it.", evidence: [1, 2, 3], receipts: receipts, currentStep: 3) == nil)
+        #expect(AgentLoop.doneChallenge(summary: "I closed it.", evidence: [2, 4], receipts: receipts, currentStep: 3) != nil)
+    }
+
+    /// A summary written before a read's result came back cannot report it.
+    @MainActor @Test func aDoneAfterAReadInTheSameReplyIsNotAccepted() async {
+        let script = Script([toolUses([("read_page", [:]), ("done", ["summary": "The page lists three plans.", "evidence": [1]])]),
+                             toolUse("done", ["summary": "The page lists two plans.", "evidence": [1]])])
+        let outcome = await loop(script).run(goal: "what plans are there")
+        #expect(outcome == .done(summary: "The page lists two plans."))
+        #expect(script.bodies.count == 2)
+        let results = ((script.bodies[1]["messages"] as? [[String: Any]])?.last?["content"] as? [[String: Any]] ?? [])
+            .filter { $0["type"] as? String == "tool_result" }
+        #expect((results.last?["content"] as? String)?.contains("doneBeforeReading") == true)
+    }
+
+    /// The final line waited behind the last progress line, spoken just before
+    /// done. Progress is said only once the next reply shows the task goes on.
+    @MainActor @Test func progressIsSpokenOnlyOnceTheTaskGoesOn() async {
+        let script = Script([toolUse("press_element", ["name": "Docs"]), toolUse("scroll", ["direction": "down"]),
+                             toolUse("done", ["summary": "I pressed Docs and scrolled.", "evidence": [1, 2]])])
+        script.secondsPerModelCall = 5
+        _ = await loop(script).run(goal: "open the docs and scroll")
+        #expect(script.narrations.count == 1, "the press is said when the scroll comes; the scroll is never said, done follows it")
+        #expect(script.narrations.first?.contains("pressed") == true)
     }
 }
