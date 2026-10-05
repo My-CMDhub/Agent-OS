@@ -93,7 +93,7 @@ struct AgentLoopGeminiTests {
         ]
         let request = AgentLoopGemini.request(fromAnthropic: body, model: "gemini-2.5-pro")
         let contents = request["contents"] as? [[String: Any]] ?? []
-        #expect(contents.map { $0["role"] as? String } == ["user", "model", "user"])
+        #expect(contents.map { $0["role"] as? String } == ["user", "model", "user", "user"])
         let first = contents[0]["parts"] as? [[String: Any]] ?? []
         #expect((first[1]["inlineData"] as? [String: Any])?["data"] as? String == "QUJD")
         let model = contents[1]["parts"] as? [[String: Any]] ?? []
@@ -106,9 +106,32 @@ struct AgentLoopGeminiTests {
         #expect(second?["name"] as? String == "read_page")
         #expect((second?["response"] as? [String: Any])?["error"] as? String == "{\"ok\":false}")
         let functions = ((request["tools"] as? [[String: Any]])?.first?["functionDeclarations"] as? [[String: Any]]) ?? []
+        #expect(results.count == 2, "the function responses travel alone")
+        #expect((contents.dropFirst(3).first?["parts"] as? [[String: Any]])?.first?["text"] as? String == "Step 2")
         #expect(functions.map { $0["name"] as? String } == ["scroll"])
         #expect((((request["systemInstruction"] as? [String: Any])?["parts"] as? [[String: Any]])?.first?["text"] as? String) == "You are the task runner.")
         #expect((request["generationConfig"] as? [String: Any])?["thinkingConfig"] == nil, "2.5 Pro keeps its own thinking")
+    }
+
+    /// Live 2026-10-05: gemini-3.1-pro-preview answered an empty text, no call, to every turn holding
+    /// function responses AND the step's screenshot (7-step run: steps 2, 4, 6 all `noToolCall`);
+    /// repro by curl 0/2 mixed, 2/2 with the responses in a turn of their own. Flash took both.
+    @Test func functionResponsesAreATurnOfTheirOwnBeforeTheObservation() {
+        let body: [String: Any] = ["messages": [
+            ["role": "user", "content": [["type": "text", "text": "goal"]]],
+            ["role": "assistant", "content": [["type": "tool_use", "id": "g1", "name": "scroll", "input": [:]]]],
+            ["role": "user", "content": [["type": "tool_result", "tool_use_id": "g1", "content": "{}"],
+                                         ["type": "image", "source": ["media_type": "image/jpeg", "data": "QUJD"]],
+                                         ["type": "text", "text": "Step 2"]]],
+            ["role": "assistant", "content": [["type": "text", "text": "(no reply)"]]],
+            ["role": "user", "content": [["type": "text", "text": "Answer with exactly one tool call."], ["type": "text", "text": "Step 3"]]]]]
+        let contents = AgentLoopGemini.request(fromAnthropic: body, model: "gemini-3.1-pro-preview")["contents"] as? [[String: Any]] ?? []
+        #expect(contents.map { $0["role"] as? String } == ["user", "model", "user", "user", "model", "user"])
+        // Never index past the end: a trap here hangs the whole test host (2026-10-05, every run for 30 min).
+        func parts(_ index: Int) -> [[String: Any]] { contents.indices.contains(index) ? contents[index]["parts"] as? [[String: Any]] ?? [] : [] }
+        #expect(parts(2).count == 1 && parts(2).first?["functionResponse"] != nil)
+        #expect(parts(3).count == 2 && parts(3).first?["inlineData"] != nil && parts(3).last?["text"] as? String == "Step 2")
+        #expect(parts(5).count == 2, "a turn with no responses is not split")
     }
 
     @Test func aResponseTranslatesCallsThoughtsRefusalsAndCuts() {

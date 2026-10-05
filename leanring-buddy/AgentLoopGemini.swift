@@ -85,7 +85,13 @@ nonisolated enum AgentLoopGemini {
                 if let signature = block["thoughtSignature"] { part["thoughtSignature"] = signature }
                 parts.append(part)
             }
-            if !parts.isEmpty { contents.append(["role": message["role"] as? String == "assistant" ? "model" : "user", "parts": parts]) }
+            // Function responses go in a turn of their own, before the rest: live 2026-10-05,
+            // gemini-3.1-pro-preview answered an empty text, no call, to every turn holding
+            // responses AND the step's screenshot (repro 0/2 mixed, 2/2 split; Flash took both).
+            let role = message["role"] as? String == "assistant" ? "model" : "user"
+            let responses = parts.filter { $0["functionResponse"] != nil }
+            let groups = role == "user" && !responses.isEmpty ? [responses, parts.filter { $0["functionResponse"] == nil }] : [parts]
+            for group in groups where !group.isEmpty { contents.append(["role": role, "parts": group]) }
         }
         let system = (body["system"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined(separator: "\n") ?? ""
         let functions = (body["tools"] as? [[String: Any]] ?? []).filter { $0["type"] == nil }.map { tool -> [String: Any] in
