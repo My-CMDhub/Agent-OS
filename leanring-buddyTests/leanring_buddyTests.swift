@@ -3547,10 +3547,15 @@ private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirma
     let moved = ScreenPlacement.after(placed, origin: CGPoint(x: 0, y: 10), nowUptime: 11)
     #expect(moved.sinceUptime == 11)
     let window = ScreenPlacement(origin: .zero, sinceUptime: 10.5)
-    #expect(ScreenPlacement.settledSeconds(row: placed, window: window, nowUptime: 12) == 1.5)
-    #expect(ScreenPlacement.settledSeconds(row: moved, window: window, nowUptime: 12) == 1)
+    let button = ScreenPlacement(origin: CGPoint(x: 300, y: 120), sinceUptime: 9)
+    #expect(ScreenPlacement.settledSeconds(row: placed, window: window, button: button, nowUptime: 12) == 1.5)
+    #expect(ScreenPlacement.settledSeconds(row: moved, window: window, button: button, nowUptime: 12) == 1)
     // A hidden window has no placement, and nothing on it is settled.
-    #expect(ScreenPlacement.settledSeconds(row: placed, window: nil, nowUptime: 12) == nil)
+    #expect(ScreenPlacement.settledSeconds(row: placed, window: nil, button: button, nowUptime: 12) == nil)
+    // Details opened: the row stayed put, the button moved down — its clock restarts.
+    let pushedDown = ScreenPlacement.after(button, origin: CGPoint(x: 300, y: 220), nowUptime: 11.9)
+    #expect(ScreenPlacement.settledSeconds(row: placed, window: window, button: pushedDown, nowUptime: 12)! < HarnessConfirmations.ApprovalInput.minimumRowSettledSeconds)
+    #expect(ScreenPlacement.settledSeconds(row: placed, window: window, button: nil, nowUptime: 12) == nil)
 }
 
 @Test func aNewTicketIsListedAfterTheOnesAlreadyShowing() throws {
@@ -3565,14 +3570,17 @@ private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirma
 }
 
 @Test func theAlwaysButtonSaysWholeAppForFocusAndLaunchAndExactlyThisOtherwise() throws {
+    // The button's words are the scope the "Always allowed" list shows; the
+    // rule's title is the question already on the card (ConfirmationCardTests).
     let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
     guard case .opened(let press) = confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false),
           case .opened(let launch) = confirmations.open(
             .init(verb: "launch", bundleIdentifier: "com.apple.Terminal", rawTarget: "Terminal"), appName: "Term\ninal", reason: "r", destructive: false) else {
         Issue.record("expected two tickets"); return
     }
-    #expect(HarnessConfirmations.alwaysButtonTitle(for: press) == "Always allow exactly this")
-    #expect(HarnessConfirmations.alwaysButtonTitle(for: launch) == #"Always allow launch for the whole app "Term\ninal""#)
+    #expect(HarnessConfirmations.alwaysButtonTitle(for: press) == "Always allow \u{00B7} exactly this")
+    #expect(HarnessConfirmations.alwaysButtonTitle(for: launch) == "Always allow \u{00B7} whole app")
+    #expect(launch.displayLines.first == #"Launch "Term\ninal"?"#)
 }
 
 @Test func aNilTargetOrTextInARuleIsNoLongerAWildcard() {

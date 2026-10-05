@@ -25,8 +25,17 @@ struct ConfirmationPromptView: View {
     private var includesAnsweredTickets: Bool { style == .panel }
 
     /// The card's sections, top to bottom. Every `CardLine.Kind` is here (a test
-    /// holds it), so no line a ticket binds can be left off the card.
-    static let cardSections: [HarnessConfirmations.CardLine.Kind] = [.verb, .preview, .place, .qualifier, .effect]
+    /// holds it), so no line a ticket binds can be left off the card. The first
+    /// group is always drawn; the second opens under Details.
+    static let alwaysVisibleSections: [HarnessConfirmations.CardLine.Kind] = [.question, .preview, .place]
+    static let detailSections: [HarnessConfirmations.CardLine.Kind] = [.qualifier, .effect]
+    static var cardSections: [HarnessConfirmations.CardLine.Kind] { alwaysVisibleSections + detailSections }
+    /// Opening Details or a long preview moves the buttons; the move is this
+    /// long and `minimumRowSettledSeconds` outlasts it (a test holds that).
+    static let expandSeconds: TimeInterval = 0.2
+    /// Tickets whose Details, or whose whole typed text, the owner opened.
+    @State private var openDetails: Set<String> = []
+    @State private var openPreviews: Set<String> = []
     /// Why the last approval pressed on a ticket did not count, by ticket id.
     /// Every reason is our own words and numbers — no app-written text.
     @State private var approvalRejections: [String: String] = [:]
@@ -96,7 +105,13 @@ struct ConfirmationPromptView: View {
     private func recordsFrame(of button: String, ticketID: String) -> some View {
         GeometryReader { proxy in
             Color.clear.onChange(of: proxy.frame(in: .global), initial: true) { _, frame in
-                placementTracker.buttonFrames[Self.buttonFrameKey(ticketID, button)] = frame
+                let key = Self.buttonFrameKey(ticketID, button)
+                placementTracker.buttonFrames[key] = frame
+                // A button that moved (Details opened, a preview expanded) starts
+                // its clock again: its recorded frame is where it is going, not
+                // where it is drawn mid-move.
+                placementTracker.buttonPlacements[key] = ScreenPlacement.after(
+                    placementTracker.buttonPlacements[key], origin: frame.origin, nowUptime: ProcessInfo.processInfo.systemUptime)
             }
         }
     }
@@ -112,7 +127,8 @@ struct ConfirmationPromptView: View {
             from: event,
             hostWindowNumber: placementTracker.hostWindow?.windowNumber,
             rowSettledSeconds: ScreenPlacement.settledSeconds(
-                row: placementTracker.rowPlacements[ticket.id], window: placementTracker.windowPlacement, nowUptime: nowUptime
+                row: placementTracker.rowPlacements[ticket.id], window: placementTracker.windowPlacement,
+                button: placementTracker.buttonPlacements[Self.buttonFrameKey(ticket.id, button)], nowUptime: nowUptime
             ),
             // Both panels host the SwiftUI tree as the window's content view, so
             // `.global` frames and this height share one space.
@@ -218,29 +234,61 @@ struct ConfirmationPromptView: View {
     // MARK: Card
 
     private static let ink = ConfirmationCardStyle.ink
-    private static let labelWidth: CGFloat = 58
+    /// Icon tile plus its gap: the lines under the question start here.
+    private static let textInset: CGFloat = 40
 
     /// One ticket on the card. Pending only (the card never shows answered rows).
+    /// Owner's layout 2026-10-05: question + countdown, where, Details, buttons.
     @ViewBuilder
     private func cardRow(_ ticket: HarnessConfirmations.Ticket, step: ConfirmationStep?, now: Date) -> some View {
-        let lines = ticket.cardLines
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(Self.cardSections, id: \.self) { kind in
-                cardSection(kind, lines.filter { $0.kind == kind }.map(\.text), ticket: ticket)
+        let texts = { (kind: HarnessConfirmations.CardLine.Kind) in ticket.cardLines.filter { $0.kind == kind }.map(\.text) }
+        let detailsOpen = openDetails.contains(ticket.id)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(Self.ink, lineWidth: 1.5)
+                    .frame(width: 28, height: 28)
+                    .overlay(Image(systemName: Self.symbol(for: ticket.verb))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Self.ink))
+                Text(texts(.question).joined(separator: " "))
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Self.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                CountdownRing(expiresAt: ticket.expiresAt)
             }
-            // The kernel's reason, as before: why it asked.
-            labelled("WHY", Text(ticket.reason).font(.system(size: 12)).foregroundStyle(Self.ink.opacity(0.62))
-                .fixedSize(horizontal: false, vertical: true))
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(texts(.preview).enumerated()), id: \.offset) { _, text in
+                    previewText(text, ticketID: ticket.id)
+                }
+                monoLines(texts(.place), size: 12, opacity: 0.72)
+                toggle(detailsOpen ? "Details \u{25B4}" : "Details \u{25BE}", id: ticket.id, in: $openDetails)
+                if detailsOpen {
+                    VStack(alignment: .leading, spacing: 6) {
+                        monoLines(texts(.qualifier), size: 11, opacity: 0.5)
+                        ForEach(Array(texts(.effect).enumerated()), id: \.offset) { _, text in
+                            Text(text).font(.system(size: 12)).foregroundStyle(Self.ink.opacity(0.85))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        // The kernel's reason: why it asked.
+                        Text(ticket.reason).font(.system(size: 12)).foregroundStyle(Self.ink.opacity(0.62))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .transition(.opacity)
+                }
+            }
+            .padding(.leading, Self.textInset)
             if let rejection = approvalRejections[ticket.id] {
                 Text(verbatim: "Not counted: \(rejection)")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Self.ink)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 if let step {
                     Text(verbatim: "Doing \u{00B7} step \(step.current)/\(step.total)")
-                        .font(.system(size: 12))
+                        .font(.system(size: 11))
                         .foregroundStyle(Self.ink.opacity(0.62))
                 }
                 Spacer(minLength: 0)
@@ -248,7 +296,7 @@ struct ConfirmationPromptView: View {
                     Text("Deny")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(Self.ink)
-                        .frame(width: 96, height: 32)
+                        .frame(width: 84, height: 30)
                         .overlay(Capsule().stroke(Self.ink.opacity(0.6), lineWidth: 1.5))
                         .contentShape(Capsule())
                 }
@@ -257,7 +305,7 @@ struct ConfirmationPromptView: View {
                     Text("Allow once")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(ConfirmationCardStyle.material)
-                        .frame(width: 108, height: 32)
+                        .frame(width: 100, height: 30)
                         .background(Capsule().fill(Self.ink))
                         .contentShape(Capsule())
                 }
@@ -265,7 +313,8 @@ struct ConfirmationPromptView: View {
                 .background(recordsFrame(of: "allowOnce", ticketID: ticket.id))
             }
             // The quieter third control, only where today's card offered it: a
-            // destructive question is Allow once and Deny only.
+            // destructive question is Allow once and Deny only. Its words are the
+            // scope the "Always allowed" list will show for the rule it saves.
             if HarnessConfirmations.offersAlwaysRule(for: ticket) {
                 HStack {
                     Spacer(minLength: 0)
@@ -274,8 +323,6 @@ struct ConfirmationPromptView: View {
                             .font(.system(size: 11))
                             .underline()
                             .foregroundStyle(Self.ink.opacity(0.62))
-                            .multilineTextAlignment(.trailing)
-                            .fixedSize(horizontal: false, vertical: true)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -283,75 +330,55 @@ struct ConfirmationPromptView: View {
                 }
             }
         }
-        .padding(22)
+        .padding(18)
         .modifier(TracksRowPlacement(ticketID: ticket.id, tracker: placementTracker))
     }
 
+    /// The typed text, never silently cut: a short head and "+N more", which
+    /// opens the whole line (`open` refused anything over 300 scalars).
     @ViewBuilder
-    private func cardSection(_ kind: HarnessConfirmations.CardLine.Kind, _ texts: [String],
-                             ticket: HarnessConfirmations.Ticket) -> some View {
-        if !texts.isEmpty {
-            switch kind {
-            case .verb:
-                HStack(alignment: .center, spacing: 12) {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .stroke(Self.ink, lineWidth: 1.5)
-                        .frame(width: 30, height: 30)
-                        .overlay(Image(systemName: Self.symbol(for: ticket.verb))
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(Self.ink))
-                    (Text("J.A.R.V.I.S. wants to ") + Text(texts.joined(separator: " ")).fontWeight(.semibold))
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(Self.ink)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 8)
-                    CountdownRing(expiresAt: ticket.expiresAt)
-                }
-            case .preview:
-                // Whole, never cut: `open` refused anything too long to show in full.
-                ForEach(Array(texts.enumerated()), id: \.offset) { _, text in
-                    Text(text)
-                        .font(.system(size: 13))
-                        .foregroundStyle(Self.ink)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            case .place:
-                labelled("WHERE", monoLines(texts, opacity: 0.8))
-            case .qualifier:
-                labelled("", monoLines(texts, opacity: 0.5))
-            case .effect:
-                labelled("EFFECT", VStack(alignment: .leading, spacing: 3) {
-                    ForEach(Array(texts.enumerated()), id: \.offset) { _, text in
-                        Text(text)
-                            .font(.system(size: 13))
-                            .foregroundStyle(Self.ink)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                })
+    private func previewText(_ text: String, ticketID: String) -> some View {
+        let preview = TypedTextPreview(text)
+        let whole = preview.hiddenCharacters == 0 || openPreviews.contains(ticketID)
+        VStack(alignment: .leading, spacing: 2) {
+            Text(whole ? text : preview.head + "\u{2026}")
+                .font(.system(size: 13))
+                .foregroundStyle(Self.ink)
+                .fixedSize(horizontal: false, vertical: true)
+            if preview.hiddenCharacters > 0 {
+                toggle(whole ? "Show less" : "+\(preview.hiddenCharacters) more", id: ticketID, in: $openPreviews)
             }
         }
     }
 
-    private func monoLines(_ texts: [String], opacity: Double) -> some View {
+    /// A quiet text control that opens or closes one ticket's part of the card.
+    private func toggle(_ title: String, id: String, in set: Binding<Set<String>>) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: Self.expandSeconds)) {
+                if set.wrappedValue.contains(id) { set.wrappedValue.remove(id) } else { set.wrappedValue.insert(id) }
+            }
+        } label: {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Self.ink.opacity(0.62))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    fileprivate static func monoLinesView(_ texts: [String], size: CGFloat, opacity: Double) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(Array(texts.enumerated()), id: \.offset) { _, text in
                 Text(text)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(Self.ink.opacity(opacity))
+                    .font(.system(size: size, design: .monospaced))
+                    .foregroundStyle(ink.opacity(opacity))
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
-    private func labelled(_ label: String, _ value: some View) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(label)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Self.ink.opacity(0.62))
-                .frame(width: Self.labelWidth, alignment: .leading)
-            value
-            Spacer(minLength: 0)
-        }
+    private func monoLines(_ texts: [String], size: CGFloat, opacity: Double) -> some View {
+        Self.monoLinesView(texts, size: size, opacity: opacity)
     }
 
     /// The icon tile: our own verb, never app-written.
@@ -366,6 +393,20 @@ struct ConfirmationPromptView: View {
         case "select": return "checkmark.circle"
         default: return "cursorarrow.click"
         }
+    }
+}
+
+/// The typed text's collapsed form: the first `visibleCharacters` and a count
+/// of the rest. `head` is always a prefix and `head + hidden` the whole, so the
+/// card can shorten the quote but never drop part of it unannounced.
+struct TypedTextPreview: Equatable {
+    static let visibleCharacters = 90
+    let head: String
+    let hiddenCharacters: Int
+
+    init(_ text: String, limit: Int = visibleCharacters) {
+        head = String(text.prefix(limit))
+        hiddenCharacters = max(0, text.count - limit)
     }
 }
 
@@ -427,9 +468,12 @@ struct ScreenPlacement: Equatable {
 
     /// How long a row has been still inside a still, visible window. nil when
     /// either is unknown — the verdict refuses that rather than guessing.
-    static func settledSeconds(row: ScreenPlacement?, window: ScreenPlacement?, nowUptime: TimeInterval) -> TimeInterval? {
-        guard let row, let window else { return nil }
-        return nowUptime - max(row.sinceUptime, window.sinceUptime)
+    /// The pressed button counts too: opening Details moves the buttons inside a
+    /// row whose own origin never changes.
+    static func settledSeconds(row: ScreenPlacement?, window: ScreenPlacement?, button: ScreenPlacement?,
+                               nowUptime: TimeInterval) -> TimeInterval? {
+        guard let row, let window, let button else { return nil }
+        return nowUptime - max(row.sinceUptime, window.sinceUptime, button.sinceUptime)
     }
 }
 
@@ -444,6 +488,8 @@ final class ConfirmationPlacementTracker {
     var rowPlacements: [String: ScreenPlacement] = [:]
     /// Answer buttons by `ConfirmationPromptView.buttonFrameKey`, SwiftUI `.global`.
     var buttonFrames: [String: CGRect] = [:]
+    /// The same buttons' origins and since when — a moved button is not settled.
+    var buttonPlacements: [String: ScreenPlacement] = [:]
     private var windowObservers: [NSObjectProtocol] = []
 
     func attach(to window: NSWindow?) {
@@ -502,47 +548,82 @@ private final class WindowReportingView: NSView {
 /// The rules an "Always" answer created. They live in the data-protection
 /// keychain, which the `security` CLI cannot reach, so this list is the only
 /// way to revoke one. Remove needs no hardware click: it only narrows.
+/// Drawn in the card's material and words: each row's title is the question
+/// the card asked, its scope the words on the card's "Always" button.
 struct AlwaysRulesListView: View {
     @ObservedObject var confirmations: HarnessConfirmations
+    private static let ink = ConfirmationCardStyle.ink
+
+    /// The app's name from the local install, never from the rule.
+    static func installedAppName(_ bundleIdentifier: String) -> String? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
+            .map { FileManager.default.displayName(atPath: $0.path) }
+    }
 
     var body: some View {
         Group {
             if !confirmations.alwaysRules.isEmpty || confirmations.alwaysRulesProblem != nil {
-                VStack(alignment: .leading, spacing: DS.Spacing.xs) {
-                    Text("Always rules")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(DS.Colors.textPrimary)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("ALWAYS ALLOWED")
+                        .font(.system(size: 11, weight: .medium))
+                        .tracking(0.6)
+                        .foregroundStyle(Self.ink.opacity(0.62))
+                        .padding(.bottom, 8)
                     if let problem = confirmations.alwaysRulesProblem {
                         Text(problem)
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(DS.Colors.warning)
                             .fixedSize(horizontal: false, vertical: true)
+                            .padding(.bottom, 8)
                     }
-                    ForEach(Array(confirmations.alwaysRules.enumerated()), id: \.offset) { _, rule in
-                        HStack(alignment: .top, spacing: DS.Spacing.sm) {
-                            VStack(alignment: .leading, spacing: 0) {
-                                ForEach(Array(HarnessConfirmations.displayLines(for: rule).enumerated()), id: \.offset) { _, line in
-                                    Text(line)
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .foregroundStyle(DS.Colors.codeText)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                            }
-                            Spacer(minLength: 0)
-                            Button("Remove") { confirmations.removeAlwaysRule(rule) }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                        }
+                    ForEach(Array(confirmations.alwaysRules.enumerated()), id: \.offset) { index, rule in
+                        if index > 0 { Rectangle().fill(Self.ink.opacity(0.1)).frame(height: 1) }
+                        row(rule, HarnessConfirmations.ruleSummary(for: rule, appName: Self.installedAppName(rule.bundleIdentifier)))
                     }
                 }
-                .padding(DS.Spacing.md)
-                .background(DS.Colors.surface2)
-                .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.medium))
+                .padding(14)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(ConfirmationCardStyle.material))
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
             }
         }
         // The panel outlives many requests; re-read when it is shown.
         .onAppear { confirmations.refreshAlwaysRules() }
+    }
+
+    private func row(_ rule: HarnessConfirmations.ApprovalRule, _ summary: HarnessConfirmations.RuleSummary) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(Self.ink, lineWidth: 1.25)
+                .frame(width: 22, height: 22)
+                .overlay(Image(systemName: ConfirmationPromptView.symbol(for: rule.verb))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Self.ink))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(summary.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Self.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let preview = summary.preview {
+                    Text(preview).font(.system(size: 12)).foregroundStyle(Self.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                (Text(summary.place).font(.system(size: 11, design: .monospaced)).foregroundColor(Self.ink.opacity(0.72))
+                 + Text(verbatim: "  \u{00B7}  \(summary.scope)").font(.system(size: 11, weight: .medium)).foregroundColor(Self.ink.opacity(0.62)))
+                    .fixedSize(horizontal: false, vertical: true)
+                ConfirmationPromptView.monoLinesView(summary.qualifiers, size: 10, opacity: 0.45)
+            }
+            Spacer(minLength: 0)
+            Button { confirmations.removeAlwaysRule(rule) } label: {
+                Text("Remove")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Self.ink)
+                    .frame(width: 64, height: 24)
+                    .overlay(Capsule().stroke(Self.ink.opacity(0.6), lineWidth: 1.25))
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 8)
     }
 }

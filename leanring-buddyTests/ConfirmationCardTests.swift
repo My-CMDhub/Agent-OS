@@ -65,6 +65,10 @@ struct ConfirmationCardTests {
         // through mid-growth is refused as too early.
         #expect(ConfirmationCardWindowManager.growSeconds < HarnessConfirmations.ApprovalInput.minimumRowSettledSeconds)
         #expect(ConfirmationCardWindowManager.reduceMotionFadeSeconds < HarnessConfirmations.ApprovalInput.minimumRowSettledSeconds)
+        // And the same for Details or a long preview opening: the buttons move,
+        // their clocks restart (`aRowsClockRestartsWhenItOrItsWindowMoves`), and the
+        // move ends before a click could count.
+        #expect(ConfirmationPromptView.expandSeconds < HarnessConfirmations.ApprovalInput.minimumRowSettledSeconds)
     }
 
     // MARK: Sound
@@ -118,6 +122,93 @@ struct ConfirmationCardTests {
         let sections = ConfirmationPromptView.cardSections
         #expect(Set(sections) == Set(HarnessConfirmations.CardLine.Kind.allCases))
         #expect(sections.count == HarnessConfirmations.CardLine.Kind.allCases.count)
+        // The collapsed card draws exactly the always-visible kinds; Details the rest.
+        let kinds = HarnessConfirmations.CardLine.Kind.allCases
+        #expect(ConfirmationPromptView.alwaysVisibleSections == kinds.filter { $0.isAlwaysVisible })
+        #expect(ConfirmationPromptView.detailSections == kinds.filter { !$0.isAlwaysVisible })
+    }
+
+    /// The visibility rule (owner's layout 2026-10-05): Details may hide a line
+    /// only if it changes neither what the action does nor what it lands on.
+    @Test func everyFieldThatChangesTheActionOrItsTargetIsVisibleWithoutOpeningDetails() {
+        let full = HarnessConfirmations.Shape(verb: "type", bundleIdentifier: "com.apple.mail", rawTarget: "Body",
+                                              text: "hello", mode: "insert", withinNamed: "Drafts",
+                                              nearPoint: CGPoint(x: 10, y: 20), role: "AXTextArea", thenConfirm: true)
+        var variants: [String: HarnessConfirmations.Shape] = [:]
+        var v = full; v.text = "goodbye"; variants["text"] = v
+        v = full; v.mode = "replace"; variants["mode"] = v
+        v = full; v.withinNamed = "Bank"; variants["withinNamed"] = v
+        v = full; v.thenConfirm = false; variants["thenConfirm"] = v
+        variants["verb"] = .init(verb: "press", bundleIdentifier: full.bundleIdentifier, rawTarget: full.rawTarget, text: full.text,
+                                 mode: full.mode, withinNamed: full.withinNamed, nearPoint: full.nearPoint, role: full.role, thenConfirm: true)
+        variants["rawTarget"] = .init(verb: "type", bundleIdentifier: full.bundleIdentifier, rawTarget: "Subject", text: full.text,
+                                      mode: full.mode, withinNamed: full.withinNamed, nearPoint: full.nearPoint, role: full.role, thenConfirm: true)
+        // Identity of the element among same-named ones, and the app's id: one
+        // click away under Details (the app's NAME is in the question).
+        let detailsOnly: Set<String> = ["nearPoint", "role", "bundleIdentifier"]
+        // A field added to Shape fails here until it is put on one side.
+        #expect(Set(Mirror(reflecting: full).children.compactMap(\.label)) == Set(variants.keys).union(detailsOnly))
+
+        let visible = { (shape: HarnessConfirmations.Shape, app: String?) in
+            HarnessConfirmations.cardLines(for: shape, appName: app).filter(\.kind.isAlwaysVisible).map(\.text)
+        }
+        for (field, variant) in variants {
+            #expect(visible(variant, "Mail") != visible(full, "Mail"), "\(field) changes the action but hides behind Details")
+        }
+        // The app: by name, or by its id when it has none.
+        #expect(visible(full, "Notes") != visible(full, "Mail"))
+        let otherApp = HarnessConfirmations.Shape(verb: "type", bundleIdentifier: "com.apple.Notes", rawTarget: full.rawTarget,
+                                                  text: full.text, mode: full.mode, withinNamed: full.withinNamed,
+                                                  nearPoint: full.nearPoint, role: full.role, thenConfirm: true)
+        #expect(visible(otherApp, nil) != visible(full, nil))
+        // The typed text is visible whole (as the preview line) — the card may
+        // shorten it only with a "+N more" that opens the rest.
+        #expect(visible(full, "Mail").contains("\"hello\""))
+        #expect(visible(full, "Mail").first == "Type this and submit it in \"Mail\"?")
+    }
+
+    @Test func aLongTypedTextIsShortenedWithACountNeverCut() {
+        let text = String(repeating: "abc ", count: 60)
+        let preview = TypedTextPreview(text)
+        #expect(text.hasPrefix(preview.head))
+        #expect(preview.head.count + preview.hiddenCharacters == text.count)
+        #expect(preview.hiddenCharacters > 0)
+        let short = TypedTextPreview("hi")
+        #expect(short.head == "hi" && short.hiddenCharacters == 0)
+    }
+
+    /// The rule an "Always" answer saves reads, in the list, as the card read.
+    @Test func anAlwaysRuleIsListedInTheCardsOwnWords() {
+        let confirmations = HarnessConfirmations(rulesStore: ApprovalRulesKeychainStore(serviceName: "\(ApprovalRulesKeychainStore.productionServiceName).test-\(UUID().uuidString)"))
+        let press = HarnessConfirmations.Shape(verb: "press", bundleIdentifier: "com.apple.TextEdit", rawTarget: "Delete",
+                                               withinNamed: "Untitled", role: "AXButton")
+        let launch = HarnessConfirmations.Shape(verb: "launch", bundleIdentifier: "com.apple.Terminal", rawTarget: "Terminal")
+        guard case .opened(let pressTicket) = confirmations.open(press, appName: "TextEdit", reason: "r", destructive: false),
+              case .opened(let launchTicket) = confirmations.open(launch, appName: "Terminal", reason: "r", destructive: false) else {
+            Issue.record("expected two tickets"); return
+        }
+        let line = { (ticket: HarnessConfirmations.Ticket, kind: HarnessConfirmations.CardLine.Kind) in
+            ticket.cardLines.first { $0.kind == kind }?.text
+        }
+
+        let exact = HarnessConfirmations.ruleSummary(for: HarnessConfirmations.rule(for: pressTicket), appName: "TextEdit")
+        #expect(exact.title + "?" == line(pressTicket, .question))
+        #expect(exact.title == "Press a control in \"TextEdit\"")
+        #expect(exact.place == line(pressTicket, .place))
+        #expect(exact.scope == HarnessConfirmations.exactRuleScope)
+        #expect(exact.qualifiers.contains("role \"AXButton\""))
+        #expect(HarnessConfirmations.alwaysButtonTitle(for: pressTicket).hasSuffix(exact.scope))
+
+        let wholeApp = HarnessConfirmations.ruleSummary(for: HarnessConfirmations.rule(for: launchTicket), appName: "Terminal")
+        #expect(wholeApp.title == "Launch \"Terminal\"")
+        #expect(wholeApp.title + "?" == line(launchTicket, .question))
+        #expect(wholeApp.place == "any target")
+        #expect(HarnessConfirmations.alwaysButtonTitle(for: launchTicket).hasSuffix(wholeApp.scope))
+        #expect(wholeApp.scope == HarnessConfirmations.wholeAppRuleScope)
+
+        // A pre-2026-09-14 wildcard press rule matches nothing, and says so.
+        let stale = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.finder", verb: "press", target: nil)
+        #expect(HarnessConfirmations.ruleSummary(for: stale, appName: "Finder").scope == "matches nothing (old rule)")
     }
 
     @Test func thePreviewWhereAndEffectRowsComeFromTheBoundLines() {
@@ -125,9 +216,9 @@ struct ConfirmationCardTests {
                                                 text: "Shipped slice 1b", mode: "insert", withinNamed: "Drafts")
         let lines = HarnessConfirmations.cardLines(for: typing, appName: "Mail")
         let byKind = { (kind: HarnessConfirmations.CardLine.Kind) in lines.filter { $0.kind == kind }.map(\.text) }
-        #expect(byKind(.verb) == ["Type"])
+        #expect(byKind(.question) == ["Type this in \"Mail\"?"])
         #expect(byKind(.preview) == ["\"Shipped slice 1b\""])
-        #expect(byKind(.place) == ["\"Mail\" \u{203A} \"Drafts\" \u{203A} \"Body\""])
+        #expect(byKind(.place) == ["\"Drafts\" \u{203A} \"Body\""])
         #expect(byKind(.qualifier) == ["app id \"com.apple.mail\""])
         #expect(byKind(.effect) == ["Inserts the text above into \"Body\""])
         // What the ticket binds and the card draws are the same list.
@@ -155,7 +246,7 @@ struct ConfirmationCardTests {
     }
 
     @Test func aWhereLineTooLongToShowWholeIsRefused() {
-        // 150 + 150 fit as two names, not as one WHERE line with the app (318 scalars).
+        // 150 + 150 fit as two names, not as one where line (307 scalars).
         let shape = HarnessConfirmations.Shape(verb: "press", bundleIdentifier: "com.apple.finder",
                                                rawTarget: String(repeating: "t", count: 150),
                                                withinNamed: String(repeating: "w", count: 150))

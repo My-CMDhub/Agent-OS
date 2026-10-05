@@ -386,16 +386,25 @@ final class HarnessConfirmations: ObservableObject {
     /// and a test holds that), so a line can change place but never go missing.
     struct CardLine: Equatable {
         enum Kind: CaseIterable {
-            /// Our verb's title: "J.A.R.V.I.S. wants to **Press**".
-            case verb
+            /// The headline: the action as a question, with the app — "Type this
+            /// and submit it in "Chrome"?". Our words plus the escaped app name.
+            case question
             /// The text the action would type, escaped in full — the quote.
             case preview
-            /// The WHERE row: app › container › target.
+            /// The where line under the question: container › target.
             case place
             /// Under WHERE, dim: role, point, bundle identifier.
             case qualifier
             /// The EFFECT row: what the action does, in plain words.
             case effect
+
+            /// Drawn without opening Details. Owner's layout 2026-10-05: the
+            /// collapsed card carries everything that changes what the action does
+            /// or what it lands on — verb, mode and submit (question), app
+            /// (question), container and target (place), typed text (preview).
+            /// Role, point, app id, effect words and the reason sit behind Details,
+            /// which can be opened before answering. A test holds the split.
+            var isAlwaysVisible: Bool { self == .question || self == .preview || self == .place }
         }
         let kind: Kind
         let text: String
@@ -413,10 +422,12 @@ final class HarnessConfirmations: ObservableObject {
     static func cardLines(for shape: Shape, appName: String?, binding: ActionBinding? = nil,
                           destructive: Bool = false) -> [CardLine] {
         let target = UntrustedText(shape.rawTarget).forDisplayInFull
-        let app = appName.map { UntrustedText($0).forDisplayInFull } ?? "unnamed app"
-        var lines = [CardLine(kind: .verb, text: verbTitle(shape.verb))]
+        // No name: the bundle id stands in, so the collapsed card still says which app.
+        let app = (appName ?? shape.bundleIdentifier).map { UntrustedText($0).forDisplayInFull } ?? "unnamed app"
+        var lines = [CardLine(kind: .question, text: question(for: shape, app: app))]
         if let text = shape.text { lines.append(CardLine(kind: .preview, text: UntrustedText(text).forDisplayInFull)) }
-        let place = [app] + (shape.withinNamed.map { [UntrustedText($0).forDisplayInFull] } ?? []) + [target]
+        // The app is in the question, so the where line starts inside it.
+        let place = (shape.withinNamed.map { [UntrustedText($0).forDisplayInFull] } ?? []) + [target]
         lines.append(CardLine(kind: .place, text: place.joined(separator: " \u{203A} ")))
         if let role = shape.role { lines.append(CardLine(kind: .qualifier, text: "role \(UntrustedText(role).forDisplayInFull)")) }
         if let point = shape.nearPoint { lines.append(CardLine(kind: .qualifier, text: "at point (\(point.x), \(point.y))")) }
@@ -438,6 +449,34 @@ final class HarnessConfirmations: ObservableObject {
     static func displayLines(for shape: Shape, appName: String?, binding: ActionBinding? = nil,
                              destructive: Bool = false) -> [String] {
         cardLines(for: shape, appName: appName, binding: binding, destructive: destructive).map(\.text)
+    }
+
+    /// The headline. Every word is ours except `app`, which is already escaped:
+    /// the verb as a phrase, then whatever changes what it does — the typing mode
+    /// and a submit — so none of those can hide behind Details.
+    static func question(for shape: Shape, app: String) -> String {
+        if shape.verb == "launch" { return "Launch \(app)?" }
+        var phrase: String
+        switch shape.verb {
+        case "type":
+            let object = shape.text == nil ? "no text" : "this"
+            switch shape.mode {
+            case "insert": phrase = "Type \(object)"
+            case "replace": phrase = "Replace a field's text with \(object)"
+            default: phrase = "Type \(object) (mode \(shape.mode.map { UntrustedText($0).forDisplayInFull } ?? "none"))"
+            }
+        case "press": phrase = "Press a control"
+        case "click": phrase = "Click a control"
+        case "select": phrase = "Select an item"
+        case "open": phrase = "Open an item"
+        case "menu": phrase = "Choose a menu item"
+        case "focus": phrase = "Bring a window forward"
+        case "scroll": phrase = "Scroll"
+        case "openURL": phrase = "Open a page"
+        default: phrase = verbTitle(shape.verb)
+        }
+        if shape.thenConfirm { phrase += " and submit it" }
+        return "\(phrase) in \(app)?"
     }
 
     /// Our own verb in the header. A verb not named here is shown as itself,
@@ -475,24 +514,46 @@ final class HarnessConfirmations: ObservableObject {
         }
     }
 
-    /// A stored rule in the same words a ticket uses, for the panel's revoke list.
-    /// The app name comes from the local install, not from the rule.
-    static func displayLines(for rule: ApprovalRule) -> [String] {
+    /// One row of the panel's "Always allowed" list, in the card's own words:
+    /// `title` is the question the card asked, without the "?", and `place` its
+    /// where line — so the rule an "Always" answer creates reads as the card did.
+    struct RuleSummary: Equatable {
+        let title: String
+        let preview: String?
+        let place: String
+        let scope: String
+        /// Role, point, app id: dim, but listed, so a revoke knows what it removes.
+        let qualifiers: [String]
+    }
+
+    static let exactRuleScope = "exactly this"
+    static let wholeAppRuleScope = "whole app"
+
+    /// What a rule covers, in the words both the card's "Always" button and the
+    /// list use. A nil target outside focus/launch is a pre-2026-09-14 rule that
+    /// `matchingRule` no longer honours — say so rather than call it a scope.
+    static func ruleScope(_ rule: ApprovalRule) -> String {
+        guard rule.target == nil else { return exactRuleScope }
+        return appWideRuleVerbs.contains(rule.verb) ? wholeAppRuleScope : "matches nothing (old rule)"
+    }
+
+    /// `appName` is the raw local name (the list reads it from the install).
+    static func ruleSummary(for rule: ApprovalRule, appName: String?) -> RuleSummary {
         let shape = Shape(
             verb: rule.verb, bundleIdentifier: rule.bundleIdentifier, rawTarget: rule.target ?? "",
             text: rule.text, mode: rule.mode, withinNamed: rule.withinNamed, nearPoint: rule.nearPoint,
             role: rule.role, thenConfirm: rule.thenConfirm ?? false
         )
-        let appName = NSWorkspace.shared.urlForApplication(withBundleIdentifier: rule.bundleIdentifier)
-            .map { FileManager.default.displayName(atPath: $0.path) }
-        return cardLines(for: shape, appName: appName).map { line in
-            guard rule.target == nil else { return line.text }
-            switch line.kind {
-            case .place: return "\(appName.map { UntrustedText($0).forDisplayInFull } ?? "unnamed app") \u{203A} any target"
-            case .effect: return "\(verbTitle(rule.verb)), any target"
-            default: return line.text
-            }
-        }
+        let lines = cardLines(for: shape, appName: appName)
+        let texts = { (kind: CardLine.Kind) in lines.filter { $0.kind == kind }.map(\.text) }
+        let question = texts(.question).first ?? verbTitle(rule.verb)
+        return RuleSummary(
+            title: question.hasSuffix("?") ? String(question.dropLast()) : question,
+            preview: texts(.preview).first,
+            place: rule.target == nil ? "any target" : texts(.place).joined(separator: " "),
+            scope: ruleScope(rule),
+            qualifiers: texts(.qualifier)
+        )
     }
 
     static func consumption(of ticket: Ticket?, _ shape: Shape, now: Date) -> Consumption {
@@ -512,9 +573,10 @@ final class HarnessConfirmations: ObservableObject {
         UntrustedText(reason).forDisplayInFull
     }
 
-    /// The "Always" button's words. For `focus`/`launch` the rule `rule(for:)`
-    /// creates covers the whole app, so calling it "exactly this" would be the
-    /// one line on the card that is not true. `ticket.appName` is already escaped.
+    /// The "Always" button's words: the scope the list will show for the rule
+    /// `rule(for:)` creates. For `focus`/`launch` that rule covers the whole app,
+    /// so calling it "exactly this" would be the one line on the card that is not
+    /// true. The rule's title is the question already on the card.
     /// Destructive questions get Allow once and Deny only — see
     /// `SafetyDecision.requireConfirmation(destructive:)`. The card hides the
     /// button AND `answer` refuses to save the rule, so no caller can get one.
@@ -523,8 +585,7 @@ final class HarnessConfirmations: ObservableObject {
     }
 
     static func alwaysButtonTitle(for ticket: Ticket) -> String {
-        guard appWideRuleVerbs.contains(ticket.verb) else { return "Always allow exactly this" }
-        return "Always allow \(ticket.verb) for the whole app \(ticket.appName ?? "(unnamed app)")"
+        "Always allow \u{00B7} \(ruleScope(rule(for: ticket)))"
     }
 
     /// Why a ticket may not be opened for this shape, or nil.

@@ -165,7 +165,10 @@ final class ConfirmationCardWindowManager {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self, self.isPresented, let panel = self.panel else { return }
-                self.place(panel)
+                // Details opening animates its lines; the black follows at the same pace.
+                withAnimation(self.model.reduceMotion ? nil : .easeOut(duration: ConfirmationPromptView.expandSeconds)) {
+                    self.place(panel)
+                }
             }
     }
 
