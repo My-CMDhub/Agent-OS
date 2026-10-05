@@ -243,20 +243,21 @@ nonisolated enum RealtimeHeardCheck {
     /// — for an agent step's `appNotNamed` only, asked after `decide` heard no
     /// app. Generality suite 2026-10-06: "switch Calendar to the month view" was
     /// refused (a common-word name counts only after open/in/to/launch, and
-    /// "switch" is none), as were "a reminder" (Reminders), "a new note" (Notes)
-    /// and "the Privacy and Security settings" (System Settings). Three forms of
-    /// the installed name, no synonym list and never a sound-alike:
-    /// - the whole name, word for word or run together, anywhere;
-    /// - a one-word name's singular or plural ("note" / Notes);
-    /// - one word of a longer name, 4+ letters, that no other installed app's
-    ///   name holds in any of those forms ("settings" / System Settings, never
-    ///   "system", which System Information shares).
-    /// Safe to be generous here: a different app heard anywhere is `decide`'s
-    /// mismatch or ambiguity, which refuses before this is asked.
+    /// "switch" is none). No synonym list, never a sound-alike:
+    /// - a whole multi-word name, word for word, anywhere ("Activity Monitor");
+    /// - a one-word name, or its singular or plural, only RIGHT AFTER a cue word
+    ///   (`ownNameCueWords`: "switch Calendar", "use notes");
+    /// - one word of a longer name, 4+ letters, only right after a cue word, not
+    ///   an everyday word (`partialNameStopWords`), and held by no other installed
+    ///   app's name ("switch to monitor").
+    /// Review of 00c2221: matched anywhere, ordinary words named apps — "go to
+    /// the home page" (Home), "what does this code do" (VS Code), "keyboard
+    /// shortcuts", "this site's settings", "what time". So "a reminder", "a new
+    /// note" and "the Privacy and Security settings" no longer name their apps:
+    /// the owner's call (generality G05, G21, G16).
     static func wordsNameTheApp(transcript: String?, named: String, among names: [RealtimeVoiceVerbs.AppName]) -> Bool {
         guard let transcript, case .resolved(let url) = RealtimeVoiceVerbs.resolveApp(named: named, among: names) else { return false }
-        let spokenList = RealtimeVoiceVerbs.foldedTokens(withoutWebAddresses(transcript))
-        let spoken = Set(spokenList)
+        let spoken = RealtimeVoiceVerbs.foldedTokens(withoutWebAddresses(transcript))
         func path(_ url: URL) -> String { url.standardizedFileURL.path }
         func forms(_ word: String) -> Set<String> {
             var forms: Set<String> = [word, word + "s", word + "es"]
@@ -264,17 +265,29 @@ nonisolated enum RealtimeHeardCheck {
             if word.hasSuffix("s") { forms.insert(String(word.dropLast())) }
             return forms
         }
+        /// Every spoken word that sits right after a cue word.
+        let cued = Set(spoken.indices.dropFirst().filter { ownNameCueWords.contains(spoken[$0 - 1]) }.map { spoken[$0] })
         let own = names.filter { path($0.url) == path(url) }.map { RealtimeVoiceVerbs.foldedTokens($0.name) }.filter { !$0.isEmpty }
         let otherForms = Set(names.filter { path($0.url) != path(url) }.flatMap { RealtimeVoiceVerbs.foldedTokens($0.name) }.flatMap(forms))
-        let said = " " + spokenList.joined(separator: " ") + " "
+        let said = " " + spoken.joined(separator: " ") + " "
         return own.contains { tokens in
-            if said.contains(" " + tokens.joined(separator: " ") + " ") || spoken.contains(tokens.joined()) { return true }
-            if tokens.count == 1 { return !forms(tokens[0]).isDisjoint(with: spoken) }
+            if tokens.count == 1 { return !forms(tokens[0]).isDisjoint(with: cued) }
+            if said.contains(" " + tokens.joined(separator: " ") + " ") { return true }
             return tokens.contains { token in
-                token.count >= 4 && forms(token).isDisjoint(with: otherForms) && !forms(token).isDisjoint(with: spoken)
+                token.count >= 4 && !partialNameStopWords.contains(token) && !genericNameWords.contains(token)
+                    && forms(token).isDisjoint(with: otherForms) && !forms(token).isDisjoint(with: cued)
             }
         }
     }
+
+    /// `decide`'s app-slot cues (`commonNameSlotLeadWords`, `namingLeadWords`) plus "switch", "use", "with".
+    static let ownNameCueWords: Set<String> = ["open", "in", "to", "launch", "switch", "use", "with", "into", "focus"]
+    /// Everyday words found in longer app names that never name an app on their own.
+    /// ponytail: a hand list from this Mac's apps (2026-10-06), beside `genericNameWords`.
+    static let partialNameStopWords: Set<String> = [
+        "code", "visual", "studio", "home", "music", "photos", "photo", "messages", "message", "password", "passwords",
+        "shortcuts", "shortcut", "iphone", "phone", "mirror", "notes", "note", "keyboard", "page", "site", "data", "mail",
+        "calendar", "find", "help", "news", "video", "camera", "voice", "chat", "desktop", "studio", "pro", "plus", "live"]
 
     // MARK: Words about the page in front (pure)
 

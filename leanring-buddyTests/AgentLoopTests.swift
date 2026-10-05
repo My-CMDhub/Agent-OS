@@ -464,22 +464,44 @@ struct AgentLoopTests {
                      app("Reminders", "/System/Applications/Reminders.app"), app("System Settings", "/System/Applications/System Settings.app"),
                      app("System Information", "/System/Applications/Utilities/System Information.app"),
                      app("Keynote", "/Applications/Keynote.app"), app("TextEdit", "/System/Applications/TextEdit.app"),
-                     app("Cursor", "/Applications/Cursor.app"), app("Activity Monitor", "/System/Applications/Utilities/Activity Monitor.app")]
+                     app("Cursor", "/Applications/Cursor.app"), app("Activity Monitor", "/System/Applications/Utilities/Activity Monitor.app"),
+                     app("Home", "/System/Applications/Home.app"), app("Visual Studio Code", "/Applications/Visual Studio Code.app"),
+                     app("Shortcuts", "/System/Applications/Shortcuts.app"), app("iPhone Mirroring", "/System/Applications/iPhone Mirroring.app"),
+                     app("Time Machine", "/System/Applications/Time Machine.app"), app("Messages", "/System/Applications/Messages.app"),
+                     app("Music", "/System/Applications/Music.app"), app("Photos", "/System/Applications/Photos.app"),
+                     app("Passwords", "/System/Applications/Passwords.app"), app("App Store", "/System/Applications/App Store.app")]
         func heard(_ words: String, _ named: String) -> Bool {
             RealtimeHeardCheck.wordsNameTheApp(transcript: words, named: named, among: names)
         }
+        // A whole multi-word name anywhere; a one-word name or a distinctive word only right after a cue word.
         #expect(heard("switch Calendar to the month view", "Calendar"))
-        #expect(heard("show me my calendars", "Calendar"))
-        #expect(heard("create a reminder called JARVIS test reminder", "Reminders"))
-        #expect(heard("write it in a new note titled JARVIS test 2", "Notes"))
-        #expect(heard("open the Privacy and Security settings", "System Settings"))
-        #expect(heard("which process is using the most memory? check the activity", "Activity Monitor"))
+        #expect(heard("switch to reminders and add milk", "Reminders"))
+        #expect(heard("use notes for this", "Notes"))
+        #expect(heard("which process is using the most memory? check Activity Monitor", "Activity Monitor"))
+        #expect(heard("switch to monitor", "Activity Monitor"))
+        // Review of 00c2221: ordinary words never name an app.
+        #expect(!heard("go to the home page", "Home"))
+        #expect(!heard("what does this code do", "Visual Studio Code"))
+        #expect(!heard("switch to code", "Visual Studio Code"))
+        #expect(!heard("show my keyboard shortcuts", "Shortcuts"))
+        #expect(!heard("change this site's settings", "System Settings"))
+        #expect(!heard("open the Privacy and Security settings", "System Settings"))
+        #expect(!heard("find it on my iphone", "iPhone Mirroring"))
+        #expect(!heard("what time is it in Sydney", "Time Machine"))
+        #expect(!heard("open time", "Time Machine"))
+        #expect(!heard("read my messages aloud", "Messages"))
+        #expect(!heard("turn the music down", "Music"))
+        #expect(!heard("show me photos of cats", "Photos"))
+        #expect(!heard("what is my password", "Passwords"))
+        #expect(!heard("go to the store", "App Store"))
+        #expect(!heard("create a reminder called JARVIS test reminder", "Reminders"))
+        #expect(!heard("write it in a new note titled JARVIS test 2", "Notes"))
+        #expect(!heard("show me my calendars", "Calendar"))
         // Wrong app, a word inside another name, a shared word, a sound-alike: never.
         #expect(!heard("make a new TextEdit document", "Notes"))
         #expect(!heard("write a note", "Keynote"))
         #expect(!heard("show me the system details", "System Settings"))
         #expect(!heard("open it in kasa", "Cursor"))
-        #expect(!heard("create a reminder", "Calendar"))
         #expect(!heard("", "Calendar"))
     }
 
