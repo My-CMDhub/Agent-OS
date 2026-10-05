@@ -43,6 +43,12 @@ enum AgentLoopProbe {
             meta["reason"] = refusal
             return
         }
+        if let words = CommandLine.arguments.last(where: { $0.hasPrefix(goalArgument) }).map({ String($0.dropFirst(goalArgument.count)) }),
+           !words.isEmpty {
+            results = [await goalRun(words: words, harness: harness, confirmations: confirmations)]
+            meta["outcome"] = "ran"
+            return
+        }
         if CommandLine.arguments.contains("--agent-speed") {
             results = await speedRuns(harness: harness, confirmations: confirmations)
             meta["outcome"] = results.contains { $0["status"] as? String == "aborted" } ? "aborted" : "ran"
@@ -235,6 +241,110 @@ enum AgentLoopProbe {
             }
         }
         return results
+    }
+
+    static let goalArgument = "--agent-goal="
+
+    /// `--agent-loop-probe --agent-goal=<the owner's words> [--agent-start-bundle=<id>]`
+    /// (2026-10-05): one task as the owner would say it, in the apps as they are
+    /// — the owner's own logged-in Chrome — with no page of the probe's. The
+    /// task's pages open in tabs it opens; afterwards exactly those tabs are
+    /// closed by identity (the tab's own close button), never another. Cards are
+    /// denied and counted: a read-only task should raise none. Per run: outcome,
+    /// the spoken answer, every call (tool, target, outcome, ms), the
+    /// readOnlyTask refusals, model calls and model ms, wall ms, tabs closed.
+    static func goalRun(words: String, harness: HarnessServer, confirmations: HarnessConfirmations) async -> [String: Any] {
+        let harnessAnswer: @Sendable (String) -> String = { line in harness.answer(line: line) }
+        let startBundle = CommandLine.arguments.first { $0.hasPrefix("--agent-start-bundle=") }.map { String($0.dropFirst("--agent-start-bundle=".count)) }
+        let started = Date()
+        let startUptime = ProcessInfo.processInfo.systemUptime
+        var narrations = 0
+        let loop = AgentLoop.live(heard: words, startBundle: startBundle, harnessAnswer: harnessAnswer, model: AgentLoopModel()) { _ in narrations += 1 }
+        let finished = FinishedFlag()
+        let runTask = Task { @MainActor in
+            let outcome = await loop.run(goal: words, heard: words)
+            finished.value = true
+            return outcome
+        }
+        var cards: [[String: Any]] = []
+        var seen = Set<String>()
+        while !finished.value {
+            for ticket in confirmations.tickets where ticket.createdAt >= started && !seen.contains(ticket.id)
+                && HarnessConfirmations.status(of: ticket, now: Date()) == .pending {
+                seen.insert(ticket.id)
+                confirmations.answer(ticket.id, allow: false, scope: .once)
+                cards.append(["verb": ticket.verb, "destructive": ticket.isDestructive, "answered": "denied"])
+            }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        let outcome = await runTask.value
+        var result: [String: Any] = ["mode": "goal", "readOnly": loop.readOnly, "outcome": outcome.name, "steps": loop.step,
+                                     "wallMs": Int(((ProcessInfo.processInfo.systemUptime - startUptime) * 1000).rounded()),
+                                     "model": loop.modelUsed ?? NSNull(), "run": loop.runID, "cards": cards, "narrations": narrations]
+        switch outcome {
+        case .done(let summary): result["spoken"] = SecretScanner.redact(summary)
+        case .askOwner(let question): result["spoken"] = SecretScanner.redact(question)
+        default: result["spoken"] = AgentLoop.finalLine(outcome, goal: words, lastProgress: loop.lastProgress, step: loop.step) ?? NSNull()
+        }
+        // Every call the task made, with what it aimed at and how it ended.
+        let calls: [[String: Any]] = loop.decisions.map(callReport)
+        result["calls"] = calls
+        result["readOnlyRefusals"] = calls.filter { $0["error"] as? String == "readOnlyTask" }
+        result["tools"] = loop.receipts.map { ["step": $0.step, "tool": $0.toolName, "ok": $0.ok, "error": $0.error ?? NSNull()] as [String: Any] }
+        MeasurementLogFile.waitForPendingWrites()
+        result["modelMs"] = modelMilliseconds(run: loop.runID)
+        try? await Task.sleep(for: .seconds(ScenarioRunner.settleSeconds))
+        // Undo by identity: only the tabs this task opened.
+        let tabs = (loop.liveCarry?.taskTabs ?? [:]).flatMap { bundle, keys in keys.map { (bundle, $0) } }
+        var closed: [[String: Any]] = []
+        for (bundle, key) in tabs {
+            closed.append(await Task.detached { closeTab(key) }.value.merging(["app": bundle]) { current, _ in current })
+        }
+        result["tabsClosed"] = closed
+        print("🤖 agent goal: \(outcome.name) steps=\(loop.step) \(result["wallMs"] ?? "?") ms, \(calls.count) calls, "
+              + "\((result["readOnlyRefusals"] as? [Any])?.count ?? 0) readOnlyTask, \(cards.count) cards")
+        return result
+    }
+
+    /// One call of a goal run: tool, what it aimed at (the judged name of a
+    /// refusal, the pressed element, the page's host…), typed text, outcome.
+    static func callReport(_ decision: RealtimeToolDecision) -> [String: Any] {
+        let call = decision.call
+        let dispatch = decision.dispatch
+        var target: String? = dispatch?.harnessResponse?["target"] as? String
+        target = target ?? (dispatch?.result["target"] as? String) ?? call.elementName
+        target = target ?? call.url.flatMap { URL(string: $0)?.host }
+        target = target ?? call.path?.joined(separator: " > ")
+        target = target ?? (call.x != nil ? "position" : call.direction)
+        var line: [String: Any] = ["tool": call.name, "ok": dispatch?.result["ok"] as? Bool ?? false]
+        line["target"] = target.map { String($0.prefix(80)) } ?? NSNull()
+        line["text"] = call.text.map { String($0.prefix(60)) } ?? NSNull()
+        line["error"] = dispatch?.result["error"] ?? NSNull()
+        line["harnessMs"] = dispatch?.harnessMilliseconds ?? 0
+        line["waitedForConfirmation"] = dispatch?.waitedForConfirmation ?? false
+        return line
+    }
+
+    /// A browser tab the task opened, closed by its own close button, only
+    /// while that same element (CFEqual) still answers. Never a keystroke.
+    nonisolated static func closeTab(_ key: AccessibilityElementKey) -> [String: Any] {
+        let tab = key.element
+        func string(_ element: AXUIElement, _ attribute: String) -> String? {
+            var value: AnyObject?
+            return AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success ? value as? String : nil
+        }
+        guard let role = string(tab, kAXRoleAttribute) else { return ["closed": false, "why": "the tab no longer answers"] }
+        let title = string(tab, kAXTitleAttribute) ?? ""
+        var children: AnyObject?
+        AXUIElementCopyAttributeValue(tab, kAXChildrenAttribute as CFString, &children)
+        guard let button = ((children as? [AXUIElement]) ?? []).first(where: { child in
+            string(child, kAXRoleAttribute) == "AXButton"
+                && [string(child, kAXDescriptionAttribute), string(child, kAXTitleAttribute)].compactMap { $0?.lowercased() }.contains { $0.contains("close") }
+        }) else { return ["closed": false, "why": "no close button on the tab", "role": role] }
+        let error = AXUIElementPerformAction(button, kAXPressAction as CFString)
+        // 2026-10-05: one closed tab still answered at 0.8 s and was gone afterwards; wait up to 3 s.
+        for _ in 0..<15 where string(tab, kAXRoleAttribute) != nil { Thread.sleep(forTimeInterval: 0.2) }
+        return ["closed": string(tab, kAXRoleAttribute) == nil, "pressError": error.rawValue, "titleHadLinkedIn": title.lowercased().contains("linkedin")]
     }
 
     /// The model ms of one run, summed from its agent-loop.log step lines.

@@ -330,6 +330,8 @@ final class AgentLoop {
     /// The owner's words made it explore-only (`isReadOnlyTask`); `live` sets it
     /// and guards every request (`readOnlyGuardedAnswer`). Here it only tells the model.
     var readOnly = false
+    /// The live run's carry (the tabs it opened), for a probe to clean up by identity.
+    private(set) var liveCarry: MarksCarry?
 
     init(dependencies: Dependencies) {
         self.dependencies = dependencies
@@ -987,6 +989,7 @@ extension AgentLoop {
         carry.runID = loop.runID
         carry.readOnly = isReadOnlyTask(words: heard)
         loop.readOnly = carry.readOnly
+        loop.liveCarry = carry
         loop.provider = model.provider
         return loop
     }
