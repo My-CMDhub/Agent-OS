@@ -4194,6 +4194,9 @@ final class HarnessServer {
         let before = bundleIdentifier
             .flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first }
             .map { HarnessHands.browserWindow(processIdentifier: $0.processIdentifier) }
+        let tabBefore = bundleIdentifier
+            .flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first }
+            .flatMap { HarnessHands.selectedTab(processIdentifier: $0.processIdentifier) }
 
         phaseTiming.actionStarting()
         let application: NSRunningApplication
@@ -4215,7 +4218,10 @@ final class HarnessServer {
             polls += 1
             let after = HarnessHands.browserWindow(processIdentifier: application.processIdentifier)
             let windowChanged = after.window.map { window in before?.window.map { !CFEqual($0, window) } ?? true } ?? false
-            evidence = HarnessHands.openURLEvidence(frontmost: after.frontmost, windowChanged: windowChanged,
+            // The tab is read only when nothing cheaper moved: it walks the window.
+            let tabChanged = !windowChanged && after.title == before?.title && tabBefore != nil
+                && HarnessHands.selectedTab(processIdentifier: application.processIdentifier).map { $0 != tabBefore } == true
+            evidence = HarnessHands.openURLEvidence(frontmost: after.frontmost, windowChanged: windowChanged, tabChanged: tabChanged,
                                                     titleBefore: before?.title, titleAfter: after.title)
             guard evidence != nil else { return false }
             if let title = after.title { response["title"] = UntrustedText(title).forDisplay }

@@ -445,6 +445,9 @@ struct HarnessHandsTests {
         #expect(HarnessHands.openURLEvidence(frontmost: true, windowChanged: false, titleBefore: "Inbox", titleAfter: "Inbox") == nil)
         #expect(HarnessHands.openURLEvidence(frontmost: false, windowChanged: true, titleBefore: nil, titleAfter: "LinkedIn") == nil)
         #expect(HarnessHands.openURLEvidence(frontmost: true, windowChanged: true, titleBefore: nil, titleAfter: nil) == nil)
+        // A new tab whose page has the old tab's title: only the selected tab moved (2026-10-07).
+        #expect(HarnessHands.openURLEvidence(frontmost: true, windowChanged: false, tabChanged: true,
+                                             titleBefore: "Search | LinkedIn", titleAfter: "Search | LinkedIn") != nil)
     }
 
     // MARK: the wire

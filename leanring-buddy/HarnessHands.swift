@@ -575,10 +575,16 @@ enum HarnessHands {
     }
 
     /// The browser came forward and its front window is new or retitled.
-    static func openURLEvidence(frontmost: Bool, windowChanged: Bool, titleBefore: String?, titleAfter: String?) -> String? {
+    /// `tabChanged`: another tab is selected in the same window. A new tab whose
+    /// page shares the old tab's title ("Search | LinkedIn" twice, 2026-10-07)
+    /// moves neither the window nor its title; read as nothing, the tab was
+    /// never recorded as the task's, stayed open, and the task lost the browser.
+    static func openURLEvidence(frontmost: Bool, windowChanged: Bool, tabChanged: Bool = false,
+                                titleBefore: String?, titleAfter: String?) -> String? {
         guard frontmost, let titleAfter else { return nil }
         if windowChanged { return "a new browser window came forward" }
-        return titleAfter != titleBefore ? "the front window's title changed" : nil
+        if titleAfter != titleBefore { return "the front window's title changed" }
+        return tabChanged ? "another tab came forward in the front window" : nil
     }
 
     static let openURLDeadlineSeconds = 5.0
