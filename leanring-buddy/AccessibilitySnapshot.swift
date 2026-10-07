@@ -577,6 +577,8 @@ enum AccessibilityTreeWalker {
         case cacheConfirmedByApp
         /// The `NSWorkspace` cache, possibly frozen for this whole request.
         case cacheUnconfirmed
+        /// Not asked: `ping` reads no app, so its audit line names none.
+        case notRead
     }
 
     struct FrontmostRead {

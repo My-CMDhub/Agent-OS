@@ -5035,9 +5035,10 @@ final class HarnessServer {
         outcome: String,
         startedAt: Date,
         confirmedBy: String?,
-        phases: [String: Any]
+        phases: [String: Any],
+        frontmost knownFrontmost: AccessibilityTreeWalker.FrontmostRead? = nil
     ) {
-        let frontmost = AccessibilityTreeWalker.frontmost()
+        let frontmost = knownFrontmost ?? AccessibilityTreeWalker.frontmost()
         appendAudit(HarnessPolicy.auditLine(
             at: startedAt,
             id: request.id,
@@ -5059,8 +5060,11 @@ final class HarnessServer {
 
     /// Reads nothing a request in flight owns — see `answer(line:)`.
     private func pingResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        // No frontmost read: the system-wide one waits on the focused app (Xcode busy
+        // under a test run), and its fallback adds a 0.5 s timeout — a ping over 0.5 s, 2026-10-06.
         audit(request, dryRun: dryRun, kernel: "n/a", outcome: "ok", startedAt: startedAt,
-              confirmedBy: nil, phases: HarnessPhaseTiming().wireFields)
+              confirmedBy: nil, phases: HarnessPhaseTiming().wireFields,
+              frontmost: .init(application: nil, source: .notRead, systemWideErrorRawValue: nil))
         let counters = stateLock.withLock { (failures: auditMirrorFailures, overflow: auditMirrorOverflowLines) }
         return [
             "ok": true,
