@@ -243,23 +243,28 @@ enum GeneralitySuite {
         return nil
     }
 
-    /// Words naming the five biggest processes by resident memory ("Claude", "Xcode"…).
+    /// Words naming the five biggest processes by memory footprint, the figure
+    /// Activity Monitor's Memory column shows (RSS ranked differently, 2026-10-06).
+    /// `top` reads every process's footprint without root; its names are cut at 16 chars.
     nonisolated static func topMemoryWords() -> [String] {
-        let ps = Process()
-        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
-        ps.arguments = ["-axo", "rss=,comm="]
+        let top = Process()
+        top.executableURL = URL(fileURLWithPath: "/usr/bin/top")
+        top.arguments = ["-l", "1", "-o", "mem", "-n", "5", "-stats", "mem,command"]
         let pipe = Pipe()
-        ps.standardOutput = pipe
-        try? ps.run()
+        top.standardOutput = pipe
+        try? top.run()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        ps.waitUntilExit()
-        let rows = String(decoding: data, as: UTF8.self).split(separator: "\n").compactMap { line -> (Int, String)? in
-            let parts = line.trimmingCharacters(in: .whitespaces).split(separator: " ", maxSplits: 1)
-            guard parts.count == 2, let rss = Int(parts[0]) else { return nil }
-            return (rss, (String(parts[1]) as NSString).lastPathComponent)
-        }
-        return rows.sorted { $0.0 > $1.0 }.prefix(5).compactMap { $0.1.split(separator: " ").first.map(String.init) }
-            .filter { $0.count >= 4 }
+        top.waitUntilExit()
+        return topMemoryWords(topOutput: String(decoding: data, as: UTF8.self))
+    }
+
+    /// Rows after the `MEM COMMAND` header, in `top`'s own order (sorted by mem).
+    nonisolated static func topMemoryWords(topOutput: String) -> [String] {
+        let lines = topOutput.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let header = lines.lastIndex(where: { $0.hasPrefix("MEM") }) else { return [] }
+        return lines[(header + 1)...].prefix(5).compactMap { line in
+            line.split(separator: " ", maxSplits: 1).dropFirst().first?.split(separator: " ").first.map(String.init)
+        }.filter { $0.count >= 4 }
     }
 
     nonisolated static func scriptsCount() -> String {

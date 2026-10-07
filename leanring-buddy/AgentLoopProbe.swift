@@ -331,6 +331,8 @@ enum AgentLoopProbe {
         line["target"] = target.map { String($0.prefix(80)) } ?? NSNull()
         line["text"] = call.text.map { String($0.prefix(60)) } ?? NSNull()
         line["error"] = dispatch?.result["error"] ?? NSNull()
+        // Which refusal: clickTargetObscured alone hid six different causes (2026-10-05).
+        if line["ok"] as? Bool != true { line["message"] = (dispatch?.result["message"] ?? dispatch?.harnessResponse?["message"]) ?? NSNull() }
         line["harnessMs"] = dispatch?.harnessMilliseconds ?? 0
         line["waitedForConfirmation"] = dispatch?.waitedForConfirmation ?? false
         return line

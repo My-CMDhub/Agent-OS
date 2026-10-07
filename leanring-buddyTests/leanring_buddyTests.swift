@@ -4160,6 +4160,25 @@ private func binding(target: pid_t? = 800, selection chosen: ActionBinding.Selec
     #expect(seconds < 0.5, "ping took \(seconds) s behind a 1 s request")
 }
 
+/// The flake behind the test above (over 0.5 s once, 2026-10-06, idle Mac): ping's
+/// audit asked the system-wide focused app, which waits on that app, then a 0.5 s
+/// fallback. Ping reads no app, so its line says so. Writes one real audit line.
+@Test func pingsAuditLineReadsNoApp() throws {
+    let server = HarnessServer(globalDryRun: true, confirmations: HarnessConfirmations(rulesStore: temporaryRulesStore()))
+    let id = "unit-test-ping-noread-\(UUID().uuidString.prefix(8))"
+    _ = server.answer(line: #"{"id":"\#(id)","verb":"ping"}"#)
+    let log = try String(contentsOf: HarnessServer.auditLogURL, encoding: .utf8)
+    let line = try #require(log.split(separator: "\n").last { $0.contains(#""id":"\#(id)""#) })
+    #expect(line.contains(#""frontmostSource":"notRead""#), "\(line)")
+}
+
+/// G08's truth is the footprint `top` prints, the column Activity Monitor shows.
+@Test func generalityTopMemoryWordsReadTopsRows() {
+    let out = "Processes: 600 total\nPhysMem: 15G used\n\nMEM    COMMAND\n767M   Claude Helper (R\n717M   Cursor Helper (R\n459M   node\n327M   WindowServer\n305M   Xcode\n"
+    #expect(GeneralitySuite.topMemoryWords(topOutput: out) == ["Claude", "Cursor", "node", "WindowServer", "Xcode"])
+    #expect(GeneralitySuite.topMemoryWords(topOutput: "no header") == [])
+}
+
 /// Off main, Clicky's own main thread answers the harness's AX calls, so the
 /// panel's "Remove" and quit control became reachable (review 2026-09-15).
 @Test func theHarnessRefusesToTargetItself() {
