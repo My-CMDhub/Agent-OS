@@ -98,7 +98,10 @@ final class ConfirmationNudger {
         switch ConfirmationNudge.step(shownAt: shownAt, now: now, spoken: spoken, lastSpokenAt: lastSpokenAt,
                                       pending: isPending(), voiceBusy: busy) {
         case .wait: break
-        case .done: cardDismissed()
+        case .done:
+            // Out of nudges (or answered): stop the clock, but let a line just begun finish.
+            timer?.invalidate()
+            timer = nil
         case .speak(let nudge):
             spoken += 1
             lastSpokenAt = now
