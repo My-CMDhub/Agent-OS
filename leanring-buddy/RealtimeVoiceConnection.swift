@@ -1128,6 +1128,14 @@ final class RealtimeVoiceConnection {
         return callBundle != startBundle && !openedByTask.contains(callBundle)
     }
 
+    /// An agent step's heardNamedMismatch proceeds only in an app or tab this task
+    /// opened itself: what the task opened, it opened on the owner's words.
+    nonisolated static func agentStepMayActDespiteMismatch(outcome: RealtimeHeardCheck.Outcome, callBundle: String?,
+                                                           openedByTask: Set<String>) -> Bool {
+        guard outcome == .heardNamedMismatch, let callBundle else { return false }
+        return openedByTask.contains(callBundle)
+    }
+
     /// An agent step's appNameUnclear proceeds only in an app the task opened
     /// or focused itself, and never when an unclear word is within two edits of
     /// an installed app's name or a word of it ("slak" / Slack).
@@ -1213,7 +1221,7 @@ final class RealtimeVoiceConnection {
                                                      afterHeardRefusal: afterHeardRefusal, toolName: call.name, menuWords: menuWords,
                                                      targetWords: menuWords + RealtimeVoiceVerbs.foldedTokens(offered.joined(separator: " ")),
                                                      frontmostApp: frontmost, contentWords: RealtimeHeardCheck.contentTokens(content),
-                                                     namedIsBrowser: namedIsBrowser)
+                                                     namedIsBrowser: namedIsBrowser, isWebAppShim: RealtimeHeardCheck.isWebAppShim(appURL:))
             // A request names what it is about ("search Google for Superloop"): live
             // 2026-10-03 its "superloop" sat in the app slot and every scroll of the
             // task was refused heardUnavailable. appNameUnclear still means "ask"
@@ -1223,6 +1231,13 @@ final class RealtimeVoiceConnection {
             if isAgentStep, decision.outcome == .appNameUnclear,
                agentStepMayActDespiteUnclearWord(callBundle: callBundle, openedByTask: agentOpenedBundles,
                                                  unclearWords: decision.heardSlot, among: RealtimeVoiceVerbs.installedAppNames()) {
+                var proceeding = RealtimeHeardCheck.Decision(outcome: .noAppHeard, heardApps: [], tier: nil)
+                proceeding.heardSlot = decision.heardSlot
+                return (proceeding, true, false, pageApp)
+            }
+            // The same for another app named where to act: a page this task opened is its own
+            // (live 2026-10-08: "…then send it on LinkedIn" refused every press in the Meet tab it opened).
+            if isAgentStep, agentStepMayActDespiteMismatch(outcome: decision.outcome, callBundle: callBundle, openedByTask: agentOpenedBundles) {
                 var proceeding = RealtimeHeardCheck.Decision(outcome: .noAppHeard, heardApps: [], tier: nil)
                 proceeding.heardSlot = decision.heardSlot
                 return (proceeding, true, false, pageApp)
@@ -1238,7 +1253,8 @@ final class RealtimeVoiceConnection {
         let arrivalMs = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime).map { Int((($0 - released) * 1000).rounded()) }
         // A read is never refused here (`mayRefuse`); its decision still drives auto-focus.
         var refusal = RealtimeHeardCheck.mayRefuse(toolName: call.name)
-            ? RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named, namedAppIsRunning: namedAppIsRunning) : nil
+            ? RealtimeHeardCheck.refusal(for: decision, toolName: call.name, named: named, namedAppIsRunning: namedAppIsRunning,
+                                         isAgentStep: isAgentStep) : nil
         if refusal == nil, RealtimeHeardCheck.refusesOpeningAnApp(toolName: call.name, outcome: decision.outcome, transcript: transcript,
                                                                    callIsPageApp: callIsPageApp, named: named) {
             refusal = RealtimeHeardCheck.pageNotAppRefusal(named: named)

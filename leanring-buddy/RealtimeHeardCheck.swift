@@ -515,10 +515,13 @@ nonisolated enum RealtimeHeardCheck {
     /// app meant (live 2026-10-02 28B7: "search for LinkedIn" typed into
     /// Chrome was refused as the LinkedIn web app). `namedIsBrowser`: the call's
     /// app opens web pages, so "in this browser" is inside it (D30199AA).
+    /// `isWebAppShim`: an installed app that is only a site in a wrapper
+    /// (`isWebAppShim(appURL:)`); with a browser named, it is that site.
     static func decide(transcript: String?, named: String, among names: [RealtimeVoiceVerbs.AppName],
                        afterHeardRefusal: Bool = false, toolName: String = "", menuWords: [String] = [],
                        targetWords: [String] = [], frontmostApp: URL? = nil,
-                       contentWords: [String] = [], namedIsBrowser: Bool = false) -> Decision {
+                       contentWords: [String] = [], namedIsBrowser: Bool = false,
+                       isWebAppShim: (URL) -> Bool = { _ in false }) -> Decision {
         guard let rawTranscript = transcript, !rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return Decision(outcome: .transcriptMissing, heardApps: [], tier: nil)
         }
@@ -533,7 +536,7 @@ nonisolated enum RealtimeHeardCheck {
         let slot = readSlot(RealtimeVoiceVerbs.foldedTokens(transcript), among: names, menuWords: menuWords + targetWords + contentWords)
         var decision = decideHeard(transcript: transcript, named: named, among: names, afterHeardRefusal: afterHeardRefusal,
                                    toolName: toolName, targetWords: targetWords, frontmostApp: frontmostApp,
-                                   contentWords: contentWords, namedIsBrowser: namedIsBrowser)
+                                   contentWords: contentWords, namedIsBrowser: namedIsBrowser, isWebAppShim: isWebAppShim)
         // noAppHeard fails OPEN to the model's name, so a menu tool asks when a
         // name-like word sat where the app goes and matched nothing.
         if decision.outcome == .noAppHeard, RealtimeVoiceVerbs.isAppScopedMenuTool(toolName), !slot.unrecognised.isEmpty {
@@ -545,7 +548,7 @@ nonisolated enum RealtimeHeardCheck {
 
     private static func decideHeard(transcript: String, named: String, among names: [RealtimeVoiceVerbs.AppName],
                                     afterHeardRefusal: Bool, toolName: String, targetWords: [String], frontmostApp: URL?,
-                                    contentWords: [String], namedIsBrowser: Bool) -> Decision {
+                                    contentWords: [String], namedIsBrowser: Bool, isWebAppShim: (URL) -> Bool) -> Decision {
         func path(_ url: URL) -> String { url.standardizedFileURL.path }
         let namedPaths: Set<String>
         switch RealtimeVoiceVerbs.resolveApp(named: named, among: names) {
@@ -556,6 +559,13 @@ nonisolated enum RealtimeHeardCheck {
         }
         var heard = withoutContent(appsMentioned(in: transcript, among: names), contentWords: contentWords,
                                    namedPaths: namedPaths, among: names)
+        // Live 2026-10-08 (84B0105A, 3 runs of 3): "send the link to Edward on LinkedIn", with
+        // ~/Applications/LinkedIn.app a Safari web app, refused every press in Chrome. With a
+        // browser named, an app that is only a site in a wrapper is that site, not another app.
+        if namedIsBrowser {
+            let kept = heard.apps.filter { namedPaths.contains(path($0)) || !isWebAppShim($0) }
+            heard = HeardApps(apps: kept, ambiguousWord: heard.ambiguousWord, tier: kept.isEmpty ? nil : heard.tier)
+        }
         heard = withoutTopics(heard, transcript: transcript, namedPaths: namedPaths, among: names, namedIsBrowser: namedIsBrowser)
         heard = withoutWordsInsideTheNamedApp(heard, transcript: transcript, namedPaths: namedPaths, among: names,
                                               targetWords: targetWords, frontmostApp: frontmostApp, namedIsBrowser: namedIsBrowser)
@@ -585,6 +595,24 @@ nonisolated enum RealtimeHeardCheck {
             return Decision(outcome: .unconfirmedRetry, heardApps: heardNames, tier: heard.tier)
         }
         return Decision(outcome: agrees ? .match : .heardNamedMismatch, heardApps: heardNames, tier: heard.tier)
+    }
+
+    // MARK: Web-app shims are sites (2026-10-08)
+
+    /// Measured 2026-10-08 on this Mac: Safari's "Add to Dock" apps (LinkedIn, Gmail,
+    /// YouTube, Zoho Mail in ~/Applications) are `com.apple.Safari.WebApp.<UUID>` with a
+    /// `Manifest` dict (`start_url`) and no executable; Chrome's are
+    /// `com.google.Chrome.app.<id>` with `CrAppModeShortcutURL`.
+    static func isWebAppShim(bundleIdentifier: String?, info: [String: Any]?) -> Bool {
+        if let id = bundleIdentifier, ["com.apple.Safari.WebApp.", "com.google.Chrome.app."].contains(where: id.hasPrefix) { return true }
+        guard let info else { return false }
+        return info["CrAppModeShortcutURL"] != nil || (info["Manifest"] as? [String: Any])?["start_url"] != nil
+    }
+
+    /// Reads the bundle's Info.plist: off main.
+    static func isWebAppShim(appURL: URL) -> Bool {
+        let bundle = Bundle(url: appURL)
+        return isWebAppShim(bundleIdentifier: bundle?.bundleIdentifier, info: bundle?.infoDictionary)
     }
 
     // MARK: Content and web addresses are not apps (pure)
@@ -887,9 +915,19 @@ nonisolated enum RealtimeHeardCheck {
     /// What the model is told instead of a harness answer. Display names only
     /// (from the file system, not the transcript); `named` is the model's own.
     /// `namedAppIsRunning` matters only without a transcript (`refusesWithoutTranscript`).
-    static func refusal(for decision: Decision, toolName: String, named: String, namedAppIsRunning: Bool = true) -> [String: Any]? {
+    /// `isAgentStep`: a task runner's step, where an answer to "did you mean X?"
+    /// cannot change this check — the task's words already hold X (live
+    /// 2026-10-08: three runs asked it, three answers, the same refusal).
+    static func refusal(for decision: Decision, toolName: String, named: String, namedAppIsRunning: Bool = true,
+                        isAgentStep: Bool = false) -> [String: Any]? {
         let shownNamed = UntrustedText(named).forDisplay
         switch decision.outcome {
+        case .heardNamedMismatch where isAgentStep:
+            let heard = decision.heardApps.first ?? "another app"
+            return ["ok": false, "status": NSNull(), "error": mismatchError, "heard": heard, "named": named, "askOwnerWillNotHelp": true,
+                    "message": "the owner's words name \(heard) as where to act, not \(shownNamed), so nothing was done in \(shownNamed). "
+                        + "Asking the owner cannot change this check. Act in \(heard) if that is this step, or in a page this task opened; "
+                        + "otherwise end with done, saying plainly that this step could not be done in \(shownNamed)."]
         case .heardNamedMismatch:
             let heard = decision.heardApps.first ?? "another app"
             let said = decision.tier?.isTentative == true ? "may have said" : "said"

@@ -661,4 +661,53 @@ struct RealtimeHeardCheckTests {
                                  openedByTask: ["com.apple.TextEdit"]))
         #expect(!Check.isPageApp(callBundle: nil, startBundle: nil, frontmostBundle: nil, openedByTask: []))
     }
+
+    // Live 2026-10-08 84B0105A: ~/Applications/LinkedIn.app is a Safari web app, so "on
+    // LinkedIn" was heard as an app and every press in Chrome on meet.google.com was refused.
+    @Test func aWebAppShimIsASiteWhenTheCallActsInABrowser() {
+        let apps = installed + [app("/Users/o/Applications/LinkedIn.app"), app("/System/Applications/Utilities/Terminal.app")]
+        let chrome = URL(fileURLWithPath: "/Applications/Google Chrome.app", isDirectory: true)
+        let shim: (URL) -> Bool = { $0.lastPathComponent == "LinkedIn.app" }
+        func decide(_ transcript: String, named: String = "Google Chrome", tool: String = "press_element") -> RealtimeHeardCheck.Decision {
+            RealtimeHeardCheck.decide(transcript: transcript, named: named, among: apps, toolName: tool, frontmostApp: chrome,
+                                      namedIsBrowser: named == "Google Chrome", isWebAppShim: shim)
+        }
+        let owner = "Create a Google meeting for today at 4:00 p.m. and send the link to Edward on LinkedIn from my messages section."
+        for tool in ["press_element", "type_text"] { #expect(decide(owner, tool: tool).refusalError == nil, "\(tool)") }
+        #expect(decide("Yes, create a meeting link first for 4:00 p.m. today and then send it to Edward on LinkedIn.").refusalError == nil)
+        // Not a browser named: the shim is still an app ("type hello in LinkedIn" into TextEdit).
+        #expect(decide("type hello on LinkedIn", named: "TextEdit", tool: "type_text").outcome == .heardNamedMismatch)
+        // A real wrong-app request still refuses: Terminal is no shim.
+        #expect(decide("type hello in Terminal", tool: "type_text").outcome == .heardNamedMismatch)
+
+        // The bundle shapes measured on this Mac.
+        #expect(RealtimeHeardCheck.isWebAppShim(bundleIdentifier: "com.apple.Safari.WebApp.3AD71A25-F059-469E-91A4-1A7E10464C02", info: nil))
+        #expect(RealtimeHeardCheck.isWebAppShim(bundleIdentifier: "x", info: ["Manifest": ["start_url": "https://www.linkedin.com/"]]))
+        #expect(RealtimeHeardCheck.isWebAppShim(bundleIdentifier: "com.google.Chrome.app.abc", info: [:]))
+        #expect(!RealtimeHeardCheck.isWebAppShim(bundleIdentifier: "us.zoom.xos", info: ["CFBundleExecutable": "zoom.us"]))
+        #expect(!RealtimeHeardCheck.isWebAppShim(bundleIdentifier: "com.google.Chrome", info: [:]))
+    }
+
+    // A task step in a tab it opened acts despite another app named for a later step; elsewhere it still refuses.
+    @Test func anAgentStepActsInWhatItOpenedDespiteAMismatch() {
+        #expect(RealtimeVoiceConnection.agentStepMayActDespiteMismatch(outcome: .heardNamedMismatch, callBundle: "com.google.Chrome",
+                                                                       openedByTask: ["com.google.Chrome"]))
+        #expect(!RealtimeVoiceConnection.agentStepMayActDespiteMismatch(outcome: .heardNamedMismatch, callBundle: "com.google.Chrome",
+                                                                        openedByTask: []))
+        #expect(!RealtimeVoiceConnection.agentStepMayActDespiteMismatch(outcome: .ambiguousApp, callBundle: "com.google.Chrome",
+                                                                        openedByTask: ["com.google.Chrome"]))
+    }
+
+    // Asking "did you mean LinkedIn?" cannot unlock a mismatch the task's own words hold: a loop step is never told to ask.
+    @Test func aMismatchRefusalNeverSendsTheLoopToAskTheOwner() {
+        let decision = RealtimeHeardCheck.Decision(outcome: .heardNamedMismatch, heardApps: ["LinkedIn"], tier: nil)
+        let step = RealtimeHeardCheck.refusal(for: decision, toolName: "press_element", named: "Google Chrome", isAgentStep: true)
+        let message = (step?["message"] as? String) ?? ""
+        #expect(step?["error"] as? String == "heardNamedMismatch")
+        #expect(!message.lowercased().contains("ask the owner"))
+        #expect(message.contains("done"))
+        // A voice turn still asks: there the owner's answer is the next turn's words.
+        let voice = RealtimeHeardCheck.refusal(for: decision, toolName: "press_element", named: "Google Chrome")
+        #expect(((voice?["message"] as? String) ?? "").contains("Ask the owner"))
+    }
 }
