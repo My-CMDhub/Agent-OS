@@ -1182,6 +1182,11 @@ struct TaskSessionTests {
         #expect(AgentLoop.artifacts(inAppText: "Here's your joining info\nmeet.google.com/abc-defg-hij\nCopy") == ["meet.google.com/abc-defg-hij"])
         #expect(AgentLoop.artifacts(inAppText: "https://zoom.us/j/1234567890 and meet.google.com/new").count == 1)
         #expect(AgentLoop.artifacts(inAppText: "nothing here").isEmpty)
+        // find_on_screen's offered names are the app's; its query words are not.
+        let found: [String: Any] = ["ok": true, "words": "meet.google.com/zzz-zzzz-zzz",
+                                    "matches": [["name": "meet.google.com/abc-defg-hij", "role": "text"]]]
+        #expect(AgentLoop.appShownText(toolName: "find_on_screen", result: found) == "meet.google.com/abc-defg-hij")
+        #expect(AgentLoop.appShownText(toolName: "type_text", result: ["ok": true, "text": "meet.google.com/zzz-zzzz-zzz"]) == nil)
 
         let script = Script([toolUse("type_text", ["text": "meet.google.com/zzz-zzzz-zzz"]), toolUse("read_page"),
                              toolUse("done", ["summary": "Read it.", "evidence": [2]])])

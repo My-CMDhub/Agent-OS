@@ -648,7 +648,7 @@ final class AgentLoop {
                 let ok = result["ok"] as? Bool == true
                 let error = ok ? nil : ((result["error"] as? String) ?? "failed")
                 // App-shown text only: a page read, never the model's own arguments.
-                if ok, toolName == AgentLoopTools.readPageName, let text = result["text"] as? String {
+                if ok, let text = Self.appShownText(toolName: toolName, result: result) {
                     for found in Self.artifacts(inAppText: text) where !artifacts.contains(found) { artifacts.append(found) }
                 }
                 receipts.append(Receipt(step: step, toolName: call?.name ?? toolName, ok: ok, error: error,
@@ -1003,6 +1003,19 @@ final class AgentLoop {
     /// whole addresses, so a page's other links never count.
     /// ponytail: meeting links only; add file paths and event links when a task needs them typed.
     nonisolated static let artifactPatterns = [#"meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}\b"#, #"zoom\.us/j/[0-9]{9,11}\b"#]
+
+    /// The text in a result that the APP wrote: read_page's page text, and the
+    /// element names find_on_screen offers (live S1 B6FBD6AB: the link showed as
+    /// an element name, never read as a page). Never the model's own arguments.
+    nonisolated static func appShownText(toolName: String, result: [String: Any]) -> String? {
+        switch toolName {
+        case AgentLoopTools.readPageName: return result["text"] as? String
+        case RealtimeVoiceVerbs.findOnScreenName:
+            let names = result.values.compactMap { $0 as? [[String: Any]] }.joined().compactMap { $0["name"] as? String }
+            return names.isEmpty ? nil : names.joined(separator: "\n")
+        default: return nil
+        }
+    }
 
     nonisolated static func artifacts(inAppText text: String) -> [String] {
         var found: [String] = []
