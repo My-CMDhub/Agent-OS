@@ -1225,3 +1225,33 @@ struct TaskSessionTests {
     }
 }
 
+/// 2026-10-08 B05BEFEE: the done claimed a draft "with the Meet link" that it never wrote.
+/// Draft-style effects need a receipt of their own kind, in any grammatical person.
+@MainActor struct DraftStyleEffectTests {
+    func ok(_ tools: String...) -> [AgentLoop.Receipt] {
+        tools.enumerated().map { AgentLoop.Receipt(step: $0.offset + 1, toolName: $0.element, ok: true, error: nil) }
+    }
+
+    @Test func aDraftNeedsSomethingWritten() {
+        // B05BEFEE's shape: the compose window was opened and pressed, nothing was written into it.
+        #expect(AgentLoop.doneChallenge(summary: "An email to you was drafted with the Meet link.", evidence: [],
+                                        receipts: ok("open_url", "press_element")) != nil)
+        #expect(AgentLoop.doneChallenge(summary: "An email to you was drafted with the Meet link.", evidence: [],
+                                        receipts: ok("open_url", "type_text")) == nil)
+        #expect(AgentLoop.doneChallenge(summary: "The link was pasted into the search box.", evidence: [],
+                                        receipts: ok("open_url")) != nil)
+        #expect(AgentLoop.doneChallenge(summary: "The link was pasted into the search box.", evidence: [],
+                                        receipts: ok("open_url", "press_menu")) == nil)
+    }
+
+    @Test func copiedAttachedScheduledAddedAndCreatedNeedAnAction() {
+        for summary in ["The meeting link was copied.", "The file was attached.", "The event is scheduled for 6:30 pm.",
+                        "Ed was added as a guest.", "A meeting for later was created."] {
+            #expect(AgentLoop.doneChallenge(summary: summary, evidence: [], receipts: ok("open_url", "find_on_screen")) != nil, "\(summary)")
+            #expect(AgentLoop.doneChallenge(summary: summary, evidence: [], receipts: ok("open_url", "press_element")) == nil, "\(summary)")
+        }
+        // A negated draft-style effect claims nothing.
+        #expect(AgentLoop.doneChallenge(summary: "Nothing was drafted; I could not reach the compose window.", evidence: [],
+                                        receipts: []) == nil)
+    }
+}

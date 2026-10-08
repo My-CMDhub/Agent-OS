@@ -899,7 +899,11 @@ final class AgentLoop {
         (["typed", "entered", "filled", "written", "wrote"], [RealtimeVoiceVerbs.typeTextName]),
         (["opened", "launched", "loaded", "navigated", "visited"], navigationTools),
         (["closed", "quit"], [RealtimeVoiceVerbs.closeName]),
-        (["scrolled"], [RealtimeVoiceVerbs.scrollName])
+        (["scrolled"], [RealtimeVoiceVerbs.scrollName]),
+        // B05BEFEE (2026-10-08) claimed a draft "with the Meet link" it never wrote: draft-style effects need their own kind.
+        (["drafted", "pasted"], [RealtimeVoiceVerbs.typeTextName, RealtimeVoiceVerbs.pressMenuName]),
+        (["copied", "attached", "scheduled"], pressTools),
+        (["added", "created"], pressTools.union([RealtimeVoiceVerbs.typeTextName]))
     ]
     /// Within three words before an effect, a word that says it did not happen.
     static let effectNegations: Set<String> = ["not", "no", "never", "nothing", "couldn't", "didn't", "wasn't", "weren't", "isn't",
