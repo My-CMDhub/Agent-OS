@@ -59,16 +59,19 @@ struct LabelRetargetTests {
         #expect(picked([node("AXHeading", "Me")]) == nil)
     }
 
-    // Live 2026-10-08 (S1, run F47F8E44): Meet's "Create a meeting for later" is a web AXMenuItem
-    // reached by select; it was carded "unrecognised role" twice. Its words still decide.
-    @Test func aWebMenuItemIsSelectedAsNavigationAndItsWordsStillDecide() {
-        func select(_ name: String) -> SafetyDecision {
-            ActionSafetyKernel.evaluate(intent: ElementActionIntent(role: "AXMenuItem", title: name, action: .select),
-                                        resolvedNode: node("AXMenuItem", name), matchCount: 1, visibleBounds: bounds)
+    // Live 2026-10-08 (S1, runs F47F8E44, 0B3305D7): Meet's "Create a meeting for later" is a web
+    // AXMenuItem with no AXPress; it was carded, then sent to select. It is clicked; its words still decide.
+    @Test func aWebMenuItemIsClickedAsNavigationAndItsWordsStillDecide() {
+        func click(_ name: String) -> SafetyDecision {
+            ActionSafetyKernel.evaluate(intent: ElementActionIntent(role: "AXMenuItem", title: name, action: .click),
+                                        resolvedNode: node("AXMenuItem", name, pressable: false), matchCount: 1, visibleBounds: bounds)
         }
-        #expect(select("Create a meeting for later") == .allow)
-        #expect(select("Delete meeting") == .requireConfirmation(reason: "title suggests a destructive action: delete", destructive: true))
-        if case .refuse = select("Erase all") {} else { Issue.record("an irreversible word must still refuse") }
+        #expect(click("Create a meeting for later") == .allow)
+        #expect(click("Delete meeting") == .requireConfirmation(reason: "title suggests a destructive action: delete", destructive: true))
+        if case .refuse = click("Erase all") {} else { Issue.record("an irreversible word must still refuse") }
+        // press_element now clicks it rather than selecting it.
+        let item = RealtimeScreenCandidate(name: "Create a meeting for later", role: "AXMenuItem", frame: .zero, position: "", pressable: false)
+        #expect(item.clickTarget?.role == "AXMenuItem")
     }
 
     @Test func theControlIsJudgedAndTheLabelsWordsStillDecide() {

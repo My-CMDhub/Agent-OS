@@ -34,7 +34,12 @@ enum ActionSafetyKernel {
     /// refuses, publishing asks, whatever the role.
     static let navigationalPressRoles: Set<String> = [
         "AXButton", "AXRow", "AXCell", "AXGroup", "AXLink", "AXRadioButton", "AXDisclosureTriangle",
-        "AXMenuButton", "AXPopUpButton", "AXCheckBox"
+        "AXMenuButton", "AXPopUpButton", "AXCheckBox",
+        // Measured 2026-10-08 (smoke S1): Meet's "New meeting" pop-up in Chrome lists
+        // "Create a meeting for later" as an AXMenuItem with no AXPress; it was sent to
+        // `select` (noSelectableAncestor) or carded "unrecognised role". A menu item is
+        // navigation for `menu` already; its words are still judged first.
+        "AXMenuItem"
     ]
     /// A tab is a subrole (Chromium and AppKit put it on AXRadioButton, but a role is a convention).
     static let navigationalPressSubroles: Set<String> = ["AXTabButton"]
@@ -45,11 +50,7 @@ enum ActionSafetyKernel {
     /// sidebar row is anonymous, so the element a planner can name is the label
     /// two levels inside it. Selecting changes what is selected — the write
     /// itself cannot activate anything else.
-    /// `AXMenuItem` (measured 2026-10-08, Meet's "New meeting" pop-up in Chrome):
-    /// "Create a meeting for later" was carded "unrecognised role" twice and the
-    /// task stopped. A menu item is navigation for `menu` already; its words are
-    /// still judged above (destructive asks, irreversible refuses).
-    static let navigationalSelectRoles: Set<String> = ["AXRow", "AXCell", "AXStaticText", "AXMenuItem"]
+    static let navigationalSelectRoles: Set<String> = ["AXRow", "AXCell", "AXStaticText"]
 
     /// The only roles that may be typed into. Everything else is refused, not
     /// asked about: a role that does not accept text has no correct answer to
@@ -441,8 +442,7 @@ enum ActionSafetyKernel {
         let targetName = (AccessibilityElementNode.textInputRoles.contains(resolvedNode.role) ? resolvedNode.fieldLabel : nil)
             ?? resolvedNode.displayName
         let wordCheckedNames = [typing?.aimedByFocus == true ? nil : targetName?.raw, labelTitle].compactMap { $0 }
-        // Selecting a menu item activates it, so `select`'s exemption is not its (2026-10-08).
-        if intent.action.irreversibleNamesAreRefused || resolvedNode.role == "AXMenuItem" {
+        if intent.action.irreversibleNamesAreRefused {
             for name in wordCheckedNames {
                 let lowercased = name.lowercased()
                 if let matchedKeyword = irreversibleTitleKeywords.first(where: { lowercased.contains($0) }) {
