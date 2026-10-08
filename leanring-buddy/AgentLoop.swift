@@ -1004,7 +1004,7 @@ final class AgentLoop {
     /// The owner's next turn, after their press stopped a task.
     static func stoppedContextLine(step: Int) -> String {
         "system context, not the owner's words: the task you started with do_task was stopped by the owner's word at step \(step); "
-            + "nothing more is being done. if they ask, or said stop, say it stopped at step \(step)."
+            + "nothing more is being done. if they ask, or said stop, say it stopped at step \(step), and act on nothing for it."
     }
 
     // MARK: Task state for the voice (2026-10-08)

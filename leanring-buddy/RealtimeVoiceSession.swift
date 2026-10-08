@@ -394,7 +394,14 @@ final class RealtimeVoiceSession {
             while !Task.isCancelled {
                 guard let self, self.agentLoop?.isRunning == true, self.uptime < deadline else { return }
                 if Self.ownerWordsStopTask(marks.heardText) {
-                    if let stoppedAt = self.stopAgentLoop() { self.agentStoppedLine = AgentLoop.stoppedContextLine(step: stoppedAt) }
+                    guard let stoppedAt = self.stopAgentLoop() else { return }
+                    // Live B8 2026-10-08: stopped mid-turn, the voice still read "running" and tried to press; tell THIS turn.
+                    let line = AgentLoop.stoppedContextLine(step: stoppedAt)
+                    if let connection = self.connection, connection.turn === marks {
+                        try? await connection.sendContextText(line)
+                    } else {
+                        self.agentStoppedLine = line
+                    }
                     return
                 }
                 if marks.heardCompletedUptime(now: self.uptime) != nil { return }
