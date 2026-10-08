@@ -2055,6 +2055,7 @@ final class HarnessServer {
         bundleIdentifier: String?,
         dryRun: Bool,
         bindingSubject: ActionBinding.Subject? = nil,
+        linkURL: String? = nil,
         into response: inout [String: Any]
     ) -> GateResult {
         let described = HarnessPolicy.describe(decision)
@@ -2069,7 +2070,7 @@ final class HarnessServer {
                                 outcome: "kernelRefused", note: "refused: \(reason)")
 
         case .requireConfirmation(let reason, let destructive):
-            let shape = Self.confirmationShape(for: request, bundleIdentifier: bundleIdentifier)
+            let shape = Self.confirmationShape(for: request, bundleIdentifier: bundleIdentifier, linkURL: linkURL)
             var confirmedBy: String?
             var confirmation: [String: Any] = [:]
             var refusal: (outcome: String, note: String)?
@@ -2188,9 +2189,25 @@ final class HarnessServer {
         return result
     }
 
+    /// The AXURL of the pressed link, or of the nearest AXLink holding the
+    /// pressed element (Chromium nests a link's words a few wrappers down).
+    /// Links only: an AXWebArea's AXURL is the page itself, and reading it would
+    /// card every press on a profile page.
+    nonisolated static func linkAddress(of node: AccessibilityElementNode, rootNode: AccessibilityElementNode) -> URL? {
+        let ancestors = ElementReachability.ancestorChain(to: node, from: rootNode).map { Array($0.dropLast().reversed().prefix(3)) } ?? []
+        for candidate in [node] + ancestors where candidate.role == "AXLink" {
+            guard let element = candidate.accessibilityElement else { continue }
+            var address: AnyObject?
+            guard AXUIElementCopyAttributeValue(element, kAXURLAttribute as CFString, &address) == .success else { continue }
+            if let url = (address as? URL) ?? (address as? String).flatMap(URL.init(string:)) { return url }
+        }
+        return nil
+    }
+
     /// The request shape a ticket or rule is matched against: raw strings, so
     /// two titles that `forDisplay` would truncate alike stay distinct.
-    nonisolated static func confirmationShape(for request: HarnessRequest, bundleIdentifier: String?) -> HarnessConfirmations.Shape {
+    nonisolated static func confirmationShape(for request: HarnessRequest, bundleIdentifier: String?,
+                                              linkURL: String? = nil) -> HarnessConfirmations.Shape {
         HarnessConfirmations.Shape(
             verb: request.verb.rawValue,
             bundleIdentifier: bundleIdentifier,
@@ -2200,7 +2217,8 @@ final class HarnessServer {
             withinNamed: request.withinNamed,
             nearPoint: request.nearPoint,
             role: request.role,
-            thenConfirm: request.thenConfirm
+            thenConfirm: request.thenConfirm,
+            linkURL: linkURL
         )
     }
 
@@ -2707,15 +2725,21 @@ final class HarnessServer {
         let typingContext = typing?.context
         if let field = typing?.field { response["field"] = field }
 
+        // A link to a person-notifying view (a LinkedIn profile) asks on a card,
+        // judged on the link's OWN AXURL, never the caller's words (ruling 2026-10-08).
+        let linkURL = action == .press || action == .click || action == .open
+            ? Self.linkAddress(of: resolvedNode, rootNode: rootNode) : nil
+        let notifyingLink = linkURL.flatMap { ActionSafetyKernel.personNotifyingView($0) != nil ? HarnessHands.auditableURL($0) : nil }
+        if let notifyingLink { response["personNotifyingLink"] = notifyingLink }
         let decision = applyAppPolicy(
-            to: ActionSafetyKernel.evaluate(
+            to: ActionSafetyKernel.gatingPersonNotifyingView(ActionSafetyKernel.evaluate(
                 intent: intent,
                 resolvedNode: resolvedNode,
                 matchCount: 1,
                 visibleBounds: rootNode.frameInAppKitCoordinates,
                 typing: typingContext,
                 labelTitle: labelTitle
-            ),
+            ), url: linkURL),
             bundleIdentifier: snapshot.bundleIdentifier, into: &response
         )
         let described = HarnessPolicy.describe(decision)
@@ -2725,7 +2749,7 @@ final class HarnessServer {
         )
         let gated = gate(decision, request: request, appName: snapshot.applicationName,
                          bundleIdentifier: snapshot.bundleIdentifier, dryRun: dryRun,
-                         bindingSubject: bindingSubject, into: &response)
+                         bindingSubject: bindingSubject, linkURL: notifyingLink, into: &response)
 
         guard gated.executable else {
             response["ok"] = false
@@ -4173,7 +4197,8 @@ final class HarnessServer {
         response["bundleIdentifier"] = bundleIdentifier ?? NSNull()
 
         // The address judged like a control's name, a private host asked about (review of H1).
-        let decision = applyAppPolicy(to: HarnessHands.openURLDecision(url), bundleIdentifier: bundleIdentifier, into: &response)
+        let decision = applyAppPolicy(to: ActionSafetyKernel.gatingPersonNotifyingView(HarnessHands.openURLDecision(url), url: url),
+                                      bundleIdentifier: bundleIdentifier, into: &response)
         let gated = gate(decision, request: request, appName: browserName, bundleIdentifier: bundleIdentifier,
                          dryRun: dryRun, into: &response)
         guard gated.executable else {

@@ -317,6 +317,58 @@ enum ActionSafetyKernel {
         return .allow
     }
 
+    // MARK: Person-notifying views (owner's ruling 2026-10-08)
+
+    /// A page whose network tells the person "who viewed your profile": opening
+    /// it reaches a real person, even in a read-only task, so it asks on a card —
+    /// through openURL and through a press or click on a link whose own AXURL
+    /// points there. Data, not logic: another network is one more row (its host,
+    /// and the first path component of its profile pages).
+    struct PersonNotifyingView: Equatable {
+        let network: String
+        let host: String
+        let firstPathComponent: String
+    }
+
+    static let personNotifyingViews: [PersonNotifyingView] = [
+        PersonNotifyingView(network: "LinkedIn", host: "linkedin.com", firstPathComponent: "in")
+    ]
+
+    /// The row whose profile `url` opens: its host or a subdomain of it (www.,
+    /// au., m.), then `/<component>/<someone>`. Path compared without case and
+    /// with empty components dropped, so `//IN/jane` counts; `/in/` alone is no one.
+    /// ponytail: a shortener (lnkd.in) or a redirect URL is not followed.
+    static func personNotifyingView(_ url: URL) -> PersonNotifyingView? {
+        guard var host = url.host?.lowercased() else { return nil }
+        if host.hasSuffix(".") { host.removeLast() }
+        let path = url.path.lowercased().split(separator: "/").map(String.init)
+        guard path.count >= 2 else { return nil }
+        return personNotifyingViews.first { view in
+            (host == view.host || host.hasSuffix("." + view.host)) && path[0] == view.firstPathComponent
+        }
+    }
+
+    static func personNotifyingView(_ address: String) -> PersonNotifyingView? {
+        URL(string: address).flatMap { personNotifyingView($0) }
+    }
+
+    static func personNotifyingReason(network: String) -> String {
+        "opens a \(network) profile, and \(network) notifies that person it was viewed"
+    }
+
+    /// `decision` with the profile rule laid over it: a refusal stays a refusal,
+    /// a question keeps its destructive flag and gains the reason, an allow asks.
+    static func gatingPersonNotifyingView(_ decision: SafetyDecision, url: URL?) -> SafetyDecision {
+        guard let view = url.flatMap({ personNotifyingView($0) }) else { return decision }
+        let reason = personNotifyingReason(network: view.network)
+        switch decision {
+        case .refuse: return decision
+        case .requireConfirmation(let existing, let destructive):
+            return .requireConfirmation(reason: "\(existing); \(reason)", destructive: destructive)
+        case .allow: return .requireConfirmation(reason: reason)
+        }
+    }
+
     /// Apps that run arbitrary code or hold credentials. Starting one is asked about.
     static let launchConfirmationBundleIdentifiers: Set<String> = [
         "com.apple.Terminal", "com.googlecode.iterm2", "com.apple.ScriptEditor2",

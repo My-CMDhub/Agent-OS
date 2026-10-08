@@ -133,12 +133,14 @@ struct ConfirmationCardTests {
     @Test func everyFieldThatChangesTheActionOrItsTargetIsVisibleWithoutOpeningDetails() {
         let full = HarnessConfirmations.Shape(verb: "type", bundleIdentifier: "com.apple.mail", rawTarget: "Body",
                                               text: "hello", mode: "insert", withinNamed: "Drafts",
-                                              nearPoint: CGPoint(x: 10, y: 20), role: "AXTextArea", thenConfirm: true)
+                                              nearPoint: CGPoint(x: 10, y: 20), role: "AXTextArea", thenConfirm: true,
+                                              linkURL: "https://example.com/a")
         var variants: [String: HarnessConfirmations.Shape] = [:]
         var v = full; v.text = "goodbye"; variants["text"] = v
         v = full; v.mode = "replace"; variants["mode"] = v
         v = full; v.withinNamed = "Bank"; variants["withinNamed"] = v
         v = full; v.thenConfirm = false; variants["thenConfirm"] = v
+        v = full; v.linkURL = "https://example.com/b"; variants["linkURL"] = v
         variants["verb"] = .init(verb: "press", bundleIdentifier: full.bundleIdentifier, rawTarget: full.rawTarget, text: full.text,
                                  mode: full.mode, withinNamed: full.withinNamed, nearPoint: full.nearPoint, role: full.role, thenConfirm: true)
         variants["rawTarget"] = .init(verb: "type", bundleIdentifier: full.bundleIdentifier, rawTarget: "Subject", text: full.text,

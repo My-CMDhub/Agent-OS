@@ -3151,10 +3151,11 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
 private func mailShape(
     verb: String = "type", bundleIdentifier: String? = "com.apple.mail", rawTarget: String = "Body",
     text: String? = "hello", mode: String? = "insert", withinNamed: String? = "Drafts",
-    nearPoint: CGPoint? = CGPoint(x: 10, y: 20), role: String? = "AXTextArea", thenConfirm: Bool = true
+    nearPoint: CGPoint? = CGPoint(x: 10, y: 20), role: String? = "AXTextArea", thenConfirm: Bool = true,
+    linkURL: String? = nil
 ) -> HarnessConfirmations.Shape {
     .init(verb: verb, bundleIdentifier: bundleIdentifier, rawTarget: rawTarget, text: text, mode: mode,
-          withinNamed: withinNamed, nearPoint: nearPoint, role: role, thenConfirm: thenConfirm)
+          withinNamed: withinNamed, nearPoint: nearPoint, role: role, thenConfirm: thenConfirm, linkURL: linkURL)
 }
 
 @Test func everyFieldAConfirmationBindsIsAFieldThePanelShows() async throws {
@@ -3168,7 +3169,8 @@ private func mailShape(
         "withinNamed": mailShape(withinNamed: "Bank"),
         "nearPoint": mailShape(nearPoint: CGPoint(x: 10, y: 21)),
         "role": mailShape(role: "AXTextField"),
-        "thenConfirm": mailShape(thenConfirm: false)
+        "thenConfirm": mailShape(thenConfirm: false),
+        "linkURL": mailShape(linkURL: "https://www.linkedin.com/in/jane-doe/")
     ]
     // A field added to Shape without a variant here fails first — and a variant
     // is only accepted if changing that field alone changes what the owner sees.

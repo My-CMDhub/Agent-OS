@@ -239,11 +239,13 @@ final class HarnessConfirmations: ObservableObject {
         /// read back from a reason: the stored one is quoted, and a composed one
         /// starts with the app policy's words (review 2026-09-15).
         var isDestructive = false
+        /// `Shape.linkURL`, copied at `open`.
+        var linkURL: String? = nil
 
         /// The shape this ticket answers — what `mismatchedField` compares.
         var shape: Shape {
             Shape(verb: verb, bundleIdentifier: bundleIdentifier, rawTarget: rawTarget, text: text, mode: mode,
-                  withinNamed: withinNamed, nearPoint: nearPoint, role: role, thenConfirm: thenConfirm)
+                  withinNamed: withinNamed, nearPoint: nearPoint, role: role, thenConfirm: thenConfirm, linkURL: linkURL)
         }
 
         var expiresAt: Date { createdAt.addingTimeInterval(HarnessConfirmations.ticketLifetimeInSeconds) }
@@ -260,6 +262,36 @@ final class HarnessConfirmations: ObservableObject {
         var nearPoint: CGPoint? = nil
         var role: String? = nil
         var thenConfirm: Bool = false
+        /// press/click/open of a link whose own AXURL opens a person-notifying
+        /// view (`ActionSafetyKernel.personNotifyingViews`): the ticket binds where
+        /// the link goes, so a re-issue on a link to someone else does not match.
+        var linkURL: String? = nil
+    }
+
+    /// The always-visible warning on a profile question. Our words only.
+    static let personNotifiedWarning = "They\u{2019}ll be notified you viewed it"
+
+    /// The person-notifying view a card's action opens: the link's own AXURL for
+    /// a press or click, the address for openURL.
+    static func personNotifyingView(of shape: Shape) -> ActionSafetyKernel.PersonNotifyingView? {
+        (shape.linkURL ?? (shape.verb == "openURL" ? shape.rawTarget : nil)).flatMap { ActionSafetyKernel.personNotifyingView($0) }
+    }
+
+    /// The person's name on a profile question, only from text the app showed:
+    /// a press or click's target name. Never openURL's address (the caller's
+    /// words), never a placeholder (`<focused>`), never a phrase that is itself
+    /// about a profile ("View Jane's profile"). nil leaves the name out.
+    static func shownPersonName(of shape: Shape) -> String? {
+        guard shape.verb != "openURL", !shape.rawTarget.isEmpty, !shape.rawTarget.hasPrefix("<"),
+              shape.rawTarget.range(of: "profile", options: .caseInsensitive) == nil else { return nil }
+        return shape.rawTarget
+    }
+
+    /// "Always" exists for neither a destructive question nor a profile view:
+    /// each view notifies someone afresh. The card's button and the rule consult
+    /// both ask here.
+    static func allowsAlwaysRule(for shape: Shape, destructive: Bool) -> Bool {
+        !destructive && personNotifyingView(of: shape) == nil
     }
 
     enum Consumption: Equatable {
@@ -374,6 +406,7 @@ final class HarnessConfirmations: ObservableObject {
         if approved.nearPoint != shape.nearPoint { return "nearPoint" }
         if approved.role != shape.role { return "role" }
         if approved.thenConfirm != shape.thenConfirm { return "thenConfirm" }
+        if approved.linkURL != shape.linkURL { return "linkURL" }
         if shape.verb == "type" {
             if approved.text != shape.text { return "text" }
             if approved.mode != shape.mode { return "mode" }
@@ -427,12 +460,16 @@ final class HarnessConfirmations: ObservableObject {
         let target = UntrustedText(shape.rawTarget).forDisplayInFull
         // No name: the bundle id stands in, so the collapsed card still says which app.
         let app = (appName ?? shape.bundleIdentifier).map { UntrustedText($0).forDisplayInFull } ?? "unnamed app"
-        var lines = [CardLine(kind: .question, text: question(for: shape, app: app))]
+        let notifying = personNotifyingView(of: shape)
+        var lines = [CardLine(kind: .question, text: notifying.map { profileQuestion($0, name: shownPersonName(of: shape)) }
+                                                  ?? question(for: shape, app: app))]
+        if notifying != nil { lines.append(CardLine(kind: .warning, text: personNotifiedWarning)) }
         if destructive { lines.append(CardLine(kind: .warning, text: destructiveWarning(for: shape))) }
         if let text = shape.text { lines.append(CardLine(kind: .preview, text: UntrustedText(text).forDisplayInFull)) }
         // The app is in the question, so the where line starts inside it.
         let place = (shape.withinNamed.map { [UntrustedText($0).forDisplayInFull] } ?? []) + [target]
         lines.append(CardLine(kind: .place, text: place.joined(separator: " \u{203A} ")))
+        if let link = shape.linkURL { lines.append(CardLine(kind: .place, text: "link \(UntrustedText(link).forDisplayInFull)")) }
         if let role = shape.role { lines.append(CardLine(kind: .qualifier, text: "role \(UntrustedText(role).forDisplayInFull)")) }
         if let point = shape.nearPoint { lines.append(CardLine(kind: .qualifier, text: "at point (\(point.x), \(point.y))")) }
         let bundle = shape.bundleIdentifier.map { UntrustedText($0).forDisplayInFull } ?? "no bundle identifier"
@@ -482,6 +519,12 @@ final class HarnessConfirmations: ObservableObject {
         }
         if shape.thenConfirm { phrase += " and submit it" }
         return "\(phrase) in \(app)?"
+    }
+
+    /// Owner's ruling 2026-10-08: "Open <name>'s LinkedIn profile?", the name
+    /// escaped like every app-written string, or no name at all.
+    static func profileQuestion(_ view: ActionSafetyKernel.PersonNotifyingView, name: String?) -> String {
+        name.map { "Open \(UntrustedText($0).forDisplayInFull)\u{2019}s \(view.network) profile?" } ?? "Open a \(view.network) profile?"
     }
 
     /// The always-visible warning on a destructive question. Our words only,
@@ -595,7 +638,7 @@ final class HarnessConfirmations: ObservableObject {
     /// `SafetyDecision.requireConfirmation(destructive:)`. The card hides the
     /// button AND `answer` refuses to save the rule, so no caller can get one.
     static func offersAlwaysRule(for ticket: Ticket) -> Bool {
-        !ticket.isDestructive
+        allowsAlwaysRule(for: ticket.shape, destructive: ticket.isDestructive)
     }
 
     static func alwaysButtonTitle(for ticket: Ticket) -> String {
@@ -703,6 +746,7 @@ final class HarnessConfirmations: ObservableObject {
             binding: binding
         )
         ticket.isDestructive = destructive
+        ticket.linkURL = shape.linkURL
         tickets.append(ticket)
         // At most 20: evict the oldest answered/expired first, never a pending one.
         while tickets.count > 20,
@@ -818,7 +862,8 @@ final class HarnessConfirmations: ObservableObject {
             (try? FileManager.default.attributesOfItem(atPath: $0.path)) != nil ? $0.path : nil
         }
         switch rulesStore.load() {
-        case .success(let rules): return (destructive ? nil : Self.matchingRule(in: rules, shape), nil, ignoredFile)
+        case .success(let rules):
+            return (Self.allowsAlwaysRule(for: shape, destructive: destructive) ? Self.matchingRule(in: rules, shape) : nil, nil, ignoredFile)
         case .failure(let failure): return (nil, failure.reason, ignoredFile)
         }
     }
