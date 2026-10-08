@@ -314,7 +314,10 @@ struct AgentLoopTests {
         #expect(refused("open_url", system: true, running: true) == "systemTurnCannotAct")
         #expect(refused("scroll", system: true, speechOnly: true) == "systemTurnCannotAct")
         #expect(refused("focus_app", system: true) == nil)            // a receipt correction with no task running
-        #expect(refused("scroll", system: false, running: true) == nil) // the owner's own turn still acts
+        // 2026-10-08: a press no longer stops the task, so an owner turn while it runs acts on nothing:
+        // a second planner beside the task; the owner's words stop it, or the voice asks to set it aside.
+        #expect(refused("scroll", system: false, running: true) == "taskRunning")
+        #expect(refused("do_task", system: false, running: true) == "taskRunning")
         #expect(refused("do_task", system: false) == nil)
         // Blocker 1 (b): no owner words, no task.
         #expect(refused("do_task", system: false, heard: nil) == "heardUnavailable")
@@ -1222,6 +1225,34 @@ struct TaskSessionTests {
         let guarded = AgentLoop.draftGuardedAnswer { _ in "{\"ok\":true}" }
         #expect(guarded("{\"verb\":\"press\",\"title\":\"Save\"}").contains("draftScope"))
         #expect(guarded("{\"verb\":\"press\",\"title\":\"More options\"}") == "{\"ok\":true}")
+    }
+}
+
+/// Owner 2026-10-08 ("rigid timeline"): a key press interrupts J.A.R.V.I.S.'s speech, never
+/// the task. The owner's WORDS decide: stop words cancel it, anything else leaves it running.
+@MainActor struct KeyPressKeepsTheTaskTests {
+
+    // B8-style, the transcript injected: these words cancel, at once, even as a partial transcript.
+    @Test func stopWordsCancelTheTask() {
+        for words in ["stop", "Stop!", "Jarvis, stop.", "cancel", "cancel that", "never mind", "Nevermind.", "abort",
+                      "wait, don't", "Wait don't do that", "OK, set it aside", "stop the task"] {
+            #expect(RealtimeVoiceSession.ownerWordsStopTask(words), "\(words)")
+        }
+    }
+
+    // The live failure: "did you create the link?" mid-task killed the task.
+    @Test func aQuestionOrANewRequestLeavesTheTaskRunning() {
+        for words in ["did you create the link?", "what step are you on", "how is it going", "also open Spotify",
+                      "send it to Edward on LinkedIn", "open the stopwatch", "", "  "] {
+            #expect(!RealtimeVoiceSession.ownerWordsStopTask(words), "\(words)")
+        }
+    }
+
+    @Test func theStatusLineNoLongerBlamesAKeyPress() {
+        let line = AgentLoop.statusLine(goal: "make a meet link", state: .stopped, step: 3, receipts: [], artifacts: [])
+        #expect(!line.contains("key press"))
+        #expect(line.contains("the owner said to stop"))
+        #expect(!AgentLoop.stoppedContextLine(step: 3).contains("key press"))
     }
 }
 

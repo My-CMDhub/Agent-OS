@@ -806,6 +806,12 @@ final class RealtimeVoiceConnection {
             return RealtimeToolRefusal(error: "systemTurnCannotAct", message: "this turn was not the owner speaking, so nothing was done; "
                 + "speak only, and act only when the owner asks")
         }
+        // Owner 2026-10-08: a press no longer stops the task, so an owner turn beside it would be a second planner.
+        if agentLoopRunning {
+            return RealtimeToolRefusal(error: "taskRunning", message: "a task is still running, so nothing was done in this turn. "
+                + "If the owner asked about it, answer from the task status line. If they asked for something new, ask them in a few "
+                + "words whether to set the current task aside: it keeps running until they say stop or set it aside, then ask again")
+        }
         guard toolName == RealtimeVoiceVerbs.doTaskName else { return nil }
         guard let heard, !heard.allSatisfy(\.isWhitespace) else {
             return RealtimeToolRefusal(error: RealtimeHeardCheck.unavailableError, message: "the owner's words were not transcribed in time, "

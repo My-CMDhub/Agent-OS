@@ -1003,7 +1003,7 @@ final class AgentLoop {
 
     /// The owner's next turn, after their press stopped a task.
     static func stoppedContextLine(step: Int) -> String {
-        "system context, not the owner's words: the task you started with do_task was stopped by the owner's key press at step \(step); "
+        "system context, not the owner's words: the task you started with do_task was stopped by the owner's word at step \(step); "
             + "nothing more is being done. if they ask, or said stop, say it stopped at step \(step)."
     }
 
@@ -1062,7 +1062,7 @@ final class AgentLoop {
         switch state {
         case .running: stateWords = "running"
         case .waiting(let question): stateWords = "waiting for the owner's answer to: \(question)"
-        case .stopped: stateWords = "stopped by the owner's key press; nothing more is being done"
+        case .stopped: stateWords = "stopped: the owner said to stop; nothing more is being done"
         case .ended(.done(let summary)): stateWords = "done: \(summary)"
         case .ended(let outcome): stateWords = "did not finish (\(outcome.name))\(finalReason(outcome).map { ": \($0)" } ?? "")"
         }

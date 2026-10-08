@@ -74,7 +74,7 @@ final class RealtimeVoiceSession {
     private(set) var agentLoop: AgentLoop?
     private var agentTask: Task<Void, Never>?
     private let agentModel = AgentLoopModel()
-    /// Set when a press stopped a task: the next turn's context says where.
+    /// Set when the owner's words stopped a task: the next turn's context says where.
     private var agentStoppedLine: String?
     /// The last task (2026-10-08): its status goes with every owner turn while it
     /// runs, waits on a question, or ended within `askOwnerAnswerWindowSeconds`;
@@ -373,7 +373,37 @@ final class RealtimeVoiceSession {
         return AgentLoop.statusLine(goal: loop.goal, state: state, step: loop.step, receipts: loop.receipts, artifacts: loop.artifacts)
     }
 
-    /// The owner pressed: the running task stops before its next tool call,
+    /// The owner's words stop a running task (owner 2026-10-08): a key press no longer does.
+    /// Matched as whole words on the transcript so far, so a partial transcript stops it at once.
+    /// ponytail: "don't stop" also stops; cancelling is the safe direction.
+    nonisolated static func ownerWordsStopTask(_ heard: String) -> Bool {
+        let words = heard.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+            .split(whereSeparator: { !$0.isLetter && $0 != "'" })
+        let text = " " + words.joined(separator: " ") + " "
+        return taskStopPhrases.contains { text.contains(" \($0) ") }
+    }
+    nonisolated static let taskStopPhrases = ["stop", "cancel", "never mind", "nevermind", "abort", "wait don't", "wait do not",
+                                              "set it aside", "forget it", "drop it"]
+
+    /// While a task runs, the owner's transcript (partial or complete) is read every 50 ms; stop words
+    /// stop the task at once, and the next turn is told where.
+    private func watchForStopWords(in marks: RealtimeTurnMarks) {
+        guard agentLoop?.isRunning == true else { return }
+        let deadline = uptime + 120
+        Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.agentLoop?.isRunning == true, self.uptime < deadline else { return }
+                if Self.ownerWordsStopTask(marks.heardText) {
+                    if let stoppedAt = self.stopAgentLoop() { self.agentStoppedLine = AgentLoop.stoppedContextLine(step: stoppedAt) }
+                    return
+                }
+                if marks.heardCompletedUptime(now: self.uptime) != nil { return }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+    }
+
+    /// The owner said stop: the running task stops before its next tool call,
     /// and any line it still meant to say is dropped. Returns the step a
     /// RUNNING task stopped at.
     private func stopAgentLoop() -> Int? {
@@ -467,8 +497,8 @@ final class RealtimeVoiceSession {
         liveTurn = LiveTurn(line: line, pressedUptime: uptime)
         liveTurn?.previousReplyWasHeard = Self.previousReplyWasHeard(line: line, previousErrorKind: lastLineErrorKind)
         stopPlayback()
-        // The owner's press stops a running task; this turn is told where.
-        if let stoppedAt = stopAgentLoop() { agentStoppedLine = AgentLoop.stoppedContextLine(step: stoppedAt) }
+        // Owner 2026-10-08: the press interrupts speech only; the task runs on until the owner's words stop it
+        // (`watchForStopWords`).
         askedOwner = Self.askedOwnerAfterPress(askedOwner)
         JarvisNotch.shared.currentTurnID = line.turnID
         JarvisNotch.shared.handle(.hotkeyDown)
@@ -591,6 +621,7 @@ final class RealtimeVoiceSession {
             let stoppedLine = agentStoppedLine
             agentStoppedLine = nil
             let taskStatusLine = agentStatusLine()
+            watchForStopWords(in: marks)
             let closeUp = pointerCloseUp
             let contextSend = Task { @MainActor in
                 if let guardLine, connection.turn === marks {
