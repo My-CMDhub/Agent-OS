@@ -290,6 +290,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
         let sharedHarness = harnessServer
         companionManager.realtimeVoiceSession = RealtimeVoiceSession(harnessAnswer: { line in sharedHarness.answer(line: line) })
+        confirmationCardWindowManager?.replyAudioIsPlaying = { [companionManager] in
+            companionManager.realtimeVoiceSession?.isReplyAudioPlaying ?? false
+        }
         companionManager.start()
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.

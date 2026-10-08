@@ -127,6 +127,13 @@ final class ConfirmationCardWindowManager {
     private var generation = 0
     /// Every ticket the card has already shown — one chime per ticket, ever.
     private var announcedTicketIDs: Set<String> = []
+    /// The spoken nudge after the chime (`ConfirmationNudge`).
+    private let nudger = ConfirmationNudger()
+    /// J.A.R.V.I.S.'s reply audio playing, so the nudge waits for the end of its sentence.
+    var replyAudioIsPlaying: () -> Bool {
+        get { nudger.replyAudioIsPlaying }
+        set { nudger.replyAudioIsPlaying = newValue }
+    }
 
     private let chimeEngine = AVAudioEngine()
     private let chimeNode = AVAudioPlayerNode()
@@ -148,6 +155,7 @@ final class ConfirmationCardWindowManager {
     init(confirmations: HarnessConfirmations) {
         self.confirmations = confirmations
         Self.current = self
+        nudger.isPending = { [weak self] in self?.isPresented ?? false }
         chimeEngine.attach(chimeNode)
         chimeEngine.connect(chimeNode, to: chimeEngine.mainMixerNode, format: chimeFormat)
         // `receive(on: DispatchQueue.main)` delivers on the NEXT run-loop turn,
@@ -214,6 +222,7 @@ final class ConfirmationCardWindowManager {
         isPresented = true
         generation += 1
         let shown = generation
+        nudger.cardShown()
         JarvisNotch.shared.coveredByCard = true
         panel.orderFrontRegardless()
         // Next turn, so the collapsed frame is drawn once before the spring starts.
@@ -235,6 +244,7 @@ final class ConfirmationCardWindowManager {
     private func dismiss() {
         guard isPresented, let panel else { return }
         isPresented = false
+        nudger.cardDismissed()
         generation += 1
         let dismissed = generation
         model.interactive = false
