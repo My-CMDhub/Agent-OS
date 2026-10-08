@@ -362,6 +362,7 @@ final class AgentLoop {
     private(set) var lastOutcome: Outcome?
     /// Things the task created, as the app showed them (`artifacts(inAppText:)`), never the model's words.
     private(set) var artifacts: [String] = []
+    private var seenBeforeActing: Set<String> = []
 
     init(dependencies: Dependencies) {
         self.dependencies = dependencies
@@ -649,7 +650,12 @@ final class AgentLoop {
                 let error = ok ? nil : ((result["error"] as? String) ?? "failed")
                 // App-shown text only: a page read, never the model's own arguments.
                 if ok, let text = Self.appShownText(toolName: toolName, result: result) {
-                    for found in Self.artifacts(inAppText: text) where !artifacts.contains(found) { artifacts.append(found) }
+                    // Seen before the task changed anything, it was there already: never the task's.
+                    // Live C7A004B0: a leftover tab's link was taken as made and typed, no meeting created.
+                    let acted = receipts.contains { $0.ok && RealtimeVoiceVerbs.isActingTool($0.toolName) }
+                    for found in Self.artifacts(inAppText: text) where !artifacts.contains(found) && !seenBeforeActing.contains(found) {
+                        if acted { artifacts.append(found) } else { seenBeforeActing.insert(found) }
+                    }
                 }
                 receipts.append(Receipt(step: step, toolName: call?.name ?? toolName, ok: ok, error: error,
                                         progress: Self.progressLine(toolName: toolName, call: call, result: result)))

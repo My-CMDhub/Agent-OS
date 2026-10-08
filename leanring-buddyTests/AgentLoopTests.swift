@@ -1188,8 +1188,10 @@ struct TaskSessionTests {
         #expect(AgentLoop.appShownText(toolName: "find_on_screen", result: found) == "meet.google.com/abc-defg-hij")
         #expect(AgentLoop.appShownText(toolName: "type_text", result: ["ok": true, "text": "meet.google.com/zzz-zzzz-zzz"]) == nil)
 
-        let script = Script([toolUse("type_text", ["text": "meet.google.com/zzz-zzzz-zzz"]), toolUse("read_page"),
-                             toolUse("done", ["summary": "Read it.", "evidence": [2]])])
+        let script = Script([toolUse("read_page"), toolUse("type_text", ["text": "meet.google.com/zzz-zzzz-zzz"]), toolUse("read_page"),
+                             toolUse("done", ["summary": "Read it.", "evidence": [3]])])
+        let pages = Script([["text": "Earlier: meet.google.com/old-oldo-old"],
+                            ["text": "Your meeting's ready\nmeet.google.com/abc-defg-hij\nmeet.google.com/old-oldo-old"]])
         let task = AgentLoop(dependencies: AgentLoop.Dependencies(
             model: { _, _ in
                 script.bodies.append([:])
@@ -1198,7 +1200,7 @@ struct TaskSessionTests {
             },
             observe: { AgentObservation() },
             execute: { _, _, _, _ in dispatch(ok: true) },
-            readPage: { ["ok": true, "text": "Your meeting's ready\nmeet.google.com/abc-defg-hij"] },
+            readPage: { ["ok": true, "text": pages.replies.removeFirst()["text"] ?? ""] },
             trace: { _ in }))
         _ = await task.run(goal: "g")
         #expect(task.artifacts == ["meet.google.com/abc-defg-hij"])
