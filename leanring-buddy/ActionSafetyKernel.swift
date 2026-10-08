@@ -45,7 +45,11 @@ enum ActionSafetyKernel {
     /// sidebar row is anonymous, so the element a planner can name is the label
     /// two levels inside it. Selecting changes what is selected — the write
     /// itself cannot activate anything else.
-    static let navigationalSelectRoles: Set<String> = ["AXRow", "AXCell", "AXStaticText"]
+    /// `AXMenuItem` (measured 2026-10-08, Meet's "New meeting" pop-up in Chrome):
+    /// "Create a meeting for later" was carded "unrecognised role" twice and the
+    /// task stopped. A menu item is navigation for `menu` already; its words are
+    /// still judged above (destructive asks, irreversible refuses).
+    static let navigationalSelectRoles: Set<String> = ["AXRow", "AXCell", "AXStaticText", "AXMenuItem"]
 
     /// The only roles that may be typed into. Everything else is refused, not
     /// asked about: a role that does not accept text has no correct answer to
@@ -437,7 +441,8 @@ enum ActionSafetyKernel {
         let targetName = (AccessibilityElementNode.textInputRoles.contains(resolvedNode.role) ? resolvedNode.fieldLabel : nil)
             ?? resolvedNode.displayName
         let wordCheckedNames = [typing?.aimedByFocus == true ? nil : targetName?.raw, labelTitle].compactMap { $0 }
-        if intent.action.irreversibleNamesAreRefused {
+        // Selecting a menu item activates it, so `select`'s exemption is not its (2026-10-08).
+        if intent.action.irreversibleNamesAreRefused || resolvedNode.role == "AXMenuItem" {
             for name in wordCheckedNames {
                 let lowercased = name.lowercased()
                 if let matchedKeyword = irreversibleTitleKeywords.first(where: { lowercased.contains($0) }) {

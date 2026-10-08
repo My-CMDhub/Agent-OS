@@ -59,6 +59,18 @@ struct LabelRetargetTests {
         #expect(picked([node("AXHeading", "Me")]) == nil)
     }
 
+    // Live 2026-10-08 (S1, run F47F8E44): Meet's "Create a meeting for later" is a web AXMenuItem
+    // reached by select; it was carded "unrecognised role" twice. Its words still decide.
+    @Test func aWebMenuItemIsSelectedAsNavigationAndItsWordsStillDecide() {
+        func select(_ name: String) -> SafetyDecision {
+            ActionSafetyKernel.evaluate(intent: ElementActionIntent(role: "AXMenuItem", title: name, action: .select),
+                                        resolvedNode: node("AXMenuItem", name), matchCount: 1, visibleBounds: bounds)
+        }
+        #expect(select("Create a meeting for later") == .allow)
+        #expect(select("Delete meeting") == .requireConfirmation(reason: "title suggests a destructive action: delete", destructive: true))
+        if case .refuse = select("Erase all") {} else { Issue.record("an irreversible word must still refuse") }
+    }
+
     @Test func theControlIsJudgedAndTheLabelsWordsStillDecide() {
         func decide(control: String, role: String = "AXLink", label: String) -> SafetyDecision {
             ActionSafetyKernel.evaluate(intent: ElementActionIntent(role: "AXHeading", title: label, action: .click),
