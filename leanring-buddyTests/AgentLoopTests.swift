@@ -1112,3 +1112,109 @@ struct AgentLoopReadOnlyTests {
         #expect(!AgentLoop.goalText(goal: "x", heard: nil).contains("read-only"))
     }
 }
+
+/// 2026-10-08 Meet investigation: the task session survives ask_owner, the voice
+/// is told the task's real state, and what a task made is captured from the screen.
+struct TaskSessionTests {
+
+    // Live 84B0105A/6B68A671/BEAF1A61: each answer started a new run with no messages,
+    // receipts or opened tab. Now the answer resumes the SAME run.
+    @MainActor @Test func theOwnersAnswerResumesTheSameTask() async {
+        let script = Script([toolUse("open_url", ["url": "https://meet.google.com/"]),
+                             toolUse("ask_owner", ["question": "Which account?"], id: "ask1"),
+                             toolUse("press_element", ["name": "New meeting"]),
+                             toolUse("done", ["summary": "I pressed New meeting.", "evidence": [1, 3]])])
+        let task = loop(script)
+        #expect(await task.run(goal: "make a meet link", heard: "make a meet link") == .askOwner(question: "Which account?"))
+        #expect(task.pausedAsk?.question == "Which account?")
+        #expect(task.receipts.count == 1)
+        let outcome = await task.resume(answer: "the work one", words: "make a meet link the work one")
+        #expect(outcome == .done(summary: "I pressed New meeting."))
+        // One run: the step count, the receipts and the history carried on.
+        #expect(task.step == 4)
+        #expect(task.receipts.map(\.toolName) == ["open_url", "press_element"])
+        #expect(task.heard == "make a meet link the work one")
+        #expect(task.pausedAsk == nil)
+        // The answer went back as ask_owner's own result, beside the full earlier history.
+        let messages = script.bodies[2]["messages"] as? [[String: Any]] ?? []
+        #expect(messages.count == 5)
+        let answer = (messages.last?["content"] as? [[String: Any]])?.first { $0["tool_use_id"] as? String == "ask1" }
+        #expect((answer?["content"] as? String)?.contains("the work one") == true)
+        // A resume with nothing paused does nothing.
+        #expect(await task.resume(answer: "x", words: "x") == .failed(reason: "no task was waiting for an answer"))
+    }
+
+    // The pause message no longer says "call do_task again on any answer".
+    @MainActor @Test func thePauseLineTellsTheVoiceToResumeOnlyOnAnAnswer() {
+        let line = AgentLoop.finalLine(.askOwner(question: "Which account?"), goal: "g", lastProgress: "opened meet.google.com", step: 2) ?? ""
+        #expect(!line.contains("call do_task again with their original request"))
+        #expect(line.contains("opened meet.google.com"))
+        #expect(line.contains("never call do_task for that"))
+    }
+
+    @MainActor @Test func theStatusLineCarriesStateStepsAndArtifacts() {
+        let receipts = [AgentLoop.Receipt(step: 1, toolName: "open_url", ok: true, error: nil, progress: "opened meet.google.com"),
+                        AgentLoop.Receipt(step: 2, toolName: "press_element", ok: true, error: nil, progress: "pressed \"New meeting\""),
+                        AgentLoop.Receipt(step: 3, toolName: "read_page", ok: true, error: nil, progress: "read the page"),
+                        AgentLoop.Receipt(step: 4, toolName: "press_element", ok: false, error: "heardNamedMismatch")]
+        let line = AgentLoop.statusLine(goal: "make a meet link", state: .running, step: 4, receipts: receipts,
+                                        artifacts: ["meet.google.com/abc-defg-hij"])
+        #expect(line.contains("state: running"))
+        #expect(!line.contains("step 1 "))   // only the last three
+        #expect(line.contains("step 4 press_element (not done: heardNamedMismatch)"))
+        #expect(line.contains("meet.google.com/abc-defg-hij"))
+        #expect(line.contains("never call do_task"))
+        let empty = AgentLoop.statusLine(goal: "g", state: .waiting(question: "Which?"), step: 0, receipts: [], artifacts: [])
+        #expect(empty.contains("waiting for the owner's answer to: Which?"))
+        #expect(empty.contains("nothing made by the task has been seen on screen"))
+        // State: a press stops it; a paused run waits; a done one is done.
+        #expect(AgentLoop.taskState(isRunning: true, stoppedByPress: true, outcome: nil, pausedQuestion: nil) == .stopped)
+        #expect(AgentLoop.taskState(isRunning: false, stoppedByPress: false, outcome: .askOwner(question: "Q"), pausedQuestion: "Q")
+                == .waiting(question: "Q"))
+        #expect(AgentLoop.taskState(isRunning: false, stoppedByPress: false, outcome: .done(summary: "s"), pausedQuestion: nil)
+                == .ended(.done(summary: "s")))
+        #expect(AgentLoop.statusLine(goal: "g", state: .ended(.failed(reason: "no link")), step: 3, receipts: [], artifacts: [])
+            .contains("did not finish (failed): no link"))
+    }
+
+    // An artifact comes from what the app showed (read_page), never from the model's own words.
+    @MainActor @Test func artifactsComeFromThePageNeverTheModel() async {
+        #expect(AgentLoop.artifacts(inAppText: "Here's your joining info\nmeet.google.com/abc-defg-hij\nCopy") == ["meet.google.com/abc-defg-hij"])
+        #expect(AgentLoop.artifacts(inAppText: "https://zoom.us/j/1234567890 and meet.google.com/new").count == 1)
+        #expect(AgentLoop.artifacts(inAppText: "nothing here").isEmpty)
+
+        let script = Script([toolUse("type_text", ["text": "meet.google.com/zzz-zzzz-zzz"]), toolUse("read_page"),
+                             toolUse("done", ["summary": "Read it.", "evidence": [2]])])
+        let task = AgentLoop(dependencies: AgentLoop.Dependencies(
+            model: { _, _ in
+                script.bodies.append([:])
+                let reply = script.replies.count > 1 ? script.replies.removeFirst() : script.replies[0]
+                return AgentModelReply(json: reply, model: "fake", milliseconds: 1)
+            },
+            observe: { AgentObservation() },
+            execute: { _, _, _, _ in dispatch(ok: true) },
+            readPage: { ["ok": true, "text": "Your meeting's ready\nmeet.google.com/abc-defg-hij"] },
+            trace: { _ in }))
+        _ = await task.run(goal: "g")
+        #expect(task.artifacts == ["meet.google.com/abc-defg-hij"])
+    }
+
+    // S2: "stop before saving or sending" keeps the task short of the commit, judged by the target's own name.
+    @Test func theOwnersDraftWordsStopSaveAndSend() {
+        #expect(AgentLoop.isDraftTask(words: "create an event, add the guest, but stop before saving or sending"))
+        #expect(AgentLoop.isDraftTask(words: "Draft an email to me, don't send it"))
+        #expect(!AgentLoop.isDraftTask(words: "Create a Google Meet link and send it to me on WhatsApp"))
+        func press(_ title: String) -> [String: Any] { ["verb": "press", "title": title] }
+        #expect(AgentLoop.draftRefusal(press("Save")) != nil)
+        #expect(AgentLoop.draftRefusal(press("Send invitation")) != nil)
+        #expect(AgentLoop.draftRefusal(["verb": "click", "labelTitle": "Schedule send"]) != nil)
+        #expect(AgentLoop.draftRefusal(["verb": "menu", "path": ["File", "Save"]]) != nil)
+        #expect(AgentLoop.draftRefusal(press("Add guests")) == nil)
+        #expect(AgentLoop.draftRefusal(press("Saved items")) == nil)
+        #expect(AgentLoop.draftRefusal(["verb": "type", "title": "Send"]) == nil)
+        let guarded = AgentLoop.draftGuardedAnswer { _ in "{\"ok\":true}" }
+        #expect(guarded("{\"verb\":\"press\",\"title\":\"Save\"}").contains("draftScope"))
+        #expect(guarded("{\"verb\":\"press\",\"title\":\"More options\"}") == "{\"ok\":true}")
+    }
+}
+

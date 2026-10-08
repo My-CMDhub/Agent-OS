@@ -91,8 +91,9 @@ nonisolated enum AgentLoopTools {
                  ["summary": ["type": "string", "description": "What was achieved, or plainly what could not be done and why."],
                   "evidence": ["type": "array", "items": ["type": "integer"],
                                "description": "The step numbers whose ok results prove the summary."]], ["summary", "evidence"]),
-            tool(askOwnerName, "Ends the task with a question only the owner can answer: which of two equal matches, a choice, "
-                 + "or that it is their turn to sign in or type a password. The question is spoken to them.",
+            tool(askOwnerName, "Pauses the task with a question only the owner can answer: which of two equal matches, a choice, "
+                 + "or that it is their turn to sign in or type a password. The question is spoken to them; their answer comes back as "
+                 + "this call's result and the same task goes on. Never ask about a refusal no answer can change.",
                  ["question": ["type": "string", "description": "One short question."]], ["question"])
         ]
     }
@@ -309,6 +310,17 @@ final class AgentLoop {
         let toolName: String
         let ok: Bool
         let error: String?
+        /// A few plain words of what it did (`progressLine`), for the task status.
+        var progress: String? = nil
+    }
+
+    /// An ask_owner the run paused on: its call's id, and the results of the
+    /// reply's other calls, which go back with the owner's answer.
+    struct PausedAsk {
+        let toolUseID: String
+        let question: String
+        let resultsBefore: [[String: Any]]
+        let skippedAfter: [[String: Any]]
     }
 
     private let dependencies: Dependencies
@@ -333,6 +345,24 @@ final class AgentLoop {
     /// The live run's carry (the tabs it opened), for a probe to clean up by identity.
     private(set) var liveCarry: MarksCarry?
 
+    // The task session (2026-10-08): kept across an ask_owner, so the owner's
+    // answer resumes the SAME task — history, receipts, step count, opened tabs.
+    private(set) var goal = ""
+    private(set) var heard: String?
+    private var messages: [[String: Any]] = []
+    /// The previous step's tool_result (or a correction), sent with the next observation.
+    private var pending: [[String: Any]] = []
+    private var challengedDone = false
+    private var sameRefusal: (error: String, count: Int)?
+    private var lastError: String?
+    private var webUsed: [String: Int] = [:]
+    /// Task time spent before the last pause; the owner's thinking time is not the task's.
+    private var activeSeconds: TimeInterval = 0
+    private(set) var pausedAsk: PausedAsk?
+    private(set) var lastOutcome: Outcome?
+    /// Things the task created, as the app showed them (`artifacts(inAppText:)`), never the model's words.
+    private(set) var artifacts: [String] = []
+
     init(dependencies: Dependencies) {
         self.dependencies = dependencies
     }
@@ -346,21 +376,44 @@ final class AgentLoop {
     /// `goal`: the request as the voice passed it on. `heard`: the owner's own
     /// words, which the guards judge by (set in `live`); Claude sees both.
     func run(goal: String, heard: String? = nil) async -> Outcome {
+        self.goal = goal
+        self.heard = heard
+        return await proceed()
+    }
+
+    /// The owner's answer to this run's ask_owner. `words`: what the guards now
+    /// judge by — the task's words plus this answer's, so authority grows by
+    /// only what the answer names.
+    func resume(answer: String, words: String) async -> Outcome {
+        guard let paused = pausedAsk else { return .failed(reason: "no task was waiting for an answer") }
+        pausedAsk = nil
+        heard = words
+        if let carry = liveCarry {
+            carry.heard = words
+            carry.readOnly = Self.isReadOnlyTask(words: words)
+            readOnly = carry.readOnly
+        }
+        pending = paused.resultsBefore
+            + [Self.toolResultBlock(id: paused.toolUseID, result: ["ok": true, "ownersAnswer": SecretScanner.redact(answer),
+                                                                   "note": "the owner's own words, answering your question"])]
+            + paused.skippedAfter
+            + [["type": "text", "text": "The owner answered your question. Go on with the same task from where it paused."]]
+        return await proceed()
+    }
+
+    private func proceed() async -> Outcome {
         isRunning = true
-        let started = dependencies.uptime()
+        lastOutcome = nil
+        let started = dependencies.uptime() - activeSeconds
         let goalHash = Self.goalHash(goal)
-        var messages: [[String: Any]] = []
-        /// The previous step's tool_result (or a correction), sent with the next observation.
-        var pending: [[String: Any]] = []
-        var challengedDone = false
+        let goal = self.goal, heard = self.heard
         /// The last batch's progress line, said once the next reply shows the task goes on.
         var heldProgress: String?
-        var sameRefusal: (error: String, count: Int)?
-        var lastError: String?
-        var webUsed: [String: Int] = [:]
 
         func finish(_ outcome: Outcome) -> Outcome {
             isRunning = false
+            activeSeconds = dependencies.uptime() - started
+            lastOutcome = outcome
             dependencies.onStep(nil)
             var line: [String: Any] = ["kind": "end", "run": runID, "goalHash": goalHash, "outcome": outcome.name, "steps": step,
                                        "wallMs": Int(((dependencies.uptime() - started) * 1000).rounded()),
@@ -384,6 +437,10 @@ final class AgentLoop {
                 content.append(["type": "text", "text": Self.goalText(goal: goal, heard: heard, readOnly: readOnly)])
             }
             content += Self.observationBlocks(observation, step: step)
+            if !artifacts.isEmpty {
+                content.append(["type": "text", "text": "Made by this task, as the screen showed it: \(artifacts.joined(separator: ", ")). "
+                    + "A later step may type it where the goal needs it."])
+            }
             messages.append(["role": "user", "content": content])
             pending = []
             messages = Self.keepingLatestImage(messages)
@@ -508,7 +565,14 @@ final class AgentLoop {
                 case AgentLoopTools.askOwnerName:
                     let question = (input["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     traced(["tool": toolName, "args": ["questionLength": question.count], "ok": true])
-                    return finish(question.isEmpty ? .failed(reason: "it needed the owner but asked nothing") : .askOwner(question: question))
+                    guard !question.isEmpty else { return finish(.failed(reason: "it needed the owner but asked nothing")) }
+                    // Paused, not ended: every call of this reply gets its result when the answer comes.
+                    let skipped = toolUses.dropFirst(index + 1).map { later in
+                        Self.toolResultBlock(id: (later["id"] as? String) ?? "", result: ["ok": false, "error": "skipped",
+                                                                                         "message": "not run: the task paused for the owner's answer"])
+                    }
+                    pausedAsk = PausedAsk(toolUseID: toolUseID, question: question, resultsBefore: results, skippedAfter: skipped)
+                    return finish(.askOwner(question: question))
                 default:
                     break
                 }
@@ -583,7 +647,12 @@ final class AgentLoop {
                 }
                 let ok = result["ok"] as? Bool == true
                 let error = ok ? nil : ((result["error"] as? String) ?? "failed")
-                receipts.append(Receipt(step: step, toolName: call?.name ?? toolName, ok: ok, error: error))
+                // App-shown text only: a page read, never the model's own arguments.
+                if ok, toolName == AgentLoopTools.readPageName, let text = result["text"] as? String {
+                    for found in Self.artifacts(inAppText: text) where !artifacts.contains(found) { artifacts.append(found) }
+                }
+                receipts.append(Receipt(step: step, toolName: call?.name ?? toolName, ok: ok, error: error,
+                                        progress: Self.progressLine(toolName: toolName, call: call, result: result)))
                 var fields: [String: Any] = ["tool": toolName, "args": args, "ok": ok, "error": error ?? NSNull(), "harnessMs": harnessMs,
                                              "waitedForConfirmation": waited]
                 if !(web is NSNull) { fields["web"] = web }
@@ -646,6 +715,7 @@ final class AgentLoop {
     - To reach a site on screen, use search_web, then press the result. open_url opens an address only for a site the goal names (this is checked against the goal's words); when pressing a result does not work, open_url with the site's address as shown on screen is the other way in.
     - A result that is refused will be refused again: change the approach, never repeat the same call. notPressable means that element cannot be clicked at all, by name or by position: press a different element, or for a link to a site the goal names, open_url its address as shown on screen.
     - type_text never presses Enter or sends anything; to submit, press the page's button. A press that changes or sends something may show the owner a card to approve: the tool waits for their click. If a result says it was refused, denied or expired, do not repeat it; say so with done.
+    - When a step creates something to use later (a meeting link, an event, a file), read_page once it shows, so the task records it from the screen; a later step may type it.
     - Never type, read out or ask for a password or other secret. If the goal needs a sign-in or a password, call ask_owner saying it is their turn to sign in.
     - If two or more things fit equally, call ask_owner asking which one; never guess.
     - If an approach fails, try a different one; if the goal cannot be reached, call done saying plainly what you tried and that it did not work.
@@ -896,8 +966,10 @@ final class AgentLoop {
             return "system event, not the owner's words: the task you started is finished; each step was checked by the task runner. "
                 + "tell the owner in one to three short sentences, in your own manner, keeping every name and number: \(summary) call no tool."
         case .askOwner(let question):
-            return "system event, not the owner's words: the task paused because it needs the owner. ask them briefly: \(question) "
-                + "when they answer, call do_task again with their original request (\(goal)) and their answer. call no tool now."
+            return "system event, not the owner's words: the task paused because it needs the owner;\(progress) ask them briefly: \(question) "
+                + "if their next words answer that question, call do_task with their answer: the paused task resumes where it stopped. "
+                + "if they ask how the task is going or what was done, answer from the task status line; never call do_task for that. "
+                + "call no tool now."
         case .failed(let reason):
             return "system event, not the owner's words: the task stopped without finishing: \(reason).\(progress) "
                 + "tell the owner briefly that it did not work and why; claim nothing else. call no tool."
@@ -923,6 +995,122 @@ final class AgentLoop {
     static func stoppedContextLine(step: Int) -> String {
         "system context, not the owner's words: the task you started with do_task was stopped by the owner's key press at step \(step); "
             + "nothing more is being done. if they ask, or said stop, say it stopped at step \(step)."
+    }
+
+    // MARK: Task state for the voice (2026-10-08)
+
+    /// What a task made, in text an app showed: a meeting link. The patterns are
+    /// whole addresses, so a page's other links never count.
+    /// ponytail: meeting links only; add file paths and event links when a task needs them typed.
+    nonisolated static let artifactPatterns = [#"meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}\b"#, #"zoom\.us/j/[0-9]{9,11}\b"#]
+
+    nonisolated static func artifacts(inAppText text: String) -> [String] {
+        var found: [String] = []
+        for pattern in artifactPatterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                let value = SecretScanner.redact(String(text[Range(match.range, in: text)!]).lowercased())
+                if !found.contains(value) { found.append(value) }
+            }
+        }
+        return found
+    }
+
+    /// Where a task stands, as the voice is told it on every owner turn.
+    enum TaskState: Equatable {
+        case running
+        case waiting(question: String)
+        case stopped
+        case ended(Outcome)
+    }
+
+    static func taskState(isRunning: Bool, stoppedByPress: Bool, outcome: Outcome?, pausedQuestion: String?) -> TaskState {
+        if stoppedByPress { return .stopped }
+        if isRunning { return .running }
+        if let pausedQuestion { return .waiting(question: pausedQuestion) }
+        if let outcome, outcome != .cancelled { return .ended(outcome) }
+        return .stopped
+    }
+
+    /// One context line: goal, state, step, the last three steps in plain words,
+    /// and what the task made. Scrubbed; the goal and words bounded.
+    static func statusLine(goal: String, state: TaskState, step: Int, receipts: [Receipt], artifacts: [String]) -> String {
+        let stateWords: String
+        switch state {
+        case .running: stateWords = "running"
+        case .waiting(let question): stateWords = "waiting for the owner's answer to: \(question)"
+        case .stopped: stateWords = "stopped by the owner's key press; nothing more is being done"
+        case .ended(.done(let summary)): stateWords = "done: \(summary)"
+        case .ended(let outcome): stateWords = "did not finish (\(outcome.name))\(finalReason(outcome).map { ": \($0)" } ?? "")"
+        }
+        let recent = receipts.suffix(3).map { receipt -> String in
+            let what = receipt.progress ?? receipt.toolName
+            return "step \(receipt.step) \(what) (\(receipt.ok ? "ok" : "not done: \(receipt.error ?? "failed")"))"
+        }
+        var line = "system context, not the owner's words: task status. goal: \(String(goal.prefix(200))). state: \(stateWords). "
+            + "step \(step) of at most \(maximumSteps). "
+            + (recent.isEmpty ? "no step has run yet. " : "last steps: \(recent.joined(separator: "; ")). ")
+            + (artifacts.isEmpty ? "nothing made by the task has been seen on screen. " : "made, as the screen showed it: \(artifacts.joined(separator: ", ")). ")
+        line += "answer \"did you…\" and \"how is it going\" questions from this status only, and claim nothing it does not show; "
+            + "never call do_task to answer them."
+        return SecretScanner.redact(line)
+    }
+
+    static func finalReason(_ outcome: Outcome) -> String? {
+        switch outcome {
+        case .failed(let reason): return reason
+        case .refusals(let error): return "the same step was refused \(maximumSameRefusals) times (\(error))"
+        default: return nil
+        }
+    }
+
+    // MARK: Draft scope (2026-10-08)
+
+    /// "…but stop before saving or sending", "don't send", "just draft it": the
+    /// owner's words keep the task short of the step that commits it. Judged on
+    /// the owner's words, never the model's goal.
+    nonisolated static let draftPhrases = [
+        #"\bstop (right )?before\b"#, #"\b(don't|dont|do not|never) (send|save|post|submit|schedule|invite|publish|share)\b"#,
+        #"\bwithout (sending|saving|posting|submitting|scheduling|inviting|publishing)\b"#, #"\bdrafts?\b"#,
+        #"\bbefore (saving|sending|posting|submitting|scheduling)\b"#]
+
+    nonisolated static func isDraftTask(words: String) -> Bool {
+        let text = words.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+        return draftPhrases.contains { text.range(of: $0, options: .regularExpression) != nil }
+    }
+
+    /// The words that commit a draft. Whole words of the target's own AX name.
+    nonisolated static let draftCommitWords: Set<String> = ["send", "save", "schedule", "invite", "post", "publish", "submit", "share"]
+
+    /// Why a draft task may not send this request, nil otherwise: a press or
+    /// menu item whose own name (the resolution's `title`/`labelTitle`, or the
+    /// menu path's leaf) commits. Unnamed presses pass to the kernel as before.
+    nonisolated static func draftRefusal(_ request: [String: Any]?) -> String? {
+        guard let request, let verb = (request["verb"] as? String).flatMap(HarnessVerb.init(rawValue:)) else { return nil }
+        let names: [String]
+        switch verb {
+        case .click, .press: names = [request["title"], request["labelTitle"]].compactMap { $0 as? String }
+        case .menu: names = (request["path"] as? [String])?.suffix(1).map { $0 } ?? []
+        default: return nil
+        }
+        for name in names {
+            if let word = name.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init).first(where: draftCommitWords.contains) {
+                return "\"\(String(name.prefix(60)))\" would \(word)"
+            }
+        }
+        return nil
+    }
+
+    /// The harness answer with the draft judge in front: a refused request never
+    /// reaches the harness and comes back as `draftScope`, the task's stop line.
+    nonisolated static func draftGuardedAnswer(_ answer: @escaping @Sendable (String) -> String) -> @Sendable (String) -> String {
+        { line in
+            let request = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            guard let reason = draftRefusal(request) else { return answer(line) }
+            return MeasurementLogFile.jsonLine(["ok": false, "error": "draftScope", "target": (request?["labelTitle"] ?? request?["title"]) ?? NSNull(),
+                "message": "nothing was done: the owner said to stop before this, and \(reason). The draft is as far as this task goes: "
+                    + "end with done, saying what is filled in and that it was not saved or sent."]) ?? "{\"ok\":false,\"error\":\"draftScope\"}"
+        }
     }
 
     nonisolated static func appendTrace(_ line: [String: Any]) {
@@ -980,7 +1168,7 @@ extension AgentLoop {
             },
             execute: { call, checksSite, observation, remaining in
                 carry.calls += 1
-                return await liveExecute(call, checksSite: checksSite, heard: heard, observation: observation, carry: carry,
+                return await liveExecute(call, checksSite: checksSite, heard: carry.heard, observation: observation, carry: carry,
                                          traceTurnID: "\(carry.runID)-\(carry.calls)", confirmationWaitSeconds: remaining,
                                          harnessAnswer: harnessAnswer)
             },
@@ -994,6 +1182,7 @@ extension AgentLoop {
             frontBundle: { await frontApp()?.bundleIdentifier }
         ))
         carry.runID = loop.runID
+        carry.heard = heard
         carry.readOnly = isReadOnlyTask(words: heard)
         loop.readOnly = carry.readOnly
         loop.liveCarry = carry
@@ -1018,6 +1207,8 @@ extension AgentLoop {
         var startBundle: String?
         /// The owner's words made the task explore-only: every request passes `readOnlyGuardedAnswer`.
         var readOnly = false
+        /// The owner's words every step is judged by; an answer to ask_owner adds its own (`resume`).
+        var heard = ""
     }
 
     /// What an ok open makes the task's own (re-review of 2e45939): the harness's
@@ -1328,6 +1519,7 @@ extension AgentLoop {
         var answer = boundTabs.isEmpty ? harnessAnswer : tabGuardedAnswer(harnessAnswer, boundTabs: boundTabs, readTab: frontTab(of:))
         // Outermost: a read-only task's refusal needs no tab read and never reaches the harness.
         if carry.readOnly { answer = readOnlyGuardedAnswer(answer, readFocusedField: liveFocusedField, frontAppMarksRead: liveFrontAppMarksRead) }
+        if isDraftTask(words: heard) { answer = draftGuardedAnswer(answer) }
         marks.agentStartBundle = carry.startBundle
         marks.heardText = heard
         marks.heardCompleteUptime = now

@@ -76,6 +76,15 @@ final class RealtimeVoiceSession {
     private let agentModel = AgentLoopModel()
     /// Set when a press stopped a task: the next turn's context says where.
     private var agentStoppedLine: String?
+    /// The last task (2026-10-08): its status goes with every owner turn while it
+    /// runs, waits on a question, or ended within `askOwnerAnswerWindowSeconds`;
+    /// paused on ask_owner, the owner's answer resumes it.
+    struct TaskRecord {
+        let loop: AgentLoop
+        var endedUptime: TimeInterval?
+        var stoppedByPress = false
+    }
+    private var lastTask: TaskRecord?
     /// The system turns the running task spoke, so its words can be reported.
     private var agentSpokenTurns: [RealtimeTurnMarks] = []
     /// Runner only: the task's outcome, its tool decisions and what was spoken.
@@ -311,15 +320,29 @@ final class RealtimeVoiceSession {
         // The old task's lines must not speak over the new one.
         agentSpeech?.cancel()
         let (words, root) = Self.taskWords(heard: heard, asked: askedOwner, now: uptime)
+        // The press right after a question, inside its window, answers it: the SAME task resumes.
+        let answering = askedOwner.map { uptime - $0.uptime <= Self.askOwnerAnswerWindowSeconds } ?? false
         askedOwner = nil
-        let loop = AgentLoop.live(heard: words, startBundle: startBundle, harnessAnswer: harnessAnswer, model: agentModel) { [weak self] line in
-            self?.enqueueAgentSpeech(line, final: false)
+        let paused = lastTask?.loop.pausedAsk != nil ? lastTask?.loop : nil
+        let resuming = answering && paused != nil
+        // ponytail: an unrelated request in the very answer turn resumes too (the loop sees the
+        // owner's words and may end it); a flag on do_task would split them if it bites.
+        let loop: AgentLoop
+        if resuming, let paused {
+            loop = paused
+        } else {
+            loop = AgentLoop.live(heard: words, startBundle: startBundle, harnessAnswer: harnessAnswer, model: agentModel) { [weak self] line in
+                self?.enqueueAgentSpeech(line, final: false)
+            }
         }
+        let setAside = paused != nil && !resuming
+        lastTask = TaskRecord(loop: loop)
         agentLoop = loop
         agentSpokenTurns = []
         agentTask = Task { @MainActor [weak self] in
-            let outcome = await loop.run(goal: goal, heard: words)
+            let outcome = resuming ? await loop.resume(answer: heard, words: words) : await loop.run(goal: goal, heard: words)
             guard let self else { return }
+            if self.lastTask?.loop === loop { self.lastTask?.endedUptime = self.uptime }
             if case .askOwner = outcome { self.askedOwner = AskedOwner(heard: root, uptime: self.uptime) }
             if let final = AgentLoop.finalLine(outcome, goal: goal, lastProgress: loop.lastProgress, step: loop.step), !Task.isCancelled {
                 await self.enqueueAgentSpeech(final, final: true)?.value
@@ -327,9 +350,27 @@ final class RealtimeVoiceSession {
             if self.agentLoop === loop { self.agentLoop = nil }
             await self.reportAgentLoop(loop, outcome: outcome)
         }
-        return ["ok": true, "status": "started", "error": NSNull(),
-                "message": "the task runner has started on it and will report progress and the outcome as system lines; "
-                    + "nothing is done yet, so say only a few words such as that you are on it"]
+        let status = AgentLoop.statusLine(goal: loop.goal.isEmpty ? goal : loop.goal, state: .running, step: loop.step,
+                                          receipts: loop.receipts, artifacts: loop.artifacts)
+        return ["ok": true, "status": resuming ? "resumed" : "started", "error": NSNull(), "task": status,
+                "message": (resuming ? "the paused task has resumed with the owner's answer, from step \(loop.step); its earlier steps stand as "
+                                + "the task status shows. "
+                            : "a new task has started; no step of it has run yet. "
+                                + (setAside ? "the earlier task that was waiting for the owner's answer was set aside; say so in a few words. " : ""))
+                    + "progress and the outcome come as system lines: say only a few words now, and claim nothing the status does not show"]
+    }
+
+    /// The task status line for this owner turn, nil when no task is recent.
+    private func agentStatusLine() -> String? {
+        guard let record = lastTask else { return nil }
+        if let ended = record.endedUptime, uptime - ended > Self.askOwnerAnswerWindowSeconds {
+            lastTask = nil
+            return nil
+        }
+        let loop = record.loop
+        let state = AgentLoop.taskState(isRunning: loop.isRunning, stoppedByPress: record.stoppedByPress, outcome: loop.lastOutcome,
+                                        pausedQuestion: loop.pausedAsk?.question)
+        return AgentLoop.statusLine(goal: loop.goal, state: state, step: loop.step, receipts: loop.receipts, artifacts: loop.artifacts)
     }
 
     /// The owner pressed: the running task stops before its next tool call,
@@ -337,6 +378,7 @@ final class RealtimeVoiceSession {
     /// RUNNING task stopped at.
     private func stopAgentLoop() -> Int? {
         let running = agentLoop.flatMap { $0.isRunning ? $0.step : nil }
+        if running != nil, lastTask?.loop === agentLoop { lastTask?.stoppedByPress = true }
         agentTask?.cancel()
         agentSpeech?.cancel()
         return running
@@ -548,6 +590,7 @@ final class RealtimeVoiceSession {
             // it stays inside the owner's activity. Not into a turn that replaced this one.
             let stoppedLine = agentStoppedLine
             agentStoppedLine = nil
+            let taskStatusLine = agentStatusLine()
             let closeUp = pointerCloseUp
             let contextSend = Task { @MainActor in
                 if let guardLine, connection.turn === marks {
@@ -555,6 +598,9 @@ final class RealtimeVoiceSession {
                 }
                 if let stoppedLine, connection.turn === marks {
                     try? await connection.sendContextText(stoppedLine)
+                }
+                if let taskStatusLine, connection.turn === marks {
+                    try? await connection.sendContextText(taskStatusLine)
                 }
                 let front = await frontmostLineTask.value
                 marks.keyDownFrontBundle = front?.bundle

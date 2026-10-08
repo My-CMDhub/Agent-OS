@@ -272,8 +272,18 @@ enum AgentLoopProbe {
         var narrations = 0
         let loop = AgentLoop.live(heard: words, startBundle: startBundle, harnessAnswer: harnessAnswer, model: AgentLoopModel()) { _ in narrations += 1 }
         let finished = FinishedFlag()
+        // `--agent-answer=<words>` (2026-10-08): a fixture answer to the task's ask_owner,
+        // fed to the SAME task, as the owner's next turn would (`RealtimeVoiceSession.startAgentLoop`).
+        let answer = CommandLine.arguments.last { $0.hasPrefix("--agent-answer=") }.map { String($0.dropFirst("--agent-answer=".count)) }
+        var paused: [String: Any]?
         let runTask = Task { @MainActor in
-            let outcome = await loop.run(goal: words, heard: words)
+            var outcome = await loop.run(goal: words, heard: words)
+            if case .askOwner(let question) = outcome, let answer, !answer.isEmpty {
+                paused = ["question": SecretScanner.redact(question), "step": loop.step, "receipts": loop.receipts.count,
+                          "status": AgentLoop.statusLine(goal: words, state: .waiting(question: question), step: loop.step,
+                                                         receipts: loop.receipts, artifacts: loop.artifacts)]
+                outcome = await loop.resume(answer: answer, words: words + " " + answer)
+            }
             finished.value = true
             return outcome
         }
@@ -291,7 +301,10 @@ enum AgentLoopProbe {
         let outcome = await runTask.value
         var result: [String: Any] = ["mode": "goal", "readOnly": loop.readOnly, "outcome": outcome.name, "steps": loop.step,
                                      "wallMs": Int(((ProcessInfo.processInfo.systemUptime - startUptime) * 1000).rounded()),
-                                     "model": loop.modelUsed ?? NSNull(), "run": loop.runID, "cards": cards, "narrations": narrations]
+                                     "model": loop.modelUsed ?? NSNull(), "run": loop.runID, "cards": cards, "narrations": narrations,
+                                     "pausedAt": paused ?? NSNull(), "artifacts": loop.artifacts,
+                                     "status": AgentLoop.statusLine(goal: words, state: .ended(outcome), step: loop.step,
+                                                                    receipts: loop.receipts, artifacts: loop.artifacts)]
         switch outcome {
         case .done(let summary): result["spoken"] = SecretScanner.redact(summary)
         case .askOwner(let question): result["spoken"] = SecretScanner.redact(question)
@@ -305,8 +318,9 @@ enum AgentLoopProbe {
         MeasurementLogFile.waitForPendingWrites()
         result["modelMs"] = modelMilliseconds(run: loop.runID)
         try? await Task.sleep(for: .seconds(ScenarioRunner.settleSeconds))
-        // Undo by identity: only the tabs this task opened.
-        let tabs = (loop.liveCarry?.taskTabs ?? [:]).flatMap { bundle, keys in keys.map { (bundle, $0) } }
+        // Undo by identity: only the tabs this task opened. `--agent-keep-tabs`: leave them (an unsaved form stays as it is).
+        let tabs = CommandLine.arguments.contains("--agent-keep-tabs") ? []
+            : (loop.liveCarry?.taskTabs ?? [:]).flatMap { bundle, keys in keys.map { (bundle, $0) } }
         var closed: [[String: Any]] = []
         for (bundle, key) in tabs {
             closed.append(await Task.detached { closeTab(key) }.value.merging(["app": bundle]) { current, _ in current })
