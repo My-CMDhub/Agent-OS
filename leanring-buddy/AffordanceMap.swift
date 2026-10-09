@@ -57,6 +57,7 @@ nonisolated struct AffordanceMap: Sendable {
             let shortcut = entry["shortcut"] as? String
             guard entry["hasSubmenu"] as? Bool == false,
                   !RealtimeVoiceVerbs.isPrivateMenuItem(path: path, shortcut: shortcut),
+                  !Self.isDynamicListItem(path: path, shortcut: shortcut),
                   path.allSatisfy({ UntrustedText($0).isPlausibleControlLabel && SecretScanner.redact($0) == $0 }) else { continue }
             items.append(Item(path: path, enabled: entry["enabled"] as? Bool ?? false, shortcut: shortcut))
         }
@@ -102,6 +103,31 @@ nonisolated struct AffordanceMap: Sendable {
     static func line(_ item: Item) -> String {
         let path = item.path.joined(separator: " > ")
         return item.shortcut.map { "\(path) (\($0))" } ?? path
+    }
+
+    // MARK: Dynamic lists
+
+    /// Window-menu items that are commands, by their first word; everything
+    /// else there is the window list (document and mailbox titles), whatever its shortcuts.
+    static let windowCommandWords: Set<String> = ["minimize", "zoom", "fill", "center", "move", "tile", "bring", "merge", "show", "hide",
+                                                  "enter", "exit", "remove", "arrange", "name", "cycle", "float", "full", "return", "restore"]
+
+    /// Dynamic, personal menu lists stay out of the map sent up front (owner's
+    /// default, set by the coordinator 2026-10-10), recognised by position and
+    /// shape, never by app name; find_menu_items still reaches them on request:
+    /// - depth ≥3 without a shortcut: Open Recent's files, Mail's "Move to"
+    ///   mailboxes, Notes' folders, Safari Develop's devices and pages;
+    /// - the Window menu's items that are not commands (its window list);
+    /// - a document-like title anywhere: a file name (".txt"), a path ("/"), an address ("@").
+    /// ponytail: "Sort By > Name" style static submenus go too; they cost a find, not a leak.
+    static func isDynamicListItem(path: [String], shortcut: String?) -> Bool {
+        guard let leaf = path.last else { return true }
+        if path.count >= 3, shortcut == nil { return true }
+        if leaf.contains("/") || leaf.contains("@") || leaf.range(of: #"\.[A-Za-z0-9]{1,5}$"#, options: .regularExpression) != nil { return true }
+        if path.count == 2, RealtimeVoiceVerbs.foldedTokens(path[0]) == ["window"] {
+            return !(RealtimeVoiceVerbs.foldedTokens(leaf).first.map(windowCommandWords.contains) ?? false)
+        }
+        return false
     }
 
     // MARK: Shortcut

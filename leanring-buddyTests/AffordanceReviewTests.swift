@@ -31,4 +31,34 @@ struct AffordanceReviewTests {
         #expect(!offer.candidates.contains { $0.path == ["View", "Item 149"] }, "a line cut by the budget is no offer")
         #expect(!map.offer(readOnly: true).candidates.contains { $0.path == ["File", "New Folder"] })
     }
+
+    @Test func dynamicPersonalListsNeverReachTheMap() throws {
+        let menus: [String: Any] = ["ok": true, "items": [
+            item(["File", "Open Recent", "Budget.numbers"]),
+            item(["Window", "Minimize"], shortcut: "⌘M"),
+            item(["Window", "Bring All to Front"]),
+            item(["Window", "Quarterly plan"], shortcut: "⌘1"),
+            item(["Window", "dhruv@example.com — Inbox"], shortcut: "⌘2"),
+            item(["Mailbox", "Move to", "Family"]),
+            item(["Develop", "Dhruv's iPhone", "example.com — Home"]),
+            item(["View", "Sort By", "Name"]),
+            item(["Go", "~/Projects/secret-plan"]),
+            item(["File", "Export notes.txt"]),
+            item(["View", "as List"], shortcut: "⌘2"),
+            item(["Go", "Go to Folder…"], shortcut: "⇧⌘G")
+        ]]
+        let map = try #require(AffordanceMap(menusResponse: menus, bundleIdentifier: "any.app", version: "1", pid: 1, builtUptime: 0))
+        let lines = map.menuLines(readOnly: false).joined(separator: "\n")
+        #expect(lines.contains("Window > Minimize (⌘M)"))
+        #expect(lines.contains("Window > Bring All to Front"))
+        #expect(lines.contains("View > as List (⌘2)"))
+        #expect(lines.contains("Go > Go to Folder… (⇧⌘G)"))
+        for personal in ["Budget", "Quarterly plan", "dhruv@", "Family", "iPhone", "secret-plan", "notes.txt"] {
+            #expect(!lines.contains(personal), "\(personal) is a dynamic or personal list item")
+        }
+        #expect(!lines.contains("Sort By"), "deep items without a shortcut are left to find_menu_items")
+        // Still reachable on request: find_menu_items reads the app's own listing, not the map.
+        let found = RealtimeVoiceVerbs.menuOffer(fromMenusResponse: menus, words: "sort name")
+        #expect(found.candidates.contains { $0.path == ["View", "Sort By", "Name"] })
+    }
 }
