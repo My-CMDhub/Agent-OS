@@ -549,6 +549,30 @@ struct AgentLoopTests {
         #expect(decision.outcome != .match && decision.outcome != .noAppHeard)
     }
 
+    /// Owner's ruling 2026-10-10: a pane's OWN name (as System Settings' sidebar
+    /// publishes it) names System Settings with no "settings" word, and "macOS
+    /// version" names it (General > About reads "macOS"). One word of a longer
+    /// pane name does not ("privacy policy", "lock the door"), nor a page's.
+    @Test func ownerRuling20261010APanesOwnNameAndMacOSVersionNameSystemSettings() {
+        let names = [RealtimeVoiceVerbs.AppName(name: "System Settings", url: URL(fileURLWithPath: "/System/Applications/System Settings.app"), isFileName: true),
+                     RealtimeVoiceVerbs.AppName(name: "Notes", url: URL(fileURLWithPath: "/System/Applications/Notes.app"), isFileName: true)]
+        func heard(_ words: String) -> Bool {
+            RealtimeHeardCheck.wordsNameTheApp(transcript: words, named: "System Settings", among: names)
+        }
+        #expect(heard("show me the lock screen"))
+        #expect(heard("turn on the screen saver"))
+        #expect(heard("is wifi on"))
+        #expect(heard("check the Wi-Fi"))
+        #expect(heard("how much battery is left"))
+        #expect(heard("open privacy and security"))
+        #expect(heard("change my wallpaper"))
+        #expect(heard("find out which macOS version this Mac runs and write it in a new note titled JARVIS test 2"))
+        #expect(!heard("open the privacy policy"))
+        #expect(!heard("lock the screen door"))
+        #expect(!heard("what version of Chrome is this"))
+        #expect(!heard("change this site's wallpaper"))
+    }
+
     /// Owner's ruling R2, 2026-10-06: reading must not mark things read. A
     /// read-only task in an app that sends read receipts — declared category
     /// social-networking, or a mail client — never selects or opens a list item:

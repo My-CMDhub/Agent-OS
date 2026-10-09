@@ -276,7 +276,7 @@ nonisolated enum RealtimeHeardCheck {
         let said = " " + spoken.joined(separator: " ") + " "
         // Owner's ruling R1 (2026-10-06): a built-in app is the default for its own noun.
         let builtIn = path(url).hasPrefix("/System/Applications/")
-        if builtIn, url.lastPathComponent == "System Settings.app", namesASettingsPane(spoken) { return true }
+        if builtIn, url.lastPathComponent == "System Settings.app", namesASettingsPane(spoken) || saysAPanesOwnName(spoken) { return true }
         return own.contains { tokens in
             if tokens.count == 1 {
                 if builtIn, !ownNameEverydayWords.contains(tokens[0]), !forms(tokens[0]).isDisjoint(with: Set(spoken)) { return true }
@@ -312,6 +312,24 @@ nonisolated enum RealtimeHeardCheck {
         return spoken.indices.contains { index in
             settingsWords.contains(spoken[index])
                 && spoken[max(0, index - 3)..<min(spoken.count, index + 4)].contains(where: settingsPaneWords.contains)
+        }
+    }
+
+    /// System Settings' sidebar pane names as its AX sidebar publishes them (macOS 15.5), the
+    /// owner's list of 2026-10-10. ponytail: copied from the live sidebar; re-read it on a new macOS.
+    static let settingsPaneOwnNames = ["Wi\u{2011}Fi", "Bluetooth", "Lock Screen", "Screen Saver", "Displays", "Battery", "Sound",
+                                       "Wallpaper", "Notifications", "Privacy & Security", "Keyboard", "Trackpad"]
+
+    /// Owner's ruling 2026-10-10: a pane's own name, whole ("lock screen", "wifi", "privacy and
+    /// security"), names System Settings with no settings word; so does "macOS version" (General >
+    /// About reads "macOS"). One word of a longer name never does ("privacy policy"), nor a page's.
+    static func saysAPanesOwnName(_ spoken: [String]) -> Bool {
+        guard spoken.allSatisfy({ !webPlaceWords.contains($0) }) else { return false }
+        if spoken.contains("macos"), spoken.contains("version") { return true }
+        let said = " " + spoken.filter { $0 != "and" }.joined(separator: " ") + " "
+        return settingsPaneOwnNames.contains { name in
+            let tokens = RealtimeVoiceVerbs.foldedTokens(name)
+            return said.contains(" \(tokens.joined(separator: " ")) ") || said.contains(" \(tokens.joined()) ")
         }
     }
 
