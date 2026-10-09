@@ -1219,7 +1219,7 @@ final class AgentLoop {
     }
 
     /// The words that commit a draft. Whole words of the target's own AX name.
-    nonisolated static let draftCommitWords: Set<String> = ["send", "save", "schedule", "invite", "post", "publish", "submit", "share"]
+    nonisolated static let draftCommitWords = ActionSafetyKernel.draftCommitWords
 
     /// Why a draft task may not send this request, nil otherwise: a press or
     /// menu item whose own name (the resolution's `title`/`labelTitle`, or the
@@ -1240,15 +1240,17 @@ final class AgentLoop {
         return nil
     }
 
-    /// The harness answer with the draft judge in front: a refused request never
-    /// reaches the harness and comes back as `draftScope`, the task's stop line.
+    /// The harness answer for a draft task: every request carries `draftScope`, so
+    /// the kernel asks on a CARD before a press whose own AX name commits (save,
+    /// send, …) — the owner can still approve it later (2026-10-10). The flag only
+    /// ever adds a question; `draftRefusal` stays the words this judge used to apply.
     nonisolated static func draftGuardedAnswer(_ answer: @escaping @Sendable (String) -> String) -> @Sendable (String) -> String {
         { line in
-            let request = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
-            guard let reason = draftRefusal(request) else { return answer(line) }
-            return MeasurementLogFile.jsonLine(["ok": false, "error": "draftScope", "target": (request?["labelTitle"] ?? request?["title"]) ?? NSNull(),
-                "message": "nothing was done: the owner said to stop before this, and \(reason). The draft is as far as this task goes: "
-                    + "end with done, saying what is filled in and that it was not saved or sent."]) ?? "{\"ok\":false,\"error\":\"draftScope\"}"
+            guard var request = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return answer(line) }
+            request["draftScope"] = true
+            guard let data = try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]),
+                  let flagged = String(data: data, encoding: .utf8) else { return answer(line) }
+            return answer(flagged)
         }
     }
 
