@@ -70,6 +70,16 @@ private final class Lines: @unchecked Sendable { var lines: [String] = [] }
         #expect(AgentTaskStore.read(in: directory, key: nil, report: { _, _ in }).isEmpty)
     }
 
+    // 1a: the signing key really comes from the data-protection keychain in the signed app, and stays the same.
+    @Test func theSigningKeyLivesInTheKeychainAndPersists() {
+        let service = "com.dhruvpatel.jarvis.checkpoint-key.test-\(UUID().uuidString)"
+        defer { AgentTaskKeychain.delete(service: service) }
+        let first = AgentTaskKeychain.loadOrCreate(service: service)
+        #expect(first != nil)
+        let second = AgentTaskKeychain.loadOrCreate(service: service)
+        #expect(first.map { key in key.withUnsafeBytes { Data($0) } } == second.map { key in key.withUnsafeBytes { Data($0) } })
+    }
+
     // 1d: a signed file whose id is not a task id, or is not its own name, is not read.
     @Test func aSignedFileMustNameItself() throws {
         let directory = scratchDirectory()
