@@ -97,6 +97,16 @@ private func fakeLoop(_ fake: Fake) -> AgentLoop {
         #expect(AgentTaskPhase.done.notchTitle(step: 3) == nil)
     }
 
+    // The session moves a new task to planning before step 1 exists: the notch must still count step 1.
+    @Test func aStepChangeWithinPlanningIsAnnounced() async {
+        let fake = Fake([call("done", ["summary": "Nothing to do.", "evidence": []])])
+        let loop = fakeLoop(fake)
+        loop.move(to: .planning)
+        _ = await loop.run(goal: "g")
+        #expect(fake.phases.map { "\($0.0.rawValue)\($0.1)" }.prefix(3) == ["planning0", "planning1", "acting1"])
+        #expect(loop.transitions.map(\.phase) == [.planning, .acting, .done])
+    }
+
     @Test func capsEndInTheirOwnPhase() async {
         let fake = Fake([call("scroll", ["direction": "down"])])
         let loop = fakeLoop(fake)

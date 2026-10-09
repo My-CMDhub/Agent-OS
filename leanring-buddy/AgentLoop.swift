@@ -375,6 +375,7 @@ final class AgentLoop {
     private(set) var transitions: [AgentTaskTransition] = []
     /// Moves the table refused: a run's own bug, or a late move after a stop.
     private(set) var illegalTransitions = 0
+    private var announcedStep = 0
 
     init(dependencies: Dependencies) {
         self.dependencies = dependencies
@@ -417,13 +418,22 @@ final class AgentLoop {
 
     /// Moves the phase if the table allows it; the same phase is no move.
     func move(to next: AgentTaskPhase) {
-        guard next != phase else { return }
+        // The same phase is no move, but a new step in it is news for the notch and the checkpoint.
+        guard next != phase else {
+            if step != announcedStep {
+                announcedStep = step
+                dependencies.onPhase(next, step)
+                dependencies.checkpoint(checkpoint())
+            }
+            return
+        }
         guard AgentTaskPhase.canMove(from: phase, to: next) else {
             illegalTransitions += 1
             print("🤖 agent loop \(runID): refused phase \(phase?.rawValue ?? "none") -> \(next.rawValue)")
             return
         }
         phase = next
+        announcedStep = step
         transitions.append(AgentTaskTransition(phase: next, at: dependencies.now()))
         dependencies.onPhase(next, step)
         dependencies.checkpoint(checkpoint())
