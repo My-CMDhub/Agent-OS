@@ -19,7 +19,7 @@
 //  against a ~2.8 s model call is not worth app-written labels at rest.
 //
 
-import CoreGraphics
+import AppKit
 import Foundation
 import os
 
@@ -198,6 +198,40 @@ nonisolated struct AffordanceMap: Sendable {
     static func version(ofBundleAt url: URL?) -> String {
         let info = url.flatMap { Bundle(url: $0)?.infoDictionary }
         return "\(info?["CFBundleShortVersionString"] as? String ?? "?")|\(info?["CFBundleVersion"] as? String ?? "?")"
+    }
+}
+
+// MARK: - Live
+
+extension AffordanceMap {
+    /// The app's map: the cache, else ONE `menus` forModel read through the
+    /// harness (policy applies: a refused app gets nil, so no map). The map is
+    /// built off the request queue's answer, never by a new AX path.
+    static func live(bundle: String, harnessAnswer: @escaping @Sendable (String) -> String,
+                     cache: AffordanceMapCache = .shared) async -> (map: AffordanceMap, cached: Bool)? {
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { return nil }
+        let version = version(ofBundleAt: app.bundleURL)
+        let pid = app.processIdentifier
+        let now = ProcessInfo.processInfo.systemUptime
+        if let cached = cache.map(bundle: bundle, version: version, pid: pid, now: now) { return (cached, true) }
+        let request: [String: Any] = ["verb": "menus", "expectApp": bundle, "forModel": true]
+        guard let data = try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]) else { return nil }
+        let line = String(decoding: data, as: UTF8.self)
+        let response = RealtimeOpenAppTool.harnessResponseObject(await Task.detached { harnessAnswer(line) }.value)
+        guard let map = AffordanceMap(menusResponse: response, bundleIdentifier: bundle, version: version, pid: pid, builtUptime: now) else { return nil }
+        cache.store(map)
+        return (map, false)
+    }
+
+    /// One `snapshot` forModel of the app: its landmark lines, and its listed
+    /// elements for a plan's precheck (nil: the read failed or was refused).
+    static func liveScreen(bundle: String, harnessAnswer: @escaping @Sendable (String) -> String) async -> (lines: [String], elements: [[String: Any]]?) {
+        let request: [String: Any] = ["verb": "snapshot", "expectApp": bundle, "forModel": true]
+        guard let data = try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]) else { return ([], nil) }
+        let line = String(decoding: data, as: UTF8.self)
+        let response = RealtimeOpenAppTool.harnessResponseObject(await Task.detached { harnessAnswer(line) }.value)
+        guard response["ok"] as? Bool == true else { return ([], nil) }
+        return (landmarkLines(fromSnapshotResponse: response), response["elements"] as? [[String: Any]])
     }
 }
 

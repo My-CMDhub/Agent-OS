@@ -1302,9 +1302,10 @@ extension AgentLoop {
         let loop = AgentLoop(dependencies: Dependencies(
             model: { body, timeout in try await model.send(body, timeout: timeout) },
             observe: {
-                let observation = await liveObservation(harnessAnswer: harnessAnswer)
+                var observation = await liveObservation(harnessAnswer: harnessAnswer)
                 // The app the owner was in when the task began.
                 if carry.calls == 0 { carry.startBundle = resolvedStartBundle(atAcceptance: carry.startBundle, firstLook: observation.bundleIdentifier) }
+                await addAffordances(to: &observation, carry: carry, harnessAnswer: harnessAnswer)
                 return observation
             },
             execute: { call, checksSite, observation, remaining in
@@ -1362,6 +1363,39 @@ extension AgentLoop {
         var onCardOpened: (@MainActor () -> Void)?
         /// Pages this task opened, by browser and host: what a checkpoint keeps of `taskTabs`.
         var tabHosts: [AgentTaskCheckpoint.Opened] = []
+        /// The app in front's affordance map at the last look, nil when none (refused, unreadable, hand-over).
+        var map: AffordanceMap?
+        /// Per bundle, the map build the model was last shown: shown again only after a rebuild.
+        var shownMaps: [String: TimeInterval] = [:]
+        /// The last look's listed elements (snapshot forModel), for a plan's precheck.
+        var screenElements: [[String: Any]]?
+    }
+
+    /// The App verbs (once per app per task, again after a rebuild) and this
+    /// step's landmarks, from the harness's own `menus` / `snapshot` forModel
+    /// (design 2026-10-07 §A). Never during a hand-over. The trace keeps
+    /// counts, never lines.
+    static func addAffordances(to observation: inout AgentObservation, carry: MarksCarry,
+                               harnessAnswer: @escaping @Sendable (String) -> String) async {
+        carry.map = nil
+        carry.screenElements = nil
+        guard observation.look != "handOver", let bundle = observation.bundleIdentifier else { return }
+        let started = ProcessInfo.processInfo.systemUptime
+        let built = await AffordanceMap.live(bundle: bundle, harnessAnswer: harnessAnswer)
+        carry.map = built?.map
+        var shownLines = 0
+        if let map = built?.map, carry.shownMaps[bundle] != map.builtUptime {
+            carry.shownMaps[bundle] = map.builtUptime
+            observation.lines.append(map.block(appName: nil, readOnly: carry.readOnly))
+            shownLines = map.menuLines(readOnly: carry.readOnly).count
+        }
+        let screen = await AffordanceMap.liveScreen(bundle: bundle, harnessAnswer: harnessAnswer)
+        carry.screenElements = screen.elements
+        if !screen.lines.isEmpty { observation.lines.append("Landmarks now: " + screen.lines.joined(separator: " | ")) }
+        appendTrace(["kind": "affordanceMap", "run": carry.runID, "bundle": bundle, "mapped": built != nil, "cached": built?.cached ?? NSNull(),
+                     "items": built?.map.items.count ?? 0, "menuLinesShown": shownLines, "landmarks": screen.lines.count,
+                     "ms": Int(((ProcessInfo.processInfo.systemUptime - started) * 1000).rounded()),
+                     "uptime": MeasurementLogFile.roundedUptime(ProcessInfo.processInfo.systemUptime)])
     }
 
     /// What an ok open makes the task's own (re-review of 2e45939): the harness's
@@ -1680,6 +1714,8 @@ extension AgentLoop {
         marks.screenshotDisplayFrame = observation.frame
         marks.latestMenuOffer = carry.marks?.latestMenuOffer
         marks.latestScreenOffer = carry.marks?.latestScreenOffer
+        // The App verbs the model was shown count as offered, in their own app only.
+        marks.affordanceMenuOffer = carry.map.flatMap { carry.shownMaps[$0.bundleIdentifier] != nil ? $0.offer : nil }
         carry.marks = marks
         let filled = await RealtimeOpenAppTool.withFrontmostApp(call)
         marks.toolCalls = [filled]
