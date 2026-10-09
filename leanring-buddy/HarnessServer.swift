@@ -321,18 +321,41 @@ enum HarnessPolicy {
 
     /// Whether `chain` (root ... node) ends in a listbox option: Chromium
     /// publishes a `role=option` as AXStaticText under the listbox's AXList.
-    static func isListOption(chain: [AccessibilityElementNode]) -> Bool {
+    /// The AXList must be listbox-like (`isListbox`): a page's plain `<ul>` is an
+    /// AXList too (security review 2026-10-10), and its items keep the role card.
+    /// `listRoleDescription` and `focusedRole` are live reads, asked only here.
+    static func isListOption(chain: [AccessibilityElementNode], listRoleDescription: (AccessibilityElementNode) -> String? = { _ in nil },
+                             focusedRole: () -> String? = { nil }) -> Bool {
         guard let node = chain.last, node.role == "AXStaticText" else { return false }
         // The listbox's AXList, directly or through one anonymous wrapper or the
         // option itself (its child text was pressed, run 725F3AB7).
         // Live, the full tree holds unnamed wrappers the forModel list skips (select on the
         // child text read noSelectableAncestor with prefix(2)), so up to four levels.
         for ancestor in chain.dropLast().reversed().prefix(4) {
-            if ancestor.role == "AXList" { return true }
+            if ancestor.role == "AXList" {
+                return isListbox(ancestor, roleDescription: listRoleDescription(ancestor), focusedRole: focusedRole)
+            }
             guard ancestor.role == "AXStaticText" || (ancestor.displayName == nil && !HarnessHands.activeRoles.contains(ancestor.role))
             else { return false }
         }
         return false
+    }
+
+    /// Words a listbox's subrole or role description carries ("list box", "combo box", "popup").
+    static let listboxWords = ["listbox", "list box", "combo", "popup", "pop-up", "pop up", "suggestion", "autocomplete"]
+    /// Plain lists: a page's `<ul>` (AXContentList) and `<dl>`.
+    static let plainListSubroles: Set<String> = ["AXContentList", "AXDescriptionList"]
+    /// Where the owner's caret sits when a list pops up for it: an autocomplete.
+    static let autocompleteOwnerRoles: Set<String> = ["AXComboBox", "AXTextField", "AXSearchField"]
+
+    /// A listbox-like AXList: its subrole or role description says listbox/combo box/popup,
+    /// or it is not a plain list and the app's focus is in a combobox or text field (the
+    /// list an autocomplete pops up, run 725F3AB7). A plain `<ul>` never is.
+    static func isListbox(_ list: AccessibilityElementNode, roleDescription: String?, focusedRole: () -> String?) -> Bool {
+        guard list.role == "AXList", !(list.subrole.map(plainListSubroles.contains) ?? false) else { return false }
+        let described = ((list.subrole ?? "") + " " + (roleDescription ?? "")).lowercased()
+        if listboxWords.contains(where: described.contains) { return true }
+        return focusedRole().map(autocompleteOwnerRoles.contains) == true
     }
 
     /// Whether a tab the harness opened at `openedAt` still counts as the task's
@@ -2262,6 +2285,31 @@ final class HarnessServer {
         return result
     }
 
+    /// An element's AXRoleDescription ("list box"), or nil.
+    nonisolated static func roleDescription(of element: AXUIElement) -> String? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, kAXRoleDescriptionAttribute as CFString, &value) == .success else { return nil }
+        return value as? String
+    }
+
+    /// The role of the app's focused element when it is a text entry an autocomplete
+    /// pops up for; nil otherwise, and nil for a secure field (or an unread subrole).
+    nonisolated static func focusedTextEntryRole(processIdentifier: pid_t) -> String? {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.5)
+        var focused: AnyObject?
+        guard AXUIElementCopyAttributeValue(application, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        let element = focused as! AXUIElement
+        var role: AnyObject?
+        var subrole: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success else { return nil }
+        let subroleError = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+        guard subroleError == .success || subroleError == .noValue || subroleError == .attributeUnsupported,
+              subrole as? String != "AXSecureTextField" else { return nil }
+        return role as? String
+    }
+
     /// The AXURL of the pressed link, or of the nearest AXLink holding the
     /// pressed element (Chromium nests a link's words a few wrappers down).
     /// Links only: an AXWebArea's AXURL is the page itself, and reading it would
@@ -2812,7 +2860,10 @@ final class HarnessServer {
             response["field"] = field
         }
         let isListOption = (action == .press || action == .click || action == .select) && resolvedNode.role == "AXStaticText"
-            && ElementReachability.ancestorChain(to: resolvedNode, from: rootNode).map(HarnessPolicy.isListOption(chain:)) == true
+            && ElementReachability.ancestorChain(to: resolvedNode, from: rootNode).map { chain in
+                HarnessPolicy.isListOption(chain: chain, listRoleDescription: { $0.accessibilityElement.flatMap(Self.roleDescription(of:)) },
+                                           focusedRole: { snapshot.application.flatMap { Self.focusedTextEntryRole(processIdentifier: $0.processIdentifier) } })
+            } == true
 
         // A link to a person-notifying view (a LinkedIn profile) asks on a card,
         // judged on the link's OWN AXURL, never the caller's words (ruling 2026-10-08).

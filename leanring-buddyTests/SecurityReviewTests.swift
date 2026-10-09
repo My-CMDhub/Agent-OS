@@ -162,4 +162,31 @@ private final class Lines: @unchecked Sendable { var lines: [String] = [] }
         #expect(!HarnessPolicy.samePage(URL(string: "https://evil.example/calendar/r/eventedit")!, form))
     }
 
+    // 4: a page's ordinary <ul> is not a listbox; its items keep the unrecognised-role card.
+    @Test func aPlainListIsNoListbox() {
+        let root = axNode("AXWindow", "Chat")
+        let messages = axNode("AXList", subrole: "AXContentList")
+        let item = axNode("AXStaticText", "Sam: lunch?")
+        #expect(!HarnessPolicy.isListOption(chain: [root, messages, item]))
+        let anonymous = axNode("AXList")
+        #expect(!HarnessPolicy.isListOption(chain: [root, anonymous, item]))
+        // A <ul> stays plain while the composer holds the caret.
+        #expect(!HarnessPolicy.isListOption(chain: [root, messages, item], focusedRole: { "AXTextField" }))
+        // A listbox by its own description, or the list an autocomplete pops up.
+        #expect(HarnessPolicy.isListOption(chain: [root, anonymous, item], listRoleDescription: { _ in "list box" }))
+        #expect(HarnessPolicy.isListOption(chain: [root, anonymous, item], focusedRole: { "AXComboBox" }))
+        #expect(!HarnessPolicy.isListOption(chain: [root, anonymous, item], focusedRole: { "AXButton" }))
+    }
+
+    // 4: in a read-only task a browser counts as an app that marks things read: no select or list-item click.
+    @Test func aReadOnlyTaskNeverOpensAListItemInABrowser() {
+        #expect(AgentLoop.marksReadOnOpen(category: nil, isMailClient: false, isBrowser: true))
+        let marksRead = { AgentLoop.marksReadOnOpen(category: nil, isMailClient: false, isBrowser: true) }
+        #expect(AgentLoop.readOnlyRefusal(["verb": "select", "title": "Sam: lunch?"], focusedField: { nil }, frontAppMarksRead: marksRead) != nil)
+        #expect(AgentLoop.readOnlyRefusal(["verb": "click", "role": "AXStaticText", "title": "Sam: lunch?"], focusedField: { nil },
+                                          frontAppMarksRead: marksRead) != nil)
+        #expect(AgentLoop.readOnlyRefusal(["verb": "click", "role": "AXLink", "title": "Next page"], focusedField: { nil },
+                                          frontAppMarksRead: marksRead) == nil)
+    }
+
 }

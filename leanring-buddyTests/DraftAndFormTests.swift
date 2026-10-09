@@ -137,19 +137,21 @@ extension DraftAndFormTests {
                                              frameInAppKitCoordinates: .zero, depth: 2, children: [])
         let root = AccessibilityElementNode(role: "AXWindow", subrole: nil, title: "Calendar", value: nil, elementDescription: nil,
                                             frameInAppKitCoordinates: .zero, depth: 0, children: [])
-        #expect(HarnessPolicy.isListOption(chain: [root, list, contact]))
-        #expect(HarnessPolicy.isListOption(chain: [root, list, group, contact]))
-        #expect(!HarnessPolicy.isListOption(chain: [root, group, contact]))
-        #expect(!HarnessPolicy.isListOption(chain: [root, list]))
+        // The guest field holds the caret while its suggestions pop up (security review 2026-10-10: a list is a listbox only so).
+        let guestField: () -> String? = { "AXTextField" }
+        #expect(HarnessPolicy.isListOption(chain: [root, list, contact], focusedRole: guestField))
+        #expect(HarnessPolicy.isListOption(chain: [root, list, group, contact], focusedRole: guestField))
+        #expect(!HarnessPolicy.isListOption(chain: [root, group, contact], focusedRole: guestField))
+        #expect(!HarnessPolicy.isListOption(chain: [root, list], focusedRole: guestField))
         // Run 725F3AB7: the model pressed the option's own child text ("yboyjb35@gmail.com" beside a bold "ed").
-        #expect(HarnessPolicy.isListOption(chain: [root, list, contact, text("yboyjb35@gmail.com")]))
+        #expect(HarnessPolicy.isListOption(chain: [root, list, contact, text("yboyjb35@gmail.com")], focusedRole: guestField))
         // ...and through the unnamed wrappers the full tree holds between them (live select, 07:44).
         let wrapper = AccessibilityElementNode(role: "AXGenericElement", subrole: nil, title: nil, value: nil, elementDescription: nil,
                                                frameInAppKitCoordinates: .zero, depth: 3, children: [])
-        #expect(HarnessPolicy.isListOption(chain: [root, list, wrapper, contact, wrapper, text("yboyjb35@gmail.com")]))
+        #expect(HarnessPolicy.isListOption(chain: [root, list, wrapper, contact, wrapper, text("yboyjb35@gmail.com")], focusedRole: guestField))
         let button = AccessibilityElementNode(role: "AXButton", subrole: nil, title: nil, value: nil, elementDescription: nil,
                                               frameInAppKitCoordinates: .zero, depth: 3, children: [])
-        #expect(!HarnessPolicy.isListOption(chain: [root, list, button, contact]))
+        #expect(!HarnessPolicy.isListOption(chain: [root, list, button, contact], focusedRole: guestField))
     }
 
     // Item 3: the AX hit named another process; the window server's mouse hit test is the second witness.
