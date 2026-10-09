@@ -135,7 +135,7 @@ struct AffordanceMapTests {
         #expect(joined.contains("toolbar: \"Back\""))
         #expect(joined.contains("search field \"Search\""))
         #expect(joined.contains("tabs: \"General\""))
-        #expect(joined.contains("outline \"Files\": 2 items"))
+        #expect(joined.contains("outline \"Files\": 2 visible"), "an elided table lists only what is in view")
         #expect(!joined.contains("secret draft"), "a field named by what was typed is never a landmark")
         #expect(!joined.contains("report.pdf"), "a table gives its row count, never its rows")
         #expect(lines.count <= AffordanceMap.maximumLandmarkLines)

@@ -167,7 +167,7 @@ nonisolated struct AffordanceMap: Sendable {
 
     /// ≤25 lines from a `forModel` snapshot, rebuilt every step (they change):
     /// toolbar buttons, search fields by label, tabs, and tables/outlines/lists
-    /// as kind + item count (never row contents). Names are what the snapshot
+    /// as kind + the count of items in view (an elided table lists only those; never row contents). Names are what the snapshot
     /// already lists (`listedName`, nothing inside a text or password box);
     /// a name withheld there, implausible, or touched by `SecretScanner` is skipped.
     static func landmarkLines(fromSnapshotResponse response: [String: Any]) -> [String] {
@@ -196,7 +196,7 @@ nonisolated struct AffordanceMap: Sendable {
                 tabs.append(entry["selected"] as? Bool == true ? "\(shown) (selected)" : shown)
             } else if ["AXTable", "AXOutline", "AXList", "AXBrowser"].contains(role) {
                 let count = elements.filter { $0["parent"] as? Int == index }.count
-                containers.append("\(role.dropFirst(2).lowercased()) \(shown): \(count) items")
+                containers.append("\(role.dropFirst(2).lowercased()) \(shown): \(count) visible")
             } else if role == "AXSheet" || subrole == "AXDialog" {
                 dialogs.append("dialog \(shown)")
             } else if toolbarRoles.contains(role), let window, let frame = RealtimeScreenVerbs.frame(entry["frame"]),
