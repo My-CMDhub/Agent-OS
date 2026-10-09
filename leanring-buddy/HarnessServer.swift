@@ -324,9 +324,12 @@ enum HarnessPolicy {
         guard let node = chain.last, node.role == "AXStaticText" else { return false }
         // The listbox's AXList, directly or through one anonymous wrapper or the
         // option itself (its child text was pressed, run 725F3AB7).
-        for ancestor in chain.dropLast().reversed().prefix(2) {
+        // Live, the full tree holds unnamed wrappers the forModel list skips (select on the
+        // child text read noSelectableAncestor with prefix(2)), so up to four levels.
+        for ancestor in chain.dropLast().reversed().prefix(4) {
             if ancestor.role == "AXList" { return true }
-            guard (ancestor.role == "AXGroup" && ancestor.displayName == nil) || ancestor.role == "AXStaticText" else { return false }
+            guard ancestor.role == "AXStaticText" || (ancestor.displayName == nil && !HarnessHands.activeRoles.contains(ancestor.role))
+            else { return false }
         }
         return false
     }
