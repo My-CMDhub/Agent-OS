@@ -106,6 +106,19 @@ final class RealtimeVoiceSession {
         return [" yes ", " yeah ", " yep ", " sure ", " continue ", " carry on ", " go on ", " go ahead ", " resume ", " keep going ",
                 " finish it "].contains(where: words.contains)
     }
+    /// The words a resumed task is judged by (security review 2026-10-10), or nil when this
+    /// turn does not resume it. Never the file's `ownerWords`: a file is display text. The
+    /// goal counts only as J.A.R.V.I.S. spoke it back in the turn right before — whole, the
+    /// owner heard it (`previousTurnSaid`) — and the owner's fresh yes is the new owner words.
+    nonisolated static func resumeWords(offer: AgentTaskCheckpoint?, previousSaid: String?, heard: String) -> String? {
+        guard let offer, let previousSaid, isResumeAnswer(heard) else { return nil }
+        func spaced(_ text: String) -> String {
+            " " + text.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).joined(separator: " ") + " "
+        }
+        let said = spaced(previousSaid), goal = spaced(offer.goal)
+        guard goal.count > 2, said.contains(goal), said.contains(" continue ") else { return nil }
+        return offer.goal + " " + heard
+    }
     /// The system turns the running task spoke, so its words can be reported.
     private var agentSpokenTurns: [RealtimeTurnMarks] = []
     /// Runner only: the task's outcome, its tool decisions and what was spoken.
@@ -352,7 +365,8 @@ final class RealtimeVoiceSession {
         // A task the last quit interrupted: the owner's yes continues it (it looks first); anything else sets it aside.
         let interrupted = interruptedOffer
         interruptedOffer = nil
-        let continuing = interrupted != nil && !resuming && Self.isResumeAnswer(heard)
+        let resumedWords = resuming ? nil : Self.resumeWords(offer: interrupted, previousSaid: connection?.turn.previousTurnSaid, heard: heard)
+        let continuing = resumedWords != nil
         if let interrupted, !continuing {
             var setAside = interrupted
             setAside.state = .cancelled
@@ -366,7 +380,7 @@ final class RealtimeVoiceSession {
         if resuming, let paused {
             loop = paused
         } else if continuing, let interrupted {
-            loop = AgentLoop.live(heard: interrupted.ownerWords + " " + heard, startBundle: startBundle, harnessAnswer: harnessAnswer,
+            loop = AgentLoop.live(heard: resumedWords ?? heard, startBundle: startBundle, harnessAnswer: harnessAnswer,
                                   model: agentModel) { [weak self] line in
                 self?.enqueueAgentSpeech(line, final: false)
             }
@@ -385,7 +399,7 @@ final class RealtimeVoiceSession {
         agentSpokenTurns = []
         agentTask = Task { @MainActor [weak self] in
             let outcome = resuming ? await loop.resume(answer: heard, words: words)
-                : continuing ? await loop.run(goal: loop.goal, heard: (interrupted?.ownerWords ?? "") + " " + heard)
+                : continuing ? await loop.run(goal: loop.goal, heard: resumedWords ?? heard)
                 : await loop.run(goal: goal, heard: words)
             guard let self else { return }
             if self.lastTask?.loop === loop { self.lastTask?.endedUptime = self.uptime }

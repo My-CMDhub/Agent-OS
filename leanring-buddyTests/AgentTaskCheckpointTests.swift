@@ -7,6 +7,7 @@
 //  interrupted, and resuming it looks at the screen before anything else.
 //
 
+import CryptoKit
 import Foundation
 import Testing
 @testable import Clicky
@@ -43,6 +44,10 @@ private func checkpointedLoop(_ run: Run) -> AgentLoop {
         trace: { _ in },
         checkpoint: { run.checkpoints.append($0) }))
 }
+
+private let testKey = SymmetricKey(size: .bits256)
+/// Task ids are a UUID's first 8 hex digits: "T7" -> "00000007".
+private func taskId(_ index: Int) -> String { String(format: "%08X", index) }
 
 private func temporaryDirectory() -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("agent-tasks-\(UUID().uuidString)", isDirectory: true)
@@ -82,31 +87,32 @@ private func checkpoint(_ id: String, _ state: AgentTaskPhase, at date: Date = D
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         for index in 0..<25 {
-            AgentTaskStore.write(checkpoint("T\(index)", .done), in: directory)
+            AgentTaskStore.write(checkpoint(taskId(index), .done), in: directory, key: testKey)
             // Distinct modification times, oldest first.
             try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: Double(index - 100))],
-                                                  ofItemAtPath: directory.appendingPathComponent("T\(index).json").path)
+                                                  ofItemAtPath: directory.appendingPathComponent("\(taskId(index)).json").path)
         }
         AgentTaskStore.prune(directory)
         let files = AgentTaskStore.taskFiles(directory).map(\.lastPathComponent)
         #expect(files.count == 20)
-        #expect(!files.contains("T0.json") && !files.contains("T4.json") && files.contains("T24.json"))
-        let mode = try FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("T24.json").path)[.posixPermissions] as? Int
+        #expect(!files.contains("\(taskId(0)).json") && !files.contains("\(taskId(4)).json") && files.contains("\(taskId(24)).json"))
+        let mode = try FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("\(taskId(24)).json").path)[.posixPermissions] as? Int
         #expect(mode == 0o600)
-        #expect(AgentTaskStore.read(in: directory).first?.taskId == "T24")
+        #expect(AgentTaskStore.read(in: directory, key: testKey).first?.taskId == taskId(24))
     }
 
     @Test func aTaskLeftMidTaskIsInterruptedAtLaunch() {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        for (id, state) in [("A", AgentTaskPhase.acting), ("O", .waitingForOwner), ("C", .waitingForCard), ("P", .planning), ("D", .done),
-                            ("X", .cancelled)] {
-            AgentTaskStore.write(checkpoint(id, state), in: directory)
+        for (id, state) in [("0000000A", AgentTaskPhase.acting), ("0000000B", .waitingForOwner), ("0000000C", .waitingForCard),
+                            ("0000000D", .planning), ("0000000E", .done), ("0000000F", .cancelled)] {
+            AgentTaskStore.write(checkpoint(id, state), in: directory, key: testKey)
         }
-        let interrupted = AgentTaskStore.markInterrupted(in: directory)
-        #expect(Set(interrupted.map(\.taskId)) == ["A", "O", "C", "P"])
-        let states = Dictionary(uniqueKeysWithValues: AgentTaskStore.read(in: directory).map { ($0.taskId, $0.state) })
-        #expect(states == ["A": .interrupted, "O": .interrupted, "C": .interrupted, "P": .interrupted, "D": .done, "X": .cancelled])
+        let interrupted = AgentTaskStore.markInterrupted(in: directory, key: testKey)
+        #expect(Set(interrupted.map(\.taskId)) == ["0000000A", "0000000B", "0000000C", "0000000D"])
+        let states = Dictionary(uniqueKeysWithValues: AgentTaskStore.read(in: directory, key: testKey).map { ($0.taskId, $0.state) })
+        #expect(states == ["0000000A": .interrupted, "0000000B": .interrupted, "0000000C": .interrupted, "0000000D": .interrupted,
+                           "0000000E": .done, "0000000F": .cancelled])
         #expect(interrupted.allSatisfy { $0.transitions.last?.phase == .interrupted })
     }
 
