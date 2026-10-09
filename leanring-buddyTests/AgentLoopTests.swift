@@ -1160,23 +1160,18 @@ struct TaskSessionTests {
                         AgentLoop.Receipt(step: 2, toolName: "press_element", ok: true, error: nil, progress: "pressed \"New meeting\""),
                         AgentLoop.Receipt(step: 3, toolName: "read_page", ok: true, error: nil, progress: "read the page"),
                         AgentLoop.Receipt(step: 4, toolName: "press_element", ok: false, error: "heardNamedMismatch")]
-        let line = AgentLoop.statusLine(goal: "make a meet link", state: .running, step: 4, receipts: receipts,
+        let line = AgentLoop.statusLine(goal: "make a meet link", phase: .acting, step: 4, receipts: receipts,
                                         artifacts: ["meet.google.com/abc-defg-hij"])
         #expect(line.contains("state: running"))
         #expect(!line.contains("step 1 "))   // only the last three
         #expect(line.contains("step 4 press_element (not done: heardNamedMismatch)"))
         #expect(line.contains("meet.google.com/abc-defg-hij"))
         #expect(line.contains("never call do_task"))
-        let empty = AgentLoop.statusLine(goal: "g", state: .waiting(question: "Which?"), step: 0, receipts: [], artifacts: [])
+        let empty = AgentLoop.statusLine(goal: "g", phase: .waitingForOwner, step: 0, receipts: [], artifacts: [], question: "Which?")
         #expect(empty.contains("waiting for the owner's answer to: Which?"))
         #expect(empty.contains("nothing made by the task has been seen on screen"))
-        // State: a press stops it; a paused run waits; a done one is done.
-        #expect(AgentLoop.taskState(isRunning: true, stoppedByPress: true, outcome: nil, pausedQuestion: nil) == .stopped)
-        #expect(AgentLoop.taskState(isRunning: false, stoppedByPress: false, outcome: .askOwner(question: "Q"), pausedQuestion: "Q")
-                == .waiting(question: "Q"))
-        #expect(AgentLoop.taskState(isRunning: false, stoppedByPress: false, outcome: .done(summary: "s"), pausedQuestion: nil)
-                == .ended(.done(summary: "s")))
-        #expect(AgentLoop.statusLine(goal: "g", state: .ended(.failed(reason: "no link")), step: 3, receipts: [], artifacts: [])
+        // The phase is the state (AgentTaskStateTests); a failed run carries its reason.
+        #expect(AgentLoop.statusLine(goal: "g", phase: .failed, step: 3, receipts: [], artifacts: [], outcome: .failed(reason: "no link"))
             .contains("did not finish (failed): no link"))
     }
 
@@ -1249,7 +1244,7 @@ struct TaskSessionTests {
     }
 
     @Test func theStatusLineNoLongerBlamesAKeyPress() {
-        let line = AgentLoop.statusLine(goal: "make a meet link", state: .stopped, step: 3, receipts: [], artifacts: [])
+        let line = AgentLoop.statusLine(goal: "make a meet link", phase: .cancelled, step: 3, receipts: [], artifacts: [])
         #expect(!line.contains("key press"))
         #expect(line.contains("the owner said to stop"))
         #expect(!AgentLoop.stoppedContextLine(step: 3).contains("key press"))

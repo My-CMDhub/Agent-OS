@@ -302,6 +302,9 @@ final class AgentLoop {
         var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
         /// The app in front now, between the actions of one reply.
         var frontBundle: () async -> String? = { nil }
+        /// Every phase change, with the step it happened at: the notch and agent-loop.log.
+        var onPhase: (AgentTaskPhase, Int) -> Void = { _, _ in }
+        var now: () -> Date = { Date() }
     }
 
     /// One executed tool, as the run's receipts hold it.
@@ -363,6 +366,11 @@ final class AgentLoop {
     /// Things the task created, as the app showed them (`artifacts(inAppText:)`), never the model's words.
     private(set) var artifacts: [String] = []
     private var seenBeforeActing: Set<String> = []
+    /// Where the task stands (2026-10-10): the one value the status line, the notch and do_task read.
+    private(set) var phase: AgentTaskPhase?
+    private(set) var transitions: [AgentTaskTransition] = []
+    /// Moves the table refused: a run's own bug, or a late move after a stop.
+    private(set) var illegalTransitions = 0
 
     init(dependencies: Dependencies) {
         self.dependencies = dependencies
@@ -377,6 +385,7 @@ final class AgentLoop {
     /// `goal`: the request as the voice passed it on. `heard`: the owner's own
     /// words, which the guards judge by (set in `live`); Claude sees both.
     func run(goal: String, heard: String? = nil) async -> Outcome {
+        if phase == .cancelled { return .cancelled }
         self.goal = goal
         self.heard = heard
         return await proceed()
@@ -386,7 +395,7 @@ final class AgentLoop {
     /// judge by — the task's words plus this answer's, so authority grows by
     /// only what the answer names.
     func resume(answer: String, words: String) async -> Outcome {
-        guard let paused = pausedAsk else { return .failed(reason: "no task was waiting for an answer") }
+        guard phase != .cancelled, let paused = pausedAsk else { return .failed(reason: "no task was waiting for an answer") }
         pausedAsk = nil
         heard = words
         if let carry = liveCarry {
@@ -402,6 +411,35 @@ final class AgentLoop {
         return await proceed()
     }
 
+    /// Moves the phase if the table allows it; the same phase is no move.
+    func move(to next: AgentTaskPhase) {
+        guard next != phase else { return }
+        guard AgentTaskPhase.canMove(from: phase, to: next) else {
+            illegalTransitions += 1
+            print("🤖 agent loop \(runID): refused phase \(phase?.rawValue ?? "none") -> \(next.rawValue)")
+            return
+        }
+        phase = next
+        transitions.append(AgentTaskTransition(phase: next, at: dependencies.now()))
+        dependencies.onPhase(next, step)
+    }
+
+    /// A ticket is open for this step's call: the card waits on the owner.
+    func noteCardPending() { if phase == .acting { move(to: .waitingForCard) } }
+
+    /// The owner said stop (or set it aside): cancelled now, before the run
+    /// notices; a paused task never resumes.
+    func cancel() {
+        pausedAsk = nil
+        move(to: .cancelled)
+    }
+
+    /// The task status line from this task's own phase.
+    func statusLine() -> String {
+        Self.statusLine(goal: goal, phase: phase ?? .planning, step: step, receipts: receipts, artifacts: artifacts,
+                        question: pausedAsk?.question, outcome: lastOutcome)
+    }
+
     private func proceed() async -> Outcome {
         isRunning = true
         lastOutcome = nil
@@ -413,6 +451,7 @@ final class AgentLoop {
 
         func finish(_ outcome: Outcome) -> Outcome {
             isRunning = false
+            move(to: AgentTaskPhase.ended(outcome))
             activeSeconds = dependencies.uptime() - started
             lastOutcome = outcome
             dependencies.onStep(nil)
@@ -430,6 +469,7 @@ final class AgentLoop {
             if dependencies.uptime() - started >= Self.maximumSeconds { return finish(.timeCap) }
             if step >= Self.maximumSteps { return finish(.stepCap) }
             step += 1
+            move(to: .planning)
             dependencies.onStep(ConfirmationStep(current: step, total: Self.maximumSteps))
 
             let observation = await dependencies.observe()
@@ -496,6 +536,7 @@ final class AgentLoop {
                 return finish(.timeCap)
             }
             let toolUses = assistant.filter { $0["type"] as? String == "tool_use" }
+            if !toolUses.isEmpty { move(to: .acting) }
             guard !toolUses.isEmpty else {
                 traced(["error": "noToolCall"])
                 pending = [["type": "text", "text": "Answer with a tool call. End the task with done or ask_owner."]]
@@ -646,6 +687,7 @@ final class AgentLoop {
                     (result, harnessMs, waited, call) = (dispatch.result, dispatch.harnessMilliseconds, dispatch.waitedForConfirmation, parsed)
                     record(parsed, dispatch)
                 }
+                if phase == .waitingForCard { move(to: .acting) }
                 let ok = result["ok"] as? Bool == true
                 let error = ok ? nil : ((result["error"] as? String) ?? "failed")
                 // App-shown text only: a page read, never the model's own arguments.
@@ -1039,32 +1081,24 @@ final class AgentLoop {
         return found
     }
 
-    /// Where a task stands, as the voice is told it on every owner turn.
-    enum TaskState: Equatable {
-        case running
-        case waiting(question: String)
-        case stopped
-        case ended(Outcome)
-    }
-
-    static func taskState(isRunning: Bool, stoppedByPress: Bool, outcome: Outcome?, pausedQuestion: String?) -> TaskState {
-        if stoppedByPress { return .stopped }
-        if isRunning { return .running }
-        if let pausedQuestion { return .waiting(question: pausedQuestion) }
-        if let outcome, outcome != .cancelled { return .ended(outcome) }
-        return .stopped
-    }
-
-    /// One context line: goal, state, step, the last three steps in plain words,
+    /// One context line: goal, phase, step, the last three steps in plain words,
     /// and what the task made. Scrubbed; the goal and words bounded.
-    static func statusLine(goal: String, state: TaskState, step: Int, receipts: [Receipt], artifacts: [String]) -> String {
+    /// `question`: the paused ask_owner's; `outcome`: the ended run's, for its reason.
+    static func statusLine(goal: String, phase: AgentTaskPhase, step: Int, receipts: [Receipt], artifacts: [String],
+                           question: String? = nil, outcome: Outcome? = nil) -> String {
         let stateWords: String
-        switch state {
-        case .running: stateWords = "running"
-        case .waiting(let question): stateWords = "waiting for the owner's answer to: \(question)"
-        case .stopped: stateWords = "stopped: the owner said to stop; nothing more is being done"
-        case .ended(.done(let summary)): stateWords = "done: \(summary)"
-        case .ended(let outcome): stateWords = "did not finish (\(outcome.name))\(finalReason(outcome).map { ": \($0)" } ?? "")"
+        switch phase {
+        case .planning: stateWords = "running (deciding its next step)"
+        case .acting: stateWords = "running (acting on this step)"
+        case .waitingForCard: stateWords = "waiting for the owner to allow or deny the approval card on screen"
+        case .waitingForOwner: stateWords = "waiting for the owner's answer to: \(question ?? "its question")"
+        case .cancelled: stateWords = "stopped: the owner said to stop; nothing more is being done"
+        case .interrupted: stateWords = "interrupted: J.A.R.V.I.S. quit while it ran; nothing has been done since"
+        case .done:
+            if case .done(let summary)? = outcome { stateWords = "done: \(summary)" } else { stateWords = "done" }
+        case .failed, .timedOut:
+            let name = outcome?.name ?? phase.rawValue
+            stateWords = "did not finish (\(name))\(outcome.flatMap(finalReason).map { ": \($0)" } ?? "")"
         }
         let recent = receipts.suffix(3).map { receipt -> String in
             let what = receipt.progress ?? receipt.toolName
@@ -1202,9 +1236,16 @@ extension AgentLoop {
                 JarvisNotch.shared.doingStep = step?.current
             },
             narrate: { progress in narrate(narrationLine(progress)) },
-            frontBundle: { await frontApp()?.bundleIdentifier }
+            frontBundle: { await frontApp()?.bundleIdentifier },
+            onPhase: { phase, step in
+                JarvisNotch.shared.showTask(phase.notchTitle(step: step))
+                appendTrace(["kind": "state", "run": carry.runID, "state": phase.rawValue, "step": step,
+                             "at": ISO8601DateFormatter().string(from: Date()),
+                             "uptime": MeasurementLogFile.roundedUptime(ProcessInfo.processInfo.systemUptime)])
+            }
         ))
         carry.runID = loop.runID
+        carry.onCardOpened = { [weak loop] in loop?.noteCardPending() }
         carry.heard = heard
         carry.readOnly = isReadOnlyTask(words: heard)
         loop.readOnly = carry.readOnly
@@ -1232,6 +1273,8 @@ extension AgentLoop {
         var readOnly = false
         /// The owner's words every step is judged by; an answer to ask_owner adds its own (`resume`).
         var heard = ""
+        /// A ticket opened for this step's call: the loop's `waitingForCard`.
+        var onCardOpened: (@MainActor () -> Void)?
     }
 
     /// What an ok open makes the task's own (re-review of 2e45939): the harness's
@@ -1558,6 +1601,7 @@ extension AgentLoop {
                                                                  checksSite: checksSite,
                                                                  confirmationWaitSeconds: min(RealtimeOpenAppTool.confirmationWaitSeconds,
                                                                                               max(1, confirmationWaitSeconds)),
+                                                                 onConfirmationRequired: carry.onCardOpened,
                                                                  isCurrent: { !Task.isCancelled })
         if let dispatch, dispatch.harnessConfirmed,
            [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName, RealtimeVoiceVerbs.openURLName].contains(filled.name),

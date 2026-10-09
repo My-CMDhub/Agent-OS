@@ -280,8 +280,7 @@ enum AgentLoopProbe {
             var outcome = await loop.run(goal: words, heard: words)
             if case .askOwner(let question) = outcome, let answer, !answer.isEmpty {
                 paused = ["question": SecretScanner.redact(question), "step": loop.step, "receipts": loop.receipts.count,
-                          "status": AgentLoop.statusLine(goal: words, state: .waiting(question: question), step: loop.step,
-                                                         receipts: loop.receipts, artifacts: loop.artifacts)]
+                          "status": loop.statusLine()]
                 outcome = await loop.resume(answer: answer, words: words + " " + answer)
             }
             finished.value = true
@@ -303,8 +302,8 @@ enum AgentLoopProbe {
                                      "wallMs": Int(((ProcessInfo.processInfo.systemUptime - startUptime) * 1000).rounded()),
                                      "model": loop.modelUsed ?? NSNull(), "run": loop.runID, "cards": cards, "narrations": narrations,
                                      "pausedAt": paused ?? NSNull(), "artifacts": loop.artifacts,
-                                     "status": AgentLoop.statusLine(goal: words, state: .ended(outcome), step: loop.step,
-                                                                    receipts: loop.receipts, artifacts: loop.artifacts)]
+                                     "status": loop.statusLine(), "transitions": loop.transitions.map { [$0.phase.rawValue, ISO8601DateFormatter().string(from: $0.at)] },
+                                     "illegalTransitions": loop.illegalTransitions]
         switch outcome {
         case .done(let summary): result["spoken"] = SecretScanner.redact(summary)
         case .askOwner(let question): result["spoken"] = SecretScanner.redact(question)

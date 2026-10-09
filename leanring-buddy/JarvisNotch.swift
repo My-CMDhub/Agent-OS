@@ -523,22 +523,43 @@ final class JarvisNotch {
 
     private init() {}
 
-    /// The agent loop's step while a task runs (`AgentLoop`): "Doing · 3". A
-    /// proof, a didn't-take or a finished voice turn falls back to it instead
-    /// of to idle, so the notch says a task is still going between steps.
-    var doingStep: Int? {
-        didSet {
-            if let doingStep {
-                // Never over a press, a card or a proof still holding: they fall back to it themselves.
-                switch state {
-                case .idle, .thinking, .noReply: handle(.toolCall(title: Self.doingTitle(doingStep)))
-                case .intent(let title) where title.hasPrefix(Self.doingPrefix): handle(.toolCall(title: Self.doingTitle(doingStep)))
-                default: break
-                }
-            } else if case .intent(let title) = state, title.hasPrefix(Self.doingPrefix) {
-                handle(.turnEnded)
+    /// The agent loop's step while a task runs; the scenario runner reads it.
+    var doingStep: Int?
+
+    /// The running task's title, from its phase (`AgentTaskPhase.notchTitle`):
+    /// "Doing · 3", "Waiting for you", "Needs your approval". A proof, a
+    /// didn't-take or a finished voice turn falls back to it instead of to idle,
+    /// so the notch says where the task stands between steps.
+    private(set) var taskTitle: String?
+    private var taskTitleGeneration = 0
+    /// A question nobody answers stops showing once the answer window closes.
+    nonisolated static let waitingTitleSeconds: TimeInterval = 300
+
+    func showTask(_ title: String?) {
+        let previous = taskTitle
+        taskTitle = title
+        taskTitleGeneration += 1
+        if let title {
+            // Never over a press, a card or a proof still holding: they fall back to it themselves.
+            switch state {
+            case .idle, .thinking, .noReply: handle(.toolCall(title: title))
+            case .intent(let shown) where shown == previous || Self.isTaskTitle(shown): handle(.toolCall(title: title))
+            default: break
             }
+            if title == AgentTaskPhase.waitingTitle {
+                let generation = taskTitleGeneration
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.waitingTitleSeconds) { [weak self] in
+                    guard let self, self.taskTitleGeneration == generation else { return }
+                    self.showTask(nil)
+                }
+            }
+        } else if case .intent(let shown) = state, shown == previous || Self.isTaskTitle(shown) {
+            handle(.turnEnded)
         }
+    }
+
+    nonisolated static func isTaskTitle(_ title: String) -> Bool {
+        title.hasPrefix(doingPrefix) || title == AgentTaskPhase.waitingTitle || title == AgentTaskPhase.approvalTitle
     }
 
     nonisolated static let doingPrefix = "Doing \u{00B7} "
@@ -549,7 +570,7 @@ final class JarvisNotch {
     @discardableResult
     func handle(_ event: JarvisNotchEvent) -> JarvisNotchState? {
         guard var next = state.next(on: event) else { return nil }
-        if next == .idle, let doingStep { next = .intent(title: Self.doingTitle(doingStep)) }
+        if next == .idle, let taskTitle { next = .intent(title: taskTitle) }
         if event == .hotkeyDown || panel == nil { placeOnScreenUnderCursor() }
         let before = frontmostWitness?()
         state = next

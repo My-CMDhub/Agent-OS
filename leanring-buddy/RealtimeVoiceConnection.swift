@@ -924,6 +924,7 @@ final class RealtimeVoiceConnection {
     static func runToolCall(_ call: RealtimeToolCall, decisionIndex: Int, in turn: RealtimeTurnMarks,
                             harnessAnswer: @escaping @Sendable (String) -> String, checksSite: Bool = true,
                             confirmationWaitSeconds: Double = RealtimeOpenAppTool.confirmationWaitSeconds,
+                            onConfirmationRequired agentCardOpened: (@MainActor () -> Void)? = nil,
                             isCurrent: @escaping @MainActor () -> Bool) async -> RealtimeToolDispatch? {
         // Read now, after the previous call finished: a find and a press sent
         // in one batch must still press what that find offered.
@@ -1050,6 +1051,7 @@ final class RealtimeVoiceConnection {
         } else {
             let onConfirmationRequired: @MainActor () -> Void = {
                 if isKnownTool { JarvisNotch.shared.handle(.confirmationRequired) }
+                agentCardOpened?()
             }
             dispatch = await RealtimeOpenAppTool.dispatch(call, offered: offered, offeredApp: offeredApp, screenTarget: screenTarget,
                                                           screenshotDisplay: turn.screenshotDisplayFrame,

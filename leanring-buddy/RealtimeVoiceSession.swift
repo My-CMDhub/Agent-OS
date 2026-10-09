@@ -82,7 +82,6 @@ final class RealtimeVoiceSession {
     struct TaskRecord {
         let loop: AgentLoop
         var endedUptime: TimeInterval?
-        var stoppedByPress = false
     }
     private var lastTask: TaskRecord?
     /// The system turns the running task spoke, so its words can be reported.
@@ -336,6 +335,9 @@ final class RealtimeVoiceSession {
             }
         }
         let setAside = paused != nil && !resuming
+        if setAside { paused?.cancel() }
+        // Planning from this moment: do_task's reply and the next turn's status read it, never a guess.
+        loop.move(to: .planning)
         lastTask = TaskRecord(loop: loop)
         agentLoop = loop
         agentSpokenTurns = []
@@ -350,9 +352,10 @@ final class RealtimeVoiceSession {
             if self.agentLoop === loop { self.agentLoop = nil }
             await self.reportAgentLoop(loop, outcome: outcome)
         }
-        let status = AgentLoop.statusLine(goal: loop.goal.isEmpty ? goal : loop.goal, state: .running, step: loop.step,
+        let status = AgentLoop.statusLine(goal: loop.goal.isEmpty ? goal : loop.goal, phase: loop.phase ?? .planning, step: loop.step,
                                           receipts: loop.receipts, artifacts: loop.artifacts)
-        return ["ok": true, "status": resuming ? "resumed" : "started", "error": NSNull(), "task": status,
+        return ["ok": true, "status": resuming ? "resumed" : "started", "state": (loop.phase ?? .planning).rawValue,
+                "error": NSNull(), "task": status,
                 "message": (resuming ? "the paused task has resumed with the owner's answer, from step \(loop.step); its earlier steps stand as "
                                 + "the task status shows. "
                             : "a new task has started; no step of it has run yet. "
@@ -367,10 +370,7 @@ final class RealtimeVoiceSession {
             lastTask = nil
             return nil
         }
-        let loop = record.loop
-        let state = AgentLoop.taskState(isRunning: loop.isRunning, stoppedByPress: record.stoppedByPress, outcome: loop.lastOutcome,
-                                        pausedQuestion: loop.pausedAsk?.question)
-        return AgentLoop.statusLine(goal: loop.goal, state: state, step: loop.step, receipts: loop.receipts, artifacts: loop.artifacts)
+        return record.loop.statusLine()
     }
 
     /// The owner's words stop a running task (owner 2026-10-08): a key press no longer does.
@@ -415,7 +415,7 @@ final class RealtimeVoiceSession {
     /// RUNNING task stopped at.
     private func stopAgentLoop() -> Int? {
         let running = agentLoop.flatMap { $0.isRunning ? $0.step : nil }
-        if running != nil, lastTask?.loop === agentLoop { lastTask?.stoppedByPress = true }
+        if running != nil { agentLoop?.cancel() }
         agentTask?.cancel()
         agentSpeech?.cancel()
         return running
