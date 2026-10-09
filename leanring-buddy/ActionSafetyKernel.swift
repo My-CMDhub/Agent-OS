@@ -294,6 +294,15 @@ enum ActionSafetyKernel {
         "remote login", "screen sharing", "file sharing", "remote management", "remote apple events"
     ]
 
+    /// Toggles a card guards (owner 2026-10-10), as whole words in order.
+    static let connectivityOrSecurityToggles = ["wi fi", "wifi", "bluetooth", "firewall", "filevault", "lockdown mode",
+                                                "location services", "vpn", "airdrop", "network"]
+
+    static func connectivityOrSecurityTogglePhrase(in title: String) -> String? {
+        let said = " " + title.lowercased().split { !$0.isLetter }.joined(separator: " ") + " "
+        return connectivityOrSecurityToggles.first { said.contains(" \($0) ") }
+    }
+
     /// The first confirm phrase `title` holds as whole words, in order.
     static func confirmPhrase(in title: String) -> String? {
         let words = title.lowercased().split { !$0.isLetter }.map(String.init)
@@ -616,6 +625,16 @@ enum ActionSafetyKernel {
                                                 destructive: true)
                 }
             }
+        }
+
+        // Owner's ruling 2026-10-10: a toggle that cuts the network or lowers a
+        // security guard asks (Wi-Fi off cuts the connection J.A.R.V.I.S. runs on).
+        // A sidebar row or button of the same name is navigation. ponytail: by the
+        // switch's own name; a pane-scoped rule needs the window title in the kernel.
+        if intent.action == .press || intent.action == .click,
+           resolvedNode.role == "AXCheckBox" || resolvedNode.subrole == "AXSwitch",
+           let toggle = wordCheckedNames.lazy.compactMap({ connectivityOrSecurityTogglePhrase(in: $0) }).first {
+            return .requireConfirmation(reason: "this switch changes \(toggle) — it can cut the network or lower a security guard", destructive: false)
         }
 
         // App-written text may only ever make the decision *more* cautious.

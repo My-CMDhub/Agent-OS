@@ -31,6 +31,22 @@ struct HarnessHandsTests {
                                     resolvedNode: target, matchCount: 1, visibleBounds: bounds)
     }
 
+    // Owner's ruling 2026-10-10: a switch that cuts the network or a security guard
+    // (Wi-Fi, Bluetooth, Firewall, FileVault...) asks on a card; the sidebar row of
+    // the same name is navigation, and an ordinary checkbox still passes.
+    @Test func aNetworkOrSecurityToggleAsksOnACardButItsSidebarRowDoesNot() {
+        for (title, subrole) in [("Wi\u{2011}Fi", nil), ("Bluetooth", "AXSwitch"), ("Firewall", "AXSwitch"), ("Lockdown Mode", nil)] as [(String, String?)] {
+            for action in [ElementAction.press, .click] {
+                guard case .requireConfirmation = decide(action, node("AXCheckBox", title, subrole: subrole), title: title) else {
+                    Issue.record("\(title) toggle was not carded"); continue
+                }
+            }
+        }
+        #expect(decide(.press, node("AXRow", "Wi\u{2011}Fi"), title: "Wi\u{2011}Fi") == .allow)
+        #expect(decide(.press, node("AXButton", "Bluetooth"), title: "Bluetooth") == .allow)
+        #expect(decide(.press, node("AXCheckBox", "Show seconds"), title: "Show seconds") == .allow)
+    }
+
     // MARK: click — the kernel
 
     // A click is judged as a press wherever a press could run at all.
