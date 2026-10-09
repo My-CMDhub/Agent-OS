@@ -322,10 +322,11 @@ enum HarnessPolicy {
     /// publishes a `role=option` as AXStaticText under the listbox's AXList.
     static func isListOption(chain: [AccessibilityElementNode]) -> Bool {
         guard let node = chain.last, node.role == "AXStaticText" else { return false }
-        // The listbox's AXList, directly or through one anonymous wrapper.
+        // The listbox's AXList, directly or through one anonymous wrapper or the
+        // option itself (its child text was pressed, run 725F3AB7).
         for ancestor in chain.dropLast().reversed().prefix(2) {
             if ancestor.role == "AXList" { return true }
-            guard ancestor.role == "AXGroup", ancestor.displayName == nil else { return false }
+            guard (ancestor.role == "AXGroup" && ancestor.displayName == nil) || ancestor.role == "AXStaticText" else { return false }
         }
         return false
     }
@@ -2765,7 +2766,7 @@ final class HarnessServer {
             if typingContext?.inTabTheHarnessOpened == true { field["inTabTheHarnessOpened"] = true }
             response["field"] = field
         }
-        let isListOption = (action == .press || action == .click) && resolvedNode.role == "AXStaticText"
+        let isListOption = (action == .press || action == .click || action == .select) && resolvedNode.role == "AXStaticText"
             && ElementReachability.ancestorChain(to: resolvedNode, from: rootNode).map(HarnessPolicy.isListOption(chain:)) == true
 
         // A link to a person-notifying view (a LinkedIn profile) asks on a card,
@@ -2845,6 +2846,17 @@ final class HarnessServer {
             performedOK = result.error == .success
 
         case .select:
+            // A listbox option is chosen by a click, not a selection write (press_element on a
+            // suggestion arrives as select, 725F3AB7: noSelectableAncestor x3). Judged again as a click.
+            if isListOption, ActionSafetyKernel.evaluate(
+                intent: ElementActionIntent(role: intent.role, title: intent.title, action: .click), resolvedNode: resolvedNode,
+                matchCount: 1, visibleBounds: rootNode.frameInAppKitCoordinates, labelTitle: labelTitle,
+                draftScope: request.draftScope, isListOption: true) == .allow {
+                var clicked = response
+                clicked["selectedBy"] = "clickOnListOption"
+                return clickAct(request, node: resolvedNode, rootNode: rootNode, snapshot: snapshot, namesBefore: namesBefore,
+                                kernel: described.decision, dryRun: dryRun, startedAt: startedAt, response: clicked)
+            }
             guard let chain = ElementReachability.ancestorChain(to: resolvedNode, from: rootNode) else {
                 response["ok"] = false
                 response["error"] = "noAncestorChain"

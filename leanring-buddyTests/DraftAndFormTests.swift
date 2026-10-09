@@ -141,6 +141,8 @@ extension DraftAndFormTests {
         #expect(HarnessPolicy.isListOption(chain: [root, list, group, contact]))
         #expect(!HarnessPolicy.isListOption(chain: [root, group, contact]))
         #expect(!HarnessPolicy.isListOption(chain: [root, list]))
+        // Run 725F3AB7: the model pressed the option's own child text ("yboyjb35@gmail.com" beside a bold "ed").
+        #expect(HarnessPolicy.isListOption(chain: [root, list, contact, text("yboyjb35@gmail.com")]))
     }
 
     // Item 3: the AX hit named another process; the window server's mouse hit test is the second witness.
