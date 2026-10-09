@@ -674,6 +674,14 @@ final class RealtimeVoiceSession {
             let stoppedLine = agentStoppedLine
             agentStoppedLine = nil
             let taskStatusLine = agentStatusLine()
+            // What the voice was told, as agent-loop.log keeps it (phase and step, no words): a reply is judged against it.
+            if taskStatusLine != nil {
+                AgentLoop.appendTrace(["kind": "statusSent", "turn": liveTurn?.line.turnID ?? NSNull(), "run": lastTask?.loop.runID ?? interruptedOffer?.taskId ?? NSNull(),
+                                       "state": lastTask?.loop.phase?.rawValue ?? (interruptedOffer != nil ? "interrupted" : NSNull()),
+                                       "step": lastTask?.loop.step ?? interruptedOffer?.step ?? NSNull(),
+                                       "at": ISO8601DateFormatter().string(from: Date()),
+                                       "uptime": MeasurementLogFile.roundedUptime(uptime)])
+            }
             watchForStopWords(in: marks)
             let closeUp = pointerCloseUp
             let contextSend = Task { @MainActor in

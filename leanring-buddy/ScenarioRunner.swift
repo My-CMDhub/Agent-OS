@@ -206,7 +206,8 @@ enum ScenarioRunner {
         let wanted = CommandLine.arguments.first { $0.hasPrefix("--scenario-ids=") }
             .map { $0.dropFirst("--scenario-ids=".count).split(separator: ",").map(String.init) }
         let stacks = stacksArgument()
-        let scenarios = wanted.map { ids in ids.compactMap { id in ScenarioCatalog.catalog.first { $0.id == id } } } ?? ScenarioCatalog.all
+        let scenarios = wanted.map { ids in ids.compactMap { id in (ScenarioCatalog.catalog + ScenarioCatalog.taskStatus).first { $0.id == id } } }
+            ?? ScenarioCatalog.all
         let utterances = loadUtterances()
         meta["scenarios"] = scenarios.map(\.id)
         meta["stacks"] = stacks.map(\.rawValue)
