@@ -110,4 +110,48 @@ struct DraftAndFormTests {
     }
 }
 
+extension DraftAndFormTests {
+
+    // Item 3: Calendar's guest suggestions (live 2026-10-10): typing "ed" lists AXList "ed" holding
+    // AXStaticText "edyboyjb35@gmail.com edyboyjb35@gmail.com" — Chromium's role=option. Clicking it carded
+    // "unrecognised role AXStaticText". An option is a choice, so it is clicked; its words are still judged.
+    @Test func aListboxOptionIsClickedAndItsWordsStillJudged() {
+        func text(_ name: String) -> AccessibilityElementNode {
+            AccessibilityElementNode(role: "AXStaticText", subrole: nil, title: nil, value: name, elementDescription: nil,
+                                     frameInAppKitCoordinates: CGRect(x: 715, y: 448, width: 304, height: 44), depth: 3, children: [],
+                                     publishedActionNames: ["AXShowMenu", "AXScrollToVisible"])
+        }
+        func decide(_ target: AccessibilityElementNode, option: Bool) -> SafetyDecision {
+            ActionSafetyKernel.evaluate(intent: ElementActionIntent(role: nil, title: target.displayName?.raw ?? "", action: .click),
+                                        resolvedNode: target, matchCount: 1, visibleBounds: CGRect(x: 0, y: 0, width: 1440, height: 900),
+                                        isListOption: option)
+        }
+        let contact = text("edyboyjb35@gmail.com edyboyjb35@gmail.com")
+        #expect(decide(contact, option: true) == .allow)
+        if case .requireConfirmation = decide(contact, option: false) {} else { Issue.record("loose text still asks") }
+        if case .requireConfirmation = decide(text("Delete event"), option: true) {} else { Issue.record("an option's words are judged") }
+
+        let list = AccessibilityElementNode(role: "AXList", subrole: nil, title: "ed", value: nil, elementDescription: nil,
+                                            frameInAppKitCoordinates: CGRect(x: 715, y: 404, width: 304, height: 88), depth: 2, children: [])
+        let group = AccessibilityElementNode(role: "AXGroup", subrole: nil, title: nil, value: nil, elementDescription: nil,
+                                             frameInAppKitCoordinates: .zero, depth: 2, children: [])
+        let root = AccessibilityElementNode(role: "AXWindow", subrole: nil, title: "Calendar", value: nil, elementDescription: nil,
+                                            frameInAppKitCoordinates: .zero, depth: 0, children: [])
+        #expect(HarnessPolicy.isListOption(chain: [root, list, contact]))
+        #expect(HarnessPolicy.isListOption(chain: [root, list, group, contact]))
+        #expect(!HarnessPolicy.isListOption(chain: [root, group, contact]))
+        #expect(!HarnessPolicy.isListOption(chain: [root, list]))
+    }
+
+    // Item 3: the AX hit named another process; the window server's mouse hit test is the second witness.
+    @Test func aClickIsObscuredOnlyWhenBothWitnessesSaySo() {
+        let chrome: pid_t = 605, wispr: pid_t = 650
+        #expect(HarnessHands.coveringProcess(axHit: chrome, windowServerHit: chrome, target: chrome) == nil)
+        #expect(HarnessHands.coveringProcess(axHit: wispr, windowServerHit: chrome, target: chrome) == nil)
+        #expect(HarnessHands.coveringProcess(axHit: wispr, windowServerHit: wispr, target: chrome) == wispr)
+        // An unreadable second witness never clears a cover.
+        #expect(HarnessHands.coveringProcess(axHit: wispr, windowServerHit: nil, target: chrome) == wispr)
+    }
+}
+
 final class LineBox: @unchecked Sendable { var lines: [String] = [] }

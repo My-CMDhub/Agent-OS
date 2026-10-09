@@ -318,6 +318,18 @@ struct HarnessRequest: Equatable {
 
 enum HarnessPolicy {
 
+    /// Whether `chain` (root ... node) ends in a listbox option: Chromium
+    /// publishes a `role=option` as AXStaticText under the listbox's AXList.
+    static func isListOption(chain: [AccessibilityElementNode]) -> Bool {
+        guard let node = chain.last, node.role == "AXStaticText" else { return false }
+        // The listbox's AXList, directly or through one anonymous wrapper.
+        for ancestor in chain.dropLast().reversed().prefix(2) {
+            if ancestor.role == "AXList" { return true }
+            guard ancestor.role == "AXGroup", ancestor.displayName == nil else { return false }
+        }
+        return false
+    }
+
     /// Whether a tab the harness opened at `openedAt` still counts as the task's
     /// own for the replace rule (`TypingContext.inTabTheHarnessOpened`).
     static func tabStillTheHarnesss(openedAt: Date?, now: Date) -> Bool {
@@ -2753,6 +2765,8 @@ final class HarnessServer {
             if typingContext?.inTabTheHarnessOpened == true { field["inTabTheHarnessOpened"] = true }
             response["field"] = field
         }
+        let isListOption = (action == .press || action == .click) && resolvedNode.role == "AXStaticText"
+            && ElementReachability.ancestorChain(to: resolvedNode, from: rootNode).map(HarnessPolicy.isListOption(chain:)) == true
 
         // A link to a person-notifying view (a LinkedIn profile) asks on a card,
         // judged on the link's OWN AXURL, never the caller's words (ruling 2026-10-08).
@@ -2768,7 +2782,8 @@ final class HarnessServer {
                 visibleBounds: rootNode.frameInAppKitCoordinates,
                 typing: typingContext,
                 labelTitle: labelTitle,
-                draftScope: request.draftScope
+                draftScope: request.draftScope,
+                isListOption: isListOption
             ), url: linkURL),
             bundleIdentifier: snapshot.bundleIdentifier, into: &response
         )

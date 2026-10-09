@@ -99,6 +99,23 @@ enum HarnessHands {
         case containerOfTarget
     }
 
+    /// Which process a posted click at the point would land in, when the
+    /// system-wide AX hit named another one: nil when it lands in the target.
+    static func coveringProcess(axHit: pid_t, windowServerHit: pid_t?, target: pid_t) -> pid_t? {
+        axHit == target || windowServerHit == target ? nil : axHit
+    }
+
+    /// The second witness: the process owning the window a mouse-down at the
+    /// point would hit, per the window server (click-through windows skipped).
+    static func windowServerHitProcess(atTopLeft point: CGPoint) -> pid_t? {
+        let appKit = NSPoint(x: point.x, y: CGDisplayBounds(CGMainDisplayID()).height - point.y)
+        let ask = { NSWindow.windowNumber(at: appKit, belowWindowWithWindowNumber: 0) }
+        let number = Thread.isMainThread ? ask() : DispatchQueue.main.sync(execute: ask)
+        guard number > 0, let info = (CGWindowListCopyWindowInfo(.optionIncludingWindow, CGWindowID(number)) as? [[String: Any]])?.first
+        else { return nil }
+        return info[kCGWindowOwnerPID as String] as? pid_t
+    }
+
     /// How many times, and how far apart, a container answer is asked again.
     static let hitRetries = 3
     static let hitRetrySeconds = 0.15
@@ -636,14 +653,27 @@ enum HarnessHands {
     static func hitRelation(atTopLeft point: CGPoint, target: AXUIElement, processIdentifier: pid_t) -> HitRelation {
         let systemWide = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(systemWide, RealtimeScreenHitTest.messagingTimeoutSeconds)
-        var hit: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &hit) == .success, let hit else {
+        var systemHit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &systemHit) == .success, var hit = systemHit else {
             return .unreadable
         }
         var hitProcess: pid_t = 0
         guard AXUIElementGetPid(hit, &hitProcess) == .success else { return .unreadable }
         if hitProcess == getpid() { return .harnessItself }
-        guard hitProcess == processIdentifier else { return .otherApp }
+        if hitProcess != processIdentifier {
+            // Item 3 (S2): the AX hit named another process. A posted click goes where the
+            // window server's mouse hit test says, so it is asked too; only when it also
+            // names the target is the target app asked for its own element at the point.
+            guard coveringProcess(axHit: hitProcess, windowServerHit: windowServerHitProcess(atTopLeft: point), target: processIdentifier) == nil
+            else { return .otherApp }
+            let application = AXUIElementCreateApplication(processIdentifier)
+            AXUIElementSetMessagingTimeout(application, RealtimeScreenHitTest.messagingTimeoutSeconds)
+            var appHit: AXUIElement?
+            guard AXUIElementCopyElementAtPosition(application, Float(point.x), Float(point.y), &appHit) == .success, let appHit else {
+                return .unreadable
+            }
+            hit = appHit
+        }
         // Up from the hit to the target, reading what each element between them is.
         let targetPublishesPress = AccessibilityTreeWalker.copyActionNames(from: target).contains(kAXPressAction)
         var chain: [HitChainNode] = []
@@ -822,13 +852,32 @@ enum HarnessHands {
             Thread.sleep(forTimeInterval: hitRetrySeconds)
             hit = hitRelation(atTopLeft: topLeft, target: element, processIdentifier: processIdentifier)
         }
-        if let refusal = postRefusal(frontmostIsTarget: targetIsFrontmost(processIdentifier), hit: hit) {
+        if var refusal = postRefusal(frontmostIsTarget: targetIsFrontmost(processIdentifier), hit: hit) {
+            if hit == .otherApp, let cover = coveringAppName(atTopLeft: topLeft) {
+                refusal = HandsRefusal(code: refusal.code, message: "another window (\(cover)) covers that point; nothing was clicked")
+            }
             return .failure(refusal)
         }
         guard postClick(atTopLeft: topLeft) else {
             return .failure(HandsRefusal(code: "eventCreationFailed", message: "the click event could not be created; nothing was clicked"))
         }
         return .success(topLeft)
+    }
+
+    /// Which app's window is over the point, for the refusal: both witnesses, so the
+    /// next "covers that point" names what covered it (S2 could not say).
+    static func coveringAppName(atTopLeft point: CGPoint) -> String? {
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, RealtimeScreenHitTest.messagingTimeoutSeconds)
+        var hit: AXUIElement?
+        var axPid: pid_t = 0
+        if AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &hit) == .success, let hit { AXUIElementGetPid(hit, &axPid) }
+        let serverPid = windowServerHitProcess(atTopLeft: point)
+        func name(_ pid: pid_t?) -> String? {
+            pid.flatMap { NSRunningApplication(processIdentifier: $0) }.map { UntrustedText($0.localizedName ?? $0.bundleIdentifier ?? "pid \($0.processIdentifier)").forDisplay }
+        }
+        let names = [name(axPid == 0 ? nil : axPid).map { "accessibility: \($0)" }, name(serverPid).map { "window server: \($0)" }].compactMap { $0 }
+        return names.isEmpty ? nil : names.joined(separator: ", ")
     }
 
     /// The vision click's (e): the topmost thing drawn at the point (top-left)

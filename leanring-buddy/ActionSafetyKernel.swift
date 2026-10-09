@@ -458,7 +458,8 @@ enum ActionSafetyKernel {
         typing: TypingContext? = nil,
         menuItemEnabled: Bool? = nil,
         labelTitle: String? = nil,
-        draftScope: Bool = false
+        draftScope: Bool = false,
+        isListOption: Bool = false
     ) -> SafetyDecision {
         // Order matters. Every refusal is checked before any permission.
 
@@ -643,7 +644,7 @@ enum ActionSafetyKernel {
 
         guard navigationalRoles(for: intent.action).contains(resolvedNode.role)
                 || ((intent.action == .press || intent.action == .click)
-                    && resolvedNode.subrole.map(navigationalPressSubroles.contains) == true) else {
+                    && (resolvedNode.subrole.map(navigationalPressSubroles.contains) == true || isListOption)) else {
             return .requireConfirmation(reason: "unrecognised role \(resolvedNode.role)")
         }
 
