@@ -123,4 +123,14 @@ private final class Lines: @unchecked Sendable { var lines: [String] = [] }
         #expect(note.contains("\"opened meet.google.com\""))
     }
 
+    // 2: "go ahead and open Notes" is a new request, not an answer to the offer.
+    @Test func onlyABareYesAnswersTheOffer() {
+        for words in ["go ahead and open Notes", "yes open Spotify", "sure, and then email Sam", "continue writing the email to Bob"] {
+            #expect(!RealtimeVoiceSession.isResumeAnswer(words), "\(words)")
+        }
+        for words in ["yes", "Yes, continue.", "go ahead", "okay, carry on please"] {
+            #expect(RealtimeVoiceSession.isResumeAnswer(words), "\(words)")
+        }
+    }
+
 }

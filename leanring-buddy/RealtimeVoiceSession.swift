@@ -99,13 +99,19 @@ final class RealtimeVoiceSession {
     }
 
     /// The owner's yes to "shall I continue?": judged on their words, never the voice model's goal.
+    /// A BARE yes only (security review 2026-10-10): "go ahead and open Notes" is a new request.
     nonisolated static func isResumeAnswer(_ heard: String) -> Bool {
-        let words = " " + heard.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
-            .split(whereSeparator: { !$0.isLetter && $0 != "'" }).joined(separator: " ") + " "
-        if [" no ", " don't ", " dont ", " not ", " never ", " stop ", " cancel ", " nope "].contains(where: words.contains) { return false }
-        return [" yes ", " yeah ", " yep ", " sure ", " continue ", " carry on ", " go on ", " go ahead ", " resume ", " keep going ",
-                " finish it "].contains(where: words.contains)
+        let words = heard.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+            .split(whereSeparator: { !$0.isLetter && $0 != "'" }).map(String.init)
+        let spaced = " " + words.joined(separator: " ") + " "
+        guard words.allSatisfy(resumeAnswerWords.contains) else { return false }
+        return [" yes ", " yeah ", " yep ", " sure ", " ok ", " okay ", " continue ", " carry on ", " go on ", " go ahead ", " resume ",
+                " keep going ", " finish it ", " do it "].contains(where: spaced.contains)
     }
+    /// Every word a bare yes may hold: the yeses, and nothing that names a new thing to do.
+    nonisolated static let resumeAnswerWords: Set<String> = ["yes", "yeah", "yep", "sure", "ok", "okay", "alright", "continue", "carry",
+        "on", "go", "ahead", "resume", "keep", "going", "finish", "do", "it", "that", "the", "task", "please", "jarvis", "sir", "thanks",
+        "thank", "you"]
     /// The words a resumed task is judged by (security review 2026-10-10), or nil when this
     /// turn does not resume it. Never the file's `ownerWords`: a file is display text. The
     /// goal counts only as J.A.R.V.I.S. spoke it back in the turn right before — whole, the
@@ -364,10 +370,13 @@ final class RealtimeVoiceSession {
         let resuming = answering && paused != nil
         // A task the last quit interrupted: the owner's yes continues it (it looks first); anything else sets it aside.
         let interrupted = interruptedOffer
-        interruptedOffer = nil
         let resumedWords = resuming ? nil : Self.resumeWords(offer: interrupted, previousSaid: connection?.turn.previousTurnSaid, heard: heard)
         let continuing = resumedWords != nil
-        if let interrupted, !continuing {
+        // Anything but a bare yes to the offer just spoken is a new request, and the interrupted
+        // task is KEPT (review 2026-10-10): it expires (`offerable`) or the owner says to drop it.
+        let dropped = interrupted != nil && !continuing && Self.ownerWordsStopTask(heard)
+        if continuing || dropped { interruptedOffer = nil }
+        if let interrupted, dropped {
             var setAside = interrupted
             setAside.state = .cancelled
             setAside.transitions.append(AgentTaskTransition(phase: .cancelled, at: Date()))
@@ -425,6 +434,7 @@ final class RealtimeVoiceSession {
 
     /// The task status line for this owner turn, nil when no task is recent.
     private func agentStatusLine() -> String? {
+        if let offer = interruptedOffer, Self.offerable([offer], now: Date()) == nil { interruptedOffer = nil }
         guard let record = lastTask else { return interruptedOffer.map(AgentLoop.interruptedLine) }
         if let ended = record.endedUptime, uptime - ended > Self.askOwnerAnswerWindowSeconds {
             lastTask = nil
