@@ -43,6 +43,13 @@ enum AgentLoopProbe {
             meta["reason"] = refusal
             return
         }
+        // `--agent-resume-interrupted [--agent-answer=<the owner's yes>]` (2026-10-10): the task the last quit left
+        // mid-task, marked interrupted at this launch, offered as the voice would, and continued the session's way.
+        if CommandLine.arguments.contains("--agent-resume-interrupted") {
+            results = [await resumeInterruptedRun(harness: harness, confirmations: confirmations)]
+            meta["outcome"] = "ran"
+            return
+        }
         if let words = CommandLine.arguments.last(where: { $0.hasPrefix(goalArgument) }).map({ String($0.dropFirst(goalArgument.count)) }),
            !words.isEmpty {
             results = [await goalRun(words: words, harness: harness, confirmations: confirmations)]
@@ -252,6 +259,49 @@ enum AgentLoopProbe {
             }
         }
         return results
+    }
+
+    static func resumeInterruptedRun(harness: HarnessServer, confirmations: HarnessConfirmations) async -> [String: Any] {
+        let marked = AgentTaskStore.interruptedAtLaunch
+        guard let saved = RealtimeVoiceSession.offerable(AgentTaskStore.read().filter { $0.state == .interrupted }, now: Date()) else {
+            return ["mode": "resumeInterrupted", "status": "nothingInterrupted", "markedAtLaunch": marked.map(\.taskId)]
+        }
+        let yes = CommandLine.arguments.last { $0.hasPrefix("--agent-answer=") }.map { String($0.dropFirst("--agent-answer=".count)) } ?? "yes, continue"
+        var result: [String: Any] = ["mode": "resumeInterrupted", "markedAtLaunch": marked.map(\.taskId), "task": saved.taskId,
+                                     "stateAtLaunch": saved.state.rawValue, "stepAtLaunch": saved.step, "offer": AgentLoop.interruptedLine(saved),
+                                     "answerIsYes": RealtimeVoiceSession.isResumeAnswer(yes)]
+        guard RealtimeVoiceSession.isResumeAnswer(yes) else { return result }
+        let harnessAnswer: @Sendable (String) -> String = { line in harness.answer(line: line) }
+        let loop = AgentLoop.live(heard: saved.ownerWords + " " + yes, harnessAnswer: harnessAnswer, model: AgentLoopModel()) { _ in }
+        loop.restore(from: saved)
+        loop.move(to: .planning)
+        let started = Date()
+        let finished = FinishedFlag()
+        let runTask = Task { @MainActor in
+            let outcome = await loop.run(goal: loop.goal, heard: saved.ownerWords + " " + yes)
+            finished.value = true
+            return outcome
+        }
+        var cards = 0
+        var seen = Set<String>()
+        while !finished.value {
+            for ticket in confirmations.tickets where ticket.createdAt >= started && !seen.contains(ticket.id)
+                && HarnessConfirmations.status(of: ticket, now: Date()) == .pending {
+                seen.insert(ticket.id)
+                confirmations.answer(ticket.id, allow: false, scope: .once)
+                cards += 1
+            }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        let outcome = await runTask.value
+        result["outcome"] = outcome.name
+        result["steps"] = loop.step
+        result["cardsDenied"] = cards
+        result["run"] = loop.runID
+        result["status"] = loop.statusLine()
+        result["transitions"] = loop.transitions.map { [$0.phase.rawValue, ISO8601DateFormatter().string(from: $0.at)] }
+        result["illegalTransitions"] = loop.illegalTransitions
+        return result
     }
 
     static let goalArgument = "--agent-goal="

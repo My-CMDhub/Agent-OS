@@ -84,6 +84,28 @@ final class RealtimeVoiceSession {
         var endedUptime: TimeInterval?
     }
     private var lastTask: TaskRecord?
+    /// A task the last process left mid-task (`AgentTaskStore.interruptedAtLaunch`),
+    /// offered on the owner's next turns until a do_task answers it.
+    private var interruptedOffer: AgentTaskCheckpoint?
+    /// Older than this, an interrupted task is not offered.
+    nonisolated static let interruptedOfferSeconds: TimeInterval = 3600
+
+    /// The newest task left mid-task, if it was last live within the window.
+    nonisolated static func offerable(_ interrupted: [AgentTaskCheckpoint], now: Date) -> AgentTaskCheckpoint? {
+        guard let newest = interrupted.first,
+              let lastLive = newest.transitions.last(where: { $0.phase != .interrupted })?.at ?? Optional(newest.createdAt),
+              now.timeIntervalSince(lastLive) <= interruptedOfferSeconds else { return nil }
+        return newest
+    }
+
+    /// The owner's yes to "shall I continue?": judged on their words, never the voice model's goal.
+    nonisolated static func isResumeAnswer(_ heard: String) -> Bool {
+        let words = " " + heard.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+            .split(whereSeparator: { !$0.isLetter && $0 != "'" }).joined(separator: " ") + " "
+        if [" no ", " don't ", " dont ", " not ", " never ", " stop ", " cancel ", " nope "].contains(where: words.contains) { return false }
+        return [" yes ", " yeah ", " yep ", " sure ", " continue ", " carry on ", " go on ", " go ahead ", " resume ", " keep going ",
+                " finish it "].contains(where: words.contains)
+    }
     /// The system turns the running task spoke, so its words can be reported.
     private var agentSpokenTurns: [RealtimeTurnMarks] = []
     /// Runner only: the task's outcome, its tool decisions and what was spoken.
@@ -182,6 +204,9 @@ final class RealtimeVoiceSession {
 
     init(harnessAnswer: @escaping @Sendable (String) -> String) {
         self.harnessAnswer = harnessAnswer
+        // Marks what the last process left mid-task (once per process), then offers the newest still interrupted on disk.
+        _ = AgentTaskStore.interruptedAtLaunch
+        interruptedOffer = Self.offerable(AgentTaskStore.read().filter { $0.state == .interrupted }, now: Date())
         playbackEngine.attach(playerNode)
         // The mixer resamples 24 kHz to the device rate.
         playbackEngine.connect(playerNode, to: playbackEngine.mainMixerNode, format: playbackFormat)
@@ -324,11 +349,28 @@ final class RealtimeVoiceSession {
         askedOwner = nil
         let paused = lastTask?.loop.pausedAsk != nil ? lastTask?.loop : nil
         let resuming = answering && paused != nil
+        // A task the last quit interrupted: the owner's yes continues it (it looks first); anything else sets it aside.
+        let interrupted = interruptedOffer
+        interruptedOffer = nil
+        let continuing = interrupted != nil && !resuming && Self.isResumeAnswer(heard)
+        if let interrupted, !continuing {
+            var setAside = interrupted
+            setAside.state = .cancelled
+            setAside.transitions.append(AgentTaskTransition(phase: .cancelled, at: Date()))
+            setAside.updatedAt = Date()
+            AgentTaskStore.write(setAside)
+        }
         // ponytail: an unrelated request in the very answer turn resumes too (the loop sees the
         // owner's words and may end it); a flag on do_task would split them if it bites.
         let loop: AgentLoop
         if resuming, let paused {
             loop = paused
+        } else if continuing, let interrupted {
+            loop = AgentLoop.live(heard: interrupted.ownerWords + " " + heard, startBundle: startBundle, harnessAnswer: harnessAnswer,
+                                  model: agentModel) { [weak self] line in
+                self?.enqueueAgentSpeech(line, final: false)
+            }
+            loop.restore(from: interrupted)
         } else {
             loop = AgentLoop.live(heard: words, startBundle: startBundle, harnessAnswer: harnessAnswer, model: agentModel) { [weak self] line in
                 self?.enqueueAgentSpeech(line, final: false)
@@ -342,7 +384,9 @@ final class RealtimeVoiceSession {
         agentLoop = loop
         agentSpokenTurns = []
         agentTask = Task { @MainActor [weak self] in
-            let outcome = resuming ? await loop.resume(answer: heard, words: words) : await loop.run(goal: goal, heard: words)
+            let outcome = resuming ? await loop.resume(answer: heard, words: words)
+                : continuing ? await loop.run(goal: loop.goal, heard: (interrupted?.ownerWords ?? "") + " " + heard)
+                : await loop.run(goal: goal, heard: words)
             guard let self else { return }
             if self.lastTask?.loop === loop { self.lastTask?.endedUptime = self.uptime }
             if case .askOwner = outcome { self.askedOwner = AskedOwner(heard: root, uptime: self.uptime) }
@@ -354,9 +398,11 @@ final class RealtimeVoiceSession {
         }
         let status = AgentLoop.statusLine(goal: loop.goal.isEmpty ? goal : loop.goal, phase: loop.phase ?? .planning, step: loop.step,
                                           receipts: loop.receipts, artifacts: loop.artifacts)
-        return ["ok": true, "status": resuming ? "resumed" : "started", "state": (loop.phase ?? .planning).rawValue,
+        return ["ok": true, "status": resuming || continuing ? "resumed" : "started", "state": (loop.phase ?? .planning).rawValue,
                 "error": NSNull(), "task": status,
-                "message": (resuming ? "the paused task has resumed with the owner's answer, from step \(loop.step); its earlier steps stand as "
+                "message": (continuing ? "the task the last quit interrupted has resumed from step \(loop.step); it looks at the screen "
+                                + "before doing anything. "
+                            : resuming ? "the paused task has resumed with the owner's answer, from step \(loop.step); its earlier steps stand as "
                                 + "the task status shows. "
                             : "a new task has started; no step of it has run yet. "
                                 + (setAside ? "the earlier task that was waiting for the owner's answer was set aside; say so in a few words. " : ""))
@@ -365,7 +411,7 @@ final class RealtimeVoiceSession {
 
     /// The task status line for this owner turn, nil when no task is recent.
     private func agentStatusLine() -> String? {
-        guard let record = lastTask else { return nil }
+        guard let record = lastTask else { return interruptedOffer.map(AgentLoop.interruptedLine) }
         if let ended = record.endedUptime, uptime - ended > Self.askOwnerAnswerWindowSeconds {
             lastTask = nil
             return nil

@@ -305,6 +305,8 @@ final class AgentLoop {
         /// Every phase change, with the step it happened at: the notch and agent-loop.log.
         var onPhase: (AgentTaskPhase, Int) -> Void = { _, _ in }
         var now: () -> Date = { Date() }
+        /// The task on disk after every phase change (`AgentTaskStore`); live only.
+        var checkpoint: (AgentTaskCheckpoint) -> Void = { _ in }
     }
 
     /// One executed tool, as the run's receipts hold it.
@@ -315,6 +317,8 @@ final class AgentLoop {
         let error: String?
         /// A few plain words of what it did (`progressLine`), for the task status.
         var progress: String? = nil
+        /// The same, by agent-loop.log's rules (`plainWords`): what the checkpoint keeps.
+        var words: String? = nil
     }
 
     /// An ask_owner the run paused on: its call's id, and the results of the
@@ -327,7 +331,7 @@ final class AgentLoop {
     }
 
     private let dependencies: Dependencies
-    let runID = String(UUID().uuidString.prefix(8))
+    private(set) var runID = String(UUID().uuidString.prefix(8))
     private(set) var step = 0
     private(set) var isRunning = false
     private(set) var receipts: [Receipt] = []
@@ -422,6 +426,43 @@ final class AgentLoop {
         phase = next
         transitions.append(AgentTaskTransition(phase: next, at: dependencies.now()))
         dependencies.onPhase(next, step)
+        dependencies.checkpoint(checkpoint())
+    }
+
+    /// The task as the checkpoint file holds it: plain words, scrubbed, no page or typed text.
+    func checkpoint() -> AgentTaskCheckpoint {
+        let now = dependencies.now()
+        var opened = (liveCarry?.launchedBundles.sorted() ?? []).map { AgentTaskCheckpoint.Opened(bundle: $0, host: nil) }
+        opened += liveCarry?.tabHosts ?? []
+        return AgentTaskCheckpoint(
+            taskId: runID, goal: SecretScanner.redact(goal), ownerWords: SecretScanner.redact(heard ?? goal), state: phase ?? .planning,
+            step: step, receipts: receipts.map { .init(step: $0.step, words: $0.words ?? $0.toolName, ok: $0.ok, error: $0.error) },
+            opened: opened, artifacts: artifacts.map(SecretScanner.redact), transitions: transitions,
+            createdAt: transitions.first?.at ?? now, updatedAt: now)
+    }
+
+    /// A task the last process left mid-task: same id, step count, receipts and
+    /// artifacts; never its history, screenshots or tabs (their identities died
+    /// with that process). Its first step looks again (`resumedNote`).
+    func restore(from saved: AgentTaskCheckpoint) {
+        runID = saved.taskId
+        liveCarry?.runID = saved.taskId
+        goal = saved.goal
+        step = saved.step
+        receipts = saved.receipts.map { Receipt(step: $0.step, toolName: "earlier step", ok: $0.ok, error: $0.error, progress: $0.words, words: $0.words) }
+        artifacts = saved.artifacts
+        transitions = saved.transitions
+        phase = .interrupted
+        resumedFrom = saved
+    }
+    private var resumedFrom: AgentTaskCheckpoint?
+
+    static func resumedNote(_ saved: AgentTaskCheckpoint) -> String {
+        let done = saved.receipts.map { "step \($0.step) \($0.words) (\($0.ok ? "ok" : "not done"))" }
+        return "This task was interrupted when J.A.R.V.I.S. quit, after step \(saved.step); the owner asked to continue it. "
+            + (done.isEmpty ? "No step had run. " : "Steps it took before: \(done.joined(separator: "; ")). ")
+            + "The screen may have changed since: judge from THIS screenshot what is still needed, never assume an earlier step's "
+            + "effect is still there, and never repeat a step the screen shows is done."
     }
 
     /// A ticket is open for this step's call: the card waits on the owner.
@@ -476,6 +517,7 @@ final class AgentLoop {
             var content = pending
             if messages.isEmpty {
                 content.append(["type": "text", "text": Self.goalText(goal: goal, heard: heard, readOnly: readOnly)])
+                if let resumedFrom { content.append(["type": "text", "text": Self.resumedNote(resumedFrom)]) }
             }
             content += Self.observationBlocks(observation, step: step)
             if !artifacts.isEmpty {
@@ -700,7 +742,8 @@ final class AgentLoop {
                     }
                 }
                 receipts.append(Receipt(step: step, toolName: call?.name ?? toolName, ok: ok, error: error,
-                                        progress: Self.progressLine(toolName: toolName, call: call, result: result)))
+                                        progress: Self.progressLine(toolName: toolName, call: call, result: result),
+                                        words: Self.plainWords(toolName: toolName, args: args)))
                 var fields: [String: Any] = ["tool": toolName, "args": args, "ok": ok, "error": error ?? NSNull(), "harnessMs": harnessMs,
                                              "waitedForConfirmation": waited]
                 if !(web is NSNull) { fields["web"] = web }
@@ -1039,6 +1082,35 @@ final class AgentLoop {
         }
     }
 
+    /// A receipt in the checkpoint's words: lengths and hosts, never a name, a page's text or what was typed.
+    static func plainWords(toolName: String, args: [String: Any]) -> String {
+        switch toolName {
+        case RealtimeVoiceVerbs.openURLName: return "opened \((args["urlHost"] as? String) ?? "a page")"
+        case RealtimeOpenAppTool.name: return "opened an app"
+        case RealtimeVoiceVerbs.focusAppName: return "brought an app forward"
+        case RealtimeVoiceVerbs.pressElementName: return "pressed an element"
+        case RealtimeVoiceVerbs.pressMenuName: return "chose a menu item"
+        case RealtimeVoiceVerbs.typeTextName: return "typed \((args["textLength"] as? Int) ?? 0) characters into a field"
+        case RealtimeVoiceVerbs.closeName: return "closed a \((args["what"] as? String) == "tab" ? "tab" : "window")"
+        case AgentLoopTools.readPageName: return "read the page"
+        case AgentLoopTools.searchWebName, AgentLoopGemini.webLookupName: return "looked it up on the web"
+        case RealtimeVoiceVerbs.findOnScreenName: return "looked for an element on screen"
+        case RealtimeVoiceVerbs.findMenuItemsName: return "looked through the menus"
+        default: return toolName.replacingOccurrences(of: "_", with: " ")
+        }
+    }
+
+    /// The owner's first turns after a launch that found a task interrupted.
+    static func interruptedLine(_ saved: AgentTaskCheckpoint) -> String {
+        let goal = String(saved.goal.prefix(200))
+        let recent = saved.receipts.suffix(3).map { "step \($0.step) \($0.words)" }
+        return SecretScanner.redact("system context, not the owner's words: when J.A.R.V.I.S. last quit, a task was interrupted at step \(saved.step). "
+            + "goal: \(goal). " + (recent.isEmpty ? "" : "last steps: \(recent.joined(separator: "; ")). ")
+            + "unless you already offered it, say once, in one sentence: \"I was in the middle of \(goal) when I stopped; shall I continue?\" "
+            + "if the owner says yes, call do_task with the goal \"continue the interrupted task\": it looks at the screen first and "
+            + "never replays a step. if they say no or ask for something else, it is set aside; do not offer it again.")
+    }
+
     static func narrationLine(_ progress: String) -> String {
         "system event, not the owner's words: task progress, \(progress). tell the owner in under eight words. call no tool."
     }
@@ -1242,7 +1314,8 @@ extension AgentLoop {
                 appendTrace(["kind": "state", "run": carry.runID, "state": phase.rawValue, "step": step,
                              "at": ISO8601DateFormatter().string(from: Date()),
                              "uptime": MeasurementLogFile.roundedUptime(ProcessInfo.processInfo.systemUptime)])
-            }
+            },
+            checkpoint: { AgentTaskStore.write($0) }
         ))
         carry.runID = loop.runID
         carry.onCardOpened = { [weak loop] in loop?.noteCardPending() }
@@ -1275,6 +1348,8 @@ extension AgentLoop {
         var heard = ""
         /// A ticket opened for this step's call: the loop's `waitingForCard`.
         var onCardOpened: (@MainActor () -> Void)?
+        /// Pages this task opened, by browser and host: what a checkpoint keeps of `taskTabs`.
+        var tabHosts: [AgentTaskCheckpoint.Opened] = []
     }
 
     /// What an ok open makes the task's own (re-review of 2e45939): the harness's
@@ -1610,6 +1685,7 @@ extension AgentLoop {
             case .app: carry.launchedBundles.insert(bundle)
             case .tab:
                 if let tab = await Task.detached(operation: { frontTab(of: bundle) }).value { carry.taskTabs[bundle, default: []].insert(tab) }
+                carry.tabHosts.append(.init(bundle: bundle, host: filled.url.flatMap { URL(string: $0)?.host }.map(SecretScanner.redact)))
             case .none: break
             }
         }
