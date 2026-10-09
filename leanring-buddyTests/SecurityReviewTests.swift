@@ -205,4 +205,14 @@ private final class Lines: @unchecked Sendable { var lines: [String] = [] }
         #expect(answer.contains("\"ok\":false"))
     }
 
+    // 6: the tasks folder is 0700 even when it already existed wider.
+    @Test func theTasksFolderIsPrivateEvenWhenItExisted() throws {
+        let parent = scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let directory = parent.appendingPathComponent("tasks", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+        AgentTaskStore.write(saved("0A1B2C3D"), in: directory, key: SymmetricKey(size: .bits256))
+        let mode = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? Int
+        #expect(mode == 0o700)
+    }
 }

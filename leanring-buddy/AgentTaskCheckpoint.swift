@@ -97,16 +97,35 @@ enum AgentTaskStore {
     }
 
     /// `<taskId>.json`, 0600 from creation (written beside, then renamed over), and only the newest `keep` kept.
+    /// The folder is 0700 every time, not only when created: one made wider before stays private.
     nonisolated static func write(_ checkpoint: AgentTaskCheckpoint, in directory: URL = liveDirectory, key: SymmetricKey? = liveKey) {
         guard isValidTaskId(checkpoint.taskId), let key else { return }
         let fileManager = FileManager.default
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        guard let json = try? encoder().encode(checkpoint) else { return }
+        guard chmod(directory.path, 0o700) == 0, let json = try? encoder().encode(checkpoint) else { return }
         let url = directory.appendingPathComponent("\(checkpoint.taskId).json")
         let temporary = directory.appendingPathComponent(".\(checkpoint.taskId).\(UUID().uuidString).tmp")
-        guard fileManager.createFile(atPath: temporary.path, contents: signed(json, key: key), attributes: [.posixPermissions: 0o600]) else { return }
+        guard writeNew(signed(json, key: key), to: temporary.path) else { try? fileManager.removeItem(at: temporary); return }
         if rename(temporary.path, url.path) != 0 { try? fileManager.removeItem(at: temporary) }
         prune(directory)
+    }
+
+    /// A NEW file, opened at 0600 before a byte is written (`createFile` writes, then sets the
+    /// mode), never following a link planted at the name.
+    private nonisolated static func writeNew(_ data: Data, to path: String) -> Bool {
+        let descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        guard fchmod(descriptor, 0o600) == 0 else { return false }
+        return data.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let written = Darwin.write(descriptor, buffer.baseAddress! + offset, buffer.count - offset)
+                guard written > 0 else { return false }
+                offset += written
+            }
+            return true
+        }
     }
 
     nonisolated static func prune(_ directory: URL) {
