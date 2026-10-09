@@ -113,8 +113,9 @@ enum ActionSafetyKernel {
         /// what identified it.
         let aimedByFocus: Bool
         /// The field sits in a browser tab the HARNESS opened (`openURL`) within
-        /// `HarnessServer.openedTabLifetimeSeconds` — the harness's own record,
-        /// never a caller's flag. See the replace rule in `evaluate`.
+        /// `HarnessServer.openedTabLifetimeSeconds`, still on the page it opened, and
+        /// holds only text the harness typed (`HarnessPolicy.replaceNeedsNoCard`) — the
+        /// harness's own record, never a caller's flag. See the replace rule in `evaluate`.
         var inTabTheHarnessOpened = false
     }
 
@@ -629,11 +630,11 @@ enum ActionSafetyKernel {
         // Overwriting a document is the worst thing this verb can do, and it is
         // silent — the old text is simply gone. Replacing an *empty* field is
         // not destruction, so it is not asked about.
-        // A single-line field in a tab the harness itself opened holds what that
-        // page put there (a new event form's default date), not the owner's
-        // writing (S2, 2026-10-08: "replace would discard 10 characters" stalled
-        // the form). ponytail: a tab opened at an existing item's edit page
-        // passes too; its edit commits only on Save, which draft scope cards.
+        // A single-line field the harness itself filled, on the very page it opened,
+        // holds the task's own text, not the owner's (S2, 2026-10-08: "replace would
+        // discard 10 characters" stalled the form). Since the security review of
+        // 2026-10-10 a page's own default (S2's date) or an autosaving page's text
+        // (a Docs title, a Gmail draft's To) cards: only the task's own typing passes.
         if let typing, typing.mode == .replace, typing.currentValueLength > 0,
            !(typing.inTabTheHarnessOpened && singleLineTextRoles.contains(resolvedNode.role)) {
             return .requireConfirmation(

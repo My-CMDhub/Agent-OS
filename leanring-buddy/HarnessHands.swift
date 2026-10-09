@@ -597,11 +597,13 @@ enum HarnessHands {
     /// page shares the old tab's title ("Search | LinkedIn" twice, 2026-10-07)
     /// moves neither the window nor its title; read as nothing, the tab was
     /// never recorded as the task's, stayed open, and the task lost the browser.
+    /// A title change ALONE is no evidence (security review 2026-10-10): the owner's own
+    /// tab retitles itself ("Inbox (3)" -> "Inbox (4)"), and evidence is what records a tab
+    /// as the harness's own, where a replace needs no card.
     static func openURLEvidence(frontmost: Bool, windowChanged: Bool, tabChanged: Bool = false,
                                 titleBefore: String?, titleAfter: String?) -> String? {
-        guard frontmost, let titleAfter else { return nil }
+        guard frontmost, titleAfter != nil else { return nil }
         if windowChanged { return "a new browser window came forward" }
-        if titleAfter != titleBefore { return "the front window's title changed" }
         return tabChanged ? "another tab came forward in the front window" : nil
     }
 
@@ -1129,7 +1131,10 @@ enum HarnessHands {
     static let webAreaSearchLimit = 400
 
     /// The host of the page in `window`: its first `AXWebArea`'s `AXURL`, or nil.
-    static func pageHost(inWindow window: AXUIElement) -> String? {
+    static func pageHost(inWindow window: AXUIElement) -> String? { pageURL(inWindow: window)?.host }
+
+    /// The address of the page in `window`: its first `AXWebArea`'s `AXURL`, or nil.
+    static func pageURL(inWindow window: AXUIElement) -> URL? {
         var queue = [window]
         var visited = 0
         while !queue.isEmpty, visited < webAreaSearchLimit {
@@ -1140,7 +1145,7 @@ enum HarnessHands {
             if role as? String == "AXWebArea" {
                 var address: AnyObject?
                 guard AXUIElementCopyAttributeValue(node, kAXURLAttribute as CFString, &address) == .success else { return nil }
-                return ((address as? URL) ?? (address as? String).flatMap(URL.init(string:)))?.host
+                return (address as? URL) ?? (address as? String).flatMap(URL.init(string:))
             }
             var children: AnyObject?
             if AXUIElementCopyAttributeValue(node, kAXChildrenAttribute as CFString, &children) == .success,

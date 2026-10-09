@@ -21,6 +21,7 @@
 
 import AppKit
 import ApplicationServices
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -340,6 +341,39 @@ enum HarnessPolicy {
         guard let openedAt else { return false }
         let age = now.timeIntervalSince(openedAt)
         return age >= 0 && age <= HarnessServer.openedTabLifetimeSeconds
+    }
+
+    /// A tab `openURL` brought forward: when, and the address it was asked to open.
+    struct OpenedTab: Equatable {
+        let at: Date
+        let url: URL
+    }
+    /// A field the harness typed into: a hash of the value its typing left, and when.
+    struct TypedValue: Equatable {
+        let hash: String
+        let at: Date
+    }
+
+    static func valueHash(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Same page: scheme, host and path (a trailing slash aside); query and fragment may differ.
+    static func samePage(_ a: URL, _ b: URL) -> Bool {
+        func path(_ url: URL) -> String { url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path }
+        return a.scheme?.lowercased() == b.scheme?.lowercased() && a.host?.lowercased() == b.host?.lowercased() && path(a) == path(b)
+    }
+
+    /// The replace rule's one exception (security review 2026-10-10): a tab the harness
+    /// opened is not enough — the owner may have navigated it, or it may autosave (a Docs
+    /// title, a Gmail draft's subject or To). The tab must still show the very page the
+    /// harness opened (`samePage` on its current AXURL), and the field's text must be the
+    /// harness's own typing, unchanged since. Anything else cards.
+    static func replaceNeedsNoCard(opened: OpenedTab?, currentURL: URL?, typed: TypedValue?, currentValue: String?, now: Date) -> Bool {
+        guard let opened, tabStillTheHarnesss(openedAt: opened.at, now: now), let currentURL, samePage(opened.url, currentURL),
+              let typed, tabStillTheHarnesss(openedAt: typed.at, now: now), let currentValue, typed.hash == valueHash(currentValue)
+        else { return false }
+        return true
     }
 
     /// Roles that label a control without being one.
@@ -1271,8 +1305,11 @@ final class HarnessServer {
     /// policy, then window); the second asking re-matches this ticket's shape
     /// rather than trusting that someone said yes to something.
     private var consumedTicketID: String?
-    /// Browser tabs `openURL` brought forward, and when. Read and written only on `requestQueue`.
-    private var tabsOpenedByHarness: [AccessibilityElementKey: Date] = [:]
+    /// Browser tabs `openURL` brought forward, when, and the address it opened. Read and written only on `requestQueue`.
+    private var tabsOpenedByHarness: [AccessibilityElementKey: HarnessPolicy.OpenedTab] = [:]
+    /// Fields this harness typed into, with a hash of the value its typing left: what the
+    /// replace rule's exception needs to know the text there is the task's own. `requestQueue` only.
+    private var valuesTypedByHarness: [AccessibilityElementKey: HarnessPolicy.TypedValue] = [:]
 
     /// Mirror writes that failed. Not fatal to a request; counted so `ping` can say so.
     private(set) var auditMirrorFailures = 0
@@ -2759,10 +2796,15 @@ final class HarnessServer {
             value: { liveElement.flatMap(AccessibilityTypePerformer.stringValue) }
         )
         var typingContext = typing?.context
-        // The replace rule's one exception, from the harness's OWN record of the tabs it opened.
-        if typingContext?.mode == .replace, let pid = snapshot.application?.processIdentifier,
-           HarnessPolicy.tabStillTheHarnesss(openedAt: HarnessHands.selectedTab(processIdentifier: pid).flatMap { tabsOpenedByHarness[$0] },
-                                            now: Date()) {
+        // The replace rule's one exception, from the harness's OWN record of the tabs it opened
+        // and the text it typed: the same page it opened, and only its own text in the field.
+        if typingContext?.mode == .replace, (typingContext?.currentValueLength ?? 0) > 0, let pid = snapshot.application?.processIdentifier,
+           let opened = HarnessHands.selectedTab(processIdentifier: pid).flatMap({ tabsOpenedByHarness[$0] }),
+           HarnessPolicy.replaceNeedsNoCard(
+            opened: opened,
+            currentURL: HarnessHands.browserWindow(processIdentifier: pid).window.flatMap(HarnessHands.pageURL(inWindow:)),
+            typed: liveElement.flatMap { valuesTypedByHarness[AccessibilityElementKey(element: $0)] },
+            currentValue: liveElement.flatMap(AccessibilityTypePerformer.stringValue), now: Date()) {
             typingContext?.inTabTheHarnessOpened = true
         }
         if var field = typing?.field {
@@ -3053,6 +3095,12 @@ final class HarnessServer {
             }
             audit(request, dryRun: dryRun, kernel: described.decision, outcome: "performFailed", startedAt: startedAt)
             return response
+        }
+        // What this typing left in the field: a later replace there discards only the task's own text.
+        if action == .type, let element = resolvedNode.accessibilityElement,
+           let value = AccessibilityTypePerformer.stringValue(of: element) {
+            valuesTypedByHarness = valuesTypedByHarness.filter { HarnessPolicy.tabStillTheHarnesss(openedAt: $0.value.at, now: Date()) }
+            valuesTypedByHarness[AccessibilityElementKey(element: element)] = HarnessPolicy.TypedValue(hash: HarnessPolicy.valueHash(value), at: Date())
         }
 
         // Keystrokes re-read the field and saw it grow by exactly the text: the effect
@@ -4306,7 +4354,8 @@ final class HarnessServer {
             let after = HarnessHands.browserWindow(processIdentifier: application.processIdentifier)
             let windowChanged = after.window.map { window in before?.window.map { !CFEqual($0, window) } ?? true } ?? false
             // The tab is read only when nothing cheaper moved: it walks the window.
-            let tabChanged = !windowChanged && after.title == before?.title && tabBefore != nil
+            // Read whatever the title did: a title change alone is no evidence (`openURLEvidence`).
+            let tabChanged = !windowChanged && tabBefore != nil
                 && HarnessHands.selectedTab(processIdentifier: application.processIdentifier).map { $0 != tabBefore } == true
             evidence = HarnessHands.openURLEvidence(frontmost: after.frontmost, windowChanged: windowChanged, tabChanged: tabChanged,
                                                     titleBefore: before?.title, titleAfter: after.title)
@@ -4337,8 +4386,8 @@ final class HarnessServer {
         response["ok"] = true
         // The tab now in front is the harness's own: a replace there needs no card (`tabStillTheHarnesss`).
         if let tab = HarnessHands.selectedTab(processIdentifier: application.processIdentifier) {
-            tabsOpenedByHarness = tabsOpenedByHarness.filter { HarnessPolicy.tabStillTheHarnesss(openedAt: $0.value, now: Date()) }
-            tabsOpenedByHarness[tab] = Date()
+            tabsOpenedByHarness = tabsOpenedByHarness.filter { HarnessPolicy.tabStillTheHarnesss(openedAt: $0.value.at, now: Date()) }
+            tabsOpenedByHarness[tab] = HarnessPolicy.OpenedTab(at: Date(), url: url)
         }
         audit(request, dryRun: dryRun, kernel: gated.decision, outcome: "confirmed", startedAt: startedAt)
         return response

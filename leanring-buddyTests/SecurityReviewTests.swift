@@ -133,4 +133,33 @@ private final class Lines: @unchecked Sendable { var lines: [String] = [] }
         }
     }
 
+    // 3: the owner's own tab retitling itself (an unread count) is not the harness opening a page.
+    @Test func aRetitledTabAloneIsNoOpenedPage() {
+        #expect(HarnessHands.openURLEvidence(frontmost: true, windowChanged: false, tabChanged: false,
+                                             titleBefore: "Inbox (3)", titleAfter: "Inbox (4)") == nil)
+        #expect(HarnessHands.openURLEvidence(frontmost: true, windowChanged: false, tabChanged: true,
+                                             titleBefore: "Inbox (3)", titleAfter: "LinkedIn") != nil)
+    }
+
+    // 3: the replace card is skipped only on the page the harness opened, over text it typed itself.
+    @Test func aReplaceSkipsTheCardOnlyOnTheOpenedPageOverItsOwnTyping() {
+        let now = Date()
+        let opened = HarnessPolicy.OpenedTab(at: now.addingTimeInterval(-30), url: URL(string: "https://calendar.google.com/calendar/r/eventedit?text=x")!)
+        let typed = HarnessPolicy.TypedValue(hash: HarnessPolicy.valueHash("Lunch with Sam"), at: now.addingTimeInterval(-5))
+        let form = URL(string: "https://calendar.google.com/calendar/r/eventedit/")!
+        #expect(HarnessPolicy.replaceNeedsNoCard(opened: opened, currentURL: form, typed: typed, currentValue: "Lunch with Sam", now: now))
+        // The owner (or the page) navigated the tab elsewhere: an existing event, a doc, an inbox.
+        let event = URL(string: "https://calendar.google.com/calendar/r/eventedit/MTIzNDU")!
+        #expect(!HarnessPolicy.replaceNeedsNoCard(opened: opened, currentURL: event, typed: typed, currentValue: "Lunch with Sam", now: now))
+        #expect(!HarnessPolicy.replaceNeedsNoCard(opened: opened, currentURL: nil, typed: typed, currentValue: "Lunch with Sam", now: now))
+        // The page put it there (S2's default date, a Gmail draft's To): not the task's typing.
+        #expect(!HarnessPolicy.replaceNeedsNoCard(opened: opened, currentURL: form, typed: nil, currentValue: "10 Oct 2026", now: now))
+        // Typed by the task, then changed by someone else (an autosave merge, the owner).
+        #expect(!HarnessPolicy.replaceNeedsNoCard(opened: opened, currentURL: form, typed: typed, currentValue: "Lunch with Sam and Jo", now: now))
+        // The owner's own tab, never opened by the harness.
+        #expect(!HarnessPolicy.replaceNeedsNoCard(opened: nil, currentURL: form, typed: typed, currentValue: "Lunch with Sam", now: now))
+        #expect(!HarnessPolicy.samePage(URL(string: "http://calendar.google.com/calendar/r/eventedit")!, form))
+        #expect(!HarnessPolicy.samePage(URL(string: "https://evil.example/calendar/r/eventedit")!, form))
+    }
+
 }

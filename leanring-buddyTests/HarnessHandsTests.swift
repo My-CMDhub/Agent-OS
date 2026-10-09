@@ -441,7 +441,8 @@ struct HarnessHandsTests {
         #expect(HarnessHands.handlesWeb(appURL: chrome, webHandlers: handlers))
         #expect(!HarnessHands.handlesWeb(appURL: URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"), webHandlers: handlers))
         #expect(HarnessHands.openURLEvidence(frontmost: true, windowChanged: true, titleBefore: nil, titleAfter: "New Tab") != nil)
-        #expect(HarnessHands.openURLEvidence(frontmost: true, windowChanged: false, titleBefore: "Inbox", titleAfter: "LinkedIn") != nil)
+        // A retitle alone is the owner's own tab as often as ours (security review 2026-10-10).
+        #expect(HarnessHands.openURLEvidence(frontmost: true, windowChanged: false, titleBefore: "Inbox", titleAfter: "LinkedIn") == nil)
         #expect(HarnessHands.openURLEvidence(frontmost: true, windowChanged: false, titleBefore: "Inbox", titleAfter: "Inbox") == nil)
         #expect(HarnessHands.openURLEvidence(frontmost: false, windowChanged: true, titleBefore: nil, titleAfter: "LinkedIn") == nil)
         #expect(HarnessHands.openURLEvidence(frontmost: true, windowChanged: true, titleBefore: nil, titleAfter: nil) == nil)
