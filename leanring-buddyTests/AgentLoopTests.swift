@@ -1059,7 +1059,7 @@ struct AgentLoopReadOnlyTests {
         // Typing goes only into a search field, by its own role and name.
         #expect(refused(Self.request("type", ["text": "hi", "mode": "insert", "title": "Add a comment…", "role": "AXTextArea"])))
         #expect(refused(Self.request("type", ["text": "hi", "mode": "insert", "title": "Write a message…", "role": "AXTextArea"])))
-        box.focused = AgentLoop.FieldIdentity(role: "AXTextArea", subrole: nil, label: "Write a message…")
+        box.focused = AgentLoop.FieldIdentity(role: "AXTextArea", subrole: nil, labels: ["Write a message…"])
         #expect(refused(Self.request("type", ["text": "hi", "mode": "insert", "target": "focused"])))
         box.focused = nil
         #expect(refused(Self.request("type", ["text": "hi", "mode": "insert", "target": "focused"])), "an unreadable field is not a search field")
@@ -1075,7 +1075,7 @@ struct AgentLoopReadOnlyTests {
         #expect(!refused(Self.request("focus", ["app": "Google Chrome"])))
         #expect(!refused(Self.request("type", ["text": "Farza", "mode": "replace", "title": "Search", "role": "AXComboBox"])))
         #expect(!refused(Self.request("type", ["text": "Farza", "mode": "replace", "title": "x", "role": "AXSearchField"])))
-        box.focused = AgentLoop.FieldIdentity(role: "AXTextField", subrole: nil, label: "Search")
+        box.focused = AgentLoop.FieldIdentity(role: "AXTextField", subrole: nil, labels: ["Search"])
         #expect(!refused(Self.request("type", ["text": "Farza", "mode": "insert", "target": "focused"])))
         #expect(!refused(Self.request("snapshot")))
         #expect(!refused(Self.request("look")))
@@ -1083,6 +1083,26 @@ struct AgentLoopReadOnlyTests {
     }
 
     /// Generality suite 2026-10-06: G03, G07, G11 and G17 lost every menu to
+    /// Generality G09 (2026-10-09T22-09-04Z): Finder's find bar labels its field "Search:"; typing aimed at
+    /// that label was refused twice as readOnlyTask while the refusal itself said search fields are allowed.
+    /// A search field is judged by its own AX role/subrole or its own label words, normalised.
+    @Test func aReadOnlyTaskTypesIntoAFieldThatCallsItselfSearch() {
+        func refused(_ fields: [String: Any]) -> Bool {
+            AgentLoop.readOnlyRefusal(["verb": "type", "text": "Heyclicky", "mode": "insert"].merging(fields) { _, new in new },
+                                      focusedField: { nil }) != nil
+        }
+        for title in ["Search:", "Search", "search…", "Find:", "Filter", "Search people", "Search Google or type a URL"] {
+            #expect(!refused(["title": title, "role": "AXStaticText"]), "the label \(title) names its field")
+            #expect(!refused(["title": title, "role": "AXTextField"]), "\(title)")
+        }
+        #expect(refused(["title": "x", "role": "AXTextField"]), "an ordinary field is still refused")
+        for title in ["Name:", "Write a message…", "Research notes", "Findings", "Add a comment…"] {
+            #expect(refused(["title": title, "role": "AXStaticText"]), "\(title)")
+            #expect(refused(["title": title, "role": "AXTextArea"]), "\(title)")
+        }
+        #expect(refused(["title": "Search:", "role": "AXButton"]), "a button is not a field or its label")
+    }
+
     /// `readOnlyTask`. A menu item is judged by its own AX title path: showing and
     /// navigating pass, anything that makes, changes or reaches people does not.
     @Test func aReadOnlyTaskJudgesAMenuItemByWhatItDoes() {

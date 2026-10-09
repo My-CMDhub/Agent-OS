@@ -190,7 +190,7 @@ nonisolated struct AffordanceMap: Sendable {
             let role = entry["role"] as? String ?? ""
             let subrole = entry["subrole"] as? String
             guard let shown = name(entry) else { continue }
-            if AgentLoop.isSearchField(.init(role: role, subrole: subrole, label: entry["name"] as? String)), entry["nameSource"] as? String != "value" {
+            if AgentLoop.isSearchField(.init(role: role, subrole: subrole, labels: [entry["name"] as? String].compactMap { $0 })), entry["nameSource"] as? String != "value" {
                 search.append("search field \(shown)")
             } else if role == "AXTab" || subrole == "AXTabButton" {
                 tabs.append(entry["selected"] as? Bool == true ? "\(shown) (selected)" : shown)

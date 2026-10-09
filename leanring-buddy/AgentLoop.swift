@@ -1652,17 +1652,24 @@ extension AgentLoop {
         title.lowercased().split { !$0.isLetter }.map(String.init).first(where: changingMenuWords.contains)
     }
 
-    /// What a field is, by its own AX role, subrole and label (never its value).
+    /// What a field is, by its own AX role, subrole and labels — title, description,
+    /// placeholder — never its value.
     nonisolated struct FieldIdentity: Sendable {
         let role: String
         let subrole: String?
-        let label: String?
+        let labels: [String]
     }
 
+    /// A search field says so: its role or subrole, or one of its own labels whose
+    /// first word is search / find / filter ("Search:", "Find…", "Search people";
+    /// not "Research notes"). G09 2026-10-09: Finder's "Search:" was refused.
     nonisolated static func isSearchField(_ field: FieldIdentity) -> Bool {
-        if field.role == "AXSearchField" || field.subrole == "AXSearchField" { return true }
-        guard ["AXTextField", "AXComboBox", "AXTextArea"].contains(field.role), let label = field.label else { return false }
-        return label.lowercased().split { !$0.isLetter }.contains("search")
+        if ([field.role] + [field.subrole].compactMap { $0 }).contains(where: { $0.lowercased().contains("search") }) { return true }
+        return AccessibilityElementNode.textInputRoles.contains(field.role) && field.labels.contains(where: namesSearch)
+    }
+
+    nonisolated static func namesSearch(_ label: String) -> Bool {
+        label.lowercased().split { !$0.isLetter }.first.map { ["search", "find", "filter"].contains($0) } ?? false
     }
 
     /// The word in an element's own name that makes pressing it more than navigation.
@@ -1704,8 +1711,15 @@ extension AgentLoop {
             guard isShowingMenuItem(path) else { return "the menu item \"\(shown)\" is not one that only shows or navigates" }
             return changingMenuWord(leaf).map { "the menu item \"\(shown)\" makes, changes or reaches people (\"\($0)\")" }
         case .type:
+            let title = request["title"] as? String
+            // A label ("Search:" in Finder's find bar, G09): the harness types into the field it names
+            // (`fieldLabelled(by:)`), so the label's own AX words name that field. ponytail: judged by the
+            // label, not the field it resolves to; read the resolved field here if that ever diverges.
+            if request["target"] as? String != "focused", let role = request["role"] as? String, HarnessPolicy.labelRoles.contains(role) {
+                return title.map(namesSearch) == true ? nil : "typing goes only into a search field"
+            }
             let field = request["target"] as? String == "focused" ? focusedField()
-                : (request["role"] as? String).map { FieldIdentity(role: $0, subrole: nil, label: request["title"] as? String) }
+                : (request["role"] as? String).map { FieldIdentity(role: $0, subrole: nil, labels: [title].compactMap { $0 }) }
             return field.map(isSearchField) == true ? nil : "typing goes only into a search field"
         default:
             return "\(verb.rawValue) is not navigation"
@@ -1753,7 +1767,8 @@ extension AgentLoop {
 
     /// The focused element of the app in front: role, subrole, label.
     nonisolated static func liveFocusedField() -> FieldIdentity? {
-        AccessibilityTypePerformer.focusedNode().map { FieldIdentity(role: $0.role, subrole: $0.subrole, label: $0.fieldLabel?.raw) }
+        AccessibilityTypePerformer.focusedNode().map { FieldIdentity(role: $0.role, subrole: $0.subrole,
+                                                                  labels: [$0.title, $0.elementDescription, $0.placeholder].compactMap { $0?.raw }) }
     }
 
     /// The browser's selected tab in its front window, read off main.
