@@ -95,7 +95,7 @@ struct AgentPlanTests {
     @Test func menuStepsMustBeMappedOrFoundAndReadOnlyAllowed() throws {
         let map = try #require(AffordanceMap(menusResponse: finderMenus, bundleIdentifier: "com.apple.finder", version: "1", pid: 1, builtUptime: 0))
         func check(_ steps: [[String: Any]], readOnly: Bool = false, find: RealtimeStandingOffer? = nil) -> String? {
-            AgentPlan.livePrecheck(steps, map: map, findOffer: find, readOnly: readOnly, screenElements: nil)
+            AgentPlan.livePrecheck(steps, menuOffer: map.offer(readOnly: readOnly), findOffer: find, readOnly: readOnly, screenElements: nil)
         }
         #expect(check([["tool": "press_menu", "path": ["View", "as List"]], ["tool": "press_menu", "shortcut": "⌥⌘L"]]) == nil)
         #expect(check([["tool": "press_menu", "path": ["View", "as Gallery"]]])?.contains("not in the App verbs") == true)
@@ -103,7 +103,7 @@ struct AgentPlanTests {
                                           app: "com.apple.finder", uptime: 0)
         #expect(check([["tool": "press_menu", "path": ["View", "as Gallery"]]], find: found) == nil, "a find of this task offers it too")
         #expect(check([["tool": "press_menu", "shortcut": "⌘9"]]) != nil)
-        #expect(check([["tool": "press_menu", "path": ["File", "New Folder"]]], readOnly: true)?.contains("read-only") == true)
+        #expect(check([["tool": "press_menu", "path": ["File", "New Folder"]]], readOnly: true) != nil, "not shown, so not offered")
         #expect(check([["tool": "press_menu", "path": ["File", "Get Info"]]]) == nil,
                 "a cached enabled flag goes stale: the kernel refuses a disabled item live, the precheck does not guess")
     }
@@ -116,7 +116,7 @@ struct AgentPlanTests {
             ["role": "AXButton", "name": "Back", "nameSource": "description"]
         ]
         func check(_ steps: [[String: Any]]) -> String? {
-            AgentPlan.livePrecheck(steps, map: nil, findOffer: nil, readOnly: false, screenElements: elements)
+            AgentPlan.livePrecheck(steps, menuOffer: nil, findOffer: nil, readOnly: false, screenElements: elements)
         }
         #expect(check([["tool": "press_element", "name": "Back"]]) == nil)
         #expect(check([["tool": "press_element", "name": "Recent"]])?.contains("2 things") == true)

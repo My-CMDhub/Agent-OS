@@ -1394,7 +1394,7 @@ extension AgentLoop {
             },
             checkpoint: { AgentTaskStore.write($0) },
             planPrecheck: { steps in
-                AgentPlan.livePrecheck(steps, map: carry.map, findOffer: carry.marks?.latestMenuOffer, readOnly: carry.readOnly,
+                AgentPlan.livePrecheck(steps, menuOffer: carry.mapOffer, findOffer: carry.marks?.latestMenuOffer, readOnly: carry.readOnly,
                                        screenElements: carry.screenElements)
             }
         ))
@@ -1437,6 +1437,10 @@ extension AgentLoop {
         var shownMaps: [String: TimeInterval] = [:]
         /// The last look's listed elements (snapshot forModel), for a plan's precheck.
         var screenElements: [[String: Any]]?
+        /// Per bundle, exactly the App verbs lines the model was shown, as an offer (`AffordanceMap.offer(readOnly:)`).
+        var shownOffers: [String: RealtimeStandingOffer] = [:]
+        /// The app in front's shown offer at the last look: what a press and a plan's precheck judge by.
+        var mapOffer: RealtimeStandingOffer?
     }
 
     /// The App verbs (once per app per task, again after a rebuild) and this
@@ -1446,6 +1450,7 @@ extension AgentLoop {
     static func addAffordances(to observation: inout AgentObservation, carry: MarksCarry,
                                harnessAnswer: @escaping @Sendable (String) -> String) async {
         carry.map = nil
+        carry.mapOffer = nil
         carry.screenElements = nil
         guard observation.look != "handOver", let bundle = observation.bundleIdentifier else { return }
         let started = ProcessInfo.processInfo.systemUptime
@@ -1454,9 +1459,11 @@ extension AgentLoop {
         var shownLines = 0
         if let map = built?.map, carry.shownMaps[bundle] != map.builtUptime {
             carry.shownMaps[bundle] = map.builtUptime
+            carry.shownOffers[bundle] = map.offer(readOnly: carry.readOnly)
             observation.lines.append(map.block(appName: nil, readOnly: carry.readOnly))
             shownLines = map.menuLines(readOnly: carry.readOnly).count
         }
+        if built != nil { carry.mapOffer = carry.shownOffers[bundle] }
         let screen = await AffordanceMap.liveScreen(bundle: bundle, harnessAnswer: harnessAnswer)
         carry.screenElements = screen.elements
         if !screen.lines.isEmpty { observation.lines.append("Landmarks now: " + screen.lines.joined(separator: " | ")) }
@@ -1787,7 +1794,7 @@ extension AgentLoop {
         marks.latestMenuOffer = carry.marks?.latestMenuOffer
         marks.latestScreenOffer = carry.marks?.latestScreenOffer
         // The App verbs the model was shown count as offered, in their own app only.
-        marks.affordanceMenuOffer = carry.map.flatMap { carry.shownMaps[$0.bundleIdentifier] != nil ? $0.offer : nil }
+        marks.affordanceMenuOffer = carry.mapOffer
         carry.marks = marks
         let filled = await RealtimeOpenAppTool.withFrontmostApp(call)
         marks.toolCalls = [filled]

@@ -23,7 +23,7 @@ struct AffordanceOfferTests {
     @Test func aMappedPathCountsAsOfferedOnlyInItsOwnApp() throws {
         let map = try #require(AffordanceMap(menusResponse: menus, bundleIdentifier: "com.apple.finder", version: "1", pid: 1, builtUptime: 0))
         let chosen = RealtimeOpenAppTool.pressOffer(path: ["View", "as List"], thisTurn: nil, previousTurn: nil, followUpConfirmed: nil,
-                                                    affordanceMap: map.offer, now: 10_000)
+                                                    affordanceMap: map.offer(readOnly: false), now: 10_000)
         #expect(chosen.source == .affordanceMap, "no age limit: the cache's own 10 minutes bound the map")
         let call = RealtimeToolCall(callID: "1", name: RealtimeVoiceVerbs.pressMenuName, appName: "Finder", path: ["View", "as List"])
         guard case .success = RealtimeOpenAppTool.harnessRequestLine(for: call, expectApp: "com.apple.finder", offered: chosen.offer?.candidates,
@@ -36,12 +36,12 @@ struct AffordanceOfferTests {
         }
         #expect(refusal.error == "notOffered")
         let unmapped = RealtimeOpenAppTool.pressOffer(path: ["File", "Open Recent", "Taxes 2025.pdf"], thisTurn: nil, previousTurn: nil,
-                                                      followUpConfirmed: nil, affordanceMap: map.offer, now: 10_000)
+                                                      followUpConfirmed: nil, affordanceMap: map.offer(readOnly: false), now: 10_000)
         #expect(unmapped.source == nil, "a private item is never in the map, so never offered by it")
         // This turn's find still comes first.
         let found = RealtimeStandingOffer(candidates: [RealtimeMenuCandidate(path: ["View", "as List"], shortcut: nil)], app: "com.apple.finder", uptime: 9_999)
         #expect(RealtimeOpenAppTool.pressOffer(path: ["View", "as List"], thisTurn: found, previousTurn: nil, followUpConfirmed: nil,
-                                               affordanceMap: map.offer, now: 10_000).source == .thisTurn)
+                                               affordanceMap: map.offer(readOnly: false), now: 10_000).source == .thisTurn)
     }
 
     @Test func aShortcutBecomesTheOwningItemsPath() throws {
@@ -49,7 +49,7 @@ struct AffordanceOfferTests {
         let parsed = RealtimeToolCall.parsed(callID: "1", name: RealtimeVoiceVerbs.pressMenuName, arguments: ["app": "Finder", "shortcut": "⌘2"])
         #expect(parsed.shortcut == "⌘2")
         #expect(parsed.path == nil)
-        guard case .success(let resolved) = RealtimeOpenAppTool.withShortcutResolved(parsed, map: map.offer) else {
+        guard case .success(let resolved) = RealtimeOpenAppTool.withShortcutResolved(parsed, map: map.offer(readOnly: false)) else {
             Issue.record("one owner resolves"); return
         }
         #expect(resolved.path == ["View", "as List"])
@@ -60,7 +60,7 @@ struct AffordanceOfferTests {
         // A path wins: the shortcut is only read when no path was given.
         let both = RealtimeToolCall.parsed(callID: "2", name: RealtimeVoiceVerbs.pressMenuName,
                                            arguments: ["app": "Finder", "path": ["File", "New Folder"], "shortcut": "⌘2"])
-        guard case .success(let kept) = RealtimeOpenAppTool.withShortcutResolved(both, map: map.offer) else { Issue.record("a path passes"); return }
+        guard case .success(let kept) = RealtimeOpenAppTool.withShortcutResolved(both, map: map.offer(readOnly: false)) else { Issue.record("a path passes"); return }
         #expect(kept.path == ["File", "New Folder"])
     }
 

@@ -69,9 +69,11 @@ nonisolated struct AffordanceMap: Sendable {
         self.listingIncomplete = !((response["listingStopReasons"] as? [String]) ?? []).isEmpty
     }
 
-    /// Every mapped leaf, as the press gate judges an offer: pressed only in its own app.
-    var offer: RealtimeStandingOffer {
-        RealtimeStandingOffer(candidates: items.map { RealtimeMenuCandidate(path: $0.path, shortcut: $0.shortcut) },
+    /// Exactly the items the model is shown (`menuLines`, after the budget and
+    /// read-only filters), as the press gate judges an offer: pressed only in
+    /// its own app. A mapped item cut from the lines is no offer (review of e98f476).
+    func offer(readOnly: Bool) -> RealtimeStandingOffer {
+        RealtimeStandingOffer(candidates: shownItems(readOnly: readOnly).map { RealtimeMenuCandidate(path: $0.path, shortcut: $0.shortcut) },
                               app: bundleIdentifier, uptime: builtUptime)
     }
 
@@ -81,7 +83,9 @@ nonisolated struct AffordanceMap: Sendable {
     /// cache's 10 minutes, and the kernel refuses a disabled item live at press
     /// time (review of e98f476). Over budget: boilerplate first, then depth ≥3
     /// without a shortcut, then the tail.
-    func menuLines(readOnly: Bool) -> [String] {
+    func menuLines(readOnly: Bool) -> [String] { shownItems(readOnly: readOnly).map(Self.line) }
+
+    func shownItems(readOnly: Bool) -> [Item] {
         var kept = items.filter { item in
             (item.enabled || item.shortcut != nil)
                 // " > " separates steps on a line, so a step holding ">" could not be copied back exactly.
@@ -92,7 +96,7 @@ nonisolated struct AffordanceMap: Sendable {
             kept.removeAll { $0.path.contains { step in RealtimeVoiceVerbs.foldedTokens(step).contains(where: Self.boilerplateWords.contains) } }
         }
         if kept.count > Self.maximumMenuLines { kept.removeAll { $0.path.count >= 3 && $0.shortcut == nil } }
-        return kept.prefix(Self.maximumMenuLines).map(Self.line)
+        return Array(kept.prefix(Self.maximumMenuLines))
     }
 
     static func line(_ item: Item) -> String {

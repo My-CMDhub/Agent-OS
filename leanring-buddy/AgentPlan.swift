@@ -143,7 +143,7 @@ nonisolated enum AgentPlan {
     /// refused if every exact match on screen is a secure field, or if more
     /// than one matches (ask which). No match is allowed: the press's own
     /// resolver still has OCR and vision to look with.
-    static func livePrecheck(_ steps: [[String: Any]], map: AffordanceMap?, findOffer: RealtimeStandingOffer?, readOnly: Bool,
+    static func livePrecheck(_ steps: [[String: Any]], menuOffer: RealtimeStandingOffer?, findOffer: RealtimeStandingOffer?, readOnly: Bool,
                              screenElements: [[String: Any]]?) -> String? {
         var actedBefore = false
         for (index, step) in steps.enumerated() {
@@ -153,13 +153,13 @@ nonisolated enum AgentPlan {
             if tool == RealtimeVoiceVerbs.pressMenuName {
                 var path = (step["path"] as? [Any])?.compactMap { $0 as? String } ?? []
                 if path.isEmpty, let shortcut = step["shortcut"] as? String {
-                    switch AffordanceMap.resolve(shortcut: shortcut, in: map?.offer) {
+                    switch AffordanceMap.resolve(shortcut: shortcut, in: menuOffer) {
                     case .success(let owner): path = owner
                     case .failure(let refusal): return "step \(number): \(refusal.message)"
                     }
                 }
                 let shown = UntrustedText(path.joined(separator: " > ")).forDisplay
-                let offered = [map?.offer, findOffer].contains { offer in
+                let offered = [menuOffer, findOffer].contains { offer in
                     offer.map { RealtimeDecisionTrace.choseFromOffered(path: path, offered: $0.candidates) == true } ?? false
                 }
                 guard offered else {

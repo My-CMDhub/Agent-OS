@@ -79,7 +79,7 @@ struct AffordanceMapTests {
 
     @Test func aShortcutResolvesToTheOneItemThatOwnsIt() throws {
         let map = try #require(AffordanceMap(menusResponse: finderMenus, bundleIdentifier: "com.apple.finder", version: "1", pid: 1, builtUptime: 0))
-        let offer = map.offer
+        let offer = map.offer(readOnly: false)
         #expect(AffordanceMap.resolve(shortcut: "cmd+shift+n", in: offer) == .success(["File", "New Folder"]))
         #expect(AffordanceMap.resolve(shortcut: "⌘2", in: offer) == .success(["View", "as List"]))
         if case .failure(let refusal) = AffordanceMap.resolve(shortcut: "⌘9", in: offer) {
