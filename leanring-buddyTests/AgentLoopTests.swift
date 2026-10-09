@@ -710,6 +710,31 @@ struct AgentLoopTests {
         #expect(AgentLoop.doneChallenge(summary: "According to the article, the bridge opened in 1932.", evidence: [], receipts: []) == nil)
     }
 
+    /// G20 2026-10-10 (run C708CCDF): "created by Chris Lattner" needed a receipt, so the
+    /// agent opened Chrome to earn one (2 -> 5 calls). An effect whose agent is a named
+    /// third party is a fact about them, not a claim about J.A.R.V.I.S. or the owner.
+    @MainActor @Test func anEffectByANamedThirdPartyIsAFactNotAClaim() {
+        func challenged(_ summary: String) -> Bool { AgentLoop.doneChallenge(summary: summary, evidence: [], receipts: []) != nil }
+        #expect(!challenged("The Swift programming language was originally created by Chris Lattner in 2010 at Apple. "
+            + "Other Apple developers later joined to help design and implement it before its public unveiling in 2014."))
+        #expect(!challenged("Python was created by Guido van Rossum."))
+        #expect(!challenged("The Hobbit was written by J. R. R. Tolkien."))
+        #expect(!challenged("The paper was published by Nature in 1953."))
+        #expect(!challenged("Chris Lattner created Swift."))
+        #expect(!challenged("Chris Lattner originally created Swift at Apple."))
+        #expect(!challenged("In 1937 Tolkien wrote The Hobbit."))
+        // No agent, a person as the agent, or a lowercase "by" phrase: still a claim.
+        #expect(challenged("The post was published."))
+        #expect(challenged("According to the page, your comment was posted."))
+        #expect(challenged("The note was created by me."))
+        #expect(challenged("The file was saved by pressing Save."))
+        #expect(challenged("Note created."))
+        #expect(challenged("I created the note."))
+        // An app as the subject of an action verb is J.A.R.V.I.S. acting through it.
+        #expect(challenged("Then Finder opened the folder."))
+        #expect(challenged("Your reminder was added by J.A.R.V.I.S."))
+    }
+
     /// 2026-10-03 brief: the task's tab was checked at the start of a step, but the act
     /// came later (after the heard check and any card). A mutating request re-reads the
     /// bound tab just before it goes out and refuses if the owner switched tabs.

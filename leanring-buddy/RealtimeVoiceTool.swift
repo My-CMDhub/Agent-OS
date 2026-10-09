@@ -1299,7 +1299,7 @@ nonisolated enum RealtimeOpenAppTool {
 
     /// Each sentence's lowercased words (apostrophes kept, curly ones folded),
     /// and whether it ended in a question mark.
-    static func sentences(_ transcript: String) -> [(words: [String], isQuestion: Bool)] {
+    static func sentences(_ transcript: String, lowercased: Bool = true) -> [(words: [String], isQuestion: Bool)] {
         var sentences: [(String, Bool)] = []
         var current = ""
         for character in transcript.replacingOccurrences(of: "\u{2019}", with: "'") {
@@ -1308,7 +1308,7 @@ nonisolated enum RealtimeOpenAppTool {
             current = ""
         }
         sentences.append((current, false))
-        return sentences.map { ($0.0.lowercased().split { !($0.isLetter || $0 == "'") }.map(String.init), $0.1) }.filter { !$0.words.isEmpty }
+        return sentences.map { ((lowercased ? $0.0.lowercased() : $0.0).split { !($0.isLetter || $0 == "'") }.map(String.init), $0.1) }.filter { !$0.words.isEmpty }
     }
 
     /// Item 9 then item 10 (hands design), and the correction never stops the

@@ -1092,15 +1092,44 @@ final class AgentLoop {
     /// (`effectPersons`) is in the attributed part before it.
     static func effectClaims(_ summary: String) -> [Set<String>] {
         var claims: [Set<String>] = []
-        for (words, isQuestion) in RealtimeOpenAppTool.sentences(summary) where !isQuestion {
+        // "J.A.R.V.I.S." would split into one-letter sentences and read as a name.
+        let summary = summary.replacingOccurrences(of: "J.A.R.V.I.S.", with: "JARVIS", options: .caseInsensitive)
+        let cased = RealtimeOpenAppTool.sentences(summary, lowercased: false).map(\.words)
+        for (sentence, (words, isQuestion)) in RealtimeOpenAppTool.sentences(summary).enumerated() where !isQuestion {
             let attributed = attributionStart(words) ?? words.count
             for (index, word) in words.enumerated() where index < attributed || words[attributed..<index].contains(where: effectPersons.contains) {
                 guard let kind = effectWords.first(where: { $0.words.contains(word) }) else { continue }
                 if words[max(0, index - 3)..<index].contains(where: { effectNegations.contains($0) || $0.hasSuffix("n't") }) { continue }
+                if hasNamedThirdPartyAgent(words, cased: cased[sentence], at: index) { continue }
                 claims.append(kind.receipts)
             }
         }
         return claims
+    }
+
+    /// G20 2026-10-10 (run C708CCDF): "Swift was originally created by Chris Lattner"
+    /// needed a receipt, and the agent opened Chrome to earn one (2 -> 5 calls). An
+    /// effect whose agent is a named third party is a fact about them: "created by
+    /// Chris Lattner" (any effect), or "Chris Lattner created Swift" (authorship only:
+    /// "Then Finder opened the folder" is J.A.R.V.I.S. acting through an app).
+    static let authorshipWords: Set<String> = ["created", "written", "wrote", "published"]
+    static let selfNames: Set<String> = ["jarvis", "clicky"]
+
+    static func isNamedThirdParty(_ word: String) -> Bool {
+        guard word.first?.isUppercase == true else { return false }
+        return !effectPersons.contains(word.lowercased()) && !selfNames.contains(word.lowercased())
+    }
+
+    /// `words` lowercased, `cased` the same tokens as written.
+    static func hasNamedThirdPartyAgent(_ words: [String], cased: [String], at index: Int) -> Bool {
+        guard words.count == cased.count else { return false }
+        if index + 2 < words.count, words[index + 1] == "by", isNamedThirdParty(cased[index + 2]) { return true }
+        guard authorshipWords.contains(words[index]) else { return false }
+        var subject = index - 1
+        while subject > 0, words[subject].hasSuffix("ly") { subject -= 1 }
+        // ponytail: a sentence-initial subject is not taken as a name ("Note created." is
+        // capitalised too), so "Tolkien wrote The Hobbit." still asks for a receipt.
+        return subject > 0 && isNamedThirdParty(cased[subject])
     }
 
     /// A few words of what a step did, for narration and a failure's
