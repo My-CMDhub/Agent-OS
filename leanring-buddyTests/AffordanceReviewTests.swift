@@ -82,4 +82,16 @@ struct AffordanceReviewTests {
         #expect(cache.map(bundle: "b", version: "1", pid: 10, now: 1) == nil)
         #expect(cache.map(bundle: "b", version: "1", pid: 20, now: 1) == nil)
     }
+
+    /// Review of e98f476: the landmark snapshot is one more harness walk per look
+    /// (Finder ~440 ms a look, measured 2026-10-10). The last read is reused only
+    /// for the same app, within 10 s, and only when nothing acted since it.
+    @Test func landmarksAreReusedOnlyWhenNothingActedSince() {
+        #expect(AffordanceMap.reusesLandmarks(previousAt: 100, sameApp: true, lastActingCallAt: 90, now: 105))
+        #expect(AffordanceMap.reusesLandmarks(previousAt: 100, sameApp: true, lastActingCallAt: nil, now: 105))
+        #expect(!AffordanceMap.reusesLandmarks(previousAt: 100, sameApp: true, lastActingCallAt: 101, now: 105), "something acted since")
+        #expect(!AffordanceMap.reusesLandmarks(previousAt: 100, sameApp: false, lastActingCallAt: nil, now: 105), "another app")
+        #expect(!AffordanceMap.reusesLandmarks(previousAt: 100, sameApp: true, lastActingCallAt: nil, now: 100 + AffordanceMap.landmarkReuseSeconds + 1))
+        #expect(!AffordanceMap.reusesLandmarks(previousAt: nil, sameApp: true, lastActingCallAt: nil, now: 105))
+    }
 }

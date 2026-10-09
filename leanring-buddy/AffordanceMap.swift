@@ -211,6 +211,19 @@ nonisolated struct AffordanceMap: Sendable {
         return Array(lines.prefix(maximumLandmarkLines))
     }
 
+    /// How long a landmark read may stand in for the next look's.
+    static let landmarkReuseSeconds: TimeInterval = 10
+
+    /// The landmark snapshot is a second harness walk per look, and harness
+    /// requests serialise, so it cannot run beside the look (Finder ~440 ms a
+    /// look, measured 2026-10-10). The last read stands only for the same app,
+    /// within 10 s, with nothing acted since. ponytail: the owner switching
+    /// windows inside that app within 10 s is not seen; key by window if it matters.
+    static func reusesLandmarks(previousAt: TimeInterval?, sameApp: Bool, lastActingCallAt: TimeInterval?, now: TimeInterval) -> Bool {
+        guard let previousAt, sameApp, now - previousAt <= landmarkReuseSeconds else { return false }
+        return (lastActingCallAt ?? -.infinity) < previousAt
+    }
+
     /// The "App verbs" block, once per app per task (again after a rebuild); landmarks every step.
     func block(appName: String?, readOnly: Bool) -> String {
         let lines = menuLines(readOnly: readOnly)

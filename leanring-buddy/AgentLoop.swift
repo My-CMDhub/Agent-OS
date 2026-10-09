@@ -1377,6 +1377,7 @@ extension AgentLoop {
             },
             execute: { call, checksSite, observation, remaining in
                 carry.calls += 1
+                if RealtimeVoiceVerbs.isActingTool(call.name) { carry.lastActingCallAt = ProcessInfo.processInfo.systemUptime }
                 return await liveExecute(call, checksSite: checksSite, heard: carry.heard, observation: observation, carry: carry,
                                          traceTurnID: "\(carry.runID)-\(carry.calls)", confirmationWaitSeconds: remaining,
                                          harnessAnswer: harnessAnswer)
@@ -1444,6 +1445,10 @@ extension AgentLoop {
         var shownOffers: [String: RealtimeStandingOffer] = [:]
         /// The app in front's shown offer at the last look: what a press and a plan's precheck judge by.
         var mapOffer: RealtimeStandingOffer?
+        /// The last landmark read, reused while nothing acted (`AffordanceMap.reusesLandmarks`).
+        var screenRead: (bundle: String, at: TimeInterval, lines: [String], elements: [[String: Any]]?)?
+        /// When the last acting call of this task started.
+        var lastActingCallAt: TimeInterval?
     }
 
     /// The App verbs (once per app per task, again after a rebuild) and this
@@ -1467,11 +1472,20 @@ extension AgentLoop {
             shownLines = map.menuLines(readOnly: carry.readOnly).count
         }
         if built != nil { carry.mapOffer = carry.shownOffers[bundle] }
-        let screen = await AffordanceMap.liveScreen(bundle: bundle, harnessAnswer: harnessAnswer)
+        let now = ProcessInfo.processInfo.systemUptime
+        let reused = AffordanceMap.reusesLandmarks(previousAt: carry.screenRead?.at, sameApp: carry.screenRead?.bundle == bundle,
+                                                   lastActingCallAt: carry.lastActingCallAt, now: now)
+        let screen: (lines: [String], elements: [[String: Any]]?)
+        if reused, let last = carry.screenRead {
+            screen = (last.lines, last.elements)
+        } else {
+            screen = await AffordanceMap.liveScreen(bundle: bundle, harnessAnswer: harnessAnswer)
+            carry.screenRead = (bundle, now, screen.lines, screen.elements)
+        }
         carry.screenElements = screen.elements
         if !screen.lines.isEmpty { observation.lines.append("Landmarks now: " + screen.lines.joined(separator: " | ")) }
         appendTrace(["kind": "affordanceMap", "run": carry.runID, "bundle": bundle, "mapped": built != nil, "cached": built?.cached ?? NSNull(),
-                     "items": built?.map.items.count ?? 0, "menuLinesShown": shownLines, "landmarks": screen.lines.count,
+                     "items": built?.map.items.count ?? 0, "menuLinesShown": shownLines, "landmarks": screen.lines.count, "landmarksReused": reused,
                      "ms": Int(((ProcessInfo.processInfo.systemUptime - started) * 1000).rounded()),
                      "uptime": MeasurementLogFile.roundedUptime(ProcessInfo.processInfo.systemUptime)])
     }
