@@ -25,6 +25,15 @@ import Testing
         }
     }
 
+    // Live S1 2026-10-10: the prelude started the task, so the question turn had no do_task and the
+    // runner never waited for the report; the checker read "ended unreported" over a correct answer.
+    @Test func aTaskStartedByThePreludeIsFollowedToItsEnd() {
+        #expect(ScenarioRunner.followsTask(turnStartedOne: false, hasPrelude: true, taskRunningOrReported: true))
+        #expect(ScenarioRunner.followsTask(turnStartedOne: true, hasPrelude: false, taskRunningOrReported: false))
+        #expect(!ScenarioRunner.followsTask(turnStartedOne: false, hasPrelude: false, taskRunningOrReported: true))
+        #expect(!ScenarioRunner.followsTask(turnStartedOne: false, hasPrelude: true, taskRunningOrReported: false))
+    }
+
     @Test func theCheckWantsTheTaskStillRunningAndAnAnswerOfItsOwn() async throws {
         let s1 = try #require(ScenarioCatalog.taskStatus.first { $0.id == "S1" })
         func passed(_ reply: String, _ ended: AgentLoop.Outcome, spoken: String = "The cheapest plan is Starter.") async -> Bool {

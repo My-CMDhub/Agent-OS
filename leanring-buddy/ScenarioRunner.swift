@@ -682,6 +682,11 @@ enum ScenarioRunner {
     }
 
     /// Polls `read` every 200 ms until it answers or `seconds` pass.
+    /// The runner follows a task to its end when this turn started it, or when the prelude did (S1/S2 ask about it mid-task).
+    nonisolated static func followsTask(turnStartedOne: Bool, hasPrelude: Bool, taskRunningOrReported: Bool) -> Bool {
+        turnStartedOne || (hasPrelude && taskRunningOrReported)
+    }
+
     static func waitFor<T>(seconds: Double, _ read: () async -> T?) async -> T? {
         let deadline = uptime + seconds
         repeat {
@@ -786,7 +791,8 @@ enum ScenarioRunner {
         // own caps bound it), still denying cards, then judge the whole of it.
         box.outcome.voiceDecisions = turnID.flatMap { box.marks[$0]?.decisions } ?? []
         if let turnID, let marks = box.marks[turnID],
-           marks.decisions.contains(where: { $0.call.name == RealtimeVoiceVerbs.doTaskName && $0.dispatch?.harnessConfirmed == true }) {
+           followsTask(turnStartedOne: marks.decisions.contains(where: { $0.call.name == RealtimeVoiceVerbs.doTaskName && $0.dispatch?.harnessConfirmed == true }),
+                       hasPrelude: scenario.prelude != nil, taskRunningOrReported: session.agentLoop != nil || box.agentReport != nil) {
             let agentDeadline = uptime + AgentLoop.maximumSeconds + 40
             while uptime < agentDeadline, box.agentReport == nil {
                 watch()
