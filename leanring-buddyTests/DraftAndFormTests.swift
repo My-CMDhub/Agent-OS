@@ -69,6 +69,45 @@ struct DraftAndFormTests {
         #expect(request?["title"] as? String == "Save")
     }
 
+    // Item 2: replacing a field's text cards, unless the field is a single-line one in a tab the harness opened.
+    @Test func aReplaceInATabTheHarnessOpenedNeedsNoCard() {
+        func typing(_ length: Int, opened: Bool) -> ActionSafetyKernel.TypingContext {
+            var context = ActionSafetyKernel.TypingContext(mode: .replace, settableAttributes: [kAXValueAttribute as String],
+                                                           currentValueLength: length, aimedByFocus: false)
+            context.inTabTheHarnessOpened = opened
+            return context
+        }
+        let date = AccessibilityElementNode(role: "AXTextField", subrole: nil, title: "Start date", value: "10 Oct 2026",
+                                            frameInAppKitCoordinates: CGRect(x: 100, y: 100, width: 120, height: 24), depth: 1, children: [])
+        if case .requireConfirmation = decide(.type, date, draft: false, typing: typing(11, opened: false)) {} else {
+            Issue.record("the owner's own tab must still card")
+        }
+        #expect(decide(.type, date, draft: false, typing: typing(11, opened: true)) == .allow)
+        // A document body is never replaced without asking, whoever opened the tab.
+        let body = AccessibilityElementNode(role: "AXTextArea", subrole: nil, title: "Body", value: "Dear …",
+                                            frameInAppKitCoordinates: CGRect(x: 100, y: 100, width: 300, height: 200), depth: 1, children: [])
+        if case .requireConfirmation = decide(.type, body, draft: false, typing: typing(400, opened: true)) {} else {
+            Issue.record("a text area must still card")
+        }
+        let now = Date()
+        #expect(HarnessPolicy.tabStillTheHarnesss(openedAt: now.addingTimeInterval(-60), now: now))
+        #expect(!HarnessPolicy.tabStillTheHarnesss(openedAt: now.addingTimeInterval(-HarnessServer.openedTabLifetimeSeconds - 1), now: now))
+        #expect(!HarnessPolicy.tabStillTheHarnesss(openedAt: nil, now: now))
+    }
+
+    // Keystrokes replace only when the whole value is selected first; otherwise they would insert.
+    @Test func keystrokesReplaceOnlyAWhollySelectedValue() {
+        func refusal(before: Int?, selection: Int?, covers: Bool) -> String? {
+            HarnessHands.keystrokeRefusal(text: "17 Oct 2026", mode: .replace, valueLengthBefore: before, secureInputOn: false,
+                                          focusedMightBeSecure: false, focusedIsTarget: true, selectionLength: selection,
+                                          frontmostIsTarget: true, ownerIdle: true, caretLocation: 0, value: nil,
+                                          selectionCoversValue: covers)?.code
+        }
+        #expect(refusal(before: 11, selection: 11, covers: true) == nil)
+        #expect(refusal(before: 11, selection: 4, covers: false) == "replaceNeedsAXWrite")
+        #expect(refusal(before: nil, selection: nil, covers: false) == "replaceNeedsAXWrite")
+        #expect(refusal(before: 0, selection: 0, covers: false) == nil)
+    }
 }
 
 final class LineBox: @unchecked Sendable { var lines: [String] = [] }

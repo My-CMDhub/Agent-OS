@@ -112,6 +112,10 @@ enum ActionSafetyKernel {
         /// search field has no name at all, and the OS, not the app's text, is
         /// what identified it.
         let aimedByFocus: Bool
+        /// The field sits in a browser tab the HARNESS opened (`openURL`) within
+        /// `HarnessServer.openedTabLifetimeSeconds` — the harness's own record,
+        /// never a caller's flag. See the replace rule in `evaluate`.
+        var inTabTheHarnessOpened = false
     }
 
     static func secureFieldRefusalReason(subrole: String) -> String {
@@ -175,6 +179,8 @@ enum ActionSafetyKernel {
     static let draftScopeReasonPrefix = "the owner said to stop before this: "
     /// The words that commit a draft, as whole words of a target's own name.
     static let draftCommitWords: Set<String> = ["send", "save", "schedule", "invite", "post", "publish", "submit", "share"]
+    /// Single-line inputs: replacing one discards a value, never a document.
+    static let singleLineTextRoles: Set<String> = ["AXTextField", "AXComboBox"]
 
     /// Refusal reasons as constants, so the probe can classify a decision by
     /// identity rather than by re-typing the sentence and silently missing.
@@ -622,7 +628,13 @@ enum ActionSafetyKernel {
         // Overwriting a document is the worst thing this verb can do, and it is
         // silent — the old text is simply gone. Replacing an *empty* field is
         // not destruction, so it is not asked about.
-        if let typing, typing.mode == .replace, typing.currentValueLength > 0 {
+        // A single-line field in a tab the harness itself opened holds what that
+        // page put there (a new event form's default date), not the owner's
+        // writing (S2, 2026-10-08: "replace would discard 10 characters" stalled
+        // the form). ponytail: a tab opened at an existing item's edit page
+        // passes too; its edit commits only on Save, which draft scope cards.
+        if let typing, typing.mode == .replace, typing.currentValueLength > 0,
+           !(typing.inTabTheHarnessOpened && singleLineTextRoles.contains(resolvedNode.role)) {
             return .requireConfirmation(
                 reason: replaceWouldDiscardReason(characterCount: typing.currentValueLength),
                 destructive: true

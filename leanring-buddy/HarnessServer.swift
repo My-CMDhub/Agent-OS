@@ -318,6 +318,14 @@ struct HarnessRequest: Equatable {
 
 enum HarnessPolicy {
 
+    /// Whether a tab the harness opened at `openedAt` still counts as the task's
+    /// own for the replace rule (`TypingContext.inTabTheHarnessOpened`).
+    static func tabStillTheHarnesss(openedAt: Date?, now: Date) -> Bool {
+        guard let openedAt else { return false }
+        let age = now.timeIntervalSince(openedAt)
+        return age >= 0 && age <= HarnessServer.openedTabLifetimeSeconds
+    }
+
     /// Roles that label a control without being one.
     static let labelRoles: Set<String> = ["AXHeading", "AXStaticText", "AXImage"]
     /// What a label may stand for: a link or a button.
@@ -1247,6 +1255,8 @@ final class HarnessServer {
     /// policy, then window); the second asking re-matches this ticket's shape
     /// rather than trusting that someone said yes to something.
     private var consumedTicketID: String?
+    /// Browser tabs `openURL` brought forward, and when. Read and written only on `requestQueue`.
+    private var tabsOpenedByHarness: [AccessibilityElementKey: Date] = [:]
 
     /// Mirror writes that failed. Not fatal to a request; counted so `ping` can say so.
     private(set) var auditMirrorFailures = 0
@@ -1472,6 +1482,10 @@ final class HarnessServer {
     /// from "hung". Ping acts on no app and reads no per-request state, so it
     /// has nothing to interleave with; its audit and ring writes take `stateLock`.
     /// Internal, not private, for `pingAnswersWhileTheRequestQueueIsBusy`.
+    /// How long a tab the harness opened counts as the task's own: the agent
+    /// loop's whole budget (`AgentLoop.maximumSeconds`) and a margin for a card.
+    nonisolated static let openedTabLifetimeSeconds: TimeInterval = 300
+
     nonisolated func answer(line: String) -> String {
         if case .success(let request) = HarnessPolicy.decode(line: line), request.verb == .ping {
             let startedAt = Date()
@@ -2728,8 +2742,17 @@ final class HarnessServer {
             settable: { liveElement.map(AccessibilityTypePerformer.settableAttributes) ?? [] },
             value: { liveElement.flatMap(AccessibilityTypePerformer.stringValue) }
         )
-        let typingContext = typing?.context
-        if let field = typing?.field { response["field"] = field }
+        var typingContext = typing?.context
+        // The replace rule's one exception, from the harness's OWN record of the tabs it opened.
+        if typingContext?.mode == .replace, let pid = snapshot.application?.processIdentifier,
+           HarnessPolicy.tabStillTheHarnesss(openedAt: HarnessHands.selectedTab(processIdentifier: pid).flatMap { tabsOpenedByHarness[$0] },
+                                            now: Date()) {
+            typingContext?.inTabTheHarnessOpened = true
+        }
+        if var field = typing?.field {
+            if typingContext?.inTabTheHarnessOpened == true { field["inTabTheHarnessOpened"] = true }
+            response["field"] = field
+        }
 
         // A link to a person-notifying view (a LinkedIn profile) asks on a card,
         // judged on the link's OWN AXURL, never the caller's words (ruling 2026-10-08).
@@ -4282,6 +4305,11 @@ final class HarnessServer {
             break
         }
         response["ok"] = true
+        // The tab now in front is the harness's own: a replace there needs no card (`tabStillTheHarnesss`).
+        if let tab = HarnessHands.selectedTab(processIdentifier: application.processIdentifier) {
+            tabsOpenedByHarness = tabsOpenedByHarness.filter { HarnessPolicy.tabStillTheHarnesss(openedAt: $0.value, now: Date()) }
+            tabsOpenedByHarness[tab] = Date()
+        }
         audit(request, dryRun: dryRun, kernel: gated.decision, outcome: "confirmed", startedAt: startedAt)
         return response
     }

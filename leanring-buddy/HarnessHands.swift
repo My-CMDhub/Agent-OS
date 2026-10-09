@@ -301,7 +301,8 @@ enum HarnessHands {
     /// where it landed, mid-text (`onlyBlankAfter`).
     static func keystrokeRefusal(text: String, mode: TypeMode, valueLengthBefore: Int?, secureInputOn: Bool,
                                  focusedMightBeSecure: Bool, focusedIsTarget: Bool, selectionLength: Int?,
-                                 frontmostIsTarget: Bool, ownerIdle: Bool, caretLocation: Int?, value: String?) -> HandsRefusal? {
+                                 frontmostIsTarget: Bool, ownerIdle: Bool, caretLocation: Int?, value: String?,
+                                 selectionCoversValue: Bool = false) -> HandsRefusal? {
         if secureInputOn {
             return HandsRefusal(code: "handOver", message: "secure typing is on — a password is the owner's to type; no keystrokes were posted")
         }
@@ -319,7 +320,7 @@ enum HarnessHands {
             return HandsRefusal(code: "characterTooLong", message: "a character in the text is too long for one key event; none were posted")
         }
         // Unreadable is not empty: there may be text a replace would have to remove.
-        if mode == .replace, valueLengthBefore != 0 {
+        if mode == .replace, valueLengthBefore != 0, !selectionCoversValue {
             return HandsRefusal(code: "replaceNeedsAXWrite",
                                 message: "keystrokes insert; they cannot replace what is already in the field (or could not be read)")
         }
@@ -333,7 +334,7 @@ enum HarnessHands {
                 code: "selectionUnreadable",
                 message: "the field's selection could not be read, so keystrokes might replace selected text; none were posted")
         }
-        if selectionLength > 0 {
+        if selectionLength > 0, !selectionCoversValue {
             return HandsRefusal(code: "selectionNotEmpty",
                                 message: "\(selectionLength) characters are selected; keystrokes would replace them, so none were posted")
         }
@@ -958,7 +959,16 @@ enum HarnessHands {
                 AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, endValue)
             }
         }
+        // A replace selects the whole value first, so the keys replace it; read back, never assumed.
+        if mode == .replace, let valueLengthUTF16, valueLengthUTF16 > 0 {
+            var all = CFRange(location: 0, length: valueLengthUTF16)
+            if let allValue = AXValueCreate(.cfRange, &all) {
+                AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, allValue)
+            }
+        }
         let selection = AccessibilityTypePerformer.selectedRange(of: element)
+        let selectionCoversValue = mode == .replace && (valueLengthUTF16 ?? 0) > 0
+            && selection.map { $0.location == 0 && $0.length == valueLengthUTF16 } == true
         // The push-to-talk key's release is the owner's input too: give it a moment.
         let ownerIdle = waitUntil(seconds: ownerIdleWaitSeconds) { ownerIsIdleNow() }
         if let refusal = keystrokeRefusal(
@@ -967,7 +977,7 @@ enum HarnessHands {
             focusedIsTarget: focusIsOn(element, processIdentifier: processIdentifier),
             selectionLength: selection.map { $0.length },
             frontmostIsTarget: targetIsFrontmost(processIdentifier), ownerIdle: ownerIdle,
-            caretLocation: selection.map { $0.location }, value: valueBefore
+            caretLocation: selection.map { $0.location }, value: valueBefore, selectionCoversValue: selectionCoversValue
         ) { return .refused(refusal) }
 
         let chunks = keystrokeChunks(text)
@@ -988,8 +998,10 @@ enum HarnessHands {
         waitUntil(seconds: keystrokeVerifySeconds) {
             let valueAfter = AccessibilityTypePerformer.stringValue(of: element)
             valueLengthAfter = valueAfter?.count
-            evidence = keystrokeEvidence(valueLengthBefore: valueLengthBefore, valueLengthAfter: valueLengthAfter,
-                                         typedCount: text.count, fingerprintChanged: false)
+            evidence = selectionCoversValue
+                ? (valueAfter == text ? "the field now reads the typed text in place of what it held" : nil)
+                : keystrokeEvidence(valueLengthBefore: valueLengthBefore, valueLengthAfter: valueLengthAfter,
+                                    typedCount: text.count, fingerprintChanged: false)
                 ?? (placeholderGaveWay(valueBefore: valueBefore, caret: selection?.location, valueAfter: valueAfter, typed: text)
                     ? placeholderGaveWayEvidence : nil)
             return evidence != nil
