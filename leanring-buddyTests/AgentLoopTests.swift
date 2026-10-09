@@ -259,7 +259,8 @@ struct AgentLoopTests {
         #expect(byName["do_task"] == nil)
         for name in ["search_web", "read_page", "done", "ask_owner"] { #expect(byName[name] != nil, "\(name)") }
         for declaration in RealtimeVoiceVerbs.openAIDeclarations(pointFormat: .fractions) {
-            guard let name = declaration["name"] as? String, name != "do_task" else { continue }
+            // press_menu: the loop's also takes a shortcut from the App verbs (AffordanceOfferTests).
+            guard let name = declaration["name"] as? String, name != "do_task", name != "press_menu" else { continue }
             let parameters = declaration["parameters"] as? [String: Any]
             let schema = byName[name]?["input_schema"] as? [String: Any]
             #expect(schema?["type"] as? String == "object", "\(name)")

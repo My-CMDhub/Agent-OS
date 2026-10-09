@@ -129,8 +129,27 @@ nonisolated enum RealtimeVoiceVerbs {
         }
     }
 
-    private static func declarations(_ format: RealtimePointFormat, gemini: Bool) -> [Declaration] {
+    /// `agent`: the agent loop's table, whose press_menu also takes a shortcut
+    /// from the App verbs (`AffordanceMap`); a voice turn has no map.
+    private static func declarations(_ format: RealtimePointFormat, gemini: Bool, agent: Bool = false) -> [Declaration] {
         let positionParameters = positionParameters(format, gemini: gemini)
+        let pressMenu = agent
+            ? Declaration(name: pressMenuName,
+                          description: "Presses one menu item of the app in front: a path from the App verbs or from find_menu_items, copied "
+                            + "exactly, or the shortcut an App verbs line shows, which presses the item that owns it (never a keystroke).",
+                          parameters: [
+                            Parameter(name: "app", description: "The app in front, for example \"Finder\"."),
+                            Parameter(name: "path", kind: .list, required: false,
+                                      description: "The menu path, split at \" > \", for example [\"View\", \"as List\"]."),
+                            Parameter(name: "shortcut", required: false,
+                                      description: "Instead of a path: the shortcut as an App verbs line shows it, for example \"⌘2\".")
+                          ])
+            : Declaration(name: pressMenuName,
+                          description: "Presses one menu item of the app in front. The path must be one that find_menu_items returned in this turn, copied exactly.",
+                          parameters: [
+                            Parameter(name: "app", description: "The app in front, for example \"Finder\"."),
+                            Parameter(name: "path", kind: .list, description: "The menu path exactly as find_menu_items returned it, for example [\"View\", \"as List\"].")
+                          ])
         return [
         Declaration(name: focusAppName,
                     description: "Brings an app that is already running to the front. Use its name as shown in the Dock, for example \"Finder\".",
@@ -142,12 +161,7 @@ nonisolated enum RealtimeVoiceVerbs {
                         Parameter(name: "app", required: false, description: "The app whose menus to search, for example \"Finder\". Leave it out to mean the app in front."),
                         Parameter(name: "words", description: "A few words for the command, for example \"list view\" or \"new window\".")
                     ]),
-        Declaration(name: pressMenuName,
-                    description: "Presses one menu item of the app in front. The path must be one that find_menu_items returned in this turn, copied exactly.",
-                    parameters: [
-                        Parameter(name: "app", description: "The app in front, for example \"Finder\"."),
-                        Parameter(name: "path", kind: .list, description: "The menu path exactly as find_menu_items returned it, for example [\"View\", \"as List\"].")
-                    ]),
+        pressMenu,
         Declaration(name: findOnScreenName,
                     description: "Looks through the window of the app in front for what the owner can see there — buttons, tabs, rows, links, labels, "
                         + "text — matching a few words, and returns up to \(RealtimeScreenVerbs.maximumScreenCandidates), each with its exact name, what "
@@ -244,7 +258,7 @@ nonisolated enum RealtimeVoiceVerbs {
                              "properties": ["name": ["type": "string", "description": RealtimeOpenAppTool.argumentDescription]],
                              "required": ["name"]] as [String: Any]
         ]
-        return [openApp] + declarations(.fractions, gemini: false).map { declaration in
+        return [openApp] + declarations(.fractions, gemini: false, agent: true).map { declaration in
             [
                 "name": declaration.name, "description": declaration.description,
                 "input_schema": [
@@ -856,6 +870,7 @@ nonisolated enum RealtimeDecisionTrace {
         if let y = call.y { arguments["y"] = y }
         if call.underPointer { arguments["underPointer"] = true }
         if let path = call.path { arguments["path"] = RealtimeVoiceVerbs.isPrivateMenuPath(path) ? privatePathPlaceholder : path }
+        if let shortcut = call.shortcut { arguments["shortcut"] = shortcut }
         if let direction = call.direction { arguments["direction"] = direction }
         if let amount = call.amount { arguments["amount"] = amount }
         // The text is the owner's: its length only, never the words.

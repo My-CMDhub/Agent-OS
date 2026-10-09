@@ -77,6 +77,8 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
     var words: String? = nil
     /// press_menu only: the menu path, bar item first.
     var path: [String]? = nil
+    /// press_menu only, with no path: the shortcut whose mapped owner is pressed (`withShortcutResolved`).
+    var shortcut: String? = nil
     /// point_at / press_element: the element's name, as find_on_screen offered it.
     var elementName: String? = nil
     /// point_at / press_element: a position in the key-down screenshot, 0-1 from its top-left.
@@ -133,8 +135,8 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
             return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["app"]), shapes: shapes)
         }
         return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["name"]) ?? text(arguments?["app"]),
-                                words: words, path: path, what: text(arguments?["what"]), url: text(arguments?["url"]),
-                                goal: text(arguments?["goal"]))
+                                words: words, path: path, shortcut: text(arguments?["shortcut"]), what: text(arguments?["what"]),
+                                url: text(arguments?["url"]), goal: text(arguments?["goal"]))
     }
 }
 
@@ -399,7 +401,9 @@ nonisolated enum RealtimeOpenAppTool {
             // `forModel`: the listing's names go to a remote model, so a policy `refuse` holds.
             request = ["verb": "menus", "expectApp": expectApp ?? appName, "forModel": true]
         case RealtimeVoiceVerbs.pressMenuName:
-            guard let path = call.path, !path.isEmpty else { return refuse("missingMenuPath", "press_menu needs a path from find_menu_items") }
+            guard let path = call.path, !path.isEmpty else {
+                return refuse("missingMenuPath", "press_menu needs a path from find_menu_items or the App verbs, or a shortcut the App verbs list")
+            }
             // Never offered, so never pressed: Open Recent, History and items
             // quoting the selection carry file and page names.
             guard !RealtimeVoiceVerbs.isPrivateMenuPath(path) else {
@@ -1573,6 +1577,8 @@ nonisolated enum RealtimeOpenAppTool {
         case heardOrdinal
         /// press_element at a named position AX cannot press: the harness's `visionClick`.
         case vision
+        /// press_menu of a path in the app's affordance map (`AffordanceMap`), shown to the model as App verbs.
+        case affordanceMap
     }
 
     /// Ask-then-confirm spans turns: the model searches, asks, and the owner
@@ -1593,12 +1599,34 @@ nonisolated enum RealtimeOpenAppTool {
     /// `confirmedByYes`: `RealtimeDecisionTrace.confirmedByPlainYes` — a bare
     /// yes to the one item the previous answer named — opens the same door,
     /// under the same 90 s and (in `harnessRequestLine`) same app.
+    /// `affordanceMap`: the app's map (agent steps only), after this turn's find
+    /// and before an earlier turn's: app-read paths, so the gate still judges the
+    /// model's words against the app's. No age limit here; the cache's own 10
+    /// minutes, version and pid bound it (`AffordanceMapCache`). Its `app` is the
+    /// map's bundle, so `harnessRequestLine` still refuses it in another app.
     static func pressOffer(path: [String]?, thisTurn: RealtimeStandingOffer?, previousTurn: RealtimeStandingOffer?,
-                           followUpConfirmed: Bool?, confirmedByYes: Bool = false,
+                           followUpConfirmed: Bool?, confirmedByYes: Bool = false, affordanceMap: RealtimeStandingOffer? = nil,
                            now: TimeInterval) -> (offer: RealtimeStandingOffer?, source: OfferSource?) {
-        standingOffer(thisTurn: thisTurn, previousTurn: previousTurn, followUpConfirmed: followUpConfirmed,
-                      confirmedByYes: confirmedByYes, now: now) { RealtimeDecisionTrace.choseFromOffered(path: path, offered: $0.candidates) == true }
+        let offers = { (offer: RealtimeStandingOffer) in RealtimeDecisionTrace.choseFromOffered(path: path, offered: offer.candidates) == true }
+        if let thisTurn, offers(thisTurn) { return (thisTurn, .thisTurn) }
+        if let affordanceMap, offers(affordanceMap) { return (affordanceMap, .affordanceMap) }
+        return standingOffer(thisTurn: thisTurn, previousTurn: previousTurn, followUpConfirmed: followUpConfirmed,
+                             confirmedByYes: confirmedByYes, now: now, offers: offers)
     }
+
+    /// press_menu(shortcut:) with no path: the one mapped item that owns the
+    /// shortcut, as a path, so every later gate is the path's. Never a keystroke.
+    static func withShortcutResolved(_ call: RealtimeToolCall, map: RealtimeStandingOffer?) -> Result<RealtimeToolCall, RealtimeToolRefusal> {
+        guard call.name == RealtimeVoiceVerbs.pressMenuName, call.path?.isEmpty ?? true, let shortcut = call.shortcut else { return .success(call) }
+        return AffordanceMap.resolve(shortcut: shortcut, in: map).map { path in
+            var resolved = call
+            resolved.path = path
+            return resolved
+        }
+    }
+
+    /// A mapped path the app no longer has: the map is stale, rebuilt at the next look.
+    static func invalidatesAffordanceMap(error: String?) -> Bool { ["notFound", "targetIsSubmenu"].contains(error ?? "") }
 
     /// A plain yes for this press or point (`RealtimeDecisionTrace.confirmedByPlainYes`),
     /// judged against ONE kind of offer: the previous turn's LATEST find

@@ -40,6 +40,8 @@ final class RealtimeTurnMarks {
     /// across turns that made none: a press may use it only as
     /// `RealtimeOpenAppTool.pressOffer` allows (90 s, the owner's words).
     var previousTurnMenuOffer: RealtimeStandingOffer?
+    /// Agent steps: the front app's affordance map the model was shown (`AffordanceMap.offer`); a press of a mapped path needs no find.
+    var affordanceMenuOffer: RealtimeStandingOffer?
     /// The same pair for find_on_screen's controls (`RealtimeOpenAppTool.pointOffer`).
     var latestScreenOffer: RealtimeStandingOffer?
     var previousTurnScreenOffer: RealtimeStandingOffer?
@@ -921,11 +923,22 @@ final class RealtimeVoiceConnection {
     /// front (`withFrontmostApp`). `checksSite: false` only for the loop's own
     /// search page, whose host is fixed in code. nil: `isCurrent` went false
     /// before the call ran (recorded as superseded; nothing was done).
-    static func runToolCall(_ call: RealtimeToolCall, decisionIndex: Int, in turn: RealtimeTurnMarks,
+    static func runToolCall(_ unresolvedCall: RealtimeToolCall, decisionIndex: Int, in turn: RealtimeTurnMarks,
                             harnessAnswer: @escaping @Sendable (String) -> String, checksSite: Bool = true,
                             confirmationWaitSeconds: Double = RealtimeOpenAppTool.confirmationWaitSeconds,
                             onConfirmationRequired agentCardOpened: (@MainActor () -> Void)? = nil,
                             isCurrent: @escaping @MainActor () -> Bool) async -> RealtimeToolDispatch? {
+        // press_menu(shortcut:): the mapped item that owns it, by its path, so every gate below is the path's.
+        let call: RealtimeToolCall
+        switch RealtimeOpenAppTool.withShortcutResolved(unresolvedCall, map: turn.affordanceMenuOffer) {
+        case .success(let resolved): call = resolved
+        case .failure(let refusal):
+            let refused = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: refusal), harnessMilliseconds: 0,
+                                               waitedForConfirmation: false, harnessResponse: nil)
+            turn.dispatches.append(refused)
+            turn.decisions[decisionIndex].dispatch = refused
+            return refused
+        }
         // Read now, after the previous call finished: a find and a press sent
         // in one batch must still press what that find offered.
         let thisTurnOffer = turn.latestMenuOffer
@@ -960,7 +973,7 @@ final class RealtimeVoiceConnection {
                 && (call.elementName != nil || call.x != nil || call.y != nil || call.underPointer))
         let chosen = RealtimeOpenAppTool.pressOffer(path: call.path, thisTurn: thisTurnOffer, previousTurn: turn.previousTurnMenuOffer,
                                                     followUpConfirmed: heard?.followUpConfirmed, confirmedByYes: heard?.confirmedByYes == true,
-                                                    now: ProcessInfo.processInfo.systemUptime)
+                                                    affordanceMap: turn.affordanceMenuOffer, now: ProcessInfo.processInfo.systemUptime)
         let offered = isScreenTarget ? nil : chosen.offer?.candidates
         let offeredApp = isScreenTarget ? nil : chosen.offer?.app
         var screenTarget: RealtimeScreenTarget?
@@ -1108,6 +1121,10 @@ final class RealtimeVoiceConnection {
         dispatch.heardOverlapsLabel = heard?.overlapsLabel
         if RealtimeOpenAppTool.passedOfferGate(toolName: call.name, dispatch: dispatch) {
             turn.decisions[decisionIndex].offerSource = isScreenTarget ? screenTarget?.source : chosen.source
+        }
+        if chosen.source == .affordanceMap, let app = chosen.offer?.app,
+           RealtimeOpenAppTool.invalidatesAffordanceMap(error: dispatch.result["error"] as? String) {
+            AffordanceMapCache.shared.invalidate(bundle: app)
         }
         turn.dispatches.append(dispatch)
         turn.decisions[decisionIndex].dispatch = dispatch
