@@ -1305,15 +1305,18 @@ final class AgentLoop {
     /// the kernel asks on a CARD before a press whose own AX name commits (save,
     /// send, …) — the owner can still approve it later (2026-10-10). The flag only
     /// ever adds a question; `draftRefusal` stays the words this judge used to apply.
+    /// A request it cannot read or re-encode is refused, never sent on without the flag (review 2026-10-10).
     nonisolated static func draftGuardedAnswer(_ answer: @escaping @Sendable (String) -> String) -> @Sendable (String) -> String {
         { line in
-            guard var request = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return answer(line) }
+            guard var request = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return draftScopeUnreadable }
             request["draftScope"] = true
             guard let data = try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]),
-                  let flagged = String(data: data, encoding: .utf8) else { return answer(line) }
+                  let flagged = String(data: data, encoding: .utf8) else { return draftScopeUnreadable }
             return answer(flagged)
         }
     }
+    nonisolated static let draftScopeUnreadable = "{\"ok\":false,\"error\":\"draftScopeUnreadable\",\"message\":\"nothing was done: "
+        + "this task stops before saving or sending, and the request could not be read to mark it so\"}"
 
     nonisolated static func appendTrace(_ line: [String: Any]) {
         MeasurementLogFile.appendJSONLine(line, toFileNamed: traceFileName, rotatingAtBytes: HarnessServer.auditLogRotationBytes)

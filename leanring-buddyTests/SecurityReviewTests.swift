@@ -189,4 +189,20 @@ private final class Lines: @unchecked Sendable { var lines: [String] = [] }
                                           frontAppMarksRead: marksRead) == nil)
     }
 
+    // 5: replies, comments and RSVPs commit a draft too.
+    @Test func moreWordsCommitADraft() {
+        for word in ["reply", "comment", "tweet", "connect", "update", "done", "create", "confirm", "book", "rsvp", "accept", "join"] {
+            #expect(ActionSafetyKernel.draftCommitWords.contains(word), "\(word)")
+        }
+    }
+
+    // 5: a request the draft guard cannot read is refused, never sent on without its flag.
+    @Test func anUnreadableDraftRequestFailsClosed() {
+        let seen = Lines()
+        let guarded = AgentLoop.draftGuardedAnswer { line in seen.lines.append(line); return "{\"ok\":true}" }
+        let answer = guarded("{\"verb\":\"press\",\"title\":\"Send\"")
+        #expect(seen.lines.isEmpty)
+        #expect(answer.contains("\"ok\":false"))
+    }
+
 }

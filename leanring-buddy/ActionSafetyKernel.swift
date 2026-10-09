@@ -178,8 +178,11 @@ enum ActionSafetyKernel {
     static let replaceWouldDiscardReasonPrefix = "replace would discard "
     /// The owner's words set draft scope ("stop before saving", "don't send").
     static let draftScopeReasonPrefix = "the owner said to stop before this: "
-    /// The words that commit a draft, as whole words of a target's own name.
-    static let draftCommitWords: Set<String> = ["send", "save", "schedule", "invite", "post", "publish", "submit", "share"]
+    /// The words that commit a draft, as whole words of a target's own name. The second
+    /// line is the security review of 2026-10-10: replies, comments, RSVPs and invitations
+    /// accepted commit as surely as a Send ("Done" and "Update" save an edit in place).
+    static let draftCommitWords: Set<String> = ["send", "save", "schedule", "invite", "post", "publish", "submit", "share",
+        "reply", "comment", "tweet", "connect", "update", "done", "create", "confirm", "book", "rsvp", "accept", "join"]
     /// Single-line inputs: replacing one discards a value, never a document.
     static let singleLineTextRoles: Set<String> = ["AXTextField", "AXComboBox"]
 
