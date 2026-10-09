@@ -1179,4 +1179,31 @@ enum AccessibilityMenu {
         ) == .success, let windows = value as? [AXUIElement] else { return nil }
         return windows.count
     }
+
+    /// What `ActionVerifier.menuPressEvidence` compares, read fresh. A closed
+    /// menu item's mark reads fine (measured 2026-09-25, probe 7D6CDDBB) but
+    /// LAGS the press until AppKit re-validates, so it is polled, never read once.
+    static func pressReading(item: AXUIElement, application: NSRunningApplication) -> ActionVerifier.MenuPressReading {
+        func copy(_ element: AXUIElement, _ attribute: String) -> (AXError, AnyObject?) {
+            var value: AnyObject?
+            let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+            return (error, value)
+        }
+        var reading = ActionVerifier.MenuPressReading(windows: windowCount(for: application))
+        switch copy(item, markCharAttribute) {
+        case (.success, let value): reading.marked = (value as? String).map { !$0.isEmpty } ?? false
+        // "empty or absent when unmarked": absence is an answer, any other error is not.
+        case (.noValue, _), (.attributeUnsupported, _): reading.marked = false
+        default: break
+        }
+        let (focusError, focusValue) = copy(AXUIElementCreateApplication(application.processIdentifier), kAXFocusedUIElementAttribute)
+        guard focusError == .success, let focusValue, CFGetTypeID(focusValue) == AXUIElementGetTypeID() else { return reading }
+        let focused = focusValue as! AXUIElement
+        reading.focused = AccessibilityElementKey(element: focused)
+        if case (.success, let rangeValue?) = copy(focused, kAXSelectedTextRangeAttribute), CFGetTypeID(rangeValue) == AXValueGetTypeID() {
+            var range = CFRange()
+            if AXValueGetValue(rangeValue as! AXValue, .cfRange, &range) { reading.selection = [range.location, range.length] }
+        }
+        return reading
+    }
 }

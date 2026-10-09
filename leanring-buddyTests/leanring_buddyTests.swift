@@ -2486,6 +2486,31 @@ private func expectEverySuggestionResolvesToItsOwnCandidate(
     #expect(ActionVerifier.outcome(afterPolls: [gap, gap], elapsedMilliseconds: 160) == .windowGone(afterMilliseconds: 160))
 }
 
+// 2026-10-10 baseline: View > By Month (G06), File > Find… (G12) and Edit > Select All
+// (G15) came back notVerified after ~3.2 s — a check mark, a focus move or a selection
+// is invisible to the window-name fingerprint.
+@Test func aMenuPressIsEvidencedByItsMarkFocusOrSelection() {
+    typealias R = ActionVerifier.MenuPressReading
+    let list = AccessibilityElementKey(element: AXUIElementCreateApplication(101))
+    let search = AccessibilityElementKey(element: AXUIElementCreateApplication(102))
+    let before = R(windows: 1, marked: false, focused: list, selection: [0, 0])
+    #expect(ActionVerifier.menuPressEvidence(before: before, now: before) == nil)
+    #expect(ActionVerifier.menuPressEvidence(before: before, now: R(windows: 2, marked: false, focused: list, selection: [0, 0]))
+            == "the window count changed")
+    #expect(ActionVerifier.menuPressEvidence(before: before, now: R(windows: 1, marked: true, focused: list, selection: [0, 0]))
+            == "the menu item's check mark changed")
+    #expect(ActionVerifier.menuPressEvidence(before: before, now: R(windows: 1, marked: false, focused: search, selection: nil))
+            == "the focused element changed")
+    #expect(ActionVerifier.menuPressEvidence(before: before, now: R(windows: 1, marked: false, focused: list, selection: [0, 42]))
+            == "the focused element's selection changed")
+    // A read that failed is never evidence: nil on either side compares nothing.
+    #expect(ActionVerifier.menuPressEvidence(before: before, now: R(windows: nil, marked: nil, focused: nil, selection: nil)) == nil)
+    #expect(ActionVerifier.menuPressEvidence(before: R(windows: nil, marked: nil, focused: nil, selection: nil), now: before) == nil)
+    // A selection read on a DIFFERENT element is no change of selection.
+    #expect(ActionVerifier.menuPressEvidence(before: R(windows: 1, marked: nil, focused: nil, selection: [0, 0]),
+                                             now: R(windows: 1, marked: nil, focused: search, selection: [0, 9])) == nil)
+}
+
 @Test func aSnapshotBetweenTwoGapsIsAWindowSwitchNotAClose() async throws {
     let gap: Error? = AccessibilitySnapshotError.noFocusedWindow
     #expect(ActionVerifier.outcome(afterPolls: [gap, nil], elapsedMilliseconds: 160) == nil)

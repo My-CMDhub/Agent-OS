@@ -126,6 +126,31 @@ enum ActionVerifier {
         return (outcome, polls)
     }
 
+    /// What a menu press can change that the window fingerprint cannot see.
+    /// 2026-10-10 baseline: View > By Month, File > Find… and Edit > Select All
+    /// each came back notVerified after ~3.2 s. nil is a read that failed.
+    struct MenuPressReading: Equatable {
+        var windows: Int?
+        /// The pressed item's `AXMenuItemMarkChar` is non-empty.
+        var marked: Bool?
+        /// The pressed app's `AXFocusedUIElement`.
+        var focused: AccessibilityElementKey?
+        /// That element's `AXSelectedTextRange` as [location, length].
+        var selection: [Int]?
+    }
+
+    /// The first thing that moved between two readings, or nil. Only two
+    /// successful reads are compared: a failed read is never evidence.
+    static func menuPressEvidence(before: MenuPressReading, now: MenuPressReading) -> String? {
+        if let was = before.windows, let isNow = now.windows, was != isNow { return "the window count changed" }
+        if let was = before.marked, let isNow = now.marked, was != isNow { return "the menu item's check mark changed" }
+        if let was = before.focused, let isNow = now.focused, was != isNow { return "the focused element changed" }
+        if let was = before.focused, was == now.focused, let wasRange = before.selection, let range = now.selection, wasRange != range {
+            return "the focused element's selection changed"
+        }
+        return nil
+    }
+
     /// The loop, generic over what a walk returns so a test can drive it
     /// without a cross-process read.
     static func poll<Snapshot>(

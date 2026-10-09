@@ -3686,10 +3686,15 @@ final class HarnessServer {
         // The named-element fingerprint cannot see `File > New Finder Window` —
         // two Finder windows on the same folder publish the same names — and
         // the window count cannot see anything that is not a window.
-        let windowsBefore = AccessibilityMenu.windowCount(for: application)
+        // A third: the item's check mark, the focused element and its selection
+        // (`ActionVerifier.menuPressEvidence`) — View > By Month, File > Find… and
+        // Edit > Select All change only those, and came back notVerified (2026-10-10).
+        let readingBefore = AccessibilityMenu.pressReading(item: element, application: application)
+        let windowsBefore = readingBefore.windows
         let namesBefore = (try? AccessibilityTreeWalker.snapshotFocusedWindow())?
             .rootNode.map(AccessibilityDumpRunner.namedElementFingerprint)
         response["windowsBefore"] = (windowsBefore ?? NSNull()) as Any
+        response["markedBefore"] = (readingBefore.marked ?? NSNull()) as Any
 
         // Pressing works with the menu **closed**, and leaves nothing open on
         // screen. Measured 2026-09-10 over this socket: File > New Finder Window
@@ -3715,9 +3720,14 @@ final class HarnessServer {
         // A menu works with no window open, and then "no focused window" after
         // the press is not a window that closed. See `ActionVerifier.verify`.
         // Count before walking — see `ActionVerifier.pollCountingWindowsFirst`.
+        // Re-read every poll, before any walk: the mark lags the press (see `pressReading`).
+        var cheapEvidence: String?
+        var readingAfter = readingBefore
         let windowCountMoved = {
-            if let windowsBefore, AccessibilityMenu.windowCount(for: application) != windowsBefore { return true }
-            return false
+            if cheapEvidence != nil { return true }
+            readingAfter = AccessibilityMenu.pressReading(item: element, application: application)
+            cheapEvidence = ActionVerifier.menuPressEvidence(before: readingBefore, now: readingAfter)
+            return cheapEvidence != nil
         }
         let (verification, verifyWalks) = ActionVerifier.pollCountingWindowsFirst(
             locate: AccessibilityTreeWalker.focusedWindowTarget,
@@ -3737,10 +3747,11 @@ final class HarnessServer {
             let windowsAfter = AccessibilityMenu.windowCount(for: application)
             response["verification"] = [
                 "status": "confirmed",
-                "evidence": windowsBefore != nil && windowsAfter != windowsBefore
-                    ? "the window count changed" : "named elements changed",
+                "evidence": cheapEvidence ?? (windowsBefore != nil && windowsAfter != windowsBefore
+                    ? "the window count changed" : "named elements changed"),
                 "milliseconds": milliseconds,
-                "windowsAfter": (windowsAfter ?? NSNull()) as Any
+                "windowsAfter": (windowsAfter ?? NSNull()) as Any,
+                "markedAfter": (readingAfter.marked ?? NSNull()) as Any
             ]
             response["ok"] = true
             audit(request, dryRun: dryRun, kernel: described.decision, outcome: "confirmed", startedAt: startedAt)
@@ -3760,7 +3771,9 @@ final class HarnessServer {
             response["verification"] = [
                 "status": "notObserved",
                 "milliseconds": milliseconds,
-                "windowsAfter": (AccessibilityMenu.windowCount(for: application) ?? NSNull()) as Any
+                "windowsAfter": (AccessibilityMenu.windowCount(for: application) ?? NSNull()) as Any,
+                // Checked before and after: the item was already in that state.
+                "markedAfter": (readingAfter.marked ?? NSNull()) as Any
             ]
             response["ok"] = false
             response["error"] = "notVerified"
