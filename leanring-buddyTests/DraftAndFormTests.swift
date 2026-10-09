@@ -154,4 +154,30 @@ extension DraftAndFormTests {
     }
 }
 
+extension DraftAndFormTests {
+
+    // Run BCD5ABD3 (2026-10-10): type_text "Guests" listed tab "Guests" and group "Guests" and never the
+    // box. The one-per-name pool dropped the AXComboBox inside its same-named tab panel.
+    @Test func aFieldNamedLikeItsPanelIsTypedInto() {
+        func frameJSON(_ r: CGRect) -> [String: Any] { ["x": r.minX, "y": r.minY, "w": r.width, "h": r.height] }
+        func element(_ role: String, _ name: String, _ frame: CGRect, subrole: String? = nil, parent: Int? = nil) -> [String: Any] {
+            ["role": role, "subrole": subrole ?? NSNull(), "name": name, "nameIsPlausibleLabel": true, "actions": ["AXShowMenu", "AXScrollToVisible"],
+             "nameSource": "title", "parent": parent ?? NSNull(), "frame": frameJSON(frame)]
+        }
+        let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let snapshot: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(screen), "elements": [
+            element("AXWindow", "Calendar", screen),
+            element("AXRadioButton", "Guests", CGRect(x: 707, y: 554, width: 78, height: 48), subrole: "AXTabButton"),
+            element("AXGroup", "Guests", CGRect(x: 699, y: 0, width: 352, height: 554), subrole: "AXTabPanel"),
+            element("AXComboBox", "Guests", CGRect(x: 731, y: 508, width: 304, height: 24), parent: 2)
+        ]]
+        let found = RealtimeScreenVerbs.liveCandidates(named: "Guests", fromSnapshotResponse: snapshot, screens: [screen])
+        #expect(found.contains { $0.role == "AXComboBox" })
+        #expect(RealtimeScreenVerbs.typingCandidates(found).map(\.role) == ["AXComboBox"])
+        // No input among them: unchanged, so the refusal still lists what matched.
+        let noInputs = found.filter { $0.role != "AXComboBox" }
+        #expect(RealtimeScreenVerbs.typingCandidates(noInputs) == noInputs)
+    }
+}
+
 final class LineBox: @unchecked Sendable { var lines: [String] = [] }

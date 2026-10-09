@@ -1033,7 +1033,9 @@ nonisolated enum RealtimeOpenAppTool {
         case .failure(let refusal):
             return .failure(refusal)
         case .success(let found):
-            return liveTarget(named: name, found: found, nothing: nothing, heard: ordinalWords)
+            let aimed = call.name == RealtimeVoiceVerbs.typeTextName
+                ? RealtimeScreenLookup(candidates: RealtimeScreenVerbs.typingCandidates(found.candidates), app: found.app) : found
+            return liveTarget(named: name, found: aimed, nothing: nothing, heard: ordinalWords)
         }
     }
 

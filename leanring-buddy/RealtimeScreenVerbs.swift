@@ -197,10 +197,20 @@ nonisolated enum RealtimeScreenVerbs {
             // One per name, except two clickable controls apart from each other (scenario
             // B12 2026-10-03: two "Download" buttons offered as one, and the press guessed).
             let sameName = pool.filter { $0.name == name }
-            guard sameName.isEmpty || (kept.isClickable && sameName.allSatisfy { $0.isClickable && !$0.frame.intersects(frame) }) else { continue }
+            // And a text input is never folded into a same-named tab or panel (Calendar's "Guests", BCD5ABD3).
+            let input = AccessibilityElementNode.textInputRoles.contains(role)
+            guard sameName.isEmpty || (kept.isClickable && sameName.allSatisfy { $0.isClickable && !$0.frame.intersects(frame) })
+                    || (input && !sameName.contains { AccessibilityElementNode.textInputRoles.contains($0.role) }) else { continue }
             pool.append(kept)
         }
         return (pool, hidden)
+    }
+
+    /// type_text means a text input: when a name matches inputs and other things
+    /// (Calendar's tab, tab panel and box are all "Guests"), only the inputs.
+    static func typingCandidates(_ candidates: [RealtimeScreenCandidate]) -> [RealtimeScreenCandidate] {
+        let inputs = candidates.filter { AccessibilityElementNode.textInputRoles.contains($0.role) }
+        return inputs.isEmpty ? candidates : inputs
     }
 
     static func screenOffer(fromSnapshotResponse response: [String: Any], words: String, screens: [CGRect],
