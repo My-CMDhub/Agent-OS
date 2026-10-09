@@ -378,6 +378,25 @@ struct RealtimeHeardCheckTests {
         #expect(decide("search for HeyClicky").refusalError != nil)
     }
 
+    // G09 2026-10-10: "the scripts folder of the Heyclicky repo" refused Finder's
+    // Go > Home as heardNamedMismatch ("names HeyClicky … not Finder"). A repo,
+    // project or folder named like an app is what the request is about.
+    @Test func aRepoOrProjectNamedLikeAnAppIsATopic() {
+        let apps = installed + [app("/Applications/HeyClicky.app")]
+        func decide(_ transcript: String, named: String = "Finder", tool: String = "press_menu") -> RealtimeHeardCheck.Decision {
+            RealtimeHeardCheck.decide(transcript: transcript, named: named, among: apps, toolName: tool)
+        }
+        let goal = "how many files and folders are directly inside the scripts folder of the Heyclicky repo?"
+        #expect(decide(goal).refusalError == nil)
+        #expect(!decide(goal).heardApps.contains("HeyClicky"))
+        for noun in ["repository", "project", "folder", "codebase", "directory"] {
+            #expect(decide("list the files in the HeyClicky \(noun)").refusalError == nil, "\(noun)")
+        }
+        // Where to act still names the app.
+        #expect(decide("open HeyClicky").outcome == .heardNamedMismatch)
+        #expect(decide("open HeyClicky", named: "HeyClicky", tool: "open_app").outcome == .match)
+    }
+
     // Live voices are slower than the fixtures: Gemini's transcript came at up to
     // 3,107 ms after the release (voice-decisions.log, 123 live turns).
     @Test func theTranscriptWaitCoversTheSlowestLiveTranscript() {

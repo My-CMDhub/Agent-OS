@@ -406,7 +406,9 @@ nonisolated enum RealtimeHeardCheck {
         "tab", "tabs", "url", "browser", "devtools", "incognito", "workspace", "terminal", "settings", "okay",
         // Absent from Webster's Second, every one (checked 2026-10-03): "in the search
         // box" was refused heardUnavailable in every scenario run (A5, C2, C5).
-        "box", "textbox", "searchbox", "checkbox", "dialog", "textarea", "omnibox"
+        "box", "textbox", "searchbox", "checkbox", "dialog", "textarea", "omnibox",
+        // G09 2026-10-10: "…of the Heyclicky repo?" ends on "repo", which Webster's lacks.
+        "repo", "codebase"
     ]
 
     /// An inflected form of a listed word: Webster's lists "window", not
@@ -814,6 +816,10 @@ nonisolated enum RealtimeHeardCheck {
     /// "HeyClicky posts", "HeyClicky's videos", "videos on HeyClicky".
     static let topicNouns: Set<String> = ["post", "posts", "video", "videos", "article", "articles", "news", "tips", "tutorial",
                                           "tutorials", "review", "reviews", "updates", "content", "comments", "mentions"]
+    /// G09 2026-10-10: "the scripts folder of the Heyclicky repo" refused Finder's
+    /// Go > Home as heardNamedMismatch. A repo or project named like an app is what
+    /// the request is about; "open HeyClicky" still names the app.
+    static let projectNouns: Set<String> = ["repo", "repos", "repository", "project", "folder", "codebase", "directory"]
     static let topicFillerWords = containerFillerWords.union(["his", "her", "their", "its", "our", "your", "an", "some", "any"])
 
     /// Whether the words `spoken[start..<end]` are what the request is about.
@@ -824,7 +830,7 @@ nonisolated enum RealtimeHeardCheck {
     static func isTopic(_ spoken: [String], from start: Int, to end: Int, searches: Bool = false) -> Bool {
         var follow = end
         if follow < spoken.count, spoken[follow] == "s" { follow += 1 }
-        if follow < spoken.count, topicNouns.contains(spoken[follow]) { return true }
+        if follow < spoken.count, topicNouns.contains(spoken[follow]) || projectNouns.contains(spoken[follow]) { return true }
         guard let lead = spoken[..<start].lastIndex(where: { !topicFillerWords.contains($0) }) else { return false }
         let before = lead > 0 ? spoken[lead - 1] : ""
         switch spoken[lead] {
