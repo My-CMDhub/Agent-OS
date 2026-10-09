@@ -49,7 +49,9 @@ struct AffordanceMapTests {
     @Test func linesKeepADisabledItemOnlyWithItsShortcut() throws {
         let map = try #require(AffordanceMap(menusResponse: finderMenus, bundleIdentifier: "com.apple.finder", version: "1", pid: 1, builtUptime: 0))
         let lines = map.menuLines(readOnly: false)
-        #expect(lines.contains("File > Get Info (⌘I, disabled now)"))
+        // The cached enabled flag goes stale; the kernel judges it live at press time (review of e98f476).
+        #expect(lines.contains("File > Get Info (⌘I)"))
+        #expect(!lines.contains { $0.contains("disabled") })
         #expect(!lines.contains { $0.contains("Burn to Disc") })
         #expect(lines.contains("View > as List (⌘2)"))
         #expect(lines.contains("Go > Downloads (⌥⌘L)"))
@@ -60,7 +62,7 @@ struct AffordanceMapTests {
         let lines = map.menuLines(readOnly: true)
         #expect(!lines.contains { $0.contains("New Folder") }, "File > New Folder makes something: never in a read-only map")
         #expect(lines.contains("View > as List (⌘2)"))
-        #expect(lines.contains("File > Get Info (⌘I, disabled now)"))
+        #expect(lines.contains("File > Get Info (⌘I)"))
     }
 
     @Test func overBudgetDropsBoilerplateThenDeepItemsThenTheTail() throws {

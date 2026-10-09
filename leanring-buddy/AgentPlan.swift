@@ -137,9 +137,9 @@ nonisolated enum AgentPlan {
 
     /// What the menus and screen say NOW, before any step acts. Menu steps:
     /// the path (or the shortcut's one owner) is in the App verbs or a find of
-    /// this task, and a read-only task's press judge allows it; an item the map
-    /// marks disabled is refused only when no earlier step acts (Get Info
-    /// enables after a selection). A step aimed by name before anything acts:
+    /// this task, and a read-only task's press judge allows it. Enabled is not
+    /// judged here: the map's flag may be stale, and the kernel refuses a
+    /// disabled item live at press time. A step aimed by name before anything acts:
     /// refused if every exact match on screen is a secure field, or if more
     /// than one matches (ask which). No match is allowed: the press's own
     /// resolver still has OCR and vision to look with.
@@ -167,9 +167,6 @@ nonisolated enum AgentPlan {
                 }
                 if readOnly, let reason = AgentLoop.readOnlyRefusal(["verb": "menu", "path": path], focusedField: { nil }) {
                     return "step \(number): this task is read-only by the owner's words, and \(reason)"
-                }
-                if !actedBefore, map?.items.first(where: { $0.path == path })?.enabled == false {
-                    return "step \(number): \(shown) is disabled now, and no step before it changes that"
                 }
             } else if !actedBefore, RealtimeVoiceVerbs.aimsAtScreen(tool), let name = step["name"] as? String, let elements = screenElements {
                 let matches = elements.filter { $0["name"] as? String == name }

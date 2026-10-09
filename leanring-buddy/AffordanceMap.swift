@@ -76,9 +76,11 @@ nonisolated struct AffordanceMap: Sendable {
     }
 
     /// What the model reads: leaves in menu order, ≤120. A disabled item stays
-    /// only with a shortcut, marked "disabled now" (Get Info enables after a
-    /// selection, and a plan must be able to name it). Over budget: boilerplate
-    /// first, then depth ≥3 without a shortcut, then the tail.
+    /// only with a shortcut (Get Info enables after a selection, and a plan must
+    /// be able to name it), unmarked: the cached flag goes stale within the
+    /// cache's 10 minutes, and the kernel refuses a disabled item live at press
+    /// time (review of e98f476). Over budget: boilerplate first, then depth ≥3
+    /// without a shortcut, then the tail.
     func menuLines(readOnly: Bool) -> [String] {
         var kept = items.filter { item in
             (item.enabled || item.shortcut != nil)
@@ -95,11 +97,7 @@ nonisolated struct AffordanceMap: Sendable {
 
     static func line(_ item: Item) -> String {
         let path = item.path.joined(separator: " > ")
-        switch (item.shortcut, item.enabled) {
-        case (nil, _): return path
-        case (let shortcut?, true): return "\(path) (\(shortcut))"
-        case (let shortcut?, false): return "\(path) (\(shortcut), disabled now)"
-        }
+        return item.shortcut.map { "\(path) (\($0))" } ?? path
     }
 
     // MARK: Shortcut

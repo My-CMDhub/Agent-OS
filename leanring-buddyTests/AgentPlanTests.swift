@@ -104,9 +104,8 @@ struct AgentPlanTests {
         #expect(check([["tool": "press_menu", "path": ["View", "as Gallery"]]], find: found) == nil, "a find of this task offers it too")
         #expect(check([["tool": "press_menu", "shortcut": "⌘9"]]) != nil)
         #expect(check([["tool": "press_menu", "path": ["File", "New Folder"]]], readOnly: true)?.contains("read-only") == true)
-        #expect(check([["tool": "press_menu", "path": ["File", "Get Info"]]])?.contains("disabled now") == true)
-        #expect(check([["tool": "press_element", "name": "Downloads"], ["tool": "press_menu", "path": ["File", "Get Info"]]]) == nil,
-                "Get Info enables after a selection: an earlier acting step may change it")
+        #expect(check([["tool": "press_menu", "path": ["File", "Get Info"]]]) == nil,
+                "a cached enabled flag goes stale: the kernel refuses a disabled item live, the precheck does not guess")
     }
 
     @Test func aStepAimedByNameBeforeActingMustNotBeAmbiguousOrSecure() {
