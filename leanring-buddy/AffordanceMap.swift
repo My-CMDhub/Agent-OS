@@ -237,7 +237,10 @@ extension AffordanceMap {
     /// built off the request queue's answer, never by a new AX path.
     static func live(bundle: String, harnessAnswer: @escaping @Sendable (String) -> String,
                      cache: AffordanceMapCache = .shared) async -> (map: AffordanceMap, cached: Bool)? {
-        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { return nil }
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundle)
+        // Two instances of one app (review of e98f476): the one in front, whose menu bar `menus` reads.
+        let front = running.count > 1 ? await Task.detached { AccessibilityTreeWalker.focusedApplication()?.processIdentifier }.value : nil
+        guard let app = running.first(where: { $0.processIdentifier == front }) ?? running.first else { return nil }
         let version = version(ofBundleAt: app.bundleURL)
         let pid = app.processIdentifier
         let now = ProcessInfo.processInfo.systemUptime
@@ -263,7 +266,8 @@ extension AffordanceMap {
     }
 }
 
-/// Memory only, lock-guarded, ≤24 apps (least recently used goes first).
+/// Memory only, lock-guarded, ≤24 apps (least recently used goes first),
+/// one map per running instance (bundle + pid).
 /// A map is stale after a version change, a relaunch (new pid), 10 minutes,
 /// or a mapped path coming back `notFound` / `targetIsSubmenu` (`invalidate`).
 nonisolated final class AffordanceMapCache: @unchecked Sendable {
@@ -278,33 +282,38 @@ nonisolated final class AffordanceMapCache: @unchecked Sendable {
 
     var count: Int { lock.withLock { maps.count } }
 
+    private static func key(_ bundle: String, _ pid: pid_t) -> String { "\(bundle)|\(pid)" }
+
     func map(bundle: String, version: String, pid: pid_t, now: TimeInterval) -> AffordanceMap? {
-        lock.withLock {
-            guard let map = maps[bundle] else { return nil }
-            guard map.version == version, map.pid == pid, now - map.builtUptime <= Self.maximumAgeSeconds else {
-                maps[bundle] = nil
-                order.removeAll { $0 == bundle }
+        let key = Self.key(bundle, pid)
+        return lock.withLock {
+            guard let map = maps[key] else { return nil }
+            guard map.version == version, now - map.builtUptime <= Self.maximumAgeSeconds else {
+                maps[key] = nil
+                order.removeAll { $0 == key }
                 return nil
             }
-            order.removeAll { $0 == bundle }
-            order.append(bundle)
+            order.removeAll { $0 == key }
+            order.append(key)
             return map
         }
     }
 
     func store(_ map: AffordanceMap) {
+        let key = Self.key(map.bundleIdentifier, map.pid)
         lock.withLock {
-            maps[map.bundleIdentifier] = map
-            order.removeAll { $0 == map.bundleIdentifier }
-            order.append(map.bundleIdentifier)
+            maps[key] = map
+            order.removeAll { $0 == key }
+            order.append(key)
             while order.count > Self.maximumApps { maps[order.removeFirst()] = nil }
         }
     }
 
+    /// Every instance's map of the bundle.
     func invalidate(bundle: String) {
         lock.withLock {
-            maps[bundle] = nil
-            order.removeAll { $0 == bundle }
+            maps = maps.filter { $0.value.bundleIdentifier != bundle }
+            order.removeAll { maps[$0] == nil }
         }
     }
 }

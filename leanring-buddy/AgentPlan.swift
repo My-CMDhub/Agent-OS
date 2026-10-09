@@ -146,10 +146,23 @@ nonisolated enum AgentPlan {
     static func livePrecheck(_ steps: [[String: Any]], menuOffer: RealtimeStandingOffer?, findOffer: RealtimeStandingOffer?, readOnly: Bool,
                              screenElements: [[String: Any]]?) -> String? {
         var actedBefore = false
+        var appChanged = false
         for (index, step) in steps.enumerated() {
             let tool = tool(of: step)
             let number = index + 1
-            defer { if isActing(tool) { actedBefore = true } }
+            defer {
+                if isActing(tool) { actedBefore = true }
+                if AgentLoop.appChangingTools.contains(tool) { appChanged = true }
+            }
+            // After a step that brings another app forward, this app's App verbs cannot judge its menus:
+            // the press's own offer gate does, then. The read-only judge needs no map and still applies.
+            if tool == RealtimeVoiceVerbs.pressMenuName, appChanged {
+                let path = (step["path"] as? [Any])?.compactMap { $0 as? String } ?? []
+                if readOnly, let reason = AgentLoop.readOnlyRefusal(["verb": "menu", "path": path], focusedField: { nil }) {
+                    return "step \(number): this task is read-only by the owner's words, and \(reason)"
+                }
+                continue
+            }
             if tool == RealtimeVoiceVerbs.pressMenuName {
                 var path = (step["path"] as? [Any])?.compactMap { $0 as? String } ?? []
                 if path.isEmpty, let shortcut = step["shortcut"] as? String {

@@ -106,6 +106,10 @@ struct AgentPlanTests {
         #expect(check([["tool": "press_menu", "path": ["File", "New Folder"]]], readOnly: true) != nil, "not shown, so not offered")
         #expect(check([["tool": "press_menu", "path": ["File", "Get Info"]]]) == nil,
                 "a cached enabled flag goes stale: the kernel refuses a disabled item live, the precheck does not guess")
+        // After a step that brings another app forward, its menu paths cannot be judged from this app's map.
+        #expect(check([["tool": "focus_app", "name": "Notes"], ["tool": "press_menu", "path": ["File", "New Note"]]]) == nil)
+        #expect(check([["tool": "focus_app", "name": "Notes"], ["tool": "press_menu", "path": ["File", "New Note"]]], readOnly: true) != nil,
+                "the read-only judge needs no map, so it still applies")
     }
 
     @Test func aStepAimedByNameBeforeActingMustNotBeAmbiguousOrSecure() {
@@ -212,6 +216,14 @@ struct AgentPlanTests {
         #expect(AgentLoop.doneChallenge(summary: "I pressed Send.", evidence: [2], receipts: receipts, currentStep: 3) != nil,
                 "step 2 opened an app; it is no receipt for a press")
         #expect(AgentLoop.doneChallenge(summary: "I pressed Send.", evidence: [1], receipts: receipts, currentStep: 3) == nil)
+    }
+
+    /// A refused plan is a refusal like any other: three alike end the task.
+    @MainActor @Test func aRepeatedlyRefusedPlanEndsAsRefusals() async {
+        let script = PlanScript([planReply([["tool": "press_menu", "app": "Finder", "path": ["View", "as List"]]])])
+        let outcome = await planLoop(script, precheck: { _ in "step 1: not offered" }).run(goal: "list view")
+        #expect(outcome == .refusals(error: "planRefused"))
+        #expect(script.bodies.count == AgentLoop.maximumSameRefusals)
     }
 
     @MainActor @Test func thePromptMakesAPlanTheDefaultFirstReply() {

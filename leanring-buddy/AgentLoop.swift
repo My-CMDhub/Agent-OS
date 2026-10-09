@@ -634,6 +634,9 @@ final class AgentLoop {
                     traced(["tool": AgentPlan.name, "args": ["steps": steps?.count ?? 0], "ok": false, "error": "planRefused"])
                     results.append(Self.toolResultBlock(id: id, result: ["ok": false, "error": "planRefused", "message": "nothing was run: \(refusal)"]))
                     pending = results + pending
+                    // A refused plan is a refusal like any other (review of e98f476).
+                    sameRefusal = sameRefusal?.error == "planRefused" ? ("planRefused", sameRefusal!.count + 1) : ("planRefused", 1)
+                    if sameRefusal!.count >= Self.maximumSameRefusals { return finish(.refusals(error: "planRefused")) }
                     continue
                 }
                 planID = id
