@@ -185,6 +185,36 @@ struct AgentPlanTests {
         #expect(script.executed.count == 1)
     }
 
+    /// Review of e98f476: a plan's steps all share the loop's step number, and
+    /// evidence cites THAT number, never a position in the plan.
+    @MainActor @Test func evidenceCitesTheLoopStepNeverAPlanPosition() async {
+        let script = PlanScript([planReply([["tool": "press_menu", "app": "Finder", "path": ["View", "as List"]],
+                                            ["tool": "press_menu", "app": "Finder", "path": ["Go", "Downloads"]],
+                                            ["tool": "done", "summary": "Pressed the two menu items.", "evidence": [2]]]),
+                                 reply([("done", ["summary": "Pressed the two menu items.", "evidence": [1]])])])
+        let outcome = await planLoop(script).run(goal: "list view then downloads")
+        #expect(outcome == .done(summary: "Pressed the two menu items."))
+        let combined = json(results(script)[0])
+        let steps = combined["steps"] as? [[String: Any]] ?? []
+        #expect(steps.allSatisfy { $0["step"] as? Int == 1 }, "every step of the plan carries the loop's step")
+        #expect(steps.allSatisfy { $0["planStep"] == nil }, "no second numbering to cite by mistake")
+        let challenge = steps.last
+        #expect(challenge?["error"] as? String == "doneUnbacked")
+        #expect((challenge?["message"] as? String)?.contains("step 1") == true, "the challenge says which number to cite")
+        let declared = (AgentPlan.declaration["input_schema"] as? [String: Any]).flatMap { ($0["properties"] as? [String: Any])?["steps"] as? [String: Any] }
+        let evidence = ((declared?["items"] as? [String: Any])?["properties"] as? [String: Any])?["evidence"] as? [String: Any]
+        #expect((evidence?["description"] as? String)?.contains("never a position in the plan") == true)
+    }
+
+    /// A done must be backed by the steps it CITES, not by any ok result of the run.
+    @MainActor @Test func aDoneCitingOldUnrelatedStepsIsChallenged() {
+        let receipts = [AgentLoop.Receipt(step: 1, toolName: "press_element", ok: true, error: nil),
+                        AgentLoop.Receipt(step: 2, toolName: "open_app", ok: true, error: nil)]
+        #expect(AgentLoop.doneChallenge(summary: "I pressed Send.", evidence: [2], receipts: receipts, currentStep: 3) != nil,
+                "step 2 opened an app; it is no receipt for a press")
+        #expect(AgentLoop.doneChallenge(summary: "I pressed Send.", evidence: [1], receipts: receipts, currentStep: 3) == nil)
+    }
+
     @MainActor @Test func thePromptMakesAPlanTheDefaultFirstReply() {
         #expect(AgentLoop.tools.contains { $0["name"] as? String == "plan" })
         #expect(AgentLoop.systemPrompt.contains("Reply with plan"))

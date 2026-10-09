@@ -70,7 +70,9 @@ nonisolated enum AgentPlan {
                 "query": text("search_web: the words."),
                 "question": text("web_lookup: the question."),
                 "summary": text("done: what was achieved, spoken to the owner."),
-                "evidence": ["type": "array", "items": ["type": "integer"], "description": "done: the step numbers whose ok results prove it."]
+                "evidence": ["type": "array", "items": ["type": "integer"],
+                             "description": "done: the step numbers whose ok results prove it, as each result's `step` says: every step "
+                                + "of one plan shares the reply's step number, never a position in the plan."]
             ] as [String: Any],
             "required": ["tool"]
         ]

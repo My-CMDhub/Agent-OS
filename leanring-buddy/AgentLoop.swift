@@ -659,7 +659,8 @@ final class AgentLoop {
                 }
                 func answer(_ result: [String: Any]) {
                     if planID != nil {
-                        planResults.append(result.merging(["planStep": index + 1, "tool": toolName]) { current, _ in current })
+                        // `step` is the loop's, shared by every step of the plan: the one number evidence cites.
+                        planResults.append(result.merging(["step": step, "position": index + 1, "tool": toolName]) { current, _ in current })
                     } else {
                         results.append(Self.toolResultBlock(id: toolUseID, result: result))
                     }
@@ -694,7 +695,8 @@ final class AgentLoop {
                     challengedDone = true
                     answer(["ok": false, "error": "doneUnbacked",
                             "message": "your receipts do not show this: \(challenge). Call done again claiming only what ok results showed, "
-                                + "citing their steps, or keep working."])
+                                + "citing their steps, or keep working."
+                                + (planID == nil ? "" : " Evidence cites the step number results carry: every step of this plan is step \(step).")])
                     continue
                 case AgentLoopTools.askOwnerName:
                     let question = (input["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1021,7 +1023,8 @@ final class AgentLoop {
     /// paid a second model call to drop it. A close done by pressing (a menu's
     /// Close, a panel's kill button) is a close: the same run's second done.
     static func doneChallenge(summary: String, evidence: [Int], receipts: [Receipt], currentStep: Int? = nil) -> String? {
-        let okTools = Set(receipts.filter(\.ok).map(\.toolName))
+        // Backed by the steps it CITES (review of e98f476): an old ok result elsewhere in the run is no receipt.
+        let okTools = Set(receipts.filter { $0.ok && (evidence.isEmpty || evidence.contains($0.step)) }.map(\.toolName))
         for receiptsNeeded in RealtimeOpenAppTool.firstPersonClaims(summary) + effectClaims(summary).map(Optional.some) {
             if var needed = receiptsNeeded {
                 if needed.contains(RealtimeVoiceVerbs.closeName) { needed.formUnion(pressTools) }
