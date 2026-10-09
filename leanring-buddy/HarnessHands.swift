@@ -217,11 +217,11 @@ enum HarnessHands {
     /// label) or a box off the window refuses. The role is a stand-in: a drawn
     /// control has none, so "AXButton" lets the words alone decide — which is
     /// the owner's rule for this rung (destructive asks, irreversible refuses).
-    static func visionClickDecision(ocrText: String, label: String?, frame: CGRect, windowFrame: CGRect) -> SafetyDecision {
+    static func visionClickDecision(ocrText: String, label: String?, frame: CGRect, windowFrame: CGRect, draftScope: Bool = false) -> SafetyDecision {
         let drawn = AccessibilityElementNode(role: "AXButton", subrole: nil, title: ocrText, value: nil,
                                              frameInAppKitCoordinates: frame, depth: 0, children: [])
         return ActionSafetyKernel.evaluate(intent: ElementActionIntent(role: nil, title: ocrText, action: .click), resolvedNode: drawn,
-                                           matchCount: 1, visibleBounds: windowFrame, labelTitle: label)
+                                           matchCount: 1, visibleBounds: windowFrame, labelTitle: label, draftScope: draftScope)
     }
 
     // MARK: type — pure

@@ -1218,7 +1218,8 @@ struct TaskSessionTests {
         #expect(AgentLoop.draftRefusal(press("Saved items")) == nil)
         #expect(AgentLoop.draftRefusal(["verb": "type", "title": "Send"]) == nil)
         let guarded = AgentLoop.draftGuardedAnswer { _ in "{\"ok\":true}" }
-        #expect(guarded("{\"verb\":\"press\",\"title\":\"Save\"}").contains("draftScope"))
+        // 2026-10-10: the press goes to the harness flagged, and the kernel cards it (DraftAndFormTests).
+        #expect(guarded("{\"verb\":\"press\",\"title\":\"Save\"}") == "{\"ok\":true}")
         #expect(guarded("{\"verb\":\"press\",\"title\":\"More options\"}") == "{\"ok\":true}")
     }
 }

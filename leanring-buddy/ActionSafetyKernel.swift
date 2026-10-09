@@ -171,6 +171,10 @@ enum ActionSafetyKernel {
     /// "always press Delete in Mail" would delete whatever is selected next, forever.
     static let destructiveActionReasonPrefix = "title suggests a destructive action: "
     static let replaceWouldDiscardReasonPrefix = "replace would discard "
+    /// The owner's words set draft scope ("stop before saving", "don't send").
+    static let draftScopeReasonPrefix = "the owner said to stop before this: "
+    /// The words that commit a draft, as whole words of a target's own name.
+    static let draftCommitWords: Set<String> = ["send", "save", "schedule", "invite", "post", "publish", "submit", "share"]
 
     /// Refusal reasons as constants, so the probe can classify a decision by
     /// identity rather than by re-typing the sentence and silently missing.
@@ -447,7 +451,8 @@ enum ActionSafetyKernel {
         visibleBounds: CGRect,
         typing: TypingContext? = nil,
         menuItemEnabled: Bool? = nil,
-        labelTitle: String? = nil
+        labelTitle: String? = nil,
+        draftScope: Bool = false
     ) -> SafetyDecision {
         // Order matters. Every refusal is checked before any permission.
 
@@ -588,6 +593,20 @@ enum ActionSafetyKernel {
                 return .refuse(reason: implausibleNameRefusalReason)
             }
         }
+        // Draft scope (owner 2026-10-10): the owner's words said to stop before
+        // saving or sending, so a press whose own name commits asks on a card
+        // the owner can answer later — Allow once or Deny, never an Always rule.
+        // Judged on the target's (and its label's) AX name, never the caller's.
+        if draftScope, intent.action == .press || intent.action == .click || intent.action == .menu {
+            for name in wordCheckedNames {
+                let words = name.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init)
+                if let word = words.first(where: draftCommitWords.contains) {
+                    return .requireConfirmation(reason: "\(draftScopeReasonPrefix)\"\(String(name.prefix(60)))\" would \(word)",
+                                                destructive: true)
+                }
+            }
+        }
+
         // App-written text may only ever make the decision *more* cautious.
         // A keyword here escalates to a question; nothing an app publishes can
         // turn a question into an allow.

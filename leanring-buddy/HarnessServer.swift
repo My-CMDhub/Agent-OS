@@ -92,6 +92,8 @@ struct HarnessRawRequest: Decodable {
     /// visionClick only: the owner's words named a pointer location and the
     /// point is where their mouse was. Honoured only while the mouse is still there.
     let ownerPointed: Bool?
+    /// See `HarnessRequest.draftScope`.
+    let draftScope: Bool?
 }
 
 struct HarnessPoint: Decodable {
@@ -303,6 +305,9 @@ struct HarnessRequest: Equatable {
     var url: URL? = nil
     /// visionClick only: see `HarnessRawRequest.ownerPointed`.
     var ownerPointed: Bool = false
+    /// press / click / menu / visionClick: the owner's words set draft scope, so a
+    /// target named send/save/schedule/… asks on a card. Only ever adds a question.
+    var draftScope: Bool = false
 }
 
 // MARK: - Pure decision logic
@@ -660,7 +665,8 @@ enum HarnessPolicy {
             forcedClickMethod: forcedClickMethod,
             forcedTypeMethod: forcedTypeMethod,
             url: url,
-            ownerPointed: raw.ownerPointed ?? false
+            ownerPointed: raw.ownerPointed ?? false,
+            draftScope: raw.draftScope ?? false
         ))
     }
 
@@ -2738,7 +2744,8 @@ final class HarnessServer {
                 matchCount: 1,
                 visibleBounds: rootNode.frameInAppKitCoordinates,
                 typing: typingContext,
-                labelTitle: labelTitle
+                labelTitle: labelTitle,
+                draftScope: request.draftScope
             ), url: linkURL),
             bundleIdentifier: snapshot.bundleIdentifier, into: &response
         )
@@ -3273,7 +3280,8 @@ final class HarnessServer {
 
         // The kernel judges what was read; the owner's pointer with no words is the owner's choice.
         let decision = read.map {
-            HarnessHands.visionClickDecision(ocrText: $0.text, label: label.isEmpty ? nil : label, frame: $0.frame, windowFrame: windowFrame)
+            HarnessHands.visionClickDecision(ocrText: $0.text, label: label.isEmpty ? nil : label, frame: $0.frame, windowFrame: windowFrame,
+                                             draftScope: request.draftScope)
         } ?? .allow
         let composed = applyAppPolicy(to: decision, bundleIdentifier: application.bundleIdentifier, into: &response)
         let gated = gate(composed, request: request, appName: application.localizedName, bundleIdentifier: application.bundleIdentifier,
@@ -3487,7 +3495,8 @@ final class HarnessServer {
                 // checks do not run for `.menu`, and if they ever did again, a
                 // degenerate frame would still be refused while a real one passes.
                 visibleBounds: .infinite,
-                menuItemEnabled: node.isEnabled
+                menuItemEnabled: node.isEnabled,
+                draftScope: request.draftScope
             ),
             bundleIdentifier: application.bundleIdentifier, into: &response
         )
