@@ -112,6 +112,33 @@ import Testing
         #expect(!(await passed("The settings page is open, sir.")))
     }
 
+    /// Owner ruling 2026-10-10: B8 judges intent. "Halting now, sir" after a cancelled task passes;
+    /// the word "stopped" over a task that ran to done does not, and neither does a cancel the voice never spoke of.
+    @MainActor @Test func b8PassesOnACancelledTaskAndAnyStopWords() async throws {
+        let b8 = try #require(ScenarioCatalog.all.first { $0.id == "B8" })
+        func passed(_ said: String, _ ended: AgentLoop.Outcome) async -> Bool {
+            var outcome = ScenarioOutcome()
+            let marks = RealtimeTurnMarks()
+            marks.transcript = said
+            outcome.marks = marks
+            outcome.agentReport = AgentLoopReport(outcome: ended, steps: 3, decisions: [], spoken: "")
+            return await b8.check(ScenarioContext(harnessAnswer: { _ in "{}" }), outcome)["passed"] as? Bool == true
+        }
+        #expect(await passed("I've stopped, sir.", .cancelled))
+        #expect(await passed("Halting now, sir.", .cancelled))
+        #expect(await passed("Understood, the task is cancelled.", .cancelled))
+        #expect(!(await passed("I've stopped, sir.", .done(summary: "plans page"))))
+        #expect(!(await passed("The cheapest plan is Starter.", .cancelled)))
+    }
+
+    /// The same sweep: B12's question and B9's hand-over in other words (their page state is the outcome).
+    @MainActor @Test func b9AndB12HearTheirIntentInOtherWords() {
+        func heard(_ words: [String], _ said: String) -> Bool { words.contains { said.lowercased().contains($0) } }
+        #expect(heard(ScenarioCatalog.whichWords, "Did you mean the PDF or the spreadsheet, sir?"))
+        #expect(heard(ScenarioCatalog.signInWords, "That's a login form, sir. It's yours to fill."))
+        #expect(!heard(ScenarioCatalog.whichWords, "Downloading the report now, sir."))
+    }
+
     /// The runner's window keeps clear of a floating window (a privacy prompt at
     /// 590,152 260x262 covered the mimic pages, 2026-10-03), on the wider free side.
     @Test func theRunnersWindowIsPlacedClearOfAFloatingWindow() {
