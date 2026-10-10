@@ -412,14 +412,16 @@ enum HarnessPolicy {
         let subrole: String?
     }
 
-    /// A field in a NATIVE modal — an `AXSheet` above it, or its window's subrole is
+    /// A field in a NATIVE modal — an `AXSheet` or `AXPopover` above it (TextEdit's
+    /// File > Rename… is a title-bar popover, live 2026-10-11), or its window's subrole is
     /// `AXDialog`/`AXSystemDialog` — with no `AXWebArea` between (a web modal is a group
     /// inside the page). `chain` runs from the field up to its `AXWindow`; nil, or a walk
     /// that never reached the window, is not a sheet. Owner's ruling 2026-10-11 (G15).
     static func sitsInNativeModal(_ chain: [AncestorRole]?) -> Bool {
         guard let chain, let window = chain.last, window.role == "AXWindow",
               !chain.contains(where: { $0.role == "AXWebArea" }) else { return false }
-        return chain.contains { $0.role == "AXSheet" } || ["AXDialog", "AXSystemDialog"].contains(window.subrole ?? "")
+        return chain.contains { ["AXSheet", "AXPopover"].contains($0.role) }
+            || ["AXDialog", "AXSystemDialog"].contains(window.subrole ?? "")
     }
 
     /// Roles that label a control without being one.

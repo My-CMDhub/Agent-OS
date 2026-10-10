@@ -226,6 +226,9 @@ extension DraftAndFormTests {
         #expect(HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXGroup"), step("AXSheet"), standard]))
         #expect(HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXGroup"), step("AXWindow", "AXDialog")]))
         #expect(HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXWindow", "AXSystemDialog")]))
+        // TextEdit's File > Rename… is a title-bar AXPopover, not a sheet (live 2026-10-11).
+        #expect(HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXPopover"), standard]))
+        #expect(!HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXPopover"), step("AXWebArea"), standard]))
         // A web modal is a group inside the page: it keeps carding, whatever it calls itself.
         #expect(!HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXGroup", "AXApplicationDialog"), step("AXSheet"),
                                                   step("AXWebArea"), step("AXScrollArea"), standard]))
