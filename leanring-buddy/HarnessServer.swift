@@ -2032,7 +2032,8 @@ final class HarnessServer {
                !clippedToView || !frame.intersection(clip).isEmpty {
                 var entry = summarise(node)
                 entry["nameSource"] = node.title != nil ? "title" : node.elementDescription != nil ? "description"
-                    : isTextInput && node.placeholder != nil ? "placeholder" : "value"
+                    : isTextInput && node.placeholder != nil ? "placeholder"
+                    : node.value == nil && node.labelledBy != nil ? "label" : "value"
                 entry["parent"] = parent ?? NSNull()
                 entry["subroleReadFailed"] = node.subroleReadFailed
                 // Done-conditions ("Posts tab selected", "draft present"): a boolean

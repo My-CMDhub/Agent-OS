@@ -28,12 +28,18 @@ struct AccessibilityElementNode {
     /// only (one read per such field, never per node). Review 2026-10-01: a
     /// search box named only "Search people" could not be aimed at by name.
     let placeholder: UntrustedText?
+    /// The text of the element's AXTitleUIElement — the app's own "labelled by"
+    /// link — read only for an otherwise anonymous control in `labelledByRoles`.
+    /// Measured 2026-10-11: System Settings' Wi-Fi switch publishes only this.
+    let labelledBy: UntrustedText?
 
     /// What a text field is CALLED — title, description or placeholder — never
     /// its value, which is what the owner typed.
     var fieldLabel: UntrustedText? { title ?? elementDescription ?? placeholder }
 
     static let textInputRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
+    /// Controls whose name may live on a separate label element (`labelledBy`).
+    static let labelledByRoles: Set<String> = ["AXCheckBox", "AXRadioButton", "AXSlider", "AXPopUpButton"]
 
     // MARK: What may leave the app — ONE predicate (review 2026-10-02)
     //
@@ -143,7 +149,7 @@ struct AccessibilityElementNode {
     /// An app may publish its label as AXTitle, AXDescription or AXValue, and
     /// System Settings uses a different one for each control type: nothing for
     /// rows, AXValue for sidebar labels, AXDescription for detail-pane buttons.
-    var displayName: UntrustedText? { title ?? elementDescription ?? value }
+    var displayName: UntrustedText? { title ?? elementDescription ?? value ?? labelledBy }
 
     /// Whether this element is something an agent could actually act on:
     /// it has a name, it publishes at least one action, and it occupies space.
@@ -189,6 +195,7 @@ struct AccessibilityElementNode {
         value: String?,
         elementDescription: String? = nil,
         placeholder: String? = nil,
+        labelledBy: String? = nil,
         frameInAppKitCoordinates: CGRect,
         depth: Int,
         children: [AccessibilityElementNode],
@@ -207,6 +214,7 @@ struct AccessibilityElementNode {
         self.value = value.map(UntrustedText.init)
         self.elementDescription = elementDescription.map(UntrustedText.init)
         self.placeholder = placeholder.map(UntrustedText.init)
+        self.labelledBy = labelledBy.map(UntrustedText.init)
         self.frameInAppKitCoordinates = frameInAppKitCoordinates
         self.depth = depth
         self.children = children
@@ -1071,6 +1079,14 @@ enum AccessibilityTreeWalker {
         // Only an anonymous text input pays for this read: its placeholder is its name.
         let placeholder = AccessibilityElementNode.textInputRoles.contains(role) && title == nil && elementDescription == nil
             ? copyStringAttribute(from: element, attribute: kAXPlaceholderValueAttribute) : nil
+        // Role-gated: an anonymous AXGroup is the commonest node in a Chromium tree,
+        // and asking each one for a label link would add a round trip per wrapper.
+        let labelledBy = title == nil && elementDescription == nil && value == nil
+            && AccessibilityElementNode.labelledByRoles.contains(role)
+            ? copyElementAttribute(from: element, attribute: kAXTitleUIElementAttribute).flatMap {
+                copyStringAttribute(from: $0, attribute: kAXValueAttribute)
+                    ?? copyStringAttribute(from: $0, attribute: kAXTitleAttribute)
+            } : nil
 
         // From the batch only: the fallback path reads no AXSelected (no extra round
         // trip per node), and its value read cannot tell "" from failed, so both omit.
@@ -1177,7 +1193,7 @@ enum AccessibilityTreeWalker {
         // join the batched read and costs 1.45 ms/node in Mail — 46% of the
         // per-node total, which is exactly why batching the other seven
         // attributes only bought 1.37x.
-        let couldEverBeActionable = (title ?? elementDescription ?? value) != nil
+        let couldEverBeActionable = (title ?? elementDescription ?? value ?? labelledBy) != nil
             && appKitFrame.width > 0 && appKitFrame.height > 0
         let publishedActionNames = couldEverBeActionable
             ? copyActionNames(from: element)
@@ -1190,6 +1206,7 @@ enum AccessibilityTreeWalker {
             value: value,
             elementDescription: elementDescription,
             placeholder: placeholder,
+            labelledBy: labelledBy,
             frameInAppKitCoordinates: appKitFrame,
             depth: depth,
             children: childNodes,

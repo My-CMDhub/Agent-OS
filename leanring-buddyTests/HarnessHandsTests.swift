@@ -47,6 +47,35 @@ struct HarnessHandsTests {
         #expect(decide(.press, node("AXCheckBox", "Show seconds"), title: "Show seconds") == .allow)
     }
 
+    // Measured 2026-10-11: System Settings' Wi-Fi switch publishes no title,
+    // description or string value — only AXTitleUIElement -> AXStaticText "Wi‑Fi".
+    // Named by that label, it is actionable, resolvable and carded.
+    @Test func anAnonymousSwitchIsNamedByItsTitleUIElementAndCarded() {
+        let wifi = "Wi\u{2011}Fi"
+        let frame = CGRect(x: 100, y: 100, width: 38, height: 22)
+        let toggle = AccessibilityElementNode(role: "AXCheckBox", subrole: "AXSwitch", title: nil, value: nil,
+                                              labelledBy: wifi, frameInAppKitCoordinates: frame, depth: 6,
+                                              children: [], publishedActionNames: [kAXPressAction])
+        #expect(toggle.displayName?.raw == wifi)
+        #expect(toggle.isActionable)
+        #expect(!toggle.namedByValue)
+        #expect(toggle.listedName?.raw == wifi)
+        guard case .requireConfirmation(_, let destructive) = decide(.press, toggle, title: wifi) else {
+            Issue.record("labelledBy-named Wi-Fi switch was not carded"); return
+        }
+        #expect(!destructive)
+        // On the wire it is not "named by value" either.
+        let window = AccessibilityElementNode(role: "AXWindow", subrole: nil, title: "Wi\u{2011}Fi", value: nil,
+                                              frameInAppKitCoordinates: bounds, depth: 0, children: [toggle])
+        #expect(HarnessServer.namedElements(in: window).last?["nameSource"] as? String == "label")
+
+        // A title still wins over the label link: nothing already named is renamed.
+        let titled = AccessibilityElementNode(role: "AXCheckBox", subrole: "AXSwitch", title: "Show seconds", value: nil,
+                                              labelledBy: wifi, frameInAppKitCoordinates: frame, depth: 6,
+                                              children: [], publishedActionNames: [kAXPressAction])
+        #expect(titled.displayName?.raw == "Show seconds")
+    }
+
     // MARK: click — the kernel
 
     // A click is judged as a press wherever a press could run at all.
