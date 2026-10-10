@@ -228,7 +228,12 @@ nonisolated enum JarvisNotchReason {
         "nothingAtPoint": "nothing there to act on",
         "noFieldAtPoint": "no text field there",
         "missingText": "no text was given",
-        "controlCharacterInText": "no line breaks, I don\u{2019}t press Enter",
+        "controlCharacterInText": "no tabs or control keys",
+        // Multi-line by paste (2026-10-10).
+        "lineBreakNeedsDocumentEditor": "line breaks only in a notes app",
+        "lineBreakInsertOnly": "multi-line only adds, never replaces",
+        "pasteUnavailable": "its Paste isn\u{2019}t available",
+        "pasteboardAccessNotAllowed": "the clipboard is locked",
         "invalidDirection": "no direction was given",
         "invalidMode": "insert or replace only",
         "invalidWhat": "tab, window or app only",

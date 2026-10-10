@@ -440,11 +440,14 @@ nonisolated enum RealtimeOpenAppTool {
                 if let candidate = screenTarget.candidate { request["title"] = candidate.name; request["role"] = candidate.role }
             }
         case RealtimeVoiceVerbs.typeTextName:
-            guard let text = call.text else { return refuse("missingText", "type_text needs the text to type") }
-            // A newline is Enter: into Cursor's terminal it runs a command (review 2026-10-01).
-            guard !text.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
-                return refuse("controlCharacterInText", "the text holds a line break or another control character; nothing was typed. "
-                    + "Type one line, with no Enter — the owner sends it themselves.")
+            guard let rawText = call.text else { return refuse("missingText", "type_text needs the text to type") }
+            // A newline typed is Enter: into Cursor's terminal it runs a command (review 2026-10-01).
+            // So a line break reaches the harness only to be PASTED, and only a note or document
+            // editor takes it (`HarnessPaste`, 2026-10-10); Tab and the rest never leave here.
+            let text = HarnessPaste.normalisedLineBreaks(rawText)
+            guard !HarnessPaste.containsControlCharactersOtherThanLineFeed(text) else {
+                return refuse("controlCharacterInText", "the text holds a Tab or another control character; nothing was typed. "
+                    + "Type plain text, with no Enter — the owner sends it themselves.")
             }
             let mode = call.mode ?? TypeMode.insert.rawValue
             guard TypeMode(rawValue: mode) != nil else { return refuse("invalidMode", "mode is insert or replace") }

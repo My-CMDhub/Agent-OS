@@ -550,6 +550,18 @@ enum AccessibilityTypePerformer {
         return nil
     }
 
+    /// Puts the caret at the end of `valueBefore` (UTF-16, what AX counts in);
+    /// the refusal when a selection still stands or cannot be read. Shared with
+    /// `HarnessPaste`, because a paste replaces the selection exactly as this write does.
+    static func caretAtEnd(of element: AXUIElement, valueBefore: String) -> String? {
+        var caret = CFRange(location: valueBefore.utf16.count, length: 0)
+        var caretError = AXError.failure
+        if let caretValue = AXValueCreate(.cfRange, &caret) {
+            caretError = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, caretValue)
+        }
+        return insertRefusal(caretWriteError: caretError, selectedRangeAfter: selectedRange(of: element))
+    }
+
     static func selectedRange(of element: AXUIElement) -> CFRange? {
         var out: AnyObject?
         guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &out) == .success,
@@ -696,14 +708,7 @@ enum AccessibilityTypePerformer {
         case .replace:
             error = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFString)
         case .insert:
-            var caret = CFRange(location: valueBefore.utf16.count, length: 0)
-            var caretError = AXError.failure
-            if let caretValue = AXValueCreate(.cfRange, &caret) {
-                caretError = AXUIElementSetAttributeValue(
-                    element, kAXSelectedTextRangeAttribute as CFString, caretValue
-                )
-            }
-            if let refusal = insertRefusal(caretWriteError: caretError, selectedRangeAfter: selectedRange(of: element)) {
+            if let refusal = caretAtEnd(of: element, valueBefore: valueBefore) {
                 return Outcome(attributeWritten: mode.settableAttributeRequired, error: .cannotComplete,
                                milliseconds: Int(Date().timeIntervalSince(startedAt) * 1000), valueLengthBefore: valueBefore.count,
                                valueAfter: valueBefore, refusal: refusal)

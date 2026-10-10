@@ -688,15 +688,23 @@ enum HarnessPolicy {
         }
 
         var mode = TypeMode.insert
+        var text = raw.text ?? ""
         if verb == .type {
-            guard !(raw.text ?? "").isEmpty else {
+            guard !text.isEmpty else {
                 return .failure(.missingField("text"))
             }
-            // Return SENDS in a chat composer and runs a command in a terminal: no caller's
-            // text may carry a line break, by any typing path (AX write or keystrokes).
-            // ponytail: refused everywhere, a multi-line document editor too; allow per role when one needs it.
-            guard !HarnessHands.containsControlCharacters(raw.text ?? "") else {
-                return .failure(.invalidField(field: "text", value: "a line break or another control character (Return sends a message)"))
+            // Return SENDS in a chat composer and runs a command in a terminal: no keystroke or AX
+            // write ever carries a line break. A `\n` is accepted here only to go by paste, into a
+            // note or document editor (`HarnessPaste`, owner's ruling 2026-10-10); every other
+            // control character is still refused.
+            text = HarnessPaste.normalisedLineBreaks(text)
+            guard !HarnessPaste.containsControlCharactersOtherThanLineFeed(text) else {
+                return .failure(.invalidField(field: "text", value: "a Tab or another control character (only a line break, and only by paste)"))
+            }
+            // AXConfirm after it is a submit by another name; a forced method is not a paste.
+            if text.contains("\n"), raw.thenConfirm == true || forcedTypeMethod != nil {
+                return .failure(.invalidField(field: raw.thenConfirm == true ? "thenConfirm" : "method",
+                                              value: "a line break goes by paste alone, with no confirm"))
             }
             if let requestedMode = raw.mode {
                 guard let parsed = TypeMode(rawValue: requestedMode) else {
@@ -721,7 +729,7 @@ enum HarnessPolicy {
             nearPoint: raw.nearPoint?.cgPoint,
             requestedDryRun: raw.dryRun,
             confirmed: raw.confirmed ?? false,
-            text: raw.text ?? "",
+            text: text,
             mode: mode,
             aimAtFocus: aimAtFocus,
             aimAtWindow: aimAtWindow,
@@ -2872,6 +2880,19 @@ final class HarnessServer {
             ? Self.linkAddress(of: resolvedNode, rootNode: rootNode) : nil
         let notifyingLink = linkURL.flatMap { ActionSafetyKernel.personNotifyingView($0) != nil ? HarnessHands.auditableURL($0) : nil }
         if let notifyingLink { response["personNotifyingLink"] = notifyingLink }
+        // A line break goes by paste, only into a note or document editor — judged before
+        // the kernel, so a refused request never puts a card in front of the owner.
+        if action == .type, request.text.contains("\n"), let pid = snapshot.application?.processIdentifier,
+           let refusal = HarnessPaste.gateRefusal(
+            bundleIdentifier: snapshot.bundleIdentifier, role: resolvedNode.role, mode: request.mode,
+            secureInputOn: secureInputRead().isOn, focusedMightBeSecure: HarnessHands.focusedMightBeSecure(processIdentifier: pid),
+            focusIsOnTarget: liveElement.map { HarnessHands.focusIsOn($0, processIdentifier: pid) } ?? false) {
+            response["ok"] = false
+            response["error"] = refusal.code
+            response["message"] = refusal.message
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: refusal.code, startedAt: startedAt)
+            return response
+        }
         let decision = applyAppPolicy(
             to: ActionSafetyKernel.gatingPersonNotifyingView(ActionSafetyKernel.evaluate(
                 intent: intent,
@@ -3021,6 +3042,31 @@ final class HarnessServer {
                 response["ok"] = false
                 response["error"] = "noLiveElement"
                 audit(request, dryRun: dryRun, kernel: described.decision, outcome: "noLiveElement", startedAt: startedAt)
+                return response
+            }
+            // A line break: Edit > Paste or nothing — never keystrokes, never an AX write.
+            if request.text.contains("\n") {
+                let outcome = snapshot.application.map {
+                    HarnessPaste.paste(request.text, into: element, application: $0, secureInput: secureInputRead)
+                } ?? .refused(HandsRefusal(code: "noLiveElement", message: "the field's application could not be read; nothing was pasted"))
+                phaseTiming.actionReturned()
+                switch outcome {
+                case .refused(let refusal):
+                    response["ok"] = false
+                    response["error"] = refusal.code
+                    response["message"] = refusal.message
+                    audit(request, dryRun: dryRun, kernel: described.decision, outcome: refusal.code, startedAt: startedAt)
+                case .pasted(let payload, let verified):
+                    response["performed"] = payload
+                    response["method"] = "paste"
+                    phaseTiming.verified(walks: 0, path: "readBack")
+                    response["verification"] = verified
+                        ? ["status": "confirmed", "evidence": HarnessPaste.landedEvidence, "milliseconds": payload["milliseconds"] ?? 0]
+                        : ["status": "notObserved", "milliseconds": payload["milliseconds"] ?? 0]
+                    response["ok"] = verified
+                    if !verified { response["error"] = "notVerified" }
+                    audit(request, dryRun: dryRun, kernel: described.decision, outcome: verified ? "confirmed" : "notObserved", startedAt: startedAt)
+                }
                 return response
             }
             var afterWrite = HarnessHands.AfterWrite.keystrokes
