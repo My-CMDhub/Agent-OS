@@ -41,6 +41,8 @@ nonisolated enum AgentLoopGemini {
     static let webLookupName = "web_lookup"
     /// Per task.
     static let webLookupCap = 5
+    /// Per lookup: G09 2026-10-09 measured calls of up to ~60 s against the 180 s task cap.
+    static let webLookupTimeoutSeconds: TimeInterval = 15
     /// Ids for calls Gemini sent without one; never sent back.
     static let localIDPrefix = "local-"
 

@@ -206,4 +206,34 @@ struct AgentLoopGeminiTests {
         #expect(run.traces[5]["error"] as? String == "webLookupCapReached")
         #expect(run.bodies.count == 8)
     }
+
+    /// G09 2026-10-09: "how many files and folders are directly inside the scripts
+    /// folder of the Heyclicky repo?" spent five lookups (two failed, up to ~60 s
+    /// each) and the 180 s cap. A question about this Mac is answered from the
+    /// screen; the owner's words decide that, never the model's question.
+    @Test func aQuestionAboutThisMacIsLocalUnlessTheOwnerAsksForTheWeb() {
+        for words in ["how many files and folders are directly inside the scripts folder of the Heyclicky repo?",
+                      "how many items are in my Downloads folder?", "what's on my desktop", "how much disk space is left",
+                      "which apps are installed on this Mac", "list the files in that directory", "what's in the repository"] {
+            #expect(AgentLoop.isLocalQuestion(words: words), "\(words)")
+        }
+        for words in ["what's the cheapest superloop nbn plan", "who won the cricket last night",
+                      "search the web for how many files the linux kernel has", "look up online how big the swift repo is",
+                      "google how to list a folder", "open https://github.com/apple/swift and count the folders",
+                      "profile the app", "the filesystem", ""] {
+            #expect(!AgentLoop.isLocalQuestion(words: words), "\(words)")
+        }
+        // Measured calls took up to ~60 s against the 180 s task cap.
+        #expect(AgentLoopGemini.webLookupTimeoutSeconds == 15)
+    }
+
+    @MainActor @Test func aLocalQuestionIsRefusedTheWebAndTheModelsQuestionCannotLiftIt() async {
+        let heard = "how many files and folders are directly inside the scripts folder of the Heyclicky repo?"
+        let run = Run([call("web_lookup", ["question": "latest news about the Heyclicky scripts"]),
+                       call("ask_owner", ["question": "which repo?"])])
+        let outcome = await geminiLoop(run, lookup: ["ok": true, "text": "x"]).run(goal: "search the web online for it", heard: heard)
+        #expect(outcome == .askOwner(question: "which repo?"))
+        #expect(run.lookups.isEmpty, "the lookup never ran")
+        #expect(run.traces.first?["error"] as? String == "localQuestion")
+    }
 }
