@@ -52,11 +52,21 @@ struct HelpSearchTests {
         #expect(classified.topics == ["Calculator help"])
     }
 
-    @Test func theTableHasSettledOnlyOnTwoIdenticalNonEmptyReads() {
-        #expect(!HarnessHelpSearch.isSettled(previous: nil, current: ["", "Memory"]))
+    /// Live 2026-10-11, Calculator: Help fills in stages — the menu hit ("Scientific")
+    /// or "No Results Found" first, the topics and "Show All Help Topics" ~100 ms
+    /// later — so two identical reads of a partial table settled on 1 row.
+    @Test func theTableHasSettledOnlyOnceTheTopicsHaveArrived() {
+        let full = ["", "Scientific", "", "Use the scientific calculator on Mac", "Show All Help Topics"]
+        #expect(!HarnessHelpSearch.isSettled(previous: nil, current: full))
         #expect(!HarnessHelpSearch.isSettled(previous: [], current: []))
-        #expect(!HarnessHelpSearch.isSettled(previous: ["", "Memory"], current: ["", "Memory", "Memory Recall"]))
-        #expect(HarnessHelpSearch.isSettled(previous: ["", "Memory"], current: ["", "Memory"]))
+        #expect(!HarnessHelpSearch.isSettled(previous: ["", "Scientific"], current: ["", "Scientific"]))
+        #expect(!HarnessHelpSearch.isSettled(previous: ["No Results Found"], current: ["No Results Found"]))
+        #expect(!HarnessHelpSearch.isSettled(previous: Array(full.dropLast()), current: full))
+        #expect(HarnessHelpSearch.isSettled(previous: full, current: full))
+    }
+
+    @Test func theNoResultsPlaceholderIsNotATopic() {
+        #expect(HarnessHelpSearch.classify(rows: ["No Results Found"]) == .init(menuPaths: [], topics: []))
     }
 
     // MARK: Resolution against the live listing

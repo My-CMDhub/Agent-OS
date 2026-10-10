@@ -38,6 +38,8 @@ nonisolated enum HarnessHelpSearch {
     static let pathSeparator = " > "
     /// ponytail: English only; without it a section is told apart by its " > " paths.
     static let showAllTopicsRow = "Show All Help Topics"
+    /// ponytail: English only, as above — a placeholder row, never a topic.
+    static let noResultsRow = "No Results Found"
 
     // MARK: Pure
 
@@ -72,7 +74,7 @@ nonisolated enum HarnessHelpSearch {
         for (index, section) in sections.enumerated() {
             let isTopics = topicsIndex.map { $0 == index } ?? !section.contains { $0.contains(pathSeparator) }
             if isTopics {
-                result.topics += section.filter { $0 != showAllTopicsRow }
+                result.topics += section.filter { $0 != showAllTopicsRow && $0 != noResultsRow }
             } else {
                 result.menuPaths += section.map { $0.components(separatedBy: pathSeparator) }.filter { !$0.contains(where: \.isEmpty) }
             }
@@ -80,9 +82,12 @@ nonisolated enum HarnessHelpSearch {
         return result
     }
 
-    /// Two identical non-empty reads in a row: the table stopped filling.
+    /// Two identical reads that include "Show All Help Topics": Help fills in stages
+    /// (menu hits or "No Results Found" first, topics ~100 ms later), so a partial
+    /// table repeats itself (live, Calculator, 2026-10-11). Without that row the
+    /// caller's deadline ends the poll.
     static func isSettled(previous: [String]?, current: [String]) -> Bool {
-        !current.isEmpty && current == previous
+        current.contains(showAllTopicsRow) && current == previous
     }
 
     /// Each hit kept only when it names exactly one ENABLED LEAF of the live
@@ -205,17 +210,21 @@ nonisolated enum HarnessHelpSearch {
         while !queue.isEmpty, seen < maximumNodesSearched {
             let node = queue.removeFirst()
             seen += 1
+            var isTable = false
             switch string(node, kAXRoleAttribute) {
             case "AXTextField" where string(node, kAXSubroleAttribute) == "AXSearchField":
                 field = field ?? node
             case "AXTable" where string(node, kAXDescriptionAttribute) == "search result":
                 table = table ?? node
-                continue
+                isTable = true
             default:
                 break
             }
+            // Checked before anything can skip it: a `continue` in the table case jumped
+            // this check, and with an empty field (no children) the table is the last node
+            // in the queue, so the walk ended with both found (live, Calculator, 2026-10-11).
             if let field, let table { return (field, table) }
-            queue += children(node)
+            if !isTable { queue += children(node) }
         }
         return nil
     }
