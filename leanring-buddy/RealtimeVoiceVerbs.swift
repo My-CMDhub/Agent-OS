@@ -41,14 +41,17 @@ nonisolated enum RealtimeVoiceVerbs {
     static let doTaskName = "do_task"
     /// Shapes drawn round named elements while explaining (`RealtimeAnnotate`, owner 2026-10-05).
     static let annotateName = "annotate"
-    static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName,
+    /// The frontmost app's Help-menu search (`HarnessHelpSearch`, design 2026-10-07 §A step 5).
+    static let searchHelpName = "search_help"
+    static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName, searchHelpName,
                                             findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
                                             openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
     /// on reads) and default to the app in front when the call names none.
-    static let readOnlyToolNames: Set<String> = [findMenuItemsName, findOnScreenName, pointAtName, annotateName]
+    /// search_help types only into the app's own Help field and closes the menu again.
+    static let readOnlyToolNames: Set<String> = [findMenuItemsName, findOnScreenName, pointAtName, annotateName, searchHelpName]
 
     /// The tools that aim at an element on screen, by name, position or pointer.
     static func isScreenTargetTool(_ toolName: String) -> Bool {
@@ -135,7 +138,7 @@ nonisolated enum RealtimeVoiceVerbs {
         let positionParameters = positionParameters(format, gemini: gemini)
         let pressMenu = agent
             ? Declaration(name: pressMenuName,
-                          description: "Presses one menu item of the app in front: a path from the App verbs or from find_menu_items, copied "
+                          description: "Presses one menu item of the app in front: a path from the App verbs, find_menu_items or search_help, copied "
                             + "exactly, or the shortcut an App verbs line shows, which presses the item that owns it (never a keystroke).",
                           parameters: [
                             Parameter(name: "app", description: "The app in front, for example \"Finder\"."),
@@ -145,7 +148,8 @@ nonisolated enum RealtimeVoiceVerbs {
                                       description: "Instead of a path: the shortcut as an App verbs line shows it, for example \"⌘2\".")
                           ])
             : Declaration(name: pressMenuName,
-                          description: "Presses one menu item of the app in front. The path must be one that find_menu_items returned in this turn, copied exactly.",
+                          description: "Presses one menu item of the app in front. The path must be one that find_menu_items or search_help returned "
+                            + "in this turn, copied exactly.",
                           parameters: [
                             Parameter(name: "app", description: "The app in front, for example \"Finder\"."),
                             Parameter(name: "path", kind: .list, description: "The menu path exactly as find_menu_items returned it, for example [\"View\", \"as List\"].")
@@ -165,6 +169,13 @@ nonisolated enum RealtimeVoiceVerbs {
                     parameters: [
                         Parameter(name: "app", required: false, description: "The app whose menus to search, for example \"Finder\". Leave it out to mean the app in front."),
                         Parameter(name: "words", description: "A few words for the command, for example \"list view\" or \"new window\".")
+                    ]),
+        Declaration(name: searchHelpName,
+                    description: "Searches the Help menu of the app in front: returns menu commands you may then press with press_menu, and "
+                        + "help topic titles to read out (never pressed). Prefer find_menu_items when you know the command's words.",
+                    parameters: [
+                        appInFront,
+                        Parameter(name: "words", description: "What to search the app's Help for, for example \"memory\".")
                     ]),
         pressMenu,
         Declaration(name: findOnScreenName,
@@ -398,6 +409,17 @@ nonisolated enum RealtimeVoiceVerbs {
     /// plausible label: the target app wrote them and they go into a model's context.
     static func menuOffer(fromMenusResponse response: [String: Any], words: String) -> RealtimeMenuOffer {
         let items = response["items"] as? [[String: Any]] ?? []
+        let filtered = offerableLeaves(items)
+        return RealtimeMenuOffer(
+            candidates: rankedCandidates(filtered.leaves, words: words),
+            enabledItemCount: filtered.enabledItemCount,
+            privacyDroppedCount: filtered.privacyDroppedCount,
+            listingIncomplete: !((response["listingStopReasons"] as? [String]) ?? []).isEmpty
+        )
+    }
+
+    /// The enabled, non-private, plausibly labelled leaves of a listing.
+    static func offerableLeaves(_ items: [[String: Any]]) -> (leaves: [RealtimeMenuCandidate], enabledItemCount: Int, privacyDroppedCount: Int) {
         var enabledItemCount = 0
         var privacyDroppedCount = 0
         var leaves: [RealtimeMenuCandidate] = []
@@ -409,12 +431,19 @@ nonisolated enum RealtimeVoiceVerbs {
                   path.allSatisfy({ UntrustedText($0).isPlausibleControlLabel }) else { continue }
             leaves.append(RealtimeMenuCandidate(path: path, shortcut: item["shortcut"] as? String))
         }
-        return RealtimeMenuOffer(
-            candidates: rankedCandidates(leaves, words: words),
-            enabledItemCount: enabledItemCount,
-            privacyDroppedCount: privacyDroppedCount,
-            listingIncomplete: !((response["listingStopReasons"] as? [String]) ?? []).isEmpty
-        )
+        return (leaves, enabledItemCount, privacyDroppedCount)
+    }
+
+    /// search_help's offer: the harness's `menuItems` (each already one enabled
+    /// leaf of the live listing), through the same filter as a find — in the
+    /// Help search's own order, never re-ranked by words. Topics are not here:
+    /// they are pages to read, never pressed.
+    static func helpOffer(fromHelpSearchResponse response: [String: Any]) -> RealtimeMenuOffer {
+        let paths = response["menuItems"] as? [[String]] ?? []
+        let filtered = offerableLeaves(paths.map { ["path": $0, "enabled": true, "hasSubmenu": false] })
+        return RealtimeMenuOffer(candidates: Array(filtered.leaves.prefix(maximumCandidates)), enabledItemCount: filtered.enabledItemCount,
+                                 privacyDroppedCount: filtered.privacyDroppedCount,
+                                 listingIncomplete: !((response["listingStopReasons"] as? [String]) ?? []).isEmpty)
     }
 
     /// Ranked by how many query words the path holds, then how many sit in the
@@ -447,7 +476,7 @@ nonisolated enum RealtimeVoiceVerbs {
     /// and pointed at only in the app the call named.
     static func isAppScopedMenuTool(_ toolName: String) -> Bool {
         [findMenuItemsName, pressMenuName, findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
-         annotateName].contains(toolName)
+         annotateName, searchHelpName].contains(toolName)
     }
 
     /// One name an app answers to: its file name in an Applications folder, or
@@ -575,6 +604,9 @@ nonisolated enum RealtimeVoiceVerbs {
         case findMenuItemsName:
             let words = call.words.map(RealtimeOpenAppTool.captionName) ?? "a command"
             return "Looking for \u{2018}\(words)\u{2019} in \(app ?? "the app")\u{2019}s menus\u{2026}"
+        case searchHelpName:
+            let words = call.words.map(RealtimeOpenAppTool.captionName) ?? "it"
+            return "Searching \(app ?? "the app")\u{2019}s Help for \u{2018}\(words)\u{2019}\u{2026}"
         case pressMenuName:
             return "\(menuPathCaption(call.path ?? []))\u{2026}"
         case findOnScreenName:
@@ -608,6 +640,7 @@ nonisolated enum RealtimeVoiceVerbs {
     /// do_task only starts the loop: its "started" is no receipt for "done".
     static func isActingTool(_ toolName: String) -> Bool {
         toolName != findMenuItemsName && toolName != findOnScreenName && toolName != doTaskName && toolName != annotateName
+            && toolName != searchHelpName
     }
 }
 

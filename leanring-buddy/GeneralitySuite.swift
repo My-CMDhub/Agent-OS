@@ -38,8 +38,8 @@ enum GeneralitySuite {
         let apps: [String]
         var heldOut = false
         var findOut = false
-        /// (spoken answer) -> evidence with "passed".
-        let check: (String) async -> [String: Any]
+        /// (spoken answer, the goal run's report) -> evidence with "passed".
+        let check: (_ spoken: String, _ run: [String: Any]) async -> [String: Any]
     }
 
     nonisolated static let finder = "com.apple.finder", settings = "com.apple.systempreferences", notes = "com.apple.Notes",
@@ -55,51 +55,50 @@ enum GeneralitySuite {
 
     static let tasks: [SuiteTask] = [
         SuiteTask(id: "G01", pattern: "settings pane navigation + read value", words: "what version of macOS is this Mac running? check in System Settings",
-                  apps: [settings]) { spoken in answer(spoken, has: [macOSVersion], truth: macOSVersion) },
+                  apps: [settings]) { spoken, _ in answer(spoken, has: [macOSVersion], truth: macOSVersion) },
         SuiteTask(id: "G02", pattern: "menu command (view mode)", words: "open a new Finder window on my Downloads folder and show it as a list",
-                  apps: [finder]) { _ in
+                  apps: [finder]) { _, _ in
                       let list = await read { windowHas(finder, title: "Downloads") { $0.role == "AXOutline" } }
                       return verdict(list == true, ["downloadsWindowInListView": list as Any? ?? NSNull()])
                   },
         SuiteTask(id: "G03", pattern: "read a count from a list", words: "how many items are in my Downloads folder?",
-                  apps: [finder]) { spoken in
+                  apps: [finder]) { spoken, _ in
                       // No truth, no pass: V03 once "passed" by finding "?" in its own answer (run 20-25-47Z).
                       guard let count = truthArgument("downloads") else { return verdict(false, ["truth": "missing: pass --generality-truth-downloads=<n>"]) }
                       return answer(spoken, has: [count], truth: count)
                   },
         SuiteTask(id: "G04", pattern: "create item + text entry", words: "create a new note in Notes titled JARVIS test 1 with the line hello",
-                  apps: [notes]) { _ in
+                  apps: [notes]) { _, _ in
                       let found = await read { appHas(notes) { $0.listedName?.raw.contains("JARVIS test 1") == true } }
                       return verdict(found == true, ["noteVisible": found as Any? ?? NSNull()])
                   },
         SuiteTask(id: "G05", pattern: "create item (list app)", words: "create a reminder called JARVIS test reminder",
-                  apps: [reminders]) { _ in
+                  apps: [reminders]) { _, _ in
                       let found = await read { appHas(reminders) { node in
                           [node.listedName?.raw, node.value?.raw].contains { $0?.contains("JARVIS test reminder") == true } } }
                       return verdict(found == true, ["reminderVisible": found as Any? ?? NSNull()])
                   },
         SuiteTask(id: "G06", pattern: "tab / segmented control switch", words: "switch Calendar to the month view",
-                  apps: [calendar]) { _ in
+                  apps: [calendar]) { _, _ in
                       let month = await read { appHas(calendar) { $0.listedName?.raw == "Month" && $0.selected == true } }
                       return verdict(month == true, ["monthSelected": month as Any? ?? NSNull()])
                   },
         SuiteTask(id: "G07", pattern: "Help-menu search", words: "open the Help menu in Calculator and search it for memory",
-                  apps: [calculator]) { _ in
-                      let typed = await read { helpSearchLength(calculator) } ?? nil
-                      return verdict((typed ?? 0) > 0, ["helpSearchLength": typed as Any? ?? NSNull()])
+                  apps: [calculator]) { spoken, run in
+                      helpSearchVerdict(calls: run["calls"] as? [[String: Any]] ?? [], spoken: spoken)
                   },
         SuiteTask(id: "G08", pattern: "sort / read a table", words: "which process is using the most memory right now? check Activity Monitor",
-                  apps: [activity]) { spoken in
+                  apps: [activity]) { spoken, _ in
                       let top = topMemoryWords()
                       return answer(spoken, has: top, truth: top.joined(separator: "/"))
                   },
         SuiteTask(id: "G09", pattern: "read a folder count (file tree)", words: "how many files and folders are directly inside the scripts folder of the Heyclicky repo?",
-                  apps: [finder, cursor]) { spoken in
+                  apps: [finder, cursor]) { spoken, _ in
                       let count = scriptsCount()
                       return answer(spoken, has: [count], truth: count)
                   },
         SuiteTask(id: "G10", pattern: "button grid + read display", words: "use Calculator to work out 17 times 23",
-                  apps: [calculator]) { spoken in
+                  apps: [calculator]) { spoken, _ in
                       let shown = await read { appHas(calculator) { node in [node.listedName?.raw, node.value?.raw].contains { $0?.contains("391") == true } } }
                       var result = answer(spoken, has: ["391"], truth: "391")
                       result["calculatorShows391"] = shown as Any? ?? NSNull()
@@ -107,14 +106,14 @@ enum GeneralitySuite {
                       return result
                   },
         SuiteTask(id: "G11", pattern: "read a toolbar value (IDE)", words: "which scheme is selected in Xcode?",
-                  apps: [xcode]) { spoken in answer(spoken, has: ["leanring-buddy", "leanring buddy", "learning buddy", "leanring"], truth: "leanring-buddy") },
+                  apps: [xcode]) { spoken, _ in answer(spoken, has: ["leanring-buddy", "leanring buddy", "learning buddy", "leanring"], truth: "leanring-buddy") },
         SuiteTask(id: "G12", pattern: "search field + list (held out)", words: "how many styles does the Helvetica family have in Font Book?",
-                  apps: [fontBook], heldOut: true) { spoken in
+                  apps: [fontBook], heldOut: true) { spoken, _ in
                       let count = NSFontManager.shared.availableMembers(ofFontFamily: "Helvetica")?.count ?? -1
                       return answer(spoken, has: ["\(count)"], truth: "\(count)")
                   },
         SuiteTask(id: "G13", pattern: "search field + read result (held out)", words: "look up the word serendipity in the Dictionary app and tell me what it means",
-                  apps: [dictionary], heldOut: true) { spoken in
+                  apps: [dictionary], heldOut: true) { spoken, _ in
                       let shown = await read { appHas(dictionary) { $0.listedName?.raw.lowercased().contains("serendipity") == true } }
                       var result = answer(spoken, has: ["chance", "accident", "fortunate", "luck", "happy"], truth: "occurrence by chance in a happy way")
                       result["dictionaryShowsWord"] = shown as Any? ?? NSNull()
@@ -122,40 +121,40 @@ enum GeneralitySuite {
                       return result
                   },
         SuiteTask(id: "G14", pattern: "settings navigation + read a radio state", words: "is my Mac's appearance set to light or dark? check System Settings",
-                  apps: [settings]) { spoken in
+                  apps: [settings]) { spoken, _ in
                       // UserDefaults(suiteName: globalDomain) read nil here and called a Dark Mac "light" (run 20-16-12Z): .standard searches the global domain.
                       let dark = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
                       return answer(spoken, has: [dark ? "dark" : "light"], truth: dark ? "dark" : "light")
                   },
         SuiteTask(id: "G15", pattern: "text entry + save dialog", words: "make a new TextEdit document that says JARVIS test 3 and save it to the Desktop named JARVIS test 3",
-                  apps: [textEdit]) { _ in
+                  apps: [textEdit]) { _, _ in
                       let saved = await read { documentURLs(textEdit).contains { $0.contains("Desktop/JARVIS%20test%203") } }
                       return verdict(saved == true, ["savedOnDesktop": saved as Any? ?? NSNull()])
                   },
         SuiteTask(id: "G16", pattern: "scroll a long list to an off-screen row", words: "open the Privacy and Security settings",
-                  apps: [settings]) { _ in
+                  apps: [settings]) { _, _ in
                       let titles = await read { windowTitles(settings) } ?? []
                       return verdict(titles.contains("Privacy & Security"), ["windowTitles": titles])
                   },
         SuiteTask(id: "G17", pattern: "menu command opening an info panel", words: "show me the Get Info window for my Downloads folder",
-                  apps: [finder]) { _ in
+                  apps: [finder]) { _, _ in
                       let titles = await read { windowTitles(finder) } ?? []
                       return verdict(titles.contains("Downloads Info"), ["infoWindowOpen": titles.contains("Downloads Info")])
                   },
         SuiteTask(id: "G18", pattern: "shortcut-reachable command (Go menu)", words: "open a Finder window showing the Applications folder",
-                  apps: [finder]) { _ in
+                  apps: [finder]) { _, _ in
                       let titles = await read { windowTitles(finder) } ?? []
                       return verdict(titles.contains("Applications"), ["applicationsWindow": titles.contains("Applications")])
                   },
         SuiteTask(id: "G19", pattern: "find out (connector-answerable)", words: "what's the weather like in Sydney right now?",
-                  apps: [weather, chrome], findOut: true) { spoken in
+                  apps: [weather, chrome], findOut: true) { spoken, _ in
                       let hasTemperature = spoken.range(of: #"\d+\s*(°|degrees|celsius)"#, options: [.regularExpression, .caseInsensitive]) != nil
                       return verdict(hasTemperature, ["answerHasTemperature": hasTemperature, "truth": "unverifiable (no independent weather read)"])
                   },
         SuiteTask(id: "G20", pattern: "find out (connector-answerable)", words: "who originally created the Swift programming language?",
-                  apps: [chrome], findOut: true) { spoken in answer(spoken, has: ["Lattner"], truth: "Chris Lattner") },
+                  apps: [chrome], findOut: true) { spoken, _ in answer(spoken, has: ["Lattner"], truth: "Chris Lattner") },
         SuiteTask(id: "G21", pattern: "cross-app copy", words: "find out which macOS version this Mac runs and write it in a new note titled JARVIS test 2",
-                  apps: [settings, notes]) { _ in
+                  apps: [settings, notes]) { _, _ in
                       let version = macOSVersion
                       let titled = await read { appHas(notes) { $0.listedName?.raw.contains("JARVIS test 2") == true } }
                       let withVersion = await read { appHas(notes) { node in [node.listedName?.raw, node.value?.raw].contains { $0?.contains(version) == true } } }
@@ -225,22 +224,20 @@ enum GeneralitySuite {
         return CoverageAudit.windows(of: pid).filter { string($0, kAXTitleAttribute) == title }.contains { walk($0, bundle).contains(where: match) }
     }
 
-    /// The length of what is typed in the Help menu's search field (menus are read whether open or not).
-    nonisolated static func helpSearchLength(_ bundle: String) -> Int? {
-        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first,
-              let bar = AccessibilityMenu.menuBarNode(for: app),
-              let help = AccessibilityMenu.liveChildren(of: bar).last(where: { $0.label.map { RealtimeVoiceVerbs.foldedTokens($0) == ["help"] } ?? false })
-        else { return nil }
-        var queue = [help], seen = 0
-        while !queue.isEmpty, seen < 60 {
-            let node = queue.removeFirst()
-            seen += 1
-            if AccessibilityElementNode.textInputRoles.contains(node.role), let element = node.element {
-                return string(element, kAXValueAttribute)?.count ?? 0
-            }
-            queue += AccessibilityMenu.liveChildren(of: node)
+    /// G07 by outcome and meaning (owner: checkers judge intent): an ok
+    /// search_help whose words hold "memory", and an answer naming one thing it
+    /// returned — a topic or menu item sharing two significant words with the
+    /// answer (all of them, for a one-word item). Opening the menu proves nothing.
+    nonisolated static func helpSearchVerdict(calls: [[String: Any]], spoken: String) -> [String: Any] {
+        let searches = calls.filter { $0["tool"] as? String == RealtimeVoiceVerbs.searchHelpName && $0["ok"] as? Bool == true
+            && RealtimeVoiceVerbs.foldedTokens($0["words"] as? String ?? "").contains("memory") }
+        let found = searches.flatMap { $0["found"] as? [String] ?? [] }
+        let said = Set(RealtimeVoiceVerbs.foldedTokens(spoken))
+        let named = found.first { entry in
+            let words = Set(RealtimeVoiceVerbs.foldedTokens(entry).filter { $0.count >= 3 }).subtracting(RealtimeVoiceVerbs.ignoredQueryWords)
+            return !words.isEmpty && words.filter { word in said.contains { RealtimeVoiceVerbs.tokensMatch(word, $0) } }.count >= min(2, words.count)
         }
-        return nil
+        return ["passed": named != nil, "memorySearches": searches.count, "resultsReturned": found.count]
     }
 
     /// Words naming the five biggest processes by memory footprint, the figure
@@ -366,7 +363,7 @@ enum GeneralitySuite {
             result.merge(run) { current, _ in current }
             let spoken = run["spoken"] as? String ?? ""
             result["modelCalls"] = modelCalls(run: run["run"] as? String ?? "")
-            result["check"] = await task.check(spoken)
+            result["check"] = await task.check(spoken, run)
             result["status"] = (result["check"] as? [String: Any])?["passed"] as? Bool == true ? "passed" : "failed"
             result["cleanup"] = await undo(state, apps: task.apps)
             results.append(result)
@@ -394,7 +391,7 @@ enum GeneralitySuite {
             guard let id = voiceIDs[task.id] else { return nil }
             return RunnerScenario(id: id, start: .finderFront, quitIfLaunched: task.apps.filter { $0 != finder }, check: { _, outcome in
                 let spoken = outcome.transcript
-                var result = await task.check(spoken)
+                var result = await task.check(spoken, [:])
                 result["delegated"] = outcome.voiceDecisions.contains { $0.call.name == RealtimeVoiceVerbs.doTaskName }
                 result["voiceTools"] = outcome.voiceDecisions.map(\.call.name)
                 result["taskSteps"] = outcome.agentReport?.steps ?? 0

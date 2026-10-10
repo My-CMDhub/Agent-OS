@@ -35,6 +35,7 @@ nonisolated enum AgentPlan {
     static let requiredArguments: [String: [[String]]] = [
         RealtimeOpenAppTool.name: [["name"]], RealtimeVoiceVerbs.focusAppName: [["name"]],
         RealtimeVoiceVerbs.findMenuItemsName: [["words"]], RealtimeVoiceVerbs.findOnScreenName: [["words"]],
+        RealtimeVoiceVerbs.searchHelpName: [["words"]],
         RealtimeVoiceVerbs.pressMenuName: [["path"], ["shortcut"]],
         RealtimeVoiceVerbs.pressElementName: [["name"], ["x", "y"], ["point"], ["underPointer"]],
         RealtimeVoiceVerbs.pointAtName: [["name"], ["x", "y"], ["point"], ["underPointer"]],
@@ -57,7 +58,7 @@ nonisolated enum AgentPlan {
                 "tool": text("The tool this step calls, for example \"press_menu\"."),
                 "app": text("The app, as that tool takes it."),
                 "name": text("open_app / focus_app: the app's name. press_element / point_at / type_text / scroll: the element's exact name."),
-                "words": text("find_menu_items / find_on_screen: a few words."),
+                "words": text("find_menu_items / find_on_screen / search_help: a few words."),
                 "path": ["type": "array", "items": ["type": "string"], "description": "press_menu: the menu path, split at \" > \"."],
                 "shortcut": text("press_menu: instead of a path, the shortcut an App verbs line shows."),
                 "x": number("Step 1 only: across the screenshot, 0 to 1."),
@@ -82,7 +83,7 @@ nonisolated enum AgentPlan {
                     + "the screenshot, the App verbs and earlier results. Each step is one of your tools with that tool's own arguments. "
                     + "Checked before anything runs (known tools, arguments, menu paths from the App verbs or a find, read-only); it stops "
                     + "at the first step that fails, waits for an approval card, is notObserved, changes the app in front, or reads "
-                    + "(read_page, find_on_screen, find_menu_items, web_lookup), and the result lists each step that ran. A position (x, y) "
+                    + "(read_page, find_on_screen, find_menu_items, search_help, web_lookup), and the result lists each step that ran. A position (x, y) "
                     + "only in step 1. done may be the last step only when the steps before it act and their ok results prove it.",
                 "input_schema": ["type": "object",
                                  "properties": ["steps": ["type": "array", "items": step,
@@ -128,7 +129,7 @@ nonisolated enum AgentPlan {
     /// Steps that only read: their result is something to see, so a plan stops after one.
     static func isReading(_ tool: String) -> Bool {
         [AgentLoopTools.readPageName, AgentLoopGemini.webLookupName, RealtimeVoiceVerbs.findOnScreenName,
-         RealtimeVoiceVerbs.findMenuItemsName].contains(tool)
+         RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.searchHelpName].contains(tool)
     }
 
     static func isActing(_ tool: String) -> Bool {

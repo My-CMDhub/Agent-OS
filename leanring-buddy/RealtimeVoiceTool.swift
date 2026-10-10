@@ -400,6 +400,9 @@ nonisolated enum RealtimeOpenAppTool {
             guard call.words != nil else { return refuse("missingWords", "find_menu_items needs a few words to look for") }
             // `forModel`: the listing's names go to a remote model, so a policy `refuse` holds.
             request = ["verb": "menus", "expectApp": expectApp ?? appName, "forModel": true]
+        case RealtimeVoiceVerbs.searchHelpName:
+            guard let words = call.words else { return refuse("missingWords", "search_help needs a few words to search the Help for") }
+            request = ["verb": "helpSearch", "text": words, "expectApp": expectApp ?? appName]
         case RealtimeVoiceVerbs.pressMenuName:
             guard let path = call.path, !path.isEmpty else {
                 return refuse("missingMenuPath", "press_menu needs a path from find_menu_items or the App verbs, or a shortcut the App verbs list")
@@ -681,6 +684,22 @@ nonisolated enum RealtimeOpenAppTool {
                 offer = madeOffer
             }
             response["items"] = nil
+            var dispatch = finished(result, waited: false, harnessResponse: response)
+            dispatch.menuOffer = offer
+            return checked(dispatch)
+        }
+        // search_help: its resolved menu paths are an offer exactly as a find's
+        // candidates are, so press_menu may press one; its topics are only read out.
+        if call.name == RealtimeVoiceVerbs.searchHelpName {
+            var result = toolResult(fromHarnessResponse: response)
+            var offer: RealtimeMenuOffer?
+            if response["ok"] as? Bool == true {
+                let madeOffer = RealtimeVoiceVerbs.helpOffer(fromHelpSearchResponse: response)
+                result["menuItems"] = madeOffer.candidates.map(\.jsonObject)
+                result["topics"] = Array(((response["topics"] as? [String]) ?? []).prefix(RealtimeVoiceVerbs.maximumCandidates))
+                result["note"] = "topics are help pages to read out; they are never pressed"
+                offer = madeOffer
+            }
             var dispatch = finished(result, waited: false, harnessResponse: response)
             dispatch.menuOffer = offer
             return checked(dispatch)
@@ -1745,7 +1764,7 @@ nonisolated enum RealtimeOpenAppTool {
     static func notchAnswer(for call: RealtimeToolCall, dispatch: RealtimeToolDispatch) -> JarvisNotchEvent? {
         let error = dispatch.result["error"] as? String
         switch call.name {
-        case RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.findOnScreenName:
+        case RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.findOnScreenName, RealtimeVoiceVerbs.searchHelpName:
             return dispatch.harnessConfirmed ? nil : .harnessAnswered(ok: false, subject: "", error: error)
         case RealtimeVoiceVerbs.pointAtName:
             // Pointing proves where a control is, not that anything happened: an

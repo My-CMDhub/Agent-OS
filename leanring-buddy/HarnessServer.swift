@@ -158,13 +158,18 @@ enum HarnessVerb: String, CaseIterable {
     /// when the words OCR reads there are the caller's label (`visionClickResponse`).
     case visionClick
 
+    /// Search the frontmost app's Help menu: open it, write the query into its
+    /// search field, read the results, close it (`HarnessHelpSearch`). Mutating
+    /// for the kill switch, policy and audit; a read for the kernel.
+    case helpSearch
+
     /// Whether this verb can change the world. The kill switch stops these and
     /// leaves the read-only pair working, so an operator who tripped it can
     /// still look at the machine and find out why.
     var isMutating: Bool {
         switch self {
         case .ping, .snapshot, .menus, .windows, .look, .status, .highlight: return false
-        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick: return true
+        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick, .helpSearch: return true
         }
     }
 
@@ -190,7 +195,9 @@ enum HarnessVerb: String, CaseIterable {
         // `highlight` resolves exactly like a press but performs nothing — see `highlightResponse`.
         // `openURL` targets a page in a browser, not an element: `openURLResponse`.
         // `visionClick` aims at a point, not a name in the tree: `visionClickResponse`.
-        case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight, .scroll, .openURL, .visionClick: return nil
+        // `helpSearch` types into the app's own Help field, never a named element: `helpSearchResponse`.
+        case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight, .scroll, .openURL, .visionClick,
+             .helpSearch: return nil
         }
     }
 }
@@ -689,6 +696,13 @@ enum HarnessPolicy {
 
         var mode = TypeMode.insert
         var text = raw.text ?? ""
+        // helpSearch: the words, in the app it was meant for, and nothing a model could smuggle a secret through.
+        if verb == .helpSearch {
+            text = text.trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty else { return .failure(.missingField("text")) }
+            guard raw.expectApp != nil else { return .failure(.missingField("expectApp")) }
+            if let problem = HarnessHelpSearch.queryProblem(text) { return .failure(.invalidField(field: "text", value: problem)) }
+        }
         if verb == .type {
             guard !text.isEmpty else {
                 return .failure(.missingField("text"))
@@ -723,7 +737,7 @@ enum HarnessPolicy {
             title: (verb == .menu || verb == .menus) && !path.isEmpty
                 ? path.joined(separator: " > ")
                 // openURL's target is its page, so the audit line and a ticket name it.
-                : (statusItem ?? url?.absoluteString ?? raw.title ?? ""),
+                : (statusItem ?? url?.absoluteString ?? (verb == .helpSearch ? text : raw.title) ?? ""),
             role: raw.role,
             withinNamed: raw.withinNamed,
             nearPoint: raw.nearPoint?.cgPoint,
@@ -880,7 +894,7 @@ enum HarnessPolicy {
     /// pointing, pressing and reading names (which never carry a password
     /// box's contents) go on. nil when the verb may proceed.
     static func handOverRefusal(verb: HarnessVerb, secureInput: SecureInputState) -> String? {
-        guard secureInput.isOn, verb == .type || verb == .look else { return nil }
+        guard secureInput.isOn, verb == .type || verb == .look || verb == .helpSearch else { return nil }
         return handOverMessage(secureInput)
     }
 
@@ -1080,6 +1094,8 @@ enum HarnessObservability {
         // so the one-app capture refuses. Explained and safe; three dumps of it
         // in one session were a recorder filing the expected as a surprise.
         "applicationNotCapturable",
+        // An app whose Help menu has no search field: an answer, not an anomaly.
+        "helpSearchUnavailable",
         // `LockScreenGuard` doing its job. Measured 2026-09-13: a probe left
         // running against a locked screen wrote 12,881 `anomalySuppressed`
         // audit lines naming this rule — one per refusal, each also a line of
@@ -1933,6 +1949,9 @@ final class HarnessServer {
 
         case .visionClick:
             return visionClickResponse(request, dryRun: dryRun, startedAt: startedAt)
+
+        case .helpSearch:
+            return helpSearchResponse(request, dryRun: dryRun, startedAt: startedAt)
         }
     }
 
@@ -3904,6 +3923,58 @@ final class HarnessServer {
         response["ok"] = true
         audit(request, dryRun: dryRun, kernel: "n/a", outcome: "ok", startedAt: startedAt)
         return response
+    }
+
+    // MARK: helpSearch
+
+    /// The frontmost app's Help search (`HarnessHelpSearch`, measured 2026-10-11).
+    /// No kernel decision: it types the caller's words into the app's own Help
+    /// field and closes the menu again. Its results go to a model, so a policy
+    /// `refuse` holds as for `menus` forModel. Menu hits are returned only when
+    /// they resolve to one enabled leaf of the live listing, raw so a caller
+    /// can press one; topics are app-written text, so quoted.
+    private func helpSearchResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        var response: [String: Any] = ["dryRun": dryRun]
+        guard let (application, bar) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response) else { return response }
+        func finish(_ outcome: String, error: String? = nil, message: String? = nil) -> [String: Any] {
+            response["ok"] = error == nil
+            if let error { response["error"] = error }
+            if let message { response["message"] = message }
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: outcome, startedAt: startedAt)
+            return response
+        }
+        if let reason = HarnessPolicy.modelReadRefusal(forModel: true, bundleIdentifier: application.bundleIdentifier, policy: loadedPolicy) {
+            return finish("policyRefused", error: "policyRefused", message: reason)
+        }
+        guard let help = HarnessHelpSearch.helpBarItem(in: bar), let item = help.element else {
+            return finish("helpSearchUnavailable", error: "helpSearchUnavailable", message: "this app's menu bar has no Help menu; nothing was opened")
+        }
+        response["helpMenu"] = UntrustedText(help.label ?? "").forDisplay
+        guard !dryRun else {
+            response["performed"] = ["status": "skipped", "reason": "dry run — the Help menu was not opened"]
+            return finish("dryRun")
+        }
+        phaseTiming.actionStarting()
+        let search = HarnessHelpSearch.search(query: request.text, helpItem: item)
+        phaseTiming.actionReturned()
+        response.merge(search.report) { _, new in new }
+        if let failure = search.failure { return finish(failure.code, error: failure.code, message: failure.message) }
+
+        let classified = HarnessHelpSearch.classify(rows: search.rows)
+        var menuItems: [[String]] = []
+        var dropped = 0
+        if !classified.menuPaths.isEmpty {
+            // After the close: the listing is a read of the bar, never of an open menu.
+            let listing = AccessibilityMenu.list(from: bar, pathSoFar: [], children: AccessibilityMenu.liveChildren,
+                                                 deadline: Date().addingTimeInterval(AccessibilityMenu.listingTimeLimitInSeconds))
+            (menuItems, dropped) = HarnessHelpSearch.resolve(classified.menuPaths, in: listing.items)
+            response["listingStopReasons"] = listing.stopReasons
+            response["menuMilliseconds"] = listing.milliseconds
+        }
+        response["menuItems"] = menuItems
+        response["menuItemsDropped"] = dropped
+        response["topics"] = classified.topics.map { UntrustedText($0).forDisplay }
+        return finish("ok")
     }
 
     // MARK: windows / focus

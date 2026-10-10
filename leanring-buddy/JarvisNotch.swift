@@ -255,7 +255,11 @@ nonisolated enum JarvisNotchReason {
         "visionLabelMismatch": "other words are drawn there",
         "visionNoText": "no words there to confirm it",
         "axElementAtPoint": "that one goes by its name",
-        "visionNotInFocusedWindow": "it\u{2019}s not in the front window"
+        "visionNotInFocusedWindow": "it\u{2019}s not in the front window",
+        // search_help (2026-10-11).
+        "helpSearchUnavailable": "its Help menu has no search",
+        "helpSearchFailed": "the Help search didn\u{2019}t take",
+        "helpMenuLeftOpen": "its Help menu stayed open"
     ]
 
     /// `subject` is the app HEARD for a heard-vs-named mismatch ("heard

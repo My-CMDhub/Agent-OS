@@ -396,6 +396,12 @@ enum AgentLoopProbe {
         line["error"] = dispatch?.result["error"] ?? NSNull()
         // Which refusal: clickTargetObscured alone hid six different causes (2026-10-05).
         if line["ok"] as? Bool != true { line["message"] = (dispatch?.result["message"] ?? dispatch?.harnessResponse?["message"]) ?? NSNull() }
+        // search_help: what it searched for and what it returned, for G07's outcome check.
+        if call.name == RealtimeVoiceVerbs.searchHelpName {
+            line["words"] = call.words.map { String($0.prefix(60)) } ?? NSNull()
+            let menus = (dispatch?.result["menuItems"] as? [[String: Any]] ?? []).compactMap { ($0["path"] as? [String])?.joined(separator: " > ") }
+            line["found"] = menus + (dispatch?.result["topics"] as? [String] ?? [])
+        }
         line["harnessMs"] = dispatch?.harnessMilliseconds ?? 0
         line["waitedForConfirmation"] = dispatch?.waitedForConfirmation ?? false
         return line
