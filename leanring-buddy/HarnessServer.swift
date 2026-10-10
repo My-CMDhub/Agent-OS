@@ -406,6 +406,22 @@ enum HarnessPolicy {
         return true
     }
 
+    /// One step of a live AXParent walk: what the element calls itself.
+    struct AncestorRole: Equatable {
+        let role: String
+        let subrole: String?
+    }
+
+    /// A field in a NATIVE modal — an `AXSheet` above it, or its window's subrole is
+    /// `AXDialog`/`AXSystemDialog` — with no `AXWebArea` between (a web modal is a group
+    /// inside the page). `chain` runs from the field up to its `AXWindow`; nil, or a walk
+    /// that never reached the window, is not a sheet. Owner's ruling 2026-10-11 (G15).
+    static func sitsInNativeModal(_ chain: [AncestorRole]?) -> Bool {
+        guard let chain, let window = chain.last, window.role == "AXWindow",
+              !chain.contains(where: { $0.role == "AXWebArea" }) else { return false }
+        return chain.contains { $0.role == "AXSheet" } || ["AXDialog", "AXSystemDialog"].contains(window.subrole ?? "")
+    }
+
     /// Roles that label a control without being one.
     static let labelRoles: Set<String> = ["AXHeading", "AXStaticText", "AXImage"]
     /// What a label may stand for: a link or a button.
@@ -2883,8 +2899,15 @@ final class HarnessServer {
             currentValue: liveElement.flatMap(AccessibilityTypePerformer.stringValue), now: Date()) {
             typingContext?.inTabTheHarnessOpened = true
         }
+        // A Save or Rename sheet's name field (owner's ruling 2026-10-11, G15): read live, up to the window.
+        if typingContext?.mode == .replace, (typingContext?.currentValueLength ?? 0) > 0,
+           ActionSafetyKernel.singleLineTextRoles.contains(resolvedNode.role), let liveElement,
+           HarnessPolicy.sitsInNativeModal(HarnessHands.ancestorRolesToWindow(of: liveElement)) {
+            typingContext?.inNativeModalSheet = true
+        }
         if var field = typing?.field {
             if typingContext?.inTabTheHarnessOpened == true { field["inTabTheHarnessOpened"] = true }
+            if typingContext?.inNativeModalSheet == true { field["inNativeModalSheet"] = true }
             response["field"] = field
         }
         let isListOption = (action == .press || action == .click || action == .select) && resolvedNode.role == "AXStaticText"

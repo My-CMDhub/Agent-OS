@@ -192,3 +192,47 @@ extension DraftAndFormTests {
 }
 
 final class LineBox: @unchecked Sendable { var lines: [String] = [] }
+
+extension DraftAndFormTests {
+
+    // Owner's ruling 2026-10-11 (G15, 2026-10-10T23-34-53Z): TextEdit's File > Save… sheet held "Untitled";
+    // replacing it carded destructive, the suite denied, and the model inserted instead — "UntitledJARVIS test 3.rtf".
+    // A name field in a NATIVE sheet or dialog is replaced without a card; text areas and web fields are unchanged.
+    @Test func aNameFieldInANativeSheetIsReplacedWithoutACard() {
+        func typing(_ length: Int, sheet: Bool) -> ActionSafetyKernel.TypingContext {
+            var context = ActionSafetyKernel.TypingContext(mode: .replace, settableAttributes: [kAXValueAttribute as String],
+                                                           currentValueLength: length, aimedByFocus: false)
+            context.inNativeModalSheet = sheet
+            return context
+        }
+        func field(_ role: String) -> AccessibilityElementNode {
+            AccessibilityElementNode(role: role, subrole: nil, title: "Save As:", value: "Untitled",
+                                     frameInAppKitCoordinates: CGRect(x: 100, y: 100, width: 240, height: 24), depth: 3, children: [])
+        }
+        #expect(decide(.type, field("AXTextField"), draft: false, typing: typing(8, sheet: true)) == .allow)
+        #expect(decide(.type, field("AXComboBox"), draft: false, typing: typing(8, sheet: true)) == .allow)
+        if case .requireConfirmation(_, let destructive) = decide(.type, field("AXTextArea"), draft: false, typing: typing(8, sheet: true)) {
+            #expect(destructive)
+        } else { Issue.record("a text area in a sheet must still card") }
+        if case .requireConfirmation = decide(.type, field("AXTextField"), draft: false, typing: typing(8, sheet: false)) {} else {
+            Issue.record("a field with text outside a native sheet must still card")
+        }
+        #expect(decide(.type, field("AXTextField"), draft: false, typing: typing(0, sheet: false)) == .allow)
+    }
+
+    @Test func onlyANativeSheetOrDialogWithNoWebAreaAboveCounts() {
+        func step(_ role: String, _ subrole: String? = nil) -> HarnessPolicy.AncestorRole { .init(role: role, subrole: subrole) }
+        let standard = step("AXWindow", "AXStandardWindow")
+        #expect(HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXGroup"), step("AXSheet"), standard]))
+        #expect(HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXGroup"), step("AXWindow", "AXDialog")]))
+        #expect(HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXWindow", "AXSystemDialog")]))
+        // A web modal is a group inside the page: it keeps carding, whatever it calls itself.
+        #expect(!HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXGroup", "AXApplicationDialog"), step("AXSheet"),
+                                                  step("AXWebArea"), step("AXScrollArea"), standard]))
+        #expect(!HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXWebArea"), step("AXWindow", "AXDialog")]))
+        #expect(!HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXGroup"), standard]))
+        // A walk that failed or never reached the window is not a sheet.
+        #expect(!HarnessPolicy.sitsInNativeModal(nil))
+        #expect(!HarnessPolicy.sitsInNativeModal([step("AXTextField"), step("AXSheet")]))
+    }
+}

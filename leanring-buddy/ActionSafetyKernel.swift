@@ -117,6 +117,9 @@ enum ActionSafetyKernel {
         /// holds only text the harness typed (`HarnessPolicy.replaceNeedsNoCard`) — the
         /// harness's own record, never a caller's flag. See the replace rule in `evaluate`.
         var inTabTheHarnessOpened = false
+        /// The field sits in a NATIVE modal sheet or dialog (`HarnessPolicy.sitsInNativeModal`):
+        /// a Save or Rename sheet's name field, read live by the harness. See the replace rule.
+        var inNativeModalSheet = false
     }
 
     static func secureFieldRefusalReason(subrole: String) -> String {
@@ -657,8 +660,11 @@ enum ActionSafetyKernel {
         // discard 10 characters" stalled the form). Since the security review of
         // 2026-10-10 a page's own default (S2's date) or an autosaving page's text
         // (a Docs title, a Gmail draft's To) cards: only the task's own typing passes.
+        // Owner's ruling 2026-10-11 (G15): a native Save/Rename sheet's name field held
+        // "Untitled"; the card was denied and the model inserted ("UntitledJARVIS test 3.rtf").
+        // Its default is the app's, not the owner's — never inside an AXWebArea.
         if let typing, typing.mode == .replace, typing.currentValueLength > 0,
-           !(typing.inTabTheHarnessOpened && singleLineTextRoles.contains(resolvedNode.role)) {
+           !((typing.inTabTheHarnessOpened || typing.inNativeModalSheet) && singleLineTextRoles.contains(resolvedNode.role)) {
             return .requireConfirmation(
                 reason: replaceWouldDiscardReason(characterCount: typing.currentValueLength),
                 destructive: true

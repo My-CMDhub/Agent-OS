@@ -651,6 +651,26 @@ enum HarnessHands {
         return false
     }
 
+    /// Role and subrole from `element` up to and including its `AXWindow`; nil when a
+    /// role read fails or no window is reached (`HarnessPolicy.sitsInNativeModal`).
+    static func ancestorRolesToWindow(of element: AXUIElement) -> [HarnessPolicy.AncestorRole]? {
+        var chain: [HarnessPolicy.AncestorRole] = []
+        var current = element
+        for _ in 0..<ancestorWalkLimit {
+            var role: AnyObject?, subrole: AnyObject?
+            guard AXUIElementCopyAttributeValue(current, kAXRoleAttribute as CFString, &role) == .success, let role = role as? String
+            else { return nil }
+            _ = AXUIElementCopyAttributeValue(current, kAXSubroleAttribute as CFString, &subrole)
+            chain.append(.init(role: role, subrole: subrole as? String))
+            if role == "AXWindow" { return chain }
+            var parent: AnyObject?
+            guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { return nil }
+            current = (parent as! AXUIElement)
+        }
+        return nil
+    }
+
     /// What the system draws at a global top-left point, relative to the target.
     static func hitRelation(atTopLeft point: CGPoint, target: AXUIElement, processIdentifier: pid_t) -> HitRelation {
         let systemWide = AXUIElementCreateSystemWide()
