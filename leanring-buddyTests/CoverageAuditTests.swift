@@ -88,3 +88,31 @@ struct GeneralitySuiteAnswerTests {
         #expect(GeneralitySuite.answer("Created by Chris Lattner.", has: ["Lattner"], truth: "Chris Lattner")["passed"] as? Bool == true)
     }
 }
+
+/// The suite's cleanup diff. G15, run 2026-10-10T23-34-53Z: the task saved and
+/// closed TextEdit's existing Untitled window, then File > New opened a new one
+/// in the same default frame; matched against the old windows' BOUNDS it read
+/// as old, was neither closed nor counted, and two files it saved went unreported.
+struct GeneralitySuiteCleanupTests {
+    let frame = CGRect(x: 200, y: 100, width: 600, height: 500)
+
+    @Test func aNewWindowInAnOldWindowsFrameIsStillNew() {
+        let opened = GeneralitySuite.openedWindows(before: [(number: 11, bounds: frame)],
+                                                   after: [WindowServerSurface(number: 12, bounds: frame, title: "Untitled")])
+        #expect(opened.map(\.number) == [12])
+    }
+
+    @Test func aWindowThatExistedBeforeIsNeverOpenedEvenMoved() {
+        let opened = GeneralitySuite.openedWindows(before: [(number: 11, bounds: frame)],
+                                                   after: [WindowServerSurface(number: 11, bounds: frame.offsetBy(dx: 40, dy: 40), title: nil),
+                                                           WindowServerSurface(number: 13, bounds: frame.offsetBy(dx: 40, dy: 40), title: nil)])
+        #expect(opened.map(\.number) == [13])
+    }
+
+    @Test func newFilesAreTheNamesNotInTheSnapshot() {
+        let before: Set = ["Desktop/notes.txt", "Documents/a"]
+        #expect(GeneralitySuite.newEntries(before: before, after: before.union(["Desktop/UntitledJARVIS test 3.rtf", "Desktop/Untitled.rtf"]))
+                == ["Desktop/Untitled.rtf", "Desktop/UntitledJARVIS test 3.rtf"])
+        #expect(GeneralitySuite.newEntries(before: before, after: ["Desktop/notes.txt"]).isEmpty)
+    }
+}

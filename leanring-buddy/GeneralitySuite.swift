@@ -19,7 +19,8 @@
 //  Safety: may CREATE "JARVIS test …" items (a note, a reminder, a TextEdit file)
 //  and leave them; never sends, posts, invites or deletes. Afterwards it closes
 //  only windows that appeared during the task (window-server numbers, any Space,
-//  matched to the AX window by frame) and quits only apps the task launched.
+//  never an AX window seen before, never an edited one) and quits only apps the
+//  task launched; new files in ~/Desktop and ~/Documents are listed, never removed.
 //  Same start gate as the runner: 120 s owner idle; stops when the owner returns.
 //  Report: ~/Library/Logs/Clicky/generality/<ts>/results.json (0600).
 //
@@ -275,32 +276,27 @@ enum GeneralitySuite {
     struct Before {
         var running: Set<String> = []
         var windows: [String: [(number: Int, bounds: CGRect)]] = [:]
+        var axWindows: [String: Set<AccessibilityElementKey>] = [:]
+        var files: Set<String>?
     }
 
     static func before(_ apps: [String]) -> Before {
         var state = Before()
         for app in apps {
-            if pid(app) != nil { state.running.insert(app) }
+            if let pid = pid(app) {
+                state.running.insert(app)
+                state.axWindows[app] = Set(CoverageAudit.windows(of: pid).map(AccessibilityElementKey.init))
+            }
             state.windows[app] = VoiceToolProbe.windowServerWindows(bundleIdentifier: app) ?? []
         }
         return state
     }
 
-    nonisolated static func rawFrame(_ window: AXUIElement) -> CGRect? {
-        var position: AnyObject?, size: AnyObject?
-        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &position) == .success,
-              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &size) == .success,
-              let position, let size else { return nil }
-        var origin = CGPoint.zero, extent = CGSize.zero
-        AXValueGetValue(position as! AXValue, .cgPoint, &origin)
-        AXValueGetValue(size as! AXValue, .cgSize, &extent)
-        return CGRect(origin: origin, size: extent)
-    }
-
-    /// Closes the AX windows matching a window-server window that appeared during the task
-    /// (and no window there before); quits apps the task launched. Never a count.
+    /// Closes the AX windows of window-server windows that appeared during the task, unless
+    /// edited (a save prompt is the owner's), and reports the rest by title; quits apps the
+    /// task launched; lists files it left in ~/Desktop and ~/Documents. Never a count.
     static func undo(_ state: Before, apps: [String]) async -> [String: Any] {
-        var closed = 0, quit: [String] = [], left = 0
+        var closed = 0, quit: [String] = [], left: [String] = []
         for app in apps {
             guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: app).first else { continue }
             if !state.running.contains(app) {
@@ -308,20 +304,42 @@ enum GeneralitySuite {
                 quit.append(app)
                 continue
             }
-            let old = state.windows[app] ?? []
-            let new = (VoiceToolProbe.windowServerWindows(bundleIdentifier: app) ?? []).filter { window in !old.contains { $0.number == window.number } }
-            let oldBounds = old.map(\.bounds)
-            for window in new where window.bounds.width > 100 && window.bounds.height > 60 && !oldBounds.contains(window.bounds) {
-                let pid = running.processIdentifier
-                let done = await Task.detached { () -> Bool in
-                    guard let match = CoverageAudit.windows(of: pid).first(where: { rawFrame($0) == window.bounds }) else { return false }
-                    return CoverageAudit.close(match, pid: pid, why: "generality suite: a window that appeared during the task") ["closed"] as? Bool == true
+            let pid = running.processIdentifier, oldElements = state.axWindows[app] ?? []
+            let after = VoiceToolProbe.windowServerSurfaces(bundleIdentifier: app) ?? []
+            for window in openedWindows(before: state.windows[app] ?? [], after: after) {
+                let why = await Task.detached { () -> String? in
+                    guard let match = CoverageAudit.windows(of: pid).first(where: { ScenarioRunnerAX.windowNumber(of: $0, processIdentifier: pid) == window.number }),
+                          !oldElements.contains(AccessibilityElementKey(element: match)) else { return "no new AX window with its number" }
+                    if ScenarioRunnerReal.hasUnsavedEdits(match) == true { return "unsaved edits" }
+                    let done = CoverageAudit.close(match, pid: pid, why: "generality suite: a window that appeared during the task")["closed"] as? Bool == true
+                    return done ? nil : "did not close"
                 }.value
-                if done { closed += 1 } else { left += 1 }
+                if let why { left.append("\(window.title ?? "window \(window.number)"): \(why)") } else { closed += 1 }
             }
         }
-        return ["windowsClosed": closed, "appsQuit": quit, "newWindowsLeft": left]
+        let files: Any = await Task.detached { userFolderEntries() }.value.flatMap { now in state.files.map { newEntries(before: $0, after: now) } } ?? "unreadable"
+        return ["windowsClosed": closed, "appsQuit": quit, "newWindowsLeft": left, "filesCreated": files]
     }
+
+    /// Windows the task opened: a window-server number (any Space) not there before. Never
+    /// judged by frame: G15's File > New landed in the frame of the window it had just closed.
+    nonisolated static func openedWindows(before: [(number: Int, bounds: CGRect)], after: [WindowServerSurface]) -> [WindowServerSurface] {
+        let old = Set(before.map(\.number))
+        return after.filter { !old.contains($0.number) && $0.bounds.width > 100 && $0.bounds.height > 60 }
+    }
+
+    /// Top-level names in ~/Desktop and ~/Documents; nil when a read fails (no diff beats a false one).
+    nonisolated static func userFolderEntries() -> Set<String>? {
+        var names: Set<String> = []
+        for folder in ["Desktop", "Documents"] {
+            let path = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(folder).path
+            guard let entries = try? FileManager.default.contentsOfDirectory(atPath: path) else { return nil }
+            names.formUnion(entries.map { "\(folder)/\($0)" })
+        }
+        return names
+    }
+
+    nonisolated static func newEntries(before: Set<String>, after: Set<String>) -> [String] { after.subtracting(before).sorted() }
 
     // MARK: Run
 
@@ -337,7 +355,12 @@ enum GeneralitySuite {
                 FileManager.default.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600])
             }
         }
-        defer { save(); print("🧭 generality suite: \(meta["outcome"] ?? "?") -> \(directory.path)") }
+        var filesCreated: [String: [String]] = [:]
+        defer {
+            meta["filesCreated"] = filesCreated
+            save()
+            print("🧭 generality suite: \(meta["outcome"] ?? "?") -> \(directory.path)" + (filesCreated.isEmpty ? "" : " | files created (left for the owner): \(filesCreated)"))
+        }
         if let refusal = ScenarioRunner.refusalToStart() {
             meta["outcome"] = "refused"
             meta["reason"] = refusal
@@ -357,7 +380,8 @@ enum GeneralitySuite {
             // A neutral start: Finder in front, as when the owner asks from the desktop.
             NSRunningApplication.runningApplications(withBundleIdentifier: finder).first?.activate()
             try? await Task.sleep(for: .seconds(1))
-            let state = before(task.apps)
+            var state = before(task.apps)
+            state.files = await Task.detached { userFolderEntries() }.value
             var result: [String: Any] = ["id": task.id, "pattern": task.pattern, "words": task.words, "heldOut": task.heldOut, "findOut": task.findOut]
             let run = await AgentLoopProbe.goalRun(words: task.words, harness: harness, confirmations: confirmations)
             result.merge(run) { current, _ in current }
@@ -365,10 +389,15 @@ enum GeneralitySuite {
             result["modelCalls"] = modelCalls(run: run["run"] as? String ?? "")
             result["check"] = await task.check(spoken, run)
             result["status"] = (result["check"] as? [String: Any])?["passed"] as? Bool == true ? "passed" : "failed"
-            result["cleanup"] = await undo(state, apps: task.apps)
+            let cleanup = await undo(state, apps: task.apps)
+            result["cleanup"] = cleanup
+            // Files are reported, never removed: the owner decides (G15 left two on the Desktop unseen).
+            let files = cleanup["filesCreated"] as? [String] ?? [], left = cleanup["newWindowsLeft"] as? [String] ?? []
+            if !files.isEmpty { filesCreated[task.id] = files }
             results.append(result)
             save()
-            print("🧭 \(task.id): \(result["status"] ?? "?") \(run["outcome"] ?? "?") \(run["wallMs"] ?? "?") ms")
+            print("🧭 \(task.id): \(result["status"] ?? "?") \(run["outcome"] ?? "?") \(run["wallMs"] ?? "?") ms"
+                  + (files.isEmpty ? "" : " | files created: \(files)") + (left.isEmpty ? "" : " | windows left: \(left)"))
             try? await Task.sleep(for: .seconds(1))
         }
         if meta["outcome"] == nil { meta["outcome"] = "ran" }
