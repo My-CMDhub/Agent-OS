@@ -615,6 +615,10 @@ nonisolated enum RealtimeOpenAppTool {
                 answeredUptime: ProcessInfo.processInfo.systemUptime
             )
         }
+        // open_settings_pane: a verified deep link, proven by its window title; no harness verb acts.
+        if call.name == SettingsPaneLinks.toolName {
+            return finished(await SettingsPaneLinks.open(paneName: call.appName, answer: answer), waited: false, harnessResponse: nil)
+        }
         var firstLine: String
         let call = await withFrontmostApp(call)
         switch harnessRequestLine(for: call, offered: offered, offeredApp: offeredApp, screenTarget: screenTarget) {

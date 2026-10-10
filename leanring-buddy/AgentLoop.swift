@@ -251,7 +251,7 @@ final class AgentLoop {
                                             RealtimeVoiceVerbs.findOnScreenName, RealtimeVoiceVerbs.findMenuItemsName]
     /// Bringing another app forward is what these are for.
     static let appChangingTools: Set<String> = [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName, RealtimeVoiceVerbs.openURLName,
-                                                AgentLoopTools.searchWebName]
+                                                AgentLoopTools.searchWebName, SettingsPaneLinks.toolName]
     static let narrationIntervalSeconds: TimeInterval = 4
     nonisolated static let traceFileName = "agent-loop.log"
     static let maxTokens = 4096

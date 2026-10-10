@@ -41,7 +41,8 @@ nonisolated enum AgentPlan {
         RealtimeVoiceVerbs.typeTextName: [["text"]], RealtimeVoiceVerbs.scrollName: [["direction"]],
         RealtimeVoiceVerbs.closeName: [["what"]], RealtimeVoiceVerbs.openURLName: [["url"]],
         RealtimeVoiceVerbs.annotateName: [["shapes"]], AgentLoopTools.searchWebName: [["query"]],
-        AgentLoopGemini.webLookupName: [["question"]], AgentLoopTools.doneName: [["summary"]]
+        AgentLoopGemini.webLookupName: [["question"]], AgentLoopTools.doneName: [["summary"]],
+        SettingsPaneLinks.toolName: [["name"]]
     ]
 
     /// Anthropic tool JSON. Each step is a flat object: `tool` plus that

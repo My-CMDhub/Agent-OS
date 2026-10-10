@@ -43,7 +43,7 @@ nonisolated enum RealtimeVoiceVerbs {
     static let annotateName = "annotate"
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName,
                                             findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
-                                            openURLName, doTaskName, annotateName]
+                                            openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
@@ -151,6 +151,11 @@ nonisolated enum RealtimeVoiceVerbs {
                             Parameter(name: "path", kind: .list, description: "The menu path exactly as find_menu_items returned it, for example [\"View\", \"as List\"].")
                           ])
         return [
+        Declaration(name: SettingsPaneLinks.toolName,
+                    description: "Opens one System Settings pane directly and confirms its window appeared. Changes no setting. "
+                        + "Use it for \"show me the lock screen settings\" or \"open Wi-Fi settings\"; for a pane not listed, "
+                        + "open System Settings with open_app and find it on screen.",
+                    parameters: [Parameter(name: "name", description: "The pane.", options: SettingsPaneLinks.verified.keys.sorted())]),
         Declaration(name: focusAppName,
                     description: "Brings an app that is already running to the front. Use its name as shown in the Dock, for example \"Finder\".",
                     parameters: [Parameter(name: "name", description: "The running app's name, for example \"Finder\".")]),
