@@ -2942,15 +2942,19 @@ final class HarnessServer {
         if let notifyingLink { response["personNotifyingLink"] = notifyingLink }
         // A plain Finder folder opens with no card (owner's ruling 2026-10-11, G09): two reads
         // on the resolved element only. A read-only task's open stops here when it is not one.
+        let openedFilename = action == .open ? liveElement.flatMap { Self.copyAttribute($0, "AXFilename") as? String } : nil
         let plainFolder = action == .open && ActionSafetyKernel.isPlainFinderFolder(
             bundleIdentifier: snapshot.bundleIdentifier, role: resolvedNode.role,
             url: liveElement.flatMap { Self.copyAttribute($0, "AXURL") as? URL },
-            filename: liveElement.flatMap { Self.copyAttribute($0, "AXFilename") as? String } ?? resolvedNode.value?.raw)
+            filename: openedFilename ?? resolvedNode.value?.raw)
         if action == .open { response["plainFinderFolder"] = plainFolder }
         if request.onlyPlainFolder, !plainFolder {
             response["ok"] = false
             response["error"] = "readOnlyTask"
-            response["message"] = "nothing was opened: this task is read-only, and only a plain folder in Finder opens without the owner"
+            // Say WHAT it is: G09 2026-10-11 picked the search hit "HeyClicky" (Finder hides
+            // ".app") over the folder "Heyclicky", and a bare refusal gave it nothing to correct by.
+            let what = openedFilename.map { " — it is \(UntrustedText($0).forDisplay), not a plain folder; open the folder itself" } ?? ""
+            response["message"] = "nothing was opened: this task is read-only, and only a plain folder in Finder opens without the owner" + what
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: "readOnlyTask", startedAt: startedAt)
             return response
         }
