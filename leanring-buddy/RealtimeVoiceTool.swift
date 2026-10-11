@@ -138,7 +138,10 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
             return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["app"]), shapes: shapes)
         }
         return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["name"]) ?? text(arguments?["app"]),
-                                words: words, path: path, shortcut: text(arguments?["shortcut"]), what: text(arguments?["what"]),
+                                words: words, path: path, shortcut: text(arguments?["shortcut"]),
+                                // go_to_folder's path rides in `text`: `path` is press_menu's list.
+                                text: name == RealtimeVoiceVerbs.goToFolderName ? text(arguments?["folder"]) ?? text(arguments?["path"]) : nil,
+                                what: text(arguments?["what"]),
                                 url: text(arguments?["url"]), goal: text(arguments?["goal"]))
     }
 }
@@ -387,6 +390,11 @@ nonisolated enum RealtimeOpenAppTool {
         if call.name == RealtimeVoiceVerbs.openURLName {
             guard let url = call.url else { return refuse("missingURL", "open_url needs the page's http or https address") }
             return encoded(call.appName.map { ["verb": "openURL", "url": url, "app": $0] } ?? ["verb": "openURL", "url": url])
+        }
+        // go_to_folder: Finder's own Go to Folder, only with Finder in front (the harness checks).
+        if call.name == RealtimeVoiceVerbs.goToFolderName {
+            guard let folder = call.text else { return refuse("missingFolder", "go_to_folder needs the folder's path, for example ~/Downloads") }
+            return encoded(["verb": "goToFolder", "text": folder, "expectApp": HarnessGoToFolder.finderBundleIdentifier])
         }
         guard let appName = call.appName else {
             return RealtimeVoiceVerbs.allToolNames.contains(call.name)

@@ -1201,6 +1201,7 @@ final class AgentLoop {
         case RealtimeVoiceVerbs.findOnScreenName: return "looked for an element on screen"
         case RealtimeVoiceVerbs.findMenuItemsName: return "looked through the menus"
         case RealtimeVoiceVerbs.searchHelpName: return "searched the Help menu"
+        case RealtimeVoiceVerbs.goToFolderName: return "showed a folder in Finder"
         default: return toolName.replacingOccurrences(of: "_", with: " ")
         }
     }
@@ -1718,7 +1719,8 @@ extension AgentLoop {
         guard verb.isMutating else { return nil }
         switch verb {
         // helpSearch types only the task's words into the app's own Help field, and closes it.
-        case .scroll, .openURL, .focus, .launch, .helpSearch:
+        // goToFolder: Finder's Go to Folder is navigation (owner's ruling 2026-10-11).
+        case .scroll, .openURL, .focus, .launch, .helpSearch, .goToFolder:
             return nil
         case .click, .press, .select:
             // Owner's ruling R2: opening a conversation or message marks it read, and the sender may see it.

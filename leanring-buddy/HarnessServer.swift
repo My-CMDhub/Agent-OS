@@ -165,13 +165,18 @@ enum HarnessVerb: String, CaseIterable {
     /// for the kill switch, policy and audit; a read for the kernel.
     case helpSearch
 
+    /// Finder's Go > Go to Folder…: write a path into the panel's field and press
+    /// the function row's "Go" (`HarnessGoToFolder`, owner's ruling 2026-10-11).
+    /// Mutating for the kill switch, policy and audit; navigation for the kernel.
+    case goToFolder
+
     /// Whether this verb can change the world. The kill switch stops these and
     /// leaves the read-only pair working, so an operator who tripped it can
     /// still look at the machine and find out why.
     var isMutating: Bool {
         switch self {
         case .ping, .snapshot, .menus, .windows, .look, .status, .highlight: return false
-        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick, .helpSearch: return true
+        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick, .helpSearch, .goToFolder: return true
         }
     }
 
@@ -198,8 +203,9 @@ enum HarnessVerb: String, CaseIterable {
         // `openURL` targets a page in a browser, not an element: `openURLResponse`.
         // `visionClick` aims at a point, not a name in the tree: `visionClickResponse`.
         // `helpSearch` types into the app's own Help field, never a named element: `helpSearchResponse`.
+        // `goToFolder` writes into Finder's own Go to Folder field: `goToFolderResponse`.
         case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight, .scroll, .openURL, .visionClick,
-             .helpSearch: return nil
+             .helpSearch, .goToFolder: return nil
         }
     }
 }
@@ -730,6 +736,12 @@ enum HarnessPolicy {
             guard raw.expectApp != nil else { return .failure(.missingField("expectApp")) }
             if let problem = HarnessHelpSearch.queryProblem(text) { return .failure(.invalidField(field: "text", value: problem)) }
         }
+        // goToFolder: a path, in the app it was meant for (Finder, checked live).
+        if verb == .goToFolder {
+            guard !text.isEmpty else { return .failure(.missingField("text")) }
+            guard raw.expectApp != nil else { return .failure(.missingField("expectApp")) }
+            if let problem = HarnessGoToFolder.pathProblem(text) { return .failure(.invalidField(field: "text", value: problem)) }
+        }
         if verb == .type {
             guard !text.isEmpty else {
                 return .failure(.missingField("text"))
@@ -764,7 +776,7 @@ enum HarnessPolicy {
             title: (verb == .menu || verb == .menus) && !path.isEmpty
                 ? path.joined(separator: " > ")
                 // openURL's target is its page, so the audit line and a ticket name it.
-                : (statusItem ?? url?.absoluteString ?? (verb == .helpSearch ? text : raw.title) ?? ""),
+                : (statusItem ?? url?.absoluteString ?? (verb == .helpSearch || verb == .goToFolder ? text : raw.title) ?? ""),
             role: raw.role,
             withinNamed: raw.withinNamed,
             nearPoint: raw.nearPoint?.cgPoint,
@@ -922,7 +934,7 @@ enum HarnessPolicy {
     /// pointing, pressing and reading names (which never carry a password
     /// box's contents) go on. nil when the verb may proceed.
     static func handOverRefusal(verb: HarnessVerb, secureInput: SecureInputState) -> String? {
-        guard secureInput.isOn, verb == .type || verb == .look || verb == .helpSearch else { return nil }
+        guard secureInput.isOn, verb == .type || verb == .look || verb == .helpSearch || verb == .goToFolder else { return nil }
         return handOverMessage(secureInput)
     }
 
@@ -1124,6 +1136,8 @@ enum HarnessObservability {
         "applicationNotCapturable",
         // An app whose Help menu has no search field: an answer, not an anomaly.
         "helpSearchUnavailable",
+        // goToFolder asked of an app that is not Finder: an answer, not an anomaly.
+        "notFinder",
         // `LockScreenGuard` doing its job. Measured 2026-09-13: a probe left
         // running against a locked screen wrote 12,881 `anomalySuppressed`
         // audit lines naming this rule — one per refusal, each also a line of
@@ -1980,6 +1994,9 @@ final class HarnessServer {
 
         case .helpSearch:
             return helpSearchResponse(request, dryRun: dryRun, startedAt: startedAt)
+
+        case .goToFolder:
+            return goToFolderResponse(request, dryRun: dryRun, startedAt: startedAt)
         }
     }
 
@@ -4035,6 +4052,57 @@ final class HarnessServer {
         response["menuItemsDropped"] = dropped
         response["topics"] = classified.topics.map { UntrustedText($0).forDisplay }
         return finish("ok")
+    }
+
+    // MARK: goToFolder
+
+    /// Finder's Go to Folder (`HarnessGoToFolder`, measured 2026-10-11). Finder
+    /// only, resolved by bundle identifier; no kernel decision: it navigates, it
+    /// writes only the caller's path into Finder's own panel. A policy `refuse`
+    /// holds. Dry run resolves the menu item and opens nothing.
+    private func goToFolderResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        var response: [String: Any] = ["dryRun": dryRun]
+        guard let (application, bar) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response) else { return response }
+        func finish(_ outcome: String, error: String? = nil, message: String? = nil) -> [String: Any] {
+            response["ok"] = error == nil
+            if let error { response["error"] = error }
+            if let message { response["message"] = message }
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: outcome, startedAt: startedAt)
+            return response
+        }
+        guard application.bundleIdentifier == HarnessGoToFolder.finderBundleIdentifier else {
+            return finish("notFinder", error: "notFinder",
+                          message: "Go to Folder is Finder's; Finder is not the app in front, so nothing was opened. Focus Finder first.")
+        }
+        if HarnessAppPolicy.verdict(for: application.bundleIdentifier, in: loadedPolicy).0 == .refuse {
+            return finish("policyRefused", error: "policyRefused", message: "app policy refuses \(HarnessGoToFolder.finderBundleIdentifier); nothing was opened")
+        }
+        let goItems = AccessibilityMenu.entries(of: bar, children: AccessibilityMenu.liveChildren)
+            .filter { $0.label == HarnessGoToFolder.goMenuTitle }
+        let items = goItems.count == 1
+            ? AccessibilityMenu.entries(of: goItems[0], children: AccessibilityMenu.liveChildren).filter { HarnessGoToFolder.isGoToFolderItem($0.label) }
+            : []
+        guard items.count == 1, let item = items[0].element, items[0].isEnabled else {
+            return finish("goToFolderUnavailable", error: "goToFolderUnavailable",
+                          message: "Finder's Go menu has no single enabled Go to Folder… item; nothing was opened")
+        }
+        response["menuItem"] = UntrustedText(items[0].label ?? "").forDisplay
+        guard !dryRun else {
+            response["performed"] = ["status": "skipped", "reason": "dry run — Go to Folder was resolved and not opened"]
+            return finish("dryRun")
+        }
+        phaseTiming.actionStarting()
+        let run = HarnessGoToFolder.go(to: request.text, menuItem: item, processIdentifier: application.processIdentifier)
+        phaseTiming.actionReturned()
+        response.merge(run.report) { _, new in new }
+        if let failure = run.failure {
+            // Like `menu`: a press that showed nothing is `notVerified`, its verification `notObserved`.
+            guard failure.code == "notObserved" else { return finish(failure.code, error: failure.code, message: failure.message) }
+            response["verification"] = ["status": "notObserved"]
+            return finish("notObserved", error: "notVerified", message: failure.message)
+        }
+        response["verification"] = ["status": "confirmed", "evidence": run.report["evidence"] ?? NSNull()]
+        return finish("confirmed")
     }
 
     // MARK: windows / focus

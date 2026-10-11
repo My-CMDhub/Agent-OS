@@ -35,7 +35,7 @@ nonisolated enum AgentPlan {
     static let requiredArguments: [String: [[String]]] = [
         RealtimeOpenAppTool.name: [["name"]], RealtimeVoiceVerbs.focusAppName: [["name"]],
         RealtimeVoiceVerbs.findMenuItemsName: [["words"]], RealtimeVoiceVerbs.findOnScreenName: [["words"]],
-        RealtimeVoiceVerbs.searchHelpName: [["words"]],
+        RealtimeVoiceVerbs.searchHelpName: [["words"]], RealtimeVoiceVerbs.goToFolderName: [["folder"]],
         RealtimeVoiceVerbs.pressMenuName: [["path"], ["shortcut"]],
         RealtimeVoiceVerbs.pressElementName: [["name"], ["x", "y"], ["point"], ["underPointer"]],
         RealtimeVoiceVerbs.pointAtName: [["name"], ["x", "y"], ["point"], ["underPointer"]],
@@ -69,6 +69,7 @@ nonisolated enum AgentPlan {
                 "amount": number("scroll: pages."),
                 "what": text("close: tab, window or app."),
                 "url": text("open_url: the full address."),
+                "folder": text("go_to_folder: the folder's path, for example ~/Downloads."),
                 "query": text("search_web: the words."),
                 "question": text("web_lookup: the question."),
                 "summary": text("done: what was achieved, spoken to the owner."),

@@ -259,7 +259,12 @@ nonisolated enum JarvisNotchReason {
         // search_help (2026-10-11).
         "helpSearchUnavailable": "its Help menu has no search",
         "helpSearchFailed": "the Help search didn\u{2019}t take",
-        "helpMenuLeftOpen": "its Help menu stayed open"
+        "helpMenuLeftOpen": "its Help menu stayed open",
+        // go_to_folder (2026-10-11).
+        "notFinder": "Finder isn\u{2019}t in front",
+        "goToFolderUnavailable": "Go to Folder didn\u{2019}t open",
+        "goToFolderFailed": "the folder path didn\u{2019}t take",
+        "goToFolderLeftOpen": "Go to Folder stayed open"
     ]
 
     /// `subject` is the app HEARD for a heard-vs-named mismatch ("heard

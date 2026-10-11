@@ -43,9 +43,11 @@ nonisolated enum RealtimeVoiceVerbs {
     static let annotateName = "annotate"
     /// The frontmost app's Help-menu search (`HarnessHelpSearch`, design 2026-10-07 §A step 5).
     static let searchHelpName = "search_help"
+    /// Finder's Go to Folder by path (`HarnessGoToFolder`, owner's ruling 2026-10-11).
+    static let goToFolderName = "go_to_folder"
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName, searchHelpName,
                                             findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
-                                            openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName]
+                                            openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName, goToFolderName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
@@ -160,6 +162,9 @@ nonisolated enum RealtimeVoiceVerbs {
                         + "Use it for \"show me the lock screen settings\" or \"open Wi-Fi settings\"; for a pane not listed, "
                         + "open System Settings with open_app and find it on screen.",
                     parameters: [Parameter(name: "name", description: "The pane.", options: SettingsPaneLinks.verified.keys.sorted())]),
+        Declaration(name: goToFolderName,
+                    description: "Shows a folder in Finder by its path (e.g. ~/Downloads, /Applications); changes nothing.",
+                    parameters: [Parameter(name: "folder", description: "The folder's path, starting with / or ~, for example \"~/Downloads\".")]),
         Declaration(name: focusAppName,
                     description: "Brings an app that is already running to the front. Use its name as shown in the Dock, for example \"Finder\".",
                     parameters: [Parameter(name: "name", description: "The running app's name, for example \"Finder\".")]),
@@ -623,6 +628,8 @@ nonisolated enum RealtimeVoiceVerbs {
             return "Scrolling\(way)\u{2026}"
         case typeTextName:
             return "Typing\u{2026}"
+        case goToFolderName:
+            return "Going to \(call.text.map(RealtimeOpenAppTool.captionName) ?? "the folder")\u{2026}"
         case openURLName:
             return "Opening \(call.url.flatMap { URL(string: $0)?.host }.map(RealtimeOpenAppTool.captionName) ?? "the page")\u{2026}"
         case annotateName:
