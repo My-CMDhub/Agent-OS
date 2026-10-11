@@ -1121,9 +1121,12 @@ final class AgentLoop {
     static let stateParticiples: Set<String> = ["selected"]
     static func isStateReading(_ words: [String], at index: Int) -> Bool {
         guard stateParticiples.contains(words[index]) else { return false }
+        // First person rules out a state on BOTH branches (security review of 061122e:
+        // "I now selected Delete" passed as one).
+        let before = words[max(0, index - 3)..<index]
+        if before.contains(where: { RealtimeOpenAppTool.firstPersonSubjects.contains($0) || effectPersons.contains($0) }) { return false }
         if index > 0, ["is", "are", "currently", "now", "the", "a", "an"].contains(words[index - 1]) { return true }
-        let before = words[max(0, index - 3)..<index], after = words[(index + 1)..<min(words.count, index + 4)]
-        return !before.contains(where: RealtimeOpenAppTool.firstPersonSubjects.contains) && after.contains { $0 == "is" || $0 == "are" }
+        return words[(index + 1)..<min(words.count, index + 4)].contains { $0 == "is" || $0 == "are" }
     }
 
     /// G20 2026-10-10 (run C708CCDF): "Swift was originally created by Chris Lattner"

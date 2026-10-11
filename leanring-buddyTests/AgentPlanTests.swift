@@ -229,7 +229,9 @@ struct AgentPlanTests {
                         "leanring-buddy is selected.", "The scheme currently selected is leanring-buddy."] {
             #expect(AgentLoop.doneChallenge(summary: summary, evidence: [1], receipts: read, currentStep: 2) == nil, "\(summary)")
         }
-        for summary in ["I selected the Downloads folder.", "Selected the Downloads folder.", "We selected Delete."] {
+        for summary in ["I selected the Downloads folder.", "Selected the Downloads folder.", "We selected Delete.",
+                        "I now selected the Downloads folder.", "I currently selected Delete.", "We now selected the file.",
+                        "I selected Delete and it is gone."] {
             #expect(AgentLoop.doneChallenge(summary: summary, evidence: [1], receipts: read, currentStep: 2) != nil, "\(summary)")
         }
     }
