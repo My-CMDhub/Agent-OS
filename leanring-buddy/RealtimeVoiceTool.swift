@@ -86,6 +86,8 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
     var y: Double? = nil
     /// point_at / press_element: the element under the owner's mouse at key-down.
     var underPointer: Bool = false
+    /// press_element only: open the item (AXOpen) instead of clicking it — a Finder folder opens, anything else asks.
+    var open: Bool = false
     /// scroll only: up / down / left / right, and pages.
     var direction: String? = nil
     var amount: Double? = nil
@@ -122,6 +124,7 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
             return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["app"]), elementName: text(arguments?["name"]),
                                     x: number(arguments?["x"]), y: number(arguments?["y"]),
                                     underPointer: (arguments?["underPointer"] as? Bool) ?? false,
+                                    open: name == RealtimeVoiceVerbs.pressElementName && (arguments?["open"] as? Bool) == true,
                                     direction: text(arguments?["direction"]), amount: number(arguments?["amount"]),
                                     text: typed, mode: text(arguments?["mode"]),
                                     point: (arguments?["point"] as? [Any])?.compactMap(number))
@@ -490,6 +493,16 @@ nonisolated enum RealtimeOpenAppTool {
                     + "turn, a position in this turn's screenshot, or the element under the owner's pointer, for what the owner asked now.")
             }
             let nearPoint: [String: Any] = ["x": Double(screenTarget.point.x), "y": Double(screenTarget.point.y)]
+            // Opening (owner's ruling 2026-10-11, G09): AXOpen on the named element itself; the
+            // kernel lets a plain Finder folder through and asks about everything else.
+            if isPress, call.open {
+                guard let target = screenTarget.candidate else {
+                    return refuse("nothingToOpen", "nothing was opened: open needs an item's name as find_on_screen returned it")
+                }
+                request = ["verb": "open", "title": target.name, "role": target.role, "nearPoint": nearPoint, "requireAtPoint": true,
+                           "expectApp": expectApp ?? appName]
+                break
+            }
             guard let target = screenTarget.candidate else {
                 // By sight (`visionClick`): words the harness must read back at the point, or
                 // the owner's own pointer ("click this one") with nothing AX can name under it.

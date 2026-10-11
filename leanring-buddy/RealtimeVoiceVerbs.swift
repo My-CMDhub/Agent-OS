@@ -197,7 +197,9 @@ nonisolated enum RealtimeVoiceVerbs {
                         + "owner a card to approve, and some things are refused. The result says what was pressed and whether it was verified. "
                         + "Something visible that find_on_screen does not list (drawn on a canvas, a picture-only icon) is pressed by sight: give "
                         + "its x and y AND the words printed on it; it is clicked only where those words are read back.",
-                    parameters: [appInFront] + positionParameters),
+                    parameters: [appInFront] + positionParameters
+                        + [Parameter(name: "open", kind: .flag, required: false,
+                                     description: "true to open the item instead of clicking it: opens a folder in Finder; files and apps ask the owner first.")]),
         Declaration(name: scrollName,
                     description: "Scrolls the window of the app in front, as a trackpad would. Aim it at an area by a name find_on_screen "
                         + "returned, x and y fractions of the screenshot, or underPointer; leave them out for the window's main area. The "

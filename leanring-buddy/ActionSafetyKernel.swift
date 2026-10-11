@@ -74,7 +74,23 @@ enum ActionSafetyKernel {
     /// mine generalised from the sidebar's anonymous cells and had the roles
     /// backwards; naming the majority role here would only have decided which
     /// launches happen without asking.
+    /// One exception, by the element's own AXURL, not its role: a plain Finder folder (`isPlainFinderFolder`).
     static let navigationalOpenRoles: Set<String> = []
+
+    /// Owner's ruling 2026-10-11 (G09): opening a plain FOLDER in Finder is navigation — no
+    /// card, read-only tasks included; files, apps and packages still ask. Decided from AX
+    /// data only, never on disk (no Files & Folders grant: touching ~/Desktop raises a TCC
+    /// prompt). Live 2026-10-11, Finder list view: the file-list `AXTextField` publishes AXOpen,
+    /// AXValue/AXFilename is the item's name, AXURL a file REFERENCE URL — a folder's and a
+    /// package's end in "/", a file's does not. A failed read of either is not a folder.
+    /// ponytail: conservative — any dotted name (.app, .xcodeproj, "v1.2") still asks; add a
+    /// UTType check only if a real folder needs it.
+    static func isPlainFinderFolder(bundleIdentifier: String?, role: String, url: URL?, filename: String?) -> Bool {
+        guard bundleIdentifier == "com.apple.finder", role == "AXTextField",
+              let url, url.isFileURL, url.hasDirectoryPath,
+              let name = filename, !name.isEmpty, !name.dropFirst().contains(".") else { return false }
+        return true
+    }
 
     /// Roles a menu path resolves to. A menu bar item is the top level ("File"),
     /// a menu item is everything below it.
@@ -475,7 +491,8 @@ enum ActionSafetyKernel {
         menuItemEnabled: Bool? = nil,
         labelTitle: String? = nil,
         draftScope: Bool = false,
-        isListOption: Bool = false
+        isListOption: Bool = false,
+        opensPlainFinderFolder: Bool = false
     ) -> SafetyDecision {
         // Order matters. Every refusal is checked before any permission.
 
@@ -672,6 +689,7 @@ enum ActionSafetyKernel {
         }
 
         guard navigationalRoles(for: intent.action).contains(resolvedNode.role)
+                || (intent.action == .open && opensPlainFinderFolder)
                 || ((intent.action == .press || intent.action == .click)
                     && (resolvedNode.subrole.map(navigationalPressSubroles.contains) == true || isListOption)) else {
             return .requireConfirmation(reason: "unrecognised role \(resolvedNode.role)")

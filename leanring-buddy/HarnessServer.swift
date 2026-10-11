@@ -95,6 +95,8 @@ struct HarnessRawRequest: Decodable {
     let ownerPointed: Bool?
     /// See `HarnessRequest.draftScope`.
     let draftScope: Bool?
+    /// See `HarnessRequest.onlyPlainFolder`.
+    let onlyPlainFolder: Bool?
 }
 
 struct HarnessPoint: Decodable {
@@ -316,6 +318,9 @@ struct HarnessRequest: Equatable {
     /// press / click / menu / visionClick: the owner's words set draft scope, so a
     /// target named send/save/schedule/… asks on a card. Only ever adds a question.
     var draftScope: Bool = false
+    /// open only: a read-only task's open (`AgentLoop.readOnlyGuardedAnswer` sets it) —
+    /// anything but a plain Finder folder is refused, never carded. Only ever narrows.
+    var onlyPlainFolder: Bool = false
 }
 
 // MARK: - Pure decision logic
@@ -645,7 +650,7 @@ enum HarnessPolicy {
         }
         if raw.requireAtPoint == true {
             // type_text aims like press_element: the named field must be the one at the point.
-            guard verb == .press || verb == .type || verb == .click || verb == .select else {
+            guard verb == .press || verb == .type || verb == .click || verb == .select || verb == .open else {
                 return .failure(.invalidField(field: "requireAtPoint", value: "true"))
             }
             guard raw.nearPoint != nil else { return .failure(.missingField("nearPoint")) }
@@ -710,6 +715,10 @@ enum HarnessPolicy {
             }
         } else if raw.ownerPointed == true {
             return .failure(.invalidField(field: "ownerPointed", value: "true"))
+        }
+
+        if raw.onlyPlainFolder == true, verb != .open {
+            return .failure(.invalidField(field: "onlyPlainFolder", value: "true"))
         }
 
         var mode = TypeMode.insert
@@ -787,7 +796,8 @@ enum HarnessPolicy {
             forcedTypeMethod: forcedTypeMethod,
             url: url,
             ownerPointed: raw.ownerPointed ?? false,
-            draftScope: raw.draftScope ?? false
+            draftScope: raw.draftScope ?? false,
+            onlyPlainFolder: raw.onlyPlainFolder ?? false
         ))
     }
 
@@ -2331,6 +2341,12 @@ final class HarnessServer {
         return result
     }
 
+    /// One attribute of one element, or nil when the read failed (a failure is never a value).
+    nonisolated static func copyAttribute(_ element: AXUIElement, _ attribute: String) -> AnyObject? {
+        var value: AnyObject?
+        return AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success ? value : nil
+    }
+
     /// An element's AXRoleDescription ("list box"), or nil.
     nonisolated static func roleDescription(of element: AXUIElement) -> String? {
         var value: AnyObject?
@@ -2924,6 +2940,20 @@ final class HarnessServer {
             ? Self.linkAddress(of: resolvedNode, rootNode: rootNode) : nil
         let notifyingLink = linkURL.flatMap { ActionSafetyKernel.personNotifyingView($0) != nil ? HarnessHands.auditableURL($0) : nil }
         if let notifyingLink { response["personNotifyingLink"] = notifyingLink }
+        // A plain Finder folder opens with no card (owner's ruling 2026-10-11, G09): two reads
+        // on the resolved element only. A read-only task's open stops here when it is not one.
+        let plainFolder = action == .open && ActionSafetyKernel.isPlainFinderFolder(
+            bundleIdentifier: snapshot.bundleIdentifier, role: resolvedNode.role,
+            url: liveElement.flatMap { Self.copyAttribute($0, "AXURL") as? URL },
+            filename: liveElement.flatMap { Self.copyAttribute($0, "AXFilename") as? String } ?? resolvedNode.value?.raw)
+        if action == .open { response["plainFinderFolder"] = plainFolder }
+        if request.onlyPlainFolder, !plainFolder {
+            response["ok"] = false
+            response["error"] = "readOnlyTask"
+            response["message"] = "nothing was opened: this task is read-only, and only a plain folder in Finder opens without the owner"
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "readOnlyTask", startedAt: startedAt)
+            return response
+        }
         // A line break goes by paste, only into a note or document editor — judged before
         // the kernel, so a refused request never puts a card in front of the owner.
         if action == .type, request.text.contains("\n"), let pid = snapshot.application?.processIdentifier,
@@ -2946,7 +2976,8 @@ final class HarnessServer {
                 typing: typingContext,
                 labelTitle: labelTitle,
                 draftScope: request.draftScope,
-                isListOption: isListOption
+                isListOption: isListOption,
+                opensPlainFinderFolder: plainFolder
             ), url: linkURL),
             bundleIdentifier: snapshot.bundleIdentifier, into: &response
         )

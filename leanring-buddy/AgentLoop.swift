@@ -1746,6 +1746,10 @@ extension AgentLoop {
             let field = request["target"] as? String == "focused" ? focusedField()
                 : (request["role"] as? String).map { FieldIdentity(role: $0, subrole: nil, labels: [title].compactMap { $0 }) }
             return field.map(isSearchField) == true ? nil : "typing goes only into a search field"
+        case .open:
+            // Owner's ruling 2026-10-11 (G09): a plain Finder folder opens, read-only included. Only the
+            // harness can read the element, so it judges, under `onlyPlainFolder` — which refuses, never cards.
+            return request["onlyPlainFolder"] as? Bool == true ? nil : "opening goes only into a plain folder in Finder"
         default:
             return "\(verb.rawValue) is not navigation"
         }
@@ -1780,7 +1784,17 @@ extension AgentLoop {
                                                   readFocusedField: @escaping @Sendable () -> FieldIdentity?,
                                                   frontAppMarksRead: @escaping @Sendable () -> Bool = { false }) -> @Sendable (String) -> String {
         { line in
-            let request = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            var line = line
+            var request = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            // An open goes on only as a plain-folder open: the harness refuses anything else (`onlyPlainFolder`).
+            // Judged as narrowed only once the narrowed line exists, so a failed encode is refused.
+            if request?["verb"] as? String == HarnessVerb.open.rawValue, var narrowed = request {
+                narrowed["onlyPlainFolder"] = true
+                if let data = try? JSONSerialization.data(withJSONObject: narrowed, options: [.sortedKeys]) {
+                    line = String(decoding: data, as: UTF8.self)
+                    request = narrowed
+                }
+            }
             guard let reason = readOnlyRefusal(request, focusedField: readFocusedField, frontAppMarksRead: frontAppMarksRead) else { return answer(line) }
             // `target`: the judged name, for the run's report (the model's result keeps only the message).
             let target = (request?["labelTitle"] ?? request?["title"] ?? request?["verb"]) as? String

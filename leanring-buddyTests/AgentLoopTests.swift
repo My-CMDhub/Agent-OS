@@ -1078,7 +1078,6 @@ struct AgentLoopReadOnlyTests {
         #expect(refused(Self.request("select", ["title": "Delete"])))
         #expect(refused(Self.request("click", ["role": "AXButton"])), "a press with no name cannot be judged")
         #expect(refused(Self.request("menu", ["path": ["File", "Close Tab"]])))
-        #expect(refused(Self.request("open", ["title": "notes.txt"])))
         #expect(refused("not json"))
         // Typing goes only into a search field, by its own role and name.
         #expect(refused(Self.request("type", ["text": "hi", "mode": "insert", "title": "Add a comment…", "role": "AXTextArea"])))
@@ -1095,6 +1094,9 @@ struct AgentLoopReadOnlyTests {
             #expect(!refused(Self.request("click", ["title": name, "role": "AXLink"])), "\(name)")
         }
         #expect(!refused(Self.request("scroll", ["direction": "down"])))
+        // An open goes on narrowed: the harness refuses it unless the element is a plain Finder folder
+        // (owner's ruling 2026-10-11, `FinderFolderOpenTests`).
+        #expect(!refused(Self.request("open", ["title": "notes.txt"])) && box.sent.last?.contains("\"onlyPlainFolder\":true") == true)
         #expect(!refused(Self.request("openURL", ["url": "https://www.linkedin.com/"])))
         #expect(!refused(Self.request("focus", ["app": "Google Chrome"])))
         #expect(!refused(Self.request("type", ["text": "Farza", "mode": "replace", "title": "Search", "role": "AXComboBox"])))
@@ -1103,7 +1105,7 @@ struct AgentLoopReadOnlyTests {
         #expect(!refused(Self.request("type", ["text": "Farza", "mode": "insert", "target": "focused"])))
         #expect(!refused(Self.request("snapshot")))
         #expect(!refused(Self.request("look")))
-        #expect(box.sent.count == 19)
+        #expect(box.sent.count == 20)
     }
 
     /// Generality suite 2026-10-06: G03, G07, G11 and G17 lost every menu to
