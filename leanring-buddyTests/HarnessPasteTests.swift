@@ -125,10 +125,9 @@ struct HarnessPasteTests {
         #expect(einsetzen.label == "Einsetzen")
     }
 
-    @Test func aMissingDisabledOrDoubledPasteIsUnavailable() {
+    @Test func aMissingOrDoubledPasteIsUnavailable() {
         let cases = [
             bar([("Edit", [item("Copy", "C")])]),
-            bar([("Edit", [item("Paste", "V", enabled: false)])]),
             bar([("Edit", [item("Paste", "V")]), ("Format", [item("Paste Style", "V")])]),
         ]
         for menuBar in cases {
@@ -137,6 +136,16 @@ struct HarnessPasteTests {
             }
             #expect(refusal.code == "pasteUnavailable")
         }
+    }
+
+    /// G04 2026-10-11: Paste is enabled by what the clipboard holds, so a Paste disabled
+    /// BEFORE our text is written is still found; `paste` judges it after the write.
+    @Test func aPasteDisabledBeforeTheWriteIsStillFound() {
+        guard case .success(let found) = HarnessPaste.pasteMenuItem(in: bar([("Edit", [item("Paste", "V", enabled: false)])]),
+                                                                    children: \.children) else {
+            Issue.record("a Paste disabled before the write was refused up front"); return
+        }
+        #expect(found.label == "Paste")
     }
 
     // MARK: verification and restore

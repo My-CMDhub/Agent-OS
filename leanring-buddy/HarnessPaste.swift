@@ -80,9 +80,9 @@ enum HarnessPaste {
                 ? "the app's menus have no ⌘V Paste item; nothing was pasted"
                 : "\(matches.count) menu items carry ⌘V; nothing was pasted"))
         }
-        guard item.isEnabled else {
-            return .failure(HandsRefusal(code: "pasteUnavailable", message: "the app's Paste item is disabled here; nothing was pasted"))
-        }
+        // Not judged by AXEnabled here: Paste is enabled by what the CLIPBOARD holds, so the
+        // owner's image greys it out for a text field until our text is written. `paste`
+        // re-reads it after the write (G04 2026-10-11: pasteUnavailable 5x in one run).
         return .success(item)
     }
 
@@ -161,6 +161,9 @@ enum HarnessPaste {
     }
 
     /// The gate already passed. Never presses Return, never falls back to keystrokes.
+    /// How long Paste may take to enable once our text is on the clipboard.
+    static let enabledAfterWriteSeconds = 0.3
+
     static func paste(_ text: String, into element: AXUIElement, application: NSRunningApplication,
                       secureInput: () -> SecureInputState) -> Outcome {
         let processIdentifier = application.processIdentifier
@@ -201,6 +204,17 @@ enum HarnessPaste {
 
         let saved = snapshot(pasteboard)
         let ours = write(text, to: pasteboard)
+        // Enabled is judged now, with our text on the clipboard; still disabled -> put the
+        // owner's clipboard back and refuse (a disabled item "succeeds" and does nothing).
+        let enabled = HarnessHands.waitUntil(seconds: enabledAfterWriteSeconds) {
+            var value: AnyObject?
+            return AXUIElementCopyAttributeValue(itemElement, kAXEnabledAttribute as CFString, &value) == .success && (value as? Bool) == true
+        }
+        guard enabled else {
+            if restoreDecision(ourChangeCount: ours, currentChangeCount: pasteboard.changeCount) == .restore { restore(saved, to: pasteboard) }
+            return .refused(HandsRefusal(code: "pasteUnavailable",
+                                         message: "the app's Paste item stayed disabled with the text on the clipboard; nothing was pasted"))
+        }
         let startedAt = Date()
         let press = AccessibilityActionPerformer.perform(kAXPressAction, on: itemElement)
         // Polled even after an error: -25204 "does not necessarily mean the function has failed".
