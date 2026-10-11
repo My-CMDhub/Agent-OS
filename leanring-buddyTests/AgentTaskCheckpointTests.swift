@@ -78,7 +78,9 @@ private func checkpoint(_ id: String, _ state: AgentTaskPhase, at date: Date = D
         #expect(last?.receipts.map(\.words) == ["typed 21 characters into a field", "read the page"])
         let json = String(data: (try? JSONEncoder().encode(last)) ?? Data(), encoding: .utf8) ?? ""
         #expect(!json.contains("secret draft"))
-        #expect(!json.contains("4417"))
+        // As a token, not a substring: a timestamp (813388534.384417, 2026-10-11) holds "4417" by chance.
+        #expect(json.range(of: #"(?<![0-9.])4417(?![0-9])"#, options: .regularExpression) == nil)
+        #expect(!json.contains("Your PIN"))
         #expect(!json.contains(secret))
         #expect(json.contains("type my draft"))
     }
