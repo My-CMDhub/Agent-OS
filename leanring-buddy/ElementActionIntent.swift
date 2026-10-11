@@ -585,10 +585,15 @@ enum AccessibilityTypePerformer {
     /// The element's current text, or nil when it publishes none.
     static func stringValue(of element: AXUIElement) -> String? {
         var out: AnyObject?
-        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &out) == .success else {
-            return nil
-        }
-        return out as? String
+        return stringValue(error: AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &out), value: out)
+    }
+
+    /// `kAXErrorNoValue` is an EMPTY field, not an unreadable one: a new Notes note's body
+    /// answers -25212 with AXNumberOfCharacters 0 (live 2026-10-11, G21: a paste into it was
+    /// refused `valueUnreadable` twice). Every other error stays nil — unreadable.
+    nonisolated static func stringValue(error: AXError, value: AnyObject?) -> String? {
+        if error == .noValue { return "" }
+        return error == .success ? value as? String : nil
     }
 
     /// Which of the four the element says it will accept. Asked, never assumed —

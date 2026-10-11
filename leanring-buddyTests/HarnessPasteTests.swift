@@ -15,6 +15,16 @@ import Testing
 
 struct HarnessPasteTests {
 
+    /// G21 2026-10-11: a new Notes note's body answers AXValue -25212 (no value), so the
+    /// paste refused it as unreadable twice. Empty is "", every other error is unreadable.
+    @Test func aFieldWithNoValueIsEmptyNotUnreadable() {
+        #expect(AccessibilityTypePerformer.stringValue(error: .noValue, value: nil) == "")
+        #expect(AccessibilityTypePerformer.stringValue(error: .success, value: "hello" as NSString) == "hello")
+        #expect(AccessibilityTypePerformer.stringValue(error: .cannotComplete, value: nil) == nil)
+        #expect(AccessibilityTypePerformer.stringValue(error: .attributeUnsupported, value: nil) == nil)
+        #expect(AccessibilityTypePerformer.stringValue(error: .success, value: 1 as NSNumber) == nil)
+    }
+
     private func decodeType(_ text: String, extra: [String: Any] = [:]) -> Result<HarnessRequest, HarnessRequestError> {
         var object: [String: Any] = ["verb": "type", "target": "focused", "text": text]
         object.merge(extra) { _, new in new }
