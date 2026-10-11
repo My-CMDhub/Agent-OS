@@ -209,6 +209,18 @@ struct AgentPlanTests {
         #expect((evidence?["description"] as? String)?.contains("never a position in the plan") == true)
     }
 
+    /// G16 2026-10-11: "Opened Privacy & Security" citing an ok open_settings_pane was
+    /// doneUnbacked twice — the navigation receipts did not know the pane opener (or go_to_folder).
+    @MainActor @Test func aPaneOrFolderOpenerBacksAnOpenedClaim() {
+        for tool in ["open_settings_pane", "go_to_folder"] {
+            let receipts = [AgentLoop.Receipt(step: 1, toolName: tool, ok: true, error: nil)]
+            #expect(AgentLoop.doneChallenge(summary: "Opened the Privacy & Security settings.", evidence: [1], receipts: receipts, currentStep: 2) == nil,
+                    "\(tool) backs an opened claim")
+        }
+        let failed = [AgentLoop.Receipt(step: 1, toolName: "open_settings_pane", ok: false, error: "notVerified")]
+        #expect(AgentLoop.doneChallenge(summary: "Opened the Privacy & Security settings.", evidence: [1], receipts: failed, currentStep: 2) != nil)
+    }
+
     /// A done must be backed by the steps it CITES, not by any ok result of the run.
     @MainActor @Test func aDoneCitingOldUnrelatedStepsIsChallenged() {
         let receipts = [AgentLoop.Receipt(step: 1, toolName: "press_element", ok: true, error: nil),

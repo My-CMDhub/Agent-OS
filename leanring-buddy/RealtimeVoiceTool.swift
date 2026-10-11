@@ -1252,8 +1252,10 @@ nonisolated enum RealtimeOpenAppTool {
         (["typed"], [RealtimeVoiceVerbs.typeTextName]),
         (["closed"], [RealtimeVoiceVerbs.closeName]),
         // Live 2026-10-02 row 16: "website beating chrome" was answered as if a page had opened.
+        // G16 2026-10-11: an ok open_settings_pane backs "opened" (and go_to_folder).
         (["opened"], [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.openURLName, RealtimeVoiceVerbs.focusAppName,
-                      RealtimeVoiceVerbs.pressMenuName, RealtimeVoiceVerbs.pressElementName])
+                      RealtimeVoiceVerbs.pressMenuName, RealtimeVoiceVerbs.pressElementName,
+                      SettingsPaneLinks.toolName, RealtimeVoiceVerbs.goToFolderName])
     ]
 
     /// The live line's `claimedWithoutReceipt`, by kind: "clicked" needs an ok

@@ -1048,7 +1048,9 @@ final class AgentLoop {
     }
 
     static let pressTools: Set<String> = [RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName]
-    static let navigationTools: Set<String> = pressTools.union([RealtimeOpenAppTool.name, RealtimeVoiceVerbs.openURLName, RealtimeVoiceVerbs.focusAppName])
+    // G16 2026-10-11: an ok open_settings_pane was no receipt for "opened Privacy & Security" (doneUnbacked x2).
+    static let navigationTools: Set<String> = pressTools.union([RealtimeOpenAppTool.name, RealtimeVoiceVerbs.openURLName, RealtimeVoiceVerbs.focusAppName,
+                                                               SettingsPaneLinks.toolName, RealtimeVoiceVerbs.goToFolderName])
 
     /// Effects a summary states in any grammatical person, each with the tools
     /// whose ok result is its receipt. Review of d2fe0d7: "The post was published
