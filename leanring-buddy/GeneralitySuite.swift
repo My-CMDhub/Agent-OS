@@ -2,7 +2,7 @@
 //  GeneralitySuite.swift
 //  leanring-buddy
 //
-//  `--generality-suite [--generality-ids=G01,G02] [--agent-model=gemini-3.8-flash]`
+//  `--generality-suite [--generality-ids=G01,G02] [--agent-model=gemini-3.8-flash] [--generality-no-files]`
 //  (2026-10-06): about twenty tasks over ten-plus apps, each a GENERAL pattern
 //  (menu command, list, search field, text entry, settings navigation, dialog,
 //  long-list scroll, value read, cross-app, shortcut-reachable command, tabs),
@@ -317,7 +317,11 @@ enum GeneralitySuite {
                 if let why { left.append("\(window.title ?? "window \(window.number)"): \(why)") } else { closed += 1 }
             }
         }
-        let files: Any = await Task.detached { userFolderEntries() }.value.flatMap { now in state.files.map { newEntries(before: $0, after: now) } } ?? "unreadable"
+        var files: Any = "skipped (--generality-no-files)"
+        if !skipsUserFolders {
+            let now = await Task.detached { userFolderEntries() }.value
+            files = now.flatMap { now in state.files.map { newEntries(before: $0, after: now) } } ?? "unreadable"
+        }
         return ["windowsClosed": closed, "appsQuit": quit, "newWindowsLeft": left, "filesCreated": files]
     }
 
@@ -328,8 +332,13 @@ enum GeneralitySuite {
         return after.filter { !old.contains($0.number) && $0.bounds.width > 100 && $0.bounds.height > 60 }
     }
 
+    /// `--generality-no-files`: an unattended run before Clicky has a Files & Folders grant —
+    /// the first read of ~/Desktop raises a TCC prompt that blocks until someone answers it.
+    nonisolated static var skipsUserFolders: Bool { CommandLine.arguments.contains("--generality-no-files") }
+
     /// Top-level names in ~/Desktop and ~/Documents; nil when a read fails (no diff beats a false one).
     nonisolated static func userFolderEntries() -> Set<String>? {
+        guard !skipsUserFolders else { return nil }
         var names: Set<String> = []
         for folder in ["Desktop", "Documents"] {
             let path = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(folder).path
