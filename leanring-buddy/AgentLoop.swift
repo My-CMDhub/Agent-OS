@@ -1108,10 +1108,22 @@ final class AgentLoop {
                 guard let kind = effectWords.first(where: { $0.words.contains(word) }) else { continue }
                 if words[max(0, index - 3)..<index].contains(where: { effectNegations.contains($0) || $0.hasSuffix("n't") }) { continue }
                 if hasNamedThirdPartyAgent(words, cased: cased[sentence], at: index) { continue }
+                if isStateReading(words, at: index) { continue }
                 claims.append(kind.receipts)
             }
         }
         return claims
+    }
+
+    /// G11 2026-10-11: "The scheme selected in Xcode is leanring-buddy" reads a state, not a
+    /// press. "selected" is a state after is/are/currently/now/an article, or with is/are
+    /// within three words after it and no "I"/"we" just before; "I selected X" still needs a press.
+    static let stateParticiples: Set<String> = ["selected"]
+    static func isStateReading(_ words: [String], at index: Int) -> Bool {
+        guard stateParticiples.contains(words[index]) else { return false }
+        if index > 0, ["is", "are", "currently", "now", "the", "a", "an"].contains(words[index - 1]) { return true }
+        let before = words[max(0, index - 3)..<index], after = words[(index + 1)..<min(words.count, index + 4)]
+        return !before.contains(where: RealtimeOpenAppTool.firstPersonSubjects.contains) && after.contains { $0 == "is" || $0 == "are" }
     }
 
     /// G20 2026-10-10 (run C708CCDF): "Swift was originally created by Chris Lattner"

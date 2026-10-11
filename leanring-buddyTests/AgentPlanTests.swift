@@ -221,6 +221,19 @@ struct AgentPlanTests {
         #expect(AgentLoop.doneChallenge(summary: "Opened the Privacy & Security settings.", evidence: [1], receipts: failed, currentStep: 2) != nil)
     }
 
+    /// G11 2026-10-11 (04-55-54Z): "The scheme selected in Xcode is leanring-buddy", backed by a
+    /// find_on_screen read, was doneUnbacked as if it claimed a press. A state is not an effect.
+    @MainActor @Test func aSelectedStateIsNotAPressClaim() {
+        let read = [AgentLoop.Receipt(step: 1, toolName: "find_on_screen", ok: true, error: nil)]
+        for summary in ["The scheme selected in Xcode is leanring-buddy.", "The selected scheme is leanring-buddy.",
+                        "leanring-buddy is selected.", "The scheme currently selected is leanring-buddy."] {
+            #expect(AgentLoop.doneChallenge(summary: summary, evidence: [1], receipts: read, currentStep: 2) == nil, "\(summary)")
+        }
+        for summary in ["I selected the Downloads folder.", "Selected the Downloads folder.", "We selected Delete."] {
+            #expect(AgentLoop.doneChallenge(summary: summary, evidence: [1], receipts: read, currentStep: 2) != nil, "\(summary)")
+        }
+    }
+
     /// A done must be backed by the steps it CITES, not by any ok result of the run.
     @MainActor @Test func aDoneCitingOldUnrelatedStepsIsChallenged() {
         let receipts = [AgentLoop.Receipt(step: 1, toolName: "press_element", ok: true, error: nil),
