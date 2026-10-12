@@ -1153,7 +1153,7 @@ enum HarnessObservability {
         // goToFolder asked of an app that is not Finder: an answer, not an anomaly.
         "notFinder",
         // renameItem naming an item the window does not list, or a name it already lists.
-        "renameItemNotFound", "renameNameTaken",
+        "renameItemNotFound", "renameNameTaken", "renameBusy",
         // `LockScreenGuard` doing its job. Measured 2026-09-13: a probe left
         // running against a locked screen wrote 12,881 `anomalySuppressed`
         // audit lines naming this rule — one per refusal, each also a line of

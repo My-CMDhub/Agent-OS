@@ -46,6 +46,44 @@ struct RenameItemTests {
         #expect(!HarnessRenameItem.nameTaken("c.txt", among: names, except: 0))
     }
 
+    // MARK: After File > New Folder (launch suite E08, 2026-10-13)
+
+    /// Finder's name editor is its FOCUSED window, so the browser is the main
+    /// window — or, with none, the first standard window that holds a list.
+    @Test func theBrowserWindowIsTheMainOneNeverTheFloatingEditor() {
+        let standard: (String) -> Bool = { $0 != "editor" }
+        let hasList: (String) -> Bool = { $0 == "browser" }
+        #expect(HarnessRenameItem.browserWindow(main: "browser", windows: ["editor", "browser"], isStandard: standard, hasList: hasList) == "browser")
+        #expect(HarnessRenameItem.browserWindow(main: nil, windows: ["editor", "browser"], isStandard: standard, hasList: hasList) == "browser")
+        #expect(HarnessRenameItem.browserWindow(main: "editor", windows: ["editor", "browser"], isStandard: standard, hasList: hasList) == "browser")
+        #expect(HarnessRenameItem.browserWindow(main: nil, windows: ["editor"], isStandard: standard, hasList: hasList) == nil)
+        // An icon-view main window is still the one the "list view" message is about.
+        #expect(HarnessRenameItem.browserWindow(main: "icons", windows: ["icons"], isStandard: standard, hasList: hasList) == "icons")
+    }
+
+    /// The editor New Folder left open: on the item (by the editor's text — typed
+    /// text included — or the one selected row's name) it is used as it is;
+    /// open on anything else, nothing is touched.
+    @Test func anEditorAlreadyOpenIsUsedOnTheItemAndRefusedOnAnother() {
+        typealias R = HarnessRenameItem
+        #expect(R.openEditor(isOpen: false, value: nil, selectedNames: ["untitled folder"], item: "untitled folder") == .none)
+        #expect(R.openEditor(isOpen: true, value: "untitled folder", selectedNames: ["untitled folder"], item: "untitled folder") == .onItem)
+        #expect(R.openEditor(isOpen: true, value: "untitled folderReceipts", selectedNames: ["untitled folder"],
+                             item: "untitled folderReceipts") == .onItem, "the E08 call: text typed into the editor")
+        #expect(R.openEditor(isOpen: true, value: "untitled folderReceipts", selectedNames: ["untitled folder"],
+                             item: "untitled folder") == .onItem, "the row's listed name")
+        #expect(R.openEditor(isOpen: true, value: "notes.txt", selectedNames: ["notes.txt"], item: "untitled folder") == .onAnother)
+        #expect(R.openEditor(isOpen: true, value: "untitled folder", selectedNames: [], item: "untitled folder") == .onAnother,
+                "no single selected row: which item the editor is on is unknown")
+        #expect(R.openEditor(isOpen: true, value: "a", selectedNames: ["a", "a"], item: "a") == .onAnother)
+        #expect(JarvisNotchReason.byErrorCode["renameBusy"] != nil)
+    }
+
+    @Test func theToolTellsTheModelToRenameANewFolderNotTypeIntoIt() throws {
+        let declaration = try #require(RealtimeVoiceVerbs.openAIDeclarations.first { $0["name"] as? String == "rename_item" })
+        #expect((declaration["description"] as? String)?.contains("After File > New Folder, call rename_item with name \"untitled folder\"") == true)
+    }
+
     // MARK: The committing click's point
 
     @Test func theClickAimsAtEmptySpaceBelowTheLastRowOrNowhere() throws {

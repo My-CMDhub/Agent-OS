@@ -172,7 +172,8 @@ nonisolated enum RealtimeVoiceVerbs {
                     parameters: [Parameter(name: "folder", description: "The folder's path, starting with / or ~, for example \"~/Downloads\".")]),
         Declaration(name: renameItemName,
                     description: "Renames a file or folder shown in the Finder window in front: name as listed (with extension) \u{2192} new name. "
-                        + "Changes nothing else.",
+                        + "Changes nothing else. After File > New Folder, call rename_item with name \"untitled folder\" and the new name "
+                        + "\u{2014} do not type into the name editor.",
                     parameters: [Parameter(name: "name", description: "The item's name exactly as the window lists it, for example \"notes.txt\"."),
                                  Parameter(name: "new_name", description: "The new name, with its extension, for example \"notes-old.txt\".")]),
         Declaration(name: findFileName,

@@ -274,7 +274,8 @@ nonisolated enum JarvisNotchReason {
         "renameNameTaken": "that name is taken",
         "renameEditorMissing": "the rename field didn\u{2019}t open",
         "renameNotCommitted": "the rename didn\u{2019}t commit",
-        "renameFailed": "Rename didn\u{2019}t start"
+        "renameFailed": "Rename didn\u{2019}t start",
+        "renameBusy": "another rename is open"
     ]
 
     /// `subject` is the app HEARD for a heard-vs-named mismatch ("heard

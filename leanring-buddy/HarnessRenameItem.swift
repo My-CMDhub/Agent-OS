@@ -94,6 +94,29 @@ nonisolated enum HarnessRenameItem {
         return CGPoint(x: area.midX, y: top + (area.maxY - top) / 2)
     }
 
+    /// The browser window: the app's MAIN window, or with none (or no list in it)
+    /// the first standard window holding a list. Never the focused window — after
+    /// File > New Folder that is the floating name editor (launch suite E08,
+    /// 2026-10-13: "Finder has no window in front" twice). Falls back to `main`
+    /// so a window in icon view still gets the "list view" answer.
+    static func browserWindow<W>(main: W?, windows: [W], isStandard: (W) -> Bool, hasList: (W) -> Bool) -> W? {
+        if let main, hasList(main) { return main }
+        return windows.first { isStandard($0) && hasList($0) } ?? main
+    }
+
+    enum OpenEditor: Equatable {
+        case none
+        /// Open on the item: its text (typed text included) or the one selected row's name is the item.
+        case onItem
+        /// Open on something else, or on a row that cannot be told — touch nothing.
+        case onAnother
+    }
+
+    static func openEditor(isOpen: Bool, value: String?, selectedNames: [String?], item: String) -> OpenEditor {
+        guard isOpen else { return .none }
+        return selectedNames.count == 1 && (value == item || selectedNames[0] == item) ? .onItem : .onAnother
+    }
+
     // MARK: Live
 
     struct Failure: Error {
@@ -109,6 +132,10 @@ nonisolated enum HarnessRenameItem {
         let oldName: String
         let point: CGPoint
         let listedCount: Int
+        /// Non-nil: Finder's name editor was already open on the item holding
+        /// this text (File > New Folder leaves it open), so select and File >
+        /// Rename are skipped.
+        var editorValue: String? = nil
     }
 
     /// Reads the front window's list, resolves the item, checks the new name is
@@ -118,8 +145,10 @@ nonisolated enum HarnessRenameItem {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), readTimeoutSeconds)
         let application = AXUIElementCreateApplication(processIdentifier)
         AXUIElementSetMessagingTimeout(application, readTimeoutSeconds)
-        guard let window = element(application, kAXFocusedWindowAttribute) else {
-            return .failure(Failure(code: "renameItemNotFound", message: "Finder has no window in front; nothing was renamed"))
+        guard let window = browserWindow(main: element(application, kAXMainWindowAttribute), windows: elements(application, kAXWindowsAttribute),
+                                         isStandard: { string($0, kAXSubroleAttribute) == kAXStandardWindowSubrole as String },
+                                         hasList: { !findLists(under: $0, depth: listSearchDepth).isEmpty }) else {
+            return .failure(Failure(code: "renameItemNotFound", message: "Finder has no browser window open; nothing was renamed"))
         }
         // The file list is the one list whose rows carry names; the sidebar's rows carry none.
         let lists = findLists(under: window, depth: listSearchDepth).compactMap { list -> (AXUIElement, [AXUIElement], [String?])? in
@@ -131,14 +160,35 @@ nonisolated enum HarnessRenameItem {
             return .failure(Failure(code: "renameItemNotFound",
                                     message: "the Finder window in front shows no single file list — rename works in list view (View > as List); nothing was renamed"))
         }
+        // Finder's name editor already open (File > New Folder leaves it open, maybe with typed text in it).
+        let focused = HarnessHands.focusedElement(processIdentifier: processIdentifier)
+        let editor = focused.flatMap { string($0, kAXIdentifierAttribute) == editorIdentifier ? $0 : nil }
+        let editorValue = editor.flatMap { string($0, kAXValueAttribute) }
+        let selected = elements(outline, kAXSelectedRowsAttribute)
         let index: Int
-        switch resolveItem(named: item, among: names) {
-        case .found(let found): index = found
-        case .notFound:
-            return .failure(Failure(code: "renameItemNotFound",
-                                    message: "no item listed exactly as \(UntrustedText(item).forDisplay) in the Finder window in front (name as listed, with its extension); nothing was renamed"))
-        case .ambiguous(let count):
-            return .failure(Failure(code: "ambiguous", message: "\(count) items are listed as \(UntrustedText(item).forDisplay); nothing was renamed"))
+        var item = item
+        var openValue: String?
+        switch openEditor(isOpen: editor != nil, value: editorValue, selectedNames: selected.map(rowName), item: item) {
+        case .onAnother:
+            return .failure(Failure(code: "renameBusy", message: "Finder's rename field is open on another item; nothing was touched — "
+                                    + "finish or close that rename first"))
+        case .onItem:
+            guard let found = listRows.firstIndex(where: { CFEqual($0, selected[0]) }), let listed = names[found] else {
+                return .failure(Failure(code: "renameItemNotFound", message: "the item Finder's rename field is open on is not in the file list; nothing was touched"))
+            }
+            // The listed name is what the list must stop showing; the editor's text is what it must still hold.
+            index = found
+            item = listed
+            openValue = editorValue ?? listed
+        case .none:
+            switch resolveItem(named: item, among: names) {
+            case .found(let found): index = found
+            case .notFound:
+                return .failure(Failure(code: "renameItemNotFound",
+                                        message: "no item listed exactly as \(UntrustedText(item).forDisplay) in the Finder window in front (name as listed, with its extension); nothing was renamed"))
+            case .ambiguous(let count):
+                return .failure(Failure(code: "ambiguous", message: "\(count) items are listed as \(UntrustedText(item).forDisplay); nothing was renamed"))
+            }
         }
         if newName == item {
             return .failure(Failure(code: "renameNameTaken", message: "the item is already named \(UntrustedText(newName).forDisplay); nothing was renamed"))
@@ -161,7 +211,7 @@ nonisolated enum HarnessRenameItem {
                                     message: "the file list has no empty space below its last row to click, and a rename commits only on such a click; nothing was renamed"))
         }
         return .success(Plan(processIdentifier: processIdentifier, outline: outline, row: listRows[index], oldName: item,
-                             point: point, listedCount: names.count))
+                             point: point, listedCount: names.count, editorValue: openValue))
     }
 
     struct Run {
@@ -183,28 +233,31 @@ nonisolated enum HarnessRenameItem {
             return run
         }
         let started = Date()
-        AXUIElementSetMessagingTimeout(plan.outline, writeTimeoutSeconds)
-        let selection = AXUIElementSetAttributeValue(plan.outline, kAXSelectedRowsAttribute as CFString, [plan.row] as CFArray)
-        run.report["selectAxError"] = selection.rawValue
-        guard selection == .success else {
-            return fail("renameFailed", "the item could not be selected (AXError \(selection.rawValue)); nothing was renamed")
-        }
+        run.report["editorWasOpen"] = plan.editorValue != nil
+        if plan.editorValue == nil {
+            AXUIElementSetMessagingTimeout(plan.outline, writeTimeoutSeconds)
+            let selection = AXUIElementSetAttributeValue(plan.outline, kAXSelectedRowsAttribute as CFString, [plan.row] as CFArray)
+            run.report["selectAxError"] = selection.rawValue
+            guard selection == .success else {
+                return fail("renameFailed", "the item could not be selected (AXError \(selection.rawValue)); nothing was renamed")
+            }
 
-        // Enabled only once the selection has landed.
-        var menuItem: AccessibilityMenu.Node?
-        HarnessHands.waitUntil(seconds: menuEnabledDeadlineSeconds) {
-            let items = AccessibilityMenu.entries(of: fileMenu, children: AccessibilityMenu.liveChildren).filter { isRenameItem($0.label) }
-            menuItem = items.count == 1 && items[0].isEnabled ? items[0] : nil
-            return menuItem != nil
-        }
-        guard let element = menuItem?.element else {
-            return fail("renameFailed", "Finder's File menu has no single enabled Rename item with the item selected; nothing was renamed")
-        }
-        let press = AccessibilityActionPerformer.perform(kAXPressAction, on: element, timeoutInSeconds: 2.0)
-        run.report["menuPressAxError"] = press.error.rawValue
-        // -25204: the press may be held while the editor animates in; the editor decides.
-        guard press.error == .success || press.error == .cannotComplete else {
-            return fail("renameFailed", "File > Rename did not press (AXError \(press.error.rawValue)); nothing was renamed")
+            // Enabled only once the selection has landed.
+            var menuItem: AccessibilityMenu.Node?
+            HarnessHands.waitUntil(seconds: menuEnabledDeadlineSeconds) {
+                let items = AccessibilityMenu.entries(of: fileMenu, children: AccessibilityMenu.liveChildren).filter { isRenameItem($0.label) }
+                menuItem = items.count == 1 && items[0].isEnabled ? items[0] : nil
+                return menuItem != nil
+            }
+            guard let element = menuItem?.element else {
+                return fail("renameFailed", "Finder's File menu has no single enabled Rename item with the item selected; nothing was renamed")
+            }
+            let press = AccessibilityActionPerformer.perform(kAXPressAction, on: element, timeoutInSeconds: 2.0)
+            run.report["menuPressAxError"] = press.error.rawValue
+            // -25204: the press may be held while the editor animates in; the editor decides.
+            guard press.error == .success || press.error == .cannotComplete else {
+                return fail("renameFailed", "File > Rename did not press (AXError \(press.error.rawValue)); nothing was renamed")
+            }
         }
         var editor: AXUIElement?
         HarnessHands.waitUntil(seconds: editorDeadlineSeconds) {
@@ -217,8 +270,9 @@ nonisolated enum HarnessRenameItem {
             return fail("renameEditorMissing", "Finder's rename field did not appear within \(Int(editorDeadlineSeconds * 1000)) ms; nothing more was pressed or typed")
         }
         AXUIElementSetMessagingTimeout(editor, writeTimeoutSeconds)
-        guard string(editor, kAXValueAttribute) == plan.oldName else {
-            return fail("renameEditorMissing", "the rename field that opened does not hold \(UntrustedText(plan.oldName).forDisplay); nothing was typed, "
+        let heldValue = plan.editorValue ?? plan.oldName
+        guard string(editor, kAXValueAttribute) == heldValue else {
+            return fail("renameEditorMissing", "the rename field does not hold \(UntrustedText(heldValue).forDisplay); nothing was typed, "
                 + "and the field is left open unchanged — clicking elsewhere closes it")
         }
         let write = AXUIElementSetAttributeValue(editor, kAXValueAttribute as CFString, newName as CFString)
@@ -229,10 +283,10 @@ nonisolated enum HarnessRenameItem {
 
         // The commit: one click, only on the list itself, the owner's hands off and Finder in front.
         func putBack(_ why: String) -> Run {
-            let restored = AXUIElementSetAttributeValue(editor, kAXValueAttribute as CFString, plan.oldName as CFString)
+            let restored = AXUIElementSetAttributeValue(editor, kAXValueAttribute as CFString, heldValue as CFString)
             run.report["restoredOldName"] = restored == .success
             return fail("renameNotCommitted", why + "; nothing was clicked and the rename field "
-                + (restored == .success ? "was put back to the old name and left open" : "is left open with the new name — the owner may need to close it"))
+                + (restored == .success ? "was put back as it was and left open" : "is left open with the new name — the owner may need to close it"))
         }
         guard HarnessHands.waitUntil(seconds: HarnessHands.ownerIdleWaitSeconds, { HarnessHands.ownerIsIdleNow() }) else {
             return putBack("the owner was using the keyboard or mouse")
@@ -302,6 +356,12 @@ nonisolated enum HarnessRenameItem {
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
               let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return (value as! AXUIElement)
+    }
+
+    private static func elements(_ element: AXUIElement, _ attribute: String) -> [AXUIElement] {
+        var value: AnyObject?
+        AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        return (value as? [AXUIElement]) ?? []
     }
 
     private static func children(_ element: AXUIElement) -> [AXUIElement] {
