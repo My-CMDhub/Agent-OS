@@ -173,7 +173,10 @@ nonisolated enum HarnessRenameItem {
             return .failure(Failure(code: "renameBusy", message: "Finder's rename field is open on another item; nothing was touched — "
                                     + "finish or close that rename first"))
         case .onItem:
-            guard let found = listRows.firstIndex(where: { CFEqual($0, selected[0]) }), let listed = names[found] else {
+            // While the editor is open on a row, that row's own name field reads empty (live E08
+            // 2026-10-13 21-02-32Z, twice): the editor's text — else the requested name — is its name.
+            guard let found = listRows.firstIndex(where: { CFEqual($0, selected[0]) }),
+                  let listed = names[found] ?? editorValue ?? Optional(item) else {
                 return .failure(Failure(code: "renameItemNotFound", message: "the item Finder's rename field is open on is not in the file list; nothing was touched"))
             }
             // The listed name is what the list must stop showing; the editor's text is what it must still hold.
