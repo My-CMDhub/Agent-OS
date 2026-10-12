@@ -268,7 +268,13 @@ nonisolated enum JarvisNotchReason {
         // find_file (2026-10-12).
         "findFileBadName": "that isn\u{2019}t a file name",
         "findFileTimedOut": "Spotlight didn\u{2019}t answer",
-        "findFileUnavailable": "Spotlight couldn\u{2019}t be asked"
+        "findFileUnavailable": "Spotlight couldn\u{2019}t be asked",
+        // rename_item (2026-10-13).
+        "renameItemNotFound": "that item isn\u{2019}t listed",
+        "renameNameTaken": "that name is taken",
+        "renameEditorMissing": "the rename field didn\u{2019}t open",
+        "renameNotCommitted": "the rename didn\u{2019}t commit",
+        "renameFailed": "Rename didn\u{2019}t start"
     ]
 
     /// `subject` is the app HEARD for a heard-vs-named mismatch ("heard

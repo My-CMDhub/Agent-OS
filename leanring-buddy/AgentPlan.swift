@@ -43,7 +43,8 @@ nonisolated enum AgentPlan {
         RealtimeVoiceVerbs.closeName: [["what"]], RealtimeVoiceVerbs.openURLName: [["url"]],
         RealtimeVoiceVerbs.annotateName: [["shapes"]], AgentLoopTools.searchWebName: [["query"]],
         AgentLoopGemini.webLookupName: [["question"]], AgentLoopTools.doneName: [["summary"]],
-        SettingsPaneLinks.toolName: [["name"]], RealtimeVoiceVerbs.findFileName: [["name"]]
+        SettingsPaneLinks.toolName: [["name"]], RealtimeVoiceVerbs.findFileName: [["name"]],
+        RealtimeVoiceVerbs.renameItemName: [["name", "new_name"]]
     ]
 
     /// Anthropic tool JSON. Each step is a flat object: `tool` plus that
@@ -58,7 +59,7 @@ nonisolated enum AgentPlan {
                 "tool": text("The tool this step calls, for example \"press_menu\"."),
                 "app": text("The app, as that tool takes it."),
                 "name": text("open_app / focus_app: the app's name. press_element / point_at / type_text / scroll: the element's exact name. "
-                    + "find_file: the file or folder's name."),
+                    + "find_file: the file or folder's name. rename_item: the item's name as listed."),
                 "words": text("find_menu_items / find_on_screen / search_help: a few words."),
                 "path": ["type": "array", "items": ["type": "string"], "description": "press_menu: the menu path, split at \" > \"."],
                 "shortcut": text("press_menu: instead of a path, the shortcut an App verbs line shows."),
@@ -71,6 +72,7 @@ nonisolated enum AgentPlan {
                 "what": text("close: tab, window or app."),
                 "url": text("open_url: the full address."),
                 "folder": text("go_to_folder: the folder's path, for example ~/Downloads."),
+                "new_name": text("rename_item: the new name, with its extension."),
                 "query": text("search_web: the words."),
                 "question": text("web_lookup: the question."),
                 "summary": text("done: what was achieved, spoken to the owner."),

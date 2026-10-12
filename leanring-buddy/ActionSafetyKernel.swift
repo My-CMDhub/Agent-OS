@@ -497,6 +497,24 @@ enum ActionSafetyKernel {
     static let incompleteCaptureCheckRefusalPrefix =
         "refusing to capture: the secure-field check could not inspect the whole region"
 
+    /// A Finder rename (`HarnessRenameItem`). Owner's ruling 2026-10-11: renaming
+    /// is not destructive — but the words in BOTH names are judged as a press's
+    /// are: an irreversible word refuses, a destructive or publishing word asks.
+    static func evaluateRename(from oldName: String, to newName: String) -> SafetyDecision {
+        let names = [oldName, newName].map { $0.lowercased() }
+        for name in names {
+            if let keyword = irreversibleTitleKeywords.first(where: name.contains) {
+                return .refuse(reason: irreversibleRefusalReason(keyword: keyword))
+            }
+        }
+        for name in names {
+            if let keyword = destructiveTitleKeywords.first(where: name.contains) ?? confirmPhrase(in: name) {
+                return .requireConfirmation(reason: "\(destructiveActionReasonPrefix)\(keyword)", destructive: true)
+            }
+        }
+        return .allow
+    }
+
     static func evaluate(
         intent: ElementActionIntent,
         resolvedNode: AccessibilityElementNode,

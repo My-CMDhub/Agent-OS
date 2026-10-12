@@ -170,13 +170,18 @@ enum HarnessVerb: String, CaseIterable {
     /// Mutating for the kill switch, policy and audit; navigation for the kernel.
     case goToFolder
 
+    /// Finder: rename an item listed in the front window — select it, File > Rename,
+    /// write the name, commit with one click on empty list space (`HarnessRenameItem`,
+    /// measured 2026-10-13). Mutating; the kernel judges both names' words.
+    case renameItem
+
     /// Whether this verb can change the world. The kill switch stops these and
     /// leaves the read-only pair working, so an operator who tripped it can
     /// still look at the machine and find out why.
     var isMutating: Bool {
         switch self {
         case .ping, .snapshot, .menus, .windows, .look, .status, .highlight: return false
-        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick, .helpSearch, .goToFolder: return true
+        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick, .helpSearch, .goToFolder, .renameItem: return true
         }
     }
 
@@ -204,8 +209,9 @@ enum HarnessVerb: String, CaseIterable {
         // `visionClick` aims at a point, not a name in the tree: `visionClickResponse`.
         // `helpSearch` types into the app's own Help field, never a named element: `helpSearchResponse`.
         // `goToFolder` writes into Finder's own Go to Folder field: `goToFolderResponse`.
+        // `renameItem` names a listed item and drives Finder's own editor: `renameItemResponse`.
         case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight, .scroll, .openURL, .visionClick,
-             .helpSearch, .goToFolder: return nil
+             .helpSearch, .goToFolder, .renameItem: return nil
         }
     }
 }
@@ -742,6 +748,13 @@ enum HarnessPolicy {
             guard raw.expectApp != nil else { return .failure(.missingField("expectApp")) }
             if let problem = HarnessGoToFolder.pathProblem(text) { return .failure(.invalidField(field: "text", value: problem)) }
         }
+        // renameItem: the item as listed (title), the new name (text), in Finder (checked live).
+        if verb == .renameItem {
+            guard !(raw.title ?? "").isEmpty else { return .failure(.missingField("title")) }
+            guard !text.isEmpty else { return .failure(.missingField("text")) }
+            guard raw.expectApp != nil else { return .failure(.missingField("expectApp")) }
+            if let problem = HarnessRenameItem.nameProblem(text) { return .failure(.invalidField(field: "text", value: problem)) }
+        }
         if verb == .type {
             guard !text.isEmpty else {
                 return .failure(.missingField("text"))
@@ -934,7 +947,8 @@ enum HarnessPolicy {
     /// pointing, pressing and reading names (which never carry a password
     /// box's contents) go on. nil when the verb may proceed.
     static func handOverRefusal(verb: HarnessVerb, secureInput: SecureInputState) -> String? {
-        guard secureInput.isOn, verb == .type || verb == .look || verb == .helpSearch || verb == .goToFolder else { return nil }
+        guard secureInput.isOn, verb == .type || verb == .look || verb == .helpSearch || verb == .goToFolder
+                || verb == .renameItem else { return nil }
         return handOverMessage(secureInput)
     }
 
@@ -1138,6 +1152,8 @@ enum HarnessObservability {
         "helpSearchUnavailable",
         // goToFolder asked of an app that is not Finder: an answer, not an anomaly.
         "notFinder",
+        // renameItem naming an item the window does not list, or a name it already lists.
+        "renameItemNotFound", "renameNameTaken",
         // `LockScreenGuard` doing its job. Measured 2026-09-13: a probe left
         // running against a locked screen wrote 12,881 `anomalySuppressed`
         // audit lines naming this rule — one per refusal, each also a line of
@@ -1997,6 +2013,9 @@ final class HarnessServer {
 
         case .goToFolder:
             return goToFolderResponse(request, dryRun: dryRun, startedAt: startedAt)
+
+        case .renameItem:
+            return renameItemResponse(request, dryRun: dryRun, startedAt: startedAt)
         }
     }
 
@@ -2412,7 +2431,8 @@ final class HarnessServer {
             verb: request.verb.rawValue,
             bundleIdentifier: bundleIdentifier,
             rawTarget: auditTarget(for: request) ?? "",
-            text: request.verb == .type ? request.text : nil,
+            // A rename's new name is what the owner approves, so a ticket binds it.
+            text: request.verb == .type || request.verb == .renameItem ? request.text : nil,
             mode: request.verb == .type ? request.mode.rawValue : nil,
             withinNamed: request.withinNamed,
             nearPoint: request.nearPoint,
@@ -4119,6 +4139,65 @@ final class HarnessServer {
         }
         response["verification"] = ["status": "confirmed", "evidence": run.report["evidence"] ?? NSNull()]
         return finish("confirmed")
+    }
+
+    // MARK: renameItem
+
+    /// Finder's rename (`HarnessRenameItem`, measured 2026-10-13). Finder only, by
+    /// bundle identifier; everything is read and checked before anything is
+    /// pressed — the item, the new name free, empty space to click — then the
+    /// kernel judges both names and the app policy and tickets apply. Dry run
+    /// stops after those checks.
+    private func renameItemResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        var response: [String: Any] = ["dryRun": dryRun]
+        guard let (application, bar) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response) else { return response }
+        func finish(_ outcome: String, kernel: String = "n/a", error: String? = nil, message: String? = nil) -> [String: Any] {
+            response["ok"] = error == nil
+            if let error { response["error"] = error }
+            if let message { response["message"] = message }
+            audit(request, dryRun: dryRun, kernel: kernel, outcome: outcome, startedAt: startedAt)
+            return response
+        }
+        guard application.bundleIdentifier == HarnessGoToFolder.finderBundleIdentifier else {
+            return finish("notFinder", error: "notFinder",
+                          message: "renaming is Finder's; Finder is not the app in front, so nothing was renamed. Focus Finder first.")
+        }
+        let fileMenus = AccessibilityMenu.entries(of: bar, children: AccessibilityMenu.liveChildren).filter { $0.label == HarnessRenameItem.fileMenuTitle }
+        guard fileMenus.count == 1,
+              AccessibilityMenu.entries(of: fileMenus[0], children: AccessibilityMenu.liveChildren)
+                .filter({ HarnessRenameItem.isRenameItem($0.label) }).count == 1 else {
+            return finish("renameFailed", error: "renameFailed", message: "Finder's File menu has no single Rename item; nothing was renamed")
+        }
+        let plan: HarnessRenameItem.Plan
+        switch HarnessRenameItem.plan(item: request.title, newName: request.text, processIdentifier: application.processIdentifier) {
+        case .failure(let failure): return finish(failure.code, error: failure.code, message: failure.message)
+        case .success(let planned): plan = planned
+        }
+        response["resolved"] = ["name": UntrustedText(plan.oldName).forDisplay, "listed": plan.listedCount,
+                                "commitPoint": [plan.point.x, plan.point.y]]
+        let decision = applyAppPolicy(to: ActionSafetyKernel.evaluateRename(from: plan.oldName, to: request.text),
+                                      bundleIdentifier: application.bundleIdentifier, into: &response)
+        let described = HarnessPolicy.describe(decision)
+        let gated = gate(decision, request: request, appName: application.localizedName,
+                         bundleIdentifier: application.bundleIdentifier, dryRun: dryRun, into: &response)
+        guard gated.executable else {
+            return finish(gated.outcome, kernel: described.decision, error: gated.outcome, message: response["message"] == nil ? gated.note : nil)
+        }
+        guard !dryRun else {
+            response["performed"] = ["status": "skipped", "reason": "dry run — the item and the empty space were found; nothing was selected or renamed"]
+            return finish("dryRun", kernel: described.decision)
+        }
+        phaseTiming.actionStarting()
+        let run = HarnessRenameItem.rename(plan, to: request.text, fileMenu: fileMenus[0])
+        phaseTiming.actionReturned()
+        response.merge(run.report) { _, new in new }
+        if let failure = run.failure {
+            guard failure.code == "notObserved" else { return finish(failure.code, kernel: described.decision, error: failure.code, message: failure.message) }
+            response["verification"] = ["status": "notObserved"]
+            return finish("notObserved", kernel: described.decision, error: "notVerified", message: failure.message)
+        }
+        response["verification"] = ["status": "confirmed", "evidence": run.report["evidence"] ?? NSNull()]
+        return finish("confirmed", kernel: described.decision)
     }
 
     // MARK: windows / focus
