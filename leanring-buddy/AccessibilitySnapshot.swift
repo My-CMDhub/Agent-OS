@@ -40,6 +40,12 @@ struct AccessibilityElementNode {
     static let textInputRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
     /// Controls whose name may live on a separate label element (`labelledBy`).
     static let labelledByRoles: Set<String> = ["AXCheckBox", "AXRadioButton", "AXSlider", "AXPopUpButton"]
+    /// Whether the label link is this element's name: ONE rule for the walk
+    /// (`buildNode`) and the pointer's hit test (`RealtimeScreenHitTest`) — launch
+    /// suite U02 2026-10-13: the walk named the Wi-Fi switch, the pointer did not.
+    static func namedByLabelLink(role: String, title: String?, elementDescription: String?, value: String?) -> Bool {
+        title == nil && elementDescription == nil && value == nil && labelledByRoles.contains(role)
+    }
 
     // MARK: What may leave the app — ONE predicate (review 2026-10-02)
     //
@@ -1081,12 +1087,8 @@ enum AccessibilityTreeWalker {
             ? copyStringAttribute(from: element, attribute: kAXPlaceholderValueAttribute) : nil
         // Role-gated: an anonymous AXGroup is the commonest node in a Chromium tree,
         // and asking each one for a label link would add a round trip per wrapper.
-        let labelledBy = title == nil && elementDescription == nil && value == nil
-            && AccessibilityElementNode.labelledByRoles.contains(role)
-            ? copyElementAttribute(from: element, attribute: kAXTitleUIElementAttribute).flatMap {
-                copyStringAttribute(from: $0, attribute: kAXValueAttribute)
-                    ?? copyStringAttribute(from: $0, attribute: kAXTitleAttribute)
-            } : nil
+        let labelledBy = AccessibilityElementNode.namedByLabelLink(role: role, title: title, elementDescription: elementDescription, value: value)
+            ? copyLabelLinkText(from: element) : nil
 
         // From the batch only: the fallback path reads no AXSelected (no extra round
         // trip per node), and its value read cannot tell "" from failed, so both omit.
@@ -1307,6 +1309,14 @@ enum AccessibilityTreeWalker {
             return []
         }
         return actionNames
+    }
+
+    /// The text of the element's AXTitleUIElement (its AXValue, else AXTitle);
+    /// gate the read with `AccessibilityElementNode.namedByLabelLink`.
+    static func copyLabelLinkText(from element: AXUIElement) -> String? {
+        copyElementAttribute(from: element, attribute: kAXTitleUIElementAttribute).flatMap {
+            copyStringAttribute(from: $0, attribute: kAXValueAttribute) ?? copyStringAttribute(from: $0, attribute: kAXTitleAttribute)
+        }
     }
 
     private static func copyStringAttribute(from element: AXUIElement, attribute: String) -> String? {

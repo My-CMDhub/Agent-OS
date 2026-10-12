@@ -75,12 +75,12 @@ nonisolated enum RealtimeScreenHitTest {
             let subroleError = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleValue)
             // A text field's AXValue is what the owner typed: never its name.
             let value = RealtimeScreenVerbs.textInputRoles.contains(role) ? nil : string(element, kAXValueAttribute)
-            let label = string(element, kAXTitleAttribute) ?? string(element, kAXDescriptionAttribute)
-            chain.append(RealtimeSnapNode(
-                name: label ?? value,
-                role: role, subrole: subroleValue as? String, frame: frame ?? .zero,
-                subroleReadFailed: AccessibilityElementNode.subroleReadFailed(subroleError),
-                pressable: publishesPress(element), namedByValue: label == nil && value != nil))
+            let title = string(element, kAXTitleAttribute)
+            chain.append(snapNode(
+                role: role, subrole: subroleValue as? String,
+                subroleReadFailed: AccessibilityElementNode.subroleReadFailed(subroleError), frame: frame ?? .zero,
+                title: title, description: title == nil ? string(element, kAXDescriptionAttribute) : nil, value: value,
+                labelledBy: AccessibilityTreeWalker.copyLabelLinkText(from: element), pressable: publishesPress(element)))
             var parent: CFTypeRef?
             guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parent) == .success,
                   let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
@@ -107,6 +107,18 @@ nonisolated enum RealtimeScreenHitTest {
                                                     subrole: node.subrole, pressable: node.pressable, pressAncestor: ancestor),
                             app: application?.bundleIdentifier)
         }
+    }
+
+    /// One element on the way up, named as the walk names it (`buildNode`):
+    /// title, description, value, then — for an otherwise anonymous control —
+    /// its label link, read only when `namedByLabelLink` says so.
+    static func snapNode(role: String, subrole: String?, subroleReadFailed: Bool, frame: CGRect, title: String?, description: String?,
+                         value: String?, labelledBy: @autoclosure () -> String?, pressable: Bool) -> RealtimeSnapNode {
+        let label = title ?? description
+        let linked = AccessibilityElementNode.namedByLabelLink(role: role, title: title, elementDescription: description, value: value)
+            ? labelledBy() : nil
+        return RealtimeSnapNode(name: label ?? value ?? linked, role: role, subrole: subrole, frame: frame,
+                                subroleReadFailed: subroleReadFailed, pressable: pressable, namedByValue: label == nil && value != nil)
     }
 
     /// `snap` over the named chain, with what sits past the snap depth (`above`,

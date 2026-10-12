@@ -76,6 +76,44 @@ struct HarnessHandsTests {
         #expect(titled.displayName?.raw == "Show seconds")
     }
 
+    // Launch suite U02 2026-10-13: press_element aimed BY POSITION at that same switch
+    // came back nothingAtPoint twice — the pointer's hit test named an element by
+    // title / description / value only. One naming rule now serves walk and pointer.
+    @Test func thePointerNamesAnAnonymousSwitchByItsLabelLinkAndTheKernelStillCardsIt() {
+        let wifi = "Wi\u{2011}Fi"
+        // The shared rule: role-gated, and only when nothing else names the element.
+        #expect(AccessibilityElementNode.namedByLabelLink(role: "AXCheckBox", title: nil, elementDescription: nil, value: nil))
+        #expect(!AccessibilityElementNode.namedByLabelLink(role: "AXGroup", title: nil, elementDescription: nil, value: nil))
+        #expect(!AccessibilityElementNode.namedByLabelLink(role: "AXCheckBox", title: "Show seconds", elementDescription: nil, value: nil))
+        #expect(!AccessibilityElementNode.namedByLabelLink(role: "AXCheckBox", title: nil, elementDescription: "Mute", value: nil))
+        #expect(!AccessibilityElementNode.namedByLabelLink(role: "AXPopUpButton", title: nil, elementDescription: nil, value: "Automatic"))
+
+        // The hit lands on the anonymous switch; its ancestors up to the pane are anonymous too.
+        let frame = CGRect(x: 1000, y: 700, width: 38, height: 22)
+        let toggle = RealtimeScreenHitTest.snapNode(role: "AXCheckBox", subrole: "AXSwitch", subroleReadFailed: false, frame: frame,
+                                                    title: nil, description: nil, value: nil, labelledBy: wifi, pressable: true)
+        #expect(toggle.name == wifi && toggle.pressable && !toggle.namedByValue)
+        let pane = RealtimeSnapNode(name: nil, role: "AXGroup", subrole: nil, frame: CGRect(x: 600, y: 100, width: 700, height: 700))
+        #expect(RealtimeScreenHitTest.outcome([toggle, pane], above: [], windowFrame: CGRect(x: 300, y: 100, width: 1000, height: 800))
+            == .element(0))
+        // Outside the gate, or over another name, the link names nothing.
+        #expect(RealtimeScreenHitTest.snapNode(role: "AXGroup", subrole: nil, subroleReadFailed: false, frame: frame,
+                                               title: nil, description: nil, value: nil, labelledBy: wifi, pressable: false).name == nil)
+        #expect(RealtimeScreenHitTest.snapNode(role: "AXCheckBox", subrole: nil, subroleReadFailed: false, frame: frame,
+                                               title: "Show seconds", description: nil, value: nil, labelledBy: wifi, pressable: true).name
+            == "Show seconds")
+
+        // The press goes to the harness by that name, and the element it resolves is carded.
+        let resolved = AccessibilityElementNode(role: "AXCheckBox", subrole: "AXSwitch", title: nil, value: nil,
+                                                labelledBy: wifi, frameInAppKitCoordinates: frame, depth: 6,
+                                                children: [], publishedActionNames: [kAXPressAction])
+        for action in [ElementAction.press, .click] {
+            guard case .requireConfirmation = decide(action, resolved, title: toggle.name ?? "") else {
+                Issue.record("point-aimed Wi-Fi switch was not carded (\(action))"); continue
+            }
+        }
+    }
+
     // MARK: click — the kernel
 
     // A click is judged as a press wherever a press could run at all.
