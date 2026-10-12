@@ -2953,6 +2953,10 @@ final class HarnessServer {
                                            focusedRole: { snapshot.application.flatMap { Self.focusedTextEntryRole(processIdentifier: $0.processIdentifier) } })
             } == true
 
+        // A list item's name field selects its row (live 2026-10-13, Finder): judged as the row.
+        let selectsListRow = action == .select
+            && ElementReachability.ancestorChain(to: resolvedNode, from: rootNode).map(ActionSafetyKernel.isListItemNameField) == true
+
         // A link to a person-notifying view (a LinkedIn profile) asks on a card,
         // judged on the link's OWN AXURL, never the caller's words (ruling 2026-10-08).
         let linkURL = action == .press || action == .click || action == .open
@@ -3000,7 +3004,8 @@ final class HarnessServer {
                 labelTitle: labelTitle,
                 draftScope: request.draftScope,
                 isListOption: isListOption,
-                opensPlainFinderFolder: plainFolder
+                opensPlainFinderFolder: plainFolder,
+                selectsListRow: selectsListRow
             ), url: linkURL),
             bundleIdentifier: snapshot.bundleIdentifier, into: &response
         )

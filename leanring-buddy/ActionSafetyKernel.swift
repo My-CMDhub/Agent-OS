@@ -92,6 +92,21 @@ enum ActionSafetyKernel {
         return true
     }
 
+    /// Whether `chain` (root ... node) ends in a list item's NAME FIELD: an AXTextField
+    /// whose AXRow sits in an AXOutline or AXTable. Live 2026-10-13 (Finder list view):
+    /// `select` "probe-file.txt" resolved the file's name field (AXOpen, AXShowMenu,
+    /// AXConfirm) and asked "unrecognised role AXTextField", a card even on dry run.
+    /// The selection performer writes the ROW (`AccessibilitySelectionPerformer`), and a
+    /// row is a navigational select role, so a select is judged on what it selects.
+    static func isListItemNameField(chain: [AccessibilityElementNode]) -> Bool {
+        guard let node = chain.last, node.role == "AXTextField" else { return false }
+        // ponytail: the row within three levels (row > cell > field, as measured).
+        for index in chain.indices.dropLast().reversed().prefix(3) where chain[index].role == "AXRow" {
+            return index > 0 && ["AXOutline", "AXTable"].contains(chain[index - 1].role)
+        }
+        return false
+    }
+
     /// Roles a menu path resolves to. A menu bar item is the top level ("File"),
     /// a menu item is everything below it.
     static let navigationalMenuRoles: Set<String> = ["AXMenuItem", "AXMenuBarItem"]
@@ -492,7 +507,8 @@ enum ActionSafetyKernel {
         labelTitle: String? = nil,
         draftScope: Bool = false,
         isListOption: Bool = false,
-        opensPlainFinderFolder: Bool = false
+        opensPlainFinderFolder: Bool = false,
+        selectsListRow: Bool = false
     ) -> SafetyDecision {
         // Order matters. Every refusal is checked before any permission.
 
@@ -690,6 +706,7 @@ enum ActionSafetyKernel {
 
         guard navigationalRoles(for: intent.action).contains(resolvedNode.role)
                 || (intent.action == .open && opensPlainFinderFolder)
+                || (intent.action == .select && selectsListRow)
                 || ((intent.action == .press || intent.action == .click)
                     && (resolvedNode.subrole.map(navigationalPressSubroles.contains) == true || isListOption)) else {
             return .requireConfirmation(reason: "unrecognised role \(resolvedNode.role)")
