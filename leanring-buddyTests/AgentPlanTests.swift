@@ -221,6 +221,25 @@ struct AgentPlanTests {
         #expect(AgentLoop.doneChallenge(summary: "Opened the Privacy & Security settings.", evidence: [1], receipts: failed, currentStep: 2) != nil)
     }
 
+    /// G05 2026-10-13 (20-09-09Z): "I have created a reminder called "JARVIS test reminder"" after
+    /// open_app + press_menu + find_on_screen — nothing was ever typed, and the menu press backed "created".
+    @MainActor @Test func aCreatedNameNeedsTheTypingThatGaveIt() {
+        let pressed = [AgentLoop.Receipt(step: 1, toolName: "open_app", ok: true, error: nil),
+                       AgentLoop.Receipt(step: 2, toolName: "press_menu", ok: true, error: nil)]
+        let claim = "I have created a reminder called \u{201C}JARVIS test reminder\u{201D} in Reminders."
+        #expect(AgentLoop.doneChallenge(summary: claim, evidence: [1, 2], receipts: pressed, currentStep: 3) != nil)
+        let typed = pressed + [AgentLoop.Receipt(step: 3, toolName: "type_text", ok: true, error: nil, typed: "JARVIS test reminder")]
+        #expect(AgentLoop.doneChallenge(summary: claim, evidence: [2, 3], receipts: typed, currentStep: 4) == nil)
+        let failedType = pressed + [AgentLoop.Receipt(step: 3, toolName: "type_text", ok: false, error: "kernelRefused", typed: nil)]
+        #expect(AgentLoop.doneChallenge(summary: claim, evidence: [2], receipts: failedType, currentStep: 4) != nil)
+        // Not a creation: a pre-existing item may be named without typing it.
+        let opened = [AgentLoop.Receipt(step: 1, toolName: "go_to_folder", ok: true, error: nil)]
+        #expect(AgentLoop.doneChallenge(summary: "Opened the folder called \"scripts\".", evidence: [1], receipts: opened, currentStep: 2) == nil)
+        // Pasted in a longer text counts: the name is inside what was typed.
+        let pasted = pressed + [AgentLoop.Receipt(step: 3, toolName: "type_text", ok: true, error: nil, typed: "JARVIS test 2\nmacOS 15.5")]
+        #expect(AgentLoop.doneChallenge(summary: "Created a new note titled 'JARVIS test 2'.", evidence: [3], receipts: pasted, currentStep: 4) == nil)
+    }
+
     /// G11 2026-10-11 (04-55-54Z): "The scheme selected in Xcode is leanring-buddy", backed by a
     /// find_on_screen read, was doneUnbacked as if it claimed a press. A state is not an effect.
     @MainActor @Test func aSelectedStateIsNotAPressClaim() {

@@ -354,6 +354,9 @@ final class AgentLoop {
         var progress: String? = nil
         /// The same, by agent-loop.log's rules (`plainWords`): what the checkpoint keeps.
         var words: String? = nil
+        /// What an ok type_text typed — a created item's name must be in one (G05 2026-10-13).
+        /// In memory only, never in a checkpoint.
+        var typed: String? = nil
     }
 
     /// An ask_owner the run paused on: its call's id, and the results of the
@@ -835,7 +838,8 @@ final class AgentLoop {
                 }
                 receipts.append(Receipt(step: step, toolName: call?.name ?? toolName, ok: ok, error: error,
                                         progress: Self.progressLine(toolName: toolName, call: call, result: result),
-                                        words: Self.plainWords(toolName: toolName, args: args)))
+                                        words: Self.plainWords(toolName: toolName, args: args),
+                                        typed: ok && toolName == RealtimeVoiceVerbs.typeTextName ? call?.text : nil))
                 var fields: [String: Any] = ["tool": toolName, "args": args, "ok": ok, "error": error ?? NSNull(), "harnessMs": harnessMs,
                                              "waitedForConfirmation": waited]
                 if !(web is NSNull) { fields["web"] = web }
@@ -1073,10 +1077,25 @@ final class AgentLoop {
                 return "nothing was done this task, yet the summary says done"
             }
         }
+        // A created item's NAME must have been typed this task (G05 2026-10-13: "created a reminder
+        // called "JARVIS test reminder"" after a menu press and a look; nothing typed). Creation
+        // sentences only — "opened the folder called scripts" names something that already exists.
+        let typedTexts = receipts.compactMap { $0.ok ? $0.typed?.lowercased() : nil }
+        for name in createdNames(summary) where !typedTexts.contains(where: { $0.contains(name.lowercased()) }) {
+            return "no ok type_text typed \"\(name)\", the name the summary says was created"
+        }
         let okSteps = Set(receipts.filter(\.ok).map(\.step))
         let ranSteps = Set(receipts.map(\.step))
         let unbacked = evidence.filter { !okSteps.contains($0) && !($0 == currentStep && !ranSteps.contains($0)) }
         return unbacked.isEmpty ? nil : "step \(unbacked.map(String.init).joined(separator: ", ")) has no ok result"
+    }
+
+    /// Names a creation sentence gives in quotes: created/added/made … called/named/titled "X".
+    static func createdNames(_ summary: String) -> [String] {
+        let pattern = #"(?i)\b(created|added|made|wrote|new)\b[^.!?]{0,60}?\b(called|named|titled)\s+["\u201C\u2018'](.{1,80}?)["\u201D\u2019']"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(summary.startIndex..., in: summary)
+        return regex.matches(in: summary, range: range).compactMap { Range($0.range(at: 3), in: summary).map { String(summary[$0]) } }
     }
 
     static let pressTools: Set<String> = [RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName]
