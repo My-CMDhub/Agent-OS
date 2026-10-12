@@ -471,6 +471,38 @@ enum HarnessPolicy {
         return nil
     }
 
+    /// The control a label BESIDE it names — the label is that control's AXTitleUIElement —
+    /// or nil. Launch suite U02 2026-10-13 (run 4206F2B3): "turn off Wi-Fi" aimed at the
+    /// AXStaticText "Wi‑Fi" next to System Settings' switch; it was selected
+    /// (`alreadySelected`), nothing changed, and the switch's card never fired. Claimants are
+    /// the window's `labelledByRoles` controls whose `labelledBy` is the label's text; `linked`
+    /// (live identity, `liveLabelLink`) decides when it can be read, else the one claimant on
+    /// the label's row. Two is no answer: never guess.
+    static func controlNamed(byLabel label: AccessibilityElementNode, inWindow window: AccessibilityElementNode,
+                             linked: ((AccessibilityElementNode) -> Bool)?) -> AccessibilityElementNode? {
+        guard label.role == "AXStaticText", let text = label.displayName?.raw else { return nil }
+        func claimants(under node: AccessibilityElementNode) -> [AccessibilityElementNode] {
+            (AccessibilityElementNode.labelledByRoles.contains(node.role) && node.labelledBy?.raw == text ? [node] : [])
+                + node.children.flatMap(claimants(under:))
+        }
+        let found = claimants(under: window)
+        if let linked {
+            let tied = found.filter(linked)
+            return tied.count == 1 ? tied[0] : nil
+        }
+        // AppKit frames: on the label's row is a vertical overlap.
+        let labelFrame = label.frameInAppKitCoordinates
+        guard found.count == 1, found[0].frameInAppKitCoordinates.maxY > labelFrame.minY,
+              found[0].frameInAppKitCoordinates.minY < labelFrame.maxY else { return nil }
+        return found[0]
+    }
+
+    /// A label retargeted to its control is pressed as that control: a select (what
+    /// press_element sends for a label that presses nothing) becomes a click, judged as one.
+    static func verbAfterLabelRetarget(_ action: ElementAction) -> ElementAction {
+        action == .select ? .click : action
+    }
+
     /// The text field a label names, for `type` aimed at a label. Generality
     /// suite 2026-10-06: "Save As:" (TextEdit) and Font Book's "Search" resolved
     /// to the AXStaticText beside the field and the kernel refused typing into
@@ -2901,7 +2933,7 @@ final class HarnessServer {
     }
 
     private func actResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
-        guard let action = request.verb.elementAction else {
+        guard var action = request.verb.elementAction else {
             return ["ok": false, "error": "unknownVerb", "message": "not an acting verb"]
         }
 
@@ -2909,7 +2941,8 @@ final class HarnessServer {
 
         guard let target = resolveTarget(request, action: action, dryRun: dryRun, startedAt: startedAt, into: &response)
         else { return response }
-        let (snapshot, rootNode, intent, namedNode) = target
+        let (snapshot, rootNode, namedIntent, namedNode) = target
+        var intent = namedIntent
         // A label names a link or button it sits in: the press goes to — and is
         // judged on — that control, and the label's words are word-checked too.
         // Here, not in `resolveTarget`: highlight points at what was named.
@@ -2921,6 +2954,17 @@ final class HarnessServer {
             resolvedNode = control
             labelTitle = namedNode.displayName?.raw ?? labelTitle
             response["retargetedFrom"] = Self.summarise(namedNode)
+        } else if [.press, .click, .select].contains(action), !request.aimAtFocus, !request.aimAtWindow,
+                  let control = HarnessPolicy.controlNamed(
+                    byLabel: namedNode, inWindow: rootNode,
+                    linked: namedNode.accessibilityElement == nil ? nil : HarnessPolicy.liveLabelLink(namedNode)) {
+            // A label BESIDE its control (its AXTitleUIElement): the control is pressed and judged.
+            resolvedNode = control
+            labelTitle = namedNode.displayName?.raw ?? labelTitle
+            action = HarnessPolicy.verbAfterLabelRetarget(action)
+            intent = ElementActionIntent(role: intent.role, title: intent.title, action: action)
+            response["retargetedFrom"] = Self.summarise(namedNode)
+            response["retargetedFromLabel"] = true
         }
         // A label names the field it labels: type goes there, judged as that field.
         if action == .type, !request.aimAtFocus, !AccessibilityElementNode.textInputRoles.contains(namedNode.role),
@@ -3031,7 +3075,7 @@ final class HarnessServer {
         )
         let described = HarnessPolicy.describe(decision)
         // select is not bound: it CHANGES the selection, it does not act on one.
-        let bindingSubject = request.verb == .select ? nil : ActionBinding.Subject(
+        let bindingSubject = action == .select ? nil : ActionBinding.Subject(
             targetElement: resolvedNode.accessibilityElement, processIdentifier: snapshot.application?.processIdentifier
         )
         let gated = gate(decision, request: request, appName: snapshot.applicationName,

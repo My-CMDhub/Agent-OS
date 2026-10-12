@@ -94,4 +94,56 @@ struct LabelRetargetTests {
         #expect(decide(control: "Empty Trash", role: "AXButton", label: "Bin")
                 == .refuse(reason: ActionSafetyKernel.irreversibleRefusalReason(keyword: "empty trash")))
     }
+
+    // Launch suite U02 2026-10-13 (run 4206F2B3): "turn off Wi-Fi" aimed at the AXStaticText
+    // "Wi‑Fi" BESIDE the switch (the switch's AXTitleUIElement), the harness selected it
+    // (`alreadySelected`), and the switch's card never fired. The label now reaches its control.
+    func row(label: String = "Wi\u{2011}Fi", claimants: [String?]) -> (window: AccessibilityElementNode, label: AccessibilityElementNode) {
+        let labelNode = AccessibilityElementNode(role: "AXStaticText", subrole: nil, title: nil, value: label,
+                                                 frameInAppKitCoordinates: CGRect(x: 400, y: 700, width: 60, height: 20), depth: 3, children: [])
+        let switches = claimants.enumerated().map { index, claimed in
+            AccessibilityElementNode(role: "AXCheckBox", subrole: "AXSwitch", title: nil, value: nil, labelledBy: claimed,
+                                     frameInAppKitCoordinates: CGRect(x: 900, y: 699 - CGFloat(index) * 40, width: 38, height: 22), depth: 3,
+                                     children: [], publishedActionNames: [kAXPressAction])
+        }
+        let group = AccessibilityElementNode(role: "AXGroup", subrole: nil, title: nil, value: nil,
+                                             frameInAppKitCoordinates: CGRect(x: 380, y: 600, width: 600, height: 140), depth: 2,
+                                             children: [labelNode] + switches)
+        let window = AccessibilityElementNode(role: "AXWindow", subrole: nil, title: "Wi\u{2011}Fi", value: nil,
+                                              frameInAppKitCoordinates: bounds, depth: 0, children: [group])
+        return (window, labelNode)
+    }
+
+    @Test func aLabelBesideTheSwitchItNamesPressesThatSwitchAndIsCarded() {
+        let wifi = "Wi\u{2011}Fi"
+        let (window, label) = row(claimants: [wifi])
+        let control = HarnessPolicy.controlNamed(byLabel: label, inWindow: window, linked: nil)
+        #expect(control?.role == "AXCheckBox")
+        guard let control else { return }
+        // Judged as a click on the switch (a select would go uncarded), the label's words checked too.
+        guard case .requireConfirmation = ActionSafetyKernel.evaluate(
+            intent: ElementActionIntent(role: "AXStaticText", title: wifi, action: .click), resolvedNode: control, matchCount: 1,
+            visibleBounds: bounds, labelTitle: wifi) else { Issue.record("the Wi-Fi switch reached by its label was not carded"); return }
+        #expect(HarnessPolicy.verbAfterLabelRetarget(.select) == .click)
+        #expect(HarnessPolicy.verbAfterLabelRetarget(.press) == .press)
+    }
+
+    @Test func aLabelWithNoOrTwoClaimantsIsLeftAlone() {
+        let wifi = "Wi\u{2011}Fi"
+        let none = row(claimants: [])
+        #expect(HarnessPolicy.controlNamed(byLabel: none.label, inWindow: none.window, linked: nil) == nil)
+        let other = row(claimants: ["Ask to join networks"])
+        #expect(HarnessPolicy.controlNamed(byLabel: other.label, inWindow: other.window, linked: nil) == nil)
+        // Two controls claim the same label: never guess.
+        let two = row(claimants: [wifi, wifi])
+        #expect(HarnessPolicy.controlNamed(byLabel: two.label, inWindow: two.window, linked: nil) == nil)
+        // Live identity decides when it can be read: a label that is not the switch's (the sidebar's "Wi‑Fi") stays.
+        let one = row(claimants: [wifi])
+        #expect(HarnessPolicy.controlNamed(byLabel: one.label, inWindow: one.window, linked: { _ in false }) == nil)
+        #expect(HarnessPolicy.controlNamed(byLabel: two.label, inWindow: two.window, linked: { $0.frameInAppKitCoordinates.minY < 690 })?
+            .frameInAppKitCoordinates.minY == 659)
+        // Without identity, a claimant off the label's row is no answer.
+        let far = row(claimants: [nil, wifi])
+        #expect(HarnessPolicy.controlNamed(byLabel: far.label, inWindow: far.window, linked: nil) == nil)
+    }
 }
