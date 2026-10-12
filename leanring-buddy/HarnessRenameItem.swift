@@ -32,7 +32,7 @@ nonisolated enum HarnessRenameItem {
     static let listRoles: Set<String> = ["AXOutline", "AXTable"]
     static let readTimeoutSeconds: Float = 0.5
     static let writeTimeoutSeconds: Float = 1.0
-    static let menuEnabledDeadlineSeconds = 0.5
+    static let menuEnabledDeadlineSeconds = 2.0   // live 2026-10-13: 0.5 s refused a selection Finder enabled Rename for moments later
     static let editorDeadlineSeconds = 1.5
     static let verifyDeadlineSeconds = 2.0
     static let pollIntervalSeconds = 0.05
