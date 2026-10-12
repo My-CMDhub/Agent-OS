@@ -615,19 +615,107 @@ enum AccessibilityTypePerformer {
     /// Built from direct reads rather than looked up in the walked tree on
     /// purpose: focus can be in a sheet or a popover the window walk pruned, and
     /// "not in the tree" would then be reported as "nothing has focus".
-    static func focusedNode() -> AccessibilityElementNode? {
+    static func focusedNode() -> AccessibilityElementNode? { focusedNodeAndSource()?.node }
+
+    /// One witness of where focus is: its role and owning process.
+    struct FocusWitness: Equatable { let role: String; let pid: pid_t }
+
+    /// Which witness answered. `walk(index:)` points into the walk's list.
+    enum FocusChoice: Equatable {
+        case app, systemWide, walk(index: Int)
+        var source: String {
+            switch self {
+            case .app: "app"
+            case .systemWide: "systemWide"
+            case .walk: "focusedAttributeWalk"
+            }
+        }
+    }
+
+    /// The app's own focus attribute can name a container while the caret sits in a field:
+    /// G05 2026-10-12, Reminders after File > New Reminder read AXWindow (2x) / AXOutline (1x)
+    /// while the owner saw the caret in the new row and 5/5 probes found its AXTextField.
+    /// So a non-typeable app read asks, in order: the system-wide focus (same pid only — never
+    /// another process's element), then a bounded walk for exactly one typeable `AXFocused`
+    /// element (several = no answer, never a guess); otherwise the app's read stands and the
+    /// kernel refuses it as before. `walkRoles` is lazy: it costs reads only when reached.
+    nonisolated static func chooseFocus(appRole: String?, applicationPid: pid_t, systemWide: FocusWitness?,
+                                        walkRoles: () -> [String]) -> FocusChoice? {
+        let typeable = ActionSafetyKernel.typeableRoles
+        if let appRole, typeable.contains(appRole) { return .app }
+        if let systemWide, systemWide.pid == applicationPid, typeable.contains(systemWide.role) { return .systemWide }
+        let fields = walkRoles().enumerated().filter { typeable.contains($0.element) }
+        if fields.count == 1 { return .walk(index: fields[0].offset) }
+        return appRole == nil ? nil : .app
+    }
+
+    static let focusWalkNodeLimit = 400
+
+    /// `focusedNode`, plus which witness named it (`FocusChoice.source`). Every
+    /// answer is built by `node(describing:)`, so the kernel's role and
+    /// secure-field checks see it exactly as they saw the app's own read.
+    static func focusedNodeAndSource() -> (node: AccessibilityElementNode, source: String)? {
         // The walker's source, so the snapshot that guarded this and the focus
         // it aims at name the same app.
         guard let application = AccessibilityTreeWalker.focusedApplication() else { return nil }
-        let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
+        let pid = application.processIdentifier
+        let applicationElement = AXUIElementCreateApplication(pid)
 
-        var focusedValue: AnyObject?
-        guard AXUIElementCopyAttributeValue(
-            applicationElement, kAXFocusedUIElementAttribute as CFString, &focusedValue
-        ) == .success,
-            let focusedValue,
-            CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else { return nil }
-        return node(describing: focusedValue as! AXUIElement)
+        func element(_ owner: AXUIElement, _ attribute: String) -> AXUIElement? {
+            var value: AnyObject?
+            guard AXUIElementCopyAttributeValue(owner, attribute as CFString, &value) == .success, let value,
+                  CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+            return (value as! AXUIElement)
+        }
+        func role(_ element: AXUIElement) -> String? {
+            var value: AnyObject?
+            return AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value) == .success ? value as? String : nil
+        }
+
+        let appFocus = element(applicationElement, kAXFocusedUIElementAttribute)
+        var systemWideFocus: AXUIElement?
+        var walked: [AXUIElement] = []
+
+        let choice = chooseFocus(
+            appRole: appFocus.map { role($0) ?? "AXUnknown" }, applicationPid: pid,
+            systemWide: {
+                guard appFocus.flatMap(role).map(ActionSafetyKernel.typeableRoles.contains) != true,
+                      let found = element(AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute) else { return nil }
+                var owner: pid_t = 0
+                guard AXUIElementGetPid(found, &owner) == .success else { return nil }
+                systemWideFocus = found
+                return FocusWitness(role: role(found) ?? "AXUnknown", pid: owner)
+            }(),
+            walkRoles: {
+                walked = focusedElements(under: element(applicationElement, kAXFocusedWindowAttribute))
+                return walked.map { role($0) ?? "AXUnknown" }
+            })
+
+        switch choice {
+        case .app?: return appFocus.map { (node(describing: $0), "app") }
+        case .systemWide?: return systemWideFocus.map { (node(describing: $0), "systemWide") }
+        case .walk(let index)?: return (node(describing: walked[index]), "focusedAttributeWalk")
+        case nil: return nil
+        }
+    }
+
+    /// Breadth-first, at most `focusWalkNodeLimit` nodes: every element whose
+    /// `AXFocused` reads true. One batched read per node (role is read later,
+    /// only for the few that answer true).
+    private static func focusedElements(under window: AXUIElement?) -> [AXUIElement] {
+        guard let window else { return [] }
+        var queue = [window], found: [AXUIElement] = [], visited = 0
+        while !queue.isEmpty, visited < focusWalkNodeLimit {
+            let current = queue.removeFirst()
+            visited += 1
+            var raw: CFArray?
+            guard AXUIElementCopyMultipleAttributeValues(
+                current, [kAXFocusedAttribute, kAXChildrenAttribute] as CFArray, AXCopyMultipleAttributeOptions(), &raw
+            ) == .success, let values = raw as? [AnyObject], values.count == 2 else { continue }
+            if values[0] as? Bool == true { found.append(current) }
+            if let children = values[1] as? [AXUIElement] { queue.append(contentsOf: children) }
+        }
+        return found
     }
 
     /// `focusedNode`'s reads of one element. The subrole keeps its error, as the

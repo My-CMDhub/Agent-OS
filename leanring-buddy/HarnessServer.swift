@@ -2811,7 +2811,7 @@ final class HarnessServer {
         } else if request.aimAtFocus {
             // The OS says what has focus. No name is involved, which is the
             // point: the fields most worth typing into are anonymous.
-            guard let focusedNode = AccessibilityTypePerformer.focusedNode() else {
+            guard let (focusedNode, focusSource) = AccessibilityTypePerformer.focusedNodeAndSource() else {
                 response["resolution"] = ["status": "noFocusedElement", "matchCount": 0]
                 response["ok"] = false
                 response["error"] = "noFocusedElement"
@@ -2820,6 +2820,8 @@ final class HarnessServer {
             }
             resolvedNode = focusedNode
             response["resolution"] = ["status": "focused", "matchCount": 1]
+            // Which witness named it: the app's own read, or the fallback after it named no field.
+            response["focusSource"] = focusSource
         } else {
             switch ElementActionIntentResolver.resolve(intent, inTreeRootedAt: rootNode) {
             case .resolved(let node):
