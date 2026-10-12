@@ -96,6 +96,41 @@ nonisolated enum HarnessMoveItems {
         return url.path
     }
 
+    /// The folder from Finder's path bar (View > Show Path Bar), volume first. Finder's
+    /// windows answer AXDocument -25212 and their rows carry no AXURL (live, 2026-10-13),
+    /// so the path bar is the only place a window says where it is. A shown "/" is a ":"
+    /// on disk, so such a name is refused rather than guessed.
+    /// ponytail: "Recents"/"iCloud Drive" chains give a wrong path; go_to_folder then fails, nothing moves.
+    static func folderPath(pathBar: [String], rootVolumeName: String?) -> String? {
+        guard let volume = pathBar.first, !pathBar.contains(where: { $0.isEmpty || $0.contains("/") }) else { return nil }
+        let base = volume == rootVolumeName ? "" : "/Volumes/" + volume
+        let rest = pathBar.dropFirst().joined(separator: "/")
+        return rest.isEmpty ? (base.isEmpty ? "/" : base) : base + "/" + rest
+    }
+
+    /// The path bar's names: a list of only static texts ending in the window's title.
+    static func pathBarNames(in window: AXUIElement) -> [String]? {
+        let title = HarnessRenameItem.string(window, kAXTitleAttribute)
+        var queue = [(window, 0)]
+        while !queue.isEmpty {
+            let (node, depth) = queue.removeFirst()
+            for child in HarnessRenameItem.elements(node, kAXChildrenAttribute) {
+                guard HarnessRenameItem.string(child, kAXRoleAttribute) == kAXListRole as String else {
+                    if depth < HarnessRenameItem.listSearchDepth { queue.append((child, depth + 1)) }
+                    continue
+                }
+                let items = HarnessRenameItem.elements(child, kAXChildrenAttribute)
+                let names = items.compactMap { item in
+                    HarnessRenameItem.string(item, kAXRoleAttribute) == kAXStaticTextRole as String
+                        ? HarnessRenameItem.string(item, kAXValueAttribute) ?? HarnessRenameItem.string(item, kAXTitleAttribute)
+                            ?? HarnessRenameItem.string(item, kAXDescriptionAttribute) : nil
+                }
+                if !names.isEmpty, names.count == items.count, names.last == title { return names }
+            }
+        }
+        return nil
+    }
+
     /// The first name the destination already lists — case-insensitive, like APFS.
     static func takenName(_ names: [String], destinationListed: [String?]) -> String? {
         names.first { name in destinationListed.contains { $0.map { $0.compare(name, options: .caseInsensitive) == .orderedSame } == true } }
@@ -135,7 +170,9 @@ nonisolated enum HarnessMoveItems {
         case .failure(let failure): return .failure(failure)
         case .success(let found): indices = found
         }
+        let rootVolume = try? URL(fileURLWithPath: "/").resourceValues(forKeys: [.volumeNameKey]).volumeName
         let source = folderPath(document: HarnessRenameItem.string(list.window, kAXDocumentAttribute))
+            ?? pathBarNames(in: list.window).flatMap { folderPath(pathBar: $0, rootVolumeName: rootVolume) }
         switch destinationPath(destination, sourceFolder: source, names: names, home: NSHomeDirectory()) {
         case .failure(let failure): return .failure(failure)
         case .success(let path):

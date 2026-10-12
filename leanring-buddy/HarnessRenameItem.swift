@@ -231,11 +231,15 @@ nonisolated enum HarnessRenameItem {
                                          isStandard: { string($0, kAXSubroleAttribute) == kAXStandardWindowSubrole as String },
                                          hasList: { !findLists(under: $0, depth: listSearchDepth).isEmpty }) else { return .noWindow }
         // The file list is the one list whose rows carry names; the sidebar's rows carry none.
-        let lists = findLists(under: window, depth: listSearchDepth).compactMap { list -> FileList? in
+        let reads = findLists(under: window, depth: listSearchDepth).map { list -> FileList in
             let listRows = rows(of: list)
-            let names = listRows.map(rowName)
-            return names.contains { $0 != nil } ? FileList(window: window, outline: list, rows: listRows, names: names) : nil
+            return FileList(window: window, outline: list, rows: listRows, names: listRows.map(rowName))
         }
+        let named = reads.filter { $0.names.contains { $0 != nil } }
+        // An empty folder's list holds one nameless placeholder row ("go up" image), so it is
+        // told from the sidebar by its column header: the file list answers AXHeader, the
+        // sidebar -25212 (live, "Dest", 2026-10-13).
+        let lists = named.isEmpty ? reads.filter { element($0.outline, kAXHeaderAttribute) != nil } : named
         guard lists.count == 1 else { return .noSingleList }
         return .list(lists[0])
     }

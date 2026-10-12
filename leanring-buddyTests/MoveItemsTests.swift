@@ -55,6 +55,12 @@ struct MoveItemsTests {
         #expect(path("~/JARVIS-sandbox/Receipts/Old", names: ["Receipts"]) == nil, "a folder into its own subfolder")
         #expect(HarnessMoveItems.folderPath(document: "file:///Users/owner/JARVIS-sandbox/") == "/Users/owner/JARVIS-sandbox")
         #expect(HarnessMoveItems.folderPath(document: "https://example.com/") == nil)
+        let bar = { HarnessMoveItems.folderPath(pathBar: $0, rootVolumeName: "Macintosh HD") }
+        #expect(bar(["Macintosh HD", "Users", "owner", "JARVIS-sandbox"]) == "/Users/owner/JARVIS-sandbox")
+        #expect(bar(["Macintosh HD"]) == "/")
+        #expect(bar(["Backup", "Photos"]) == "/Volumes/Backup/Photos", "another volume lives under /Volumes")
+        #expect(bar(["Macintosh HD", "Users", "a/b"]) == nil, "a shown slash is a colon on disk")
+        #expect(bar([]) == nil)
     }
 
     @Test func aNameTheDestinationListsIsTakenCaseInsensitively() {
