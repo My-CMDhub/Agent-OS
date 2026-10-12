@@ -87,6 +87,18 @@ struct GeneralitySuiteAnswerTests {
         #expect(GeneralitySuite.answer("version 15.56", has: ["15.5"], truth: "15.5")["passed"] as? Bool == false)
         #expect(GeneralitySuite.answer("Created by Chris Lattner.", has: ["Lattner"], truth: "Chris Lattner")["passed"] as? Bool == true)
     }
+
+    /// A creation passes only on MORE matching items than before. Run 2026-10-12T03-40-26Z:
+    /// G05 created nothing (typing refused) and passed on an earlier run's leftover reminder.
+    @Test @MainActor func aCreationPassesOnlyWhenTheCountGrew() {
+        #expect(GeneralitySuite.createdVerdict(before: 2, after: 3)["passed"] as? Bool == true)
+        #expect(GeneralitySuite.createdVerdict(before: 2, after: 2)["passed"] as? Bool == false)
+        let unreadable = GeneralitySuite.createdVerdict(before: nil, after: 3)
+        #expect(unreadable["passed"] as? Bool == false)
+        #expect(unreadable["countBeforeUnreadable"] as? Bool == true)
+        #expect(GeneralitySuite.createdVerdict(before: 0, after: 1)["passed"] as? Bool == true)
+        #expect(GeneralitySuite.createdVerdict(before: 1, after: nil)["passed"] as? Bool == false)
+    }
 }
 
 /// The suite's cleanup diff. G15, run 2026-10-10T23-34-53Z: the task saved and

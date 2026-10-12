@@ -39,6 +39,9 @@ enum GeneralitySuite {
         let apps: [String]
         var heldOut = false
         var findOut = false
+        /// A creation task's items: counted right before the task and again at the check, which
+        /// passes only on MORE (`createdVerdict`). Presence alone passed on an earlier run's leftovers.
+        var created: (bundle: String, match: @Sendable (AccessibilityElementNode) -> Bool)? = nil
         /// (spoken answer, the goal run's report) -> evidence with "passed".
         let check: (_ spoken: String, _ run: [String: Any]) async -> [String: Any]
     }
@@ -69,16 +72,10 @@ enum GeneralitySuite {
                       return answer(spoken, has: [count], truth: count)
                   },
         SuiteTask(id: "G04", pattern: "create item + text entry", words: "create a new note in Notes titled JARVIS test 1 with the line hello",
-                  apps: [notes]) { _, _ in
-                      let found = await read { appHas(notes) { $0.listedName?.raw.contains("JARVIS test 1") == true } }
-                      return verdict(found == true, ["noteVisible": found as Any? ?? NSNull()])
-                  },
+                  apps: [notes], created: (notes, { $0.listedName?.raw.contains("JARVIS test 1") == true })) { _, run in createdVerdict(run) },
         SuiteTask(id: "G05", pattern: "create item (list app)", words: "create a reminder called JARVIS test reminder",
-                  apps: [reminders]) { _, _ in
-                      let found = await read { appHas(reminders) { node in
-                          [node.listedName?.raw, node.value?.raw].contains { $0?.contains("JARVIS test reminder") == true } } }
-                      return verdict(found == true, ["reminderVisible": found as Any? ?? NSNull()])
-                  },
+                  apps: [reminders], created: (reminders, { node in
+                      [node.listedName?.raw, node.value?.raw].contains { $0?.contains("JARVIS test reminder") == true } })) { _, run in createdVerdict(run) },
         SuiteTask(id: "G06", pattern: "tab / segmented control switch", words: "switch Calendar to the month view",
                   apps: [calendar]) { _, _ in
                       let month = await read { appHas(calendar) { $0.listedName?.raw == "Month" && $0.selected == true } }
@@ -155,11 +152,13 @@ enum GeneralitySuite {
         SuiteTask(id: "G20", pattern: "find out (connector-answerable)", words: "who originally created the Swift programming language?",
                   apps: [chrome], findOut: true) { spoken, _ in answer(spoken, has: ["Lattner"], truth: "Chris Lattner") },
         SuiteTask(id: "G21", pattern: "cross-app copy", words: "find out which macOS version this Mac runs and write it in a new note titled JARVIS test 2",
-                  apps: [settings, notes]) { _, _ in
+                  apps: [settings, notes], created: (notes, { $0.listedName?.raw.contains("JARVIS test 2") == true })) { _, run in
                       let version = macOSVersion
-                      let titled = await read { appHas(notes) { $0.listedName?.raw.contains("JARVIS test 2") == true } }
                       let withVersion = await read { appHas(notes) { node in [node.listedName?.raw, node.value?.raw].contains { $0?.contains(version) == true } } }
-                      return verdict(titled == true && withVersion == true, ["noteTitled": titled as Any? ?? NSNull(), "versionInNotes": withVersion as Any? ?? NSNull()])
+                      var result = createdVerdict(run)
+                      result["versionInNotes"] = withVersion as Any? ?? NSNull()
+                      result["passed"] = withVersion == true && result["passed"] as? Bool == true
+                      return result
                   },
     ]
 
@@ -170,6 +169,35 @@ enum GeneralitySuite {
     }
 
     /// A read answer: the spoken words carry one of the truths (case-folded).
+    /// A creation passed only when the matching count grew; an unreadable count never passes.
+    static func createdVerdict(before: Int?, after: Int?) -> [String: Any] {
+        guard let before else { return ["passed": false, "countBeforeUnreadable": true, "countAfter": after as Any? ?? NSNull()] }
+        guard let after else { return ["passed": false, "countBefore": before, "countAfterUnreadable": true] }
+        return ["passed": after > before, "countBefore": before, "countAfter": after]
+    }
+
+    static func createdVerdict(_ run: [String: Any]) -> [String: Any] {
+        createdVerdict(before: run["countBefore"] as? Int, after: run["countAfter"] as? Int)
+    }
+
+    /// Matching nodes across the app's windows on this Space; 0 when the app is not running,
+    /// nil when a read failed (never absence). Counts VISIBLE list rows only: an item scrolled
+    /// out of a long list is missed, and a selection change can add an editor node — the owner's
+    /// leftovers are few. ponytail: an app not running reads 0, so a task that launches it passes
+    /// on a leftover; read the app's store (not its UI) if that ever matters.
+    nonisolated static func appCount(_ bundle: String, _ match: (AccessibilityElementNode) -> Bool) -> Int? {
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { return 0 }
+        var value: AnyObject?
+        let error = AXUIElementCopyAttributeValue(AXUIElementCreateApplication(app.processIdentifier), kAXWindowsAttribute as CFString, &value)
+        guard error == .success || error == .noValue else { return nil }
+        var count = 0
+        for window in value as? [AXUIElement] ?? [] {
+            guard let root = (try? AccessibilityTreeWalker.snapshotWindow(window, of: app))?.rootNode else { return nil }
+            count += root.flattenedDescendants().filter(match).count
+        }
+        return count
+    }
+
     static func answer(_ spoken: String, has truths: [String], truth: String) -> [String: Any] {
         let folded = spoken.lowercased()
         // A number must stand alone: "6" is not a hit inside "16 degrees" or "2026".
@@ -391,12 +419,19 @@ enum GeneralitySuite {
             try? await Task.sleep(for: .seconds(1))
             var state = before(task.apps)
             state.files = await Task.detached { userFolderEntries() }.value
+            let created = task.created
+            let countBefore = await Task.detached { created.map { appCount($0.bundle, $0.match) } }.value
             var result: [String: Any] = ["id": task.id, "pattern": task.pattern, "words": task.words, "heldOut": task.heldOut, "findOut": task.findOut]
             let run = await AgentLoopProbe.goalRun(words: task.words, harness: harness, confirmations: confirmations)
             result.merge(run) { current, _ in current }
             let spoken = run["spoken"] as? String ?? ""
             result["modelCalls"] = modelCalls(run: run["run"] as? String ?? "")
-            result["check"] = await task.check(spoken, run)
+            var checked = run
+            if let created {
+                checked["countBefore"] = countBefore ?? nil
+                checked["countAfter"] = await Task.detached { appCount(created.bundle, created.match) }.value
+            }
+            result["check"] = await task.check(spoken, checked)
             result["status"] = (result["check"] as? [String: Any])?["passed"] as? Bool == true ? "passed" : "failed"
             let cleanup = await undo(state, apps: task.apps)
             result["cleanup"] = cleanup
