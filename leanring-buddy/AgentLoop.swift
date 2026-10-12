@@ -1606,7 +1606,20 @@ extension AgentLoop {
 
     nonisolated static func ownership(afterOpening tool: String, bundle: String, runningAtStart: Set<String>) -> OpenOwnership {
         if tool == RealtimeVoiceVerbs.openURLName { return .tab }
+        // Finder always runs, so the folder it showed on the owner's words is the task's.
+        if tool == RealtimeVoiceVerbs.goToFolderName { return .app }
         return runningAtStart.contains(bundle) ? .none : .app
+    }
+
+    /// The app a confirmed step opened, focused or showed for the task: the
+    /// answer's own `bundleIdentifier`. nil when it was not confirmed. go_to_folder
+    /// drives Finder only (`HarnessGoToFolder`) — launch suite E07, live 2026-10-13:
+    /// it brought Finder forward and every later Finder step was refused heardUnavailable.
+    nonisolated static func openedBundle(by tool: String, confirmed: Bool, response: [String: Any]?) -> String? {
+        guard confirmed else { return nil }
+        if tool == RealtimeVoiceVerbs.goToFolderName { return HarnessGoToFolder.finderBundleIdentifier }
+        guard [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName, RealtimeVoiceVerbs.openURLName].contains(tool) else { return nil }
+        return response?["bundleIdentifier"] as? String
     }
 
     /// The apps a step may act in as the task's own: what it launched, and a
@@ -1976,9 +1989,7 @@ extension AgentLoop {
                                                                                               max(1, confirmationWaitSeconds)),
                                                                  onConfirmationRequired: carry.onCardOpened,
                                                                  isCurrent: { !Task.isCancelled })
-        if let dispatch, dispatch.harnessConfirmed,
-           [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName, RealtimeVoiceVerbs.openURLName].contains(filled.name),
-           let bundle = dispatch.harnessResponse?["bundleIdentifier"] as? String {
+        if let dispatch, let bundle = openedBundle(by: filled.name, confirmed: dispatch.harnessConfirmed, response: dispatch.harnessResponse) {
             switch ownership(afterOpening: filled.name, bundle: bundle, runningAtStart: carry.runningAtStart) {
             case .app: carry.launchedBundles.insert(bundle)
             case .tab:

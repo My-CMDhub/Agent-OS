@@ -617,6 +617,37 @@ struct AgentLoopTests {
         #expect(AgentLoop.openedByTask(launched: [], taskTabs: tabs, frontTabs: [String: String]()).isEmpty)
     }
 
+    /// Launch suite E07, live 2026-10-13: go_to_folder brought Finder forward for the
+    /// task, then "Action" and File > Get Info were refused heardUnavailable — "txt"
+    /// sat in the app slot, and only the press whose own target held "txt" passed.
+    /// An ok go_to_folder makes Finder the task's (it drives Finder only); a failed
+    /// one grants nothing, and the grant never reaches another app.
+    @Test func anOkGoToFolderMakesFinderTheTasksOwnAndNothingElse() {
+        let finder = "com.apple.finder", textEdit = "com.apple.TextEdit"
+        let names = [RealtimeVoiceVerbs.AppName(name: "Finder", url: URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app"), isFileName: false),
+                     RealtimeVoiceVerbs.AppName(name: "TextEdit", url: URL(fileURLWithPath: "/System/Applications/TextEdit.app"), isFileName: true)]
+        let heard = "rename report-draft.txt in the JARVIS-sandbox folder in my home folder to report-final.txt"
+        let decision = RealtimeHeardCheck.decide(transcript: heard, named: "Finder", among: names, toolName: RealtimeVoiceVerbs.pressMenuName,
+                                                 menuWords: RealtimeVoiceVerbs.foldedTokens("File Get Info"))
+        #expect(decision.outcome == .appNameUnclear)
+        func opened(after tool: String, ok: Bool) -> Set<String> {
+            guard let bundle = AgentLoop.openedBundle(by: tool, confirmed: ok, response: ["ok": ok]) else { return [] }
+            return AgentLoop.ownership(afterOpening: tool, bundle: bundle, runningAtStart: [finder, textEdit]) == .app ? [bundle] : []
+        }
+        func mayAct(in bundle: String, opened: Set<String>) -> Bool {
+            RealtimeVoiceConnection.agentStepMayActDespiteUnclearWord(callBundle: bundle, openedByTask: opened,
+                                                                      unclearWords: decision.heardSlot, among: names)
+        }
+        #expect(mayAct(in: finder, opened: opened(after: RealtimeVoiceVerbs.goToFolderName, ok: true)))
+        #expect(!mayAct(in: finder, opened: []))
+        #expect(!mayAct(in: finder, opened: opened(after: RealtimeVoiceVerbs.goToFolderName, ok: false)))
+        #expect(!mayAct(in: textEdit, opened: opened(after: RealtimeVoiceVerbs.goToFolderName, ok: true)))
+        // find_file only reads; open_app of an app already running stays the owner's.
+        #expect(opened(after: RealtimeVoiceVerbs.findFileName, ok: true).isEmpty)
+        #expect(AgentLoop.openedBundle(by: RealtimeOpenAppTool.name, confirmed: true, response: ["bundleIdentifier": textEdit]) == textEdit)
+        #expect(AgentLoop.ownership(afterOpening: RealtimeOpenAppTool.name, bundle: finder, runningAtStart: [finder]) == .none)
+    }
+
     /// C: an owner turn that called do_task could still act beside the loop, and the
     /// loop's "app in front when the task began" came from its first look, after any
     /// such call. Once do_task starts, that turn calls nothing; the start app is the
