@@ -408,7 +408,7 @@ enum GeneralitySuite {
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let directory = MeasurementLogFile.directoryURL.appendingPathComponent("generality/\(stamp)", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        var meta: [String: Any] = ["timestamp": stamp, "model": AgentLoopGemini.firstModel(), "provider": AgentModelProvider.configured.rawValue]
+        var meta: [String: Any] = ["timestamp": stamp, "model": AgentLoopModel.firstModel(.configured), "provider": AgentModelProvider.configured.rawValue]
         var results: [[String: Any]] = []
         let url = directory.appendingPathComponent("results.json")
         func save() {

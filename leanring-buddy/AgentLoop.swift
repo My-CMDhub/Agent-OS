@@ -133,9 +133,21 @@ actor AgentLoopModel {
     nonisolated let provider: AgentModelProvider
     private(set) var model: String
 
+    /// A Gemini step 429/5xx/timeout moved this task to OpenAI (`AgentLoopOpenAI.shouldFallBack`);
+    /// it stays there, and the next task starts on Gemini again.
+    private var openAITask: String?
+
     init(provider: AgentModelProvider = .configured) {
         self.provider = provider
-        model = provider == .gemini ? AgentLoopGemini.firstModel() : Self.preferred
+        model = Self.firstModel(provider)
+    }
+
+    nonisolated static func firstModel(_ provider: AgentModelProvider, arguments: [String] = CommandLine.arguments) -> String {
+        switch provider {
+        case .gemini: AgentLoopGemini.firstModel(arguments: arguments)
+        case .openai: AgentLoopOpenAI.pinnedModel(arguments: arguments) ?? AgentLoopOpenAI.defaultModel
+        case .claude: preferred
+        }
     }
 
     /// Sonnet 5.5 refuses `disabled`; `between_tools` is its no-extended-thinking
@@ -148,11 +160,24 @@ actor AgentLoopModel {
     }
 
     /// `timeout`: the task's time left; a fallback retry gets only what remains of it.
-    func send(_ body: [String: Any], timeout: TimeInterval) async throws -> AgentModelReply {
+    /// `task`: the run id, so a fallback to OpenAI lasts that task only.
+    func send(_ body: [String: Any], timeout: TimeInterval, task: String? = nil) async throws -> AgentModelReply {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        if provider == .openai { return try await openAI(body, model: model, deadline: deadline) }
         if provider == .gemini {
-            let (json, milliseconds) = try await gemini(deadline: deadline) { AgentLoopGemini.request(fromAnthropic: body, model: $0) }
-            return AgentModelReply(json: AgentLoopGemini.anthropicReply(fromGemini: json, model: model), model: model, milliseconds: milliseconds)
+            if let task, task == openAITask { return try await openAI(body, model: AgentLoopOpenAI.defaultModel, deadline: deadline) }
+            do {
+                let (json, milliseconds) = try await gemini(deadline: deadline) { AgentLoopGemini.request(fromAnthropic: body, model: $0) }
+                return AgentModelReply(json: AgentLoopGemini.anthropicReply(fromGemini: json, model: model), model: model, milliseconds: milliseconds)
+            } catch where AgentLoopOpenAI.shouldFallBack(error) && !Task.isCancelled {
+                let status: Any = (error as? AgentModelError)?.status ?? "timeout"
+                MeasurementLogFile.appendJSONLine(["kind": "providerFallback", "run": task ?? NSNull(), "from": model,
+                                                   "to": AgentLoopOpenAI.defaultModel, "status": status],
+                                                  toFileNamed: AgentLoop.traceFileName, rotatingAtBytes: HarnessServer.auditLogRotationBytes)
+                print("🤖 agent loop: \(model) answered \(status), retrying this step on \(AgentLoopOpenAI.defaultModel)")
+                openAITask = task
+                return try await openAI(body, model: AgentLoopOpenAI.defaultModel, deadline: deadline)
+            }
         }
         do {
             return try await post(Self.completed(body, model: model), timeout: timeout)
@@ -176,6 +201,13 @@ actor AgentLoopModel {
             return RealtimeOpenAppTool.toolResult(for: RealtimeToolRefusal(error: "webLookupFailed",
                 message: "the web lookup could not be reached (\(String(describing: error).prefix(120)))"))
         }
+    }
+
+    private func openAI(_ body: [String: Any], model: String, deadline: TimeInterval) async throws -> AgentModelReply {
+        let reply = try await post(["model": model, "request": AgentLoopOpenAI.request(fromAnthropic: body, model: model)],
+                                   route: AgentLoopOpenAI.route, timeout: deadline - ProcessInfo.processInfo.systemUptime)
+        let json = AgentLoopOpenAI.anthropicReply(fromOpenAI: reply.json, model: model)
+        return AgentModelReply(json: json, model: json["model"] as? String ?? model, milliseconds: reply.milliseconds)
     }
 
     /// Not there (404), not allowed for this key (403), or quota or credits spent (429): the next model down.
@@ -1421,7 +1453,7 @@ extension AgentLoop {
         carry.startBundle = startBundle
         carry.runningAtStart = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
         let loop = AgentLoop(dependencies: Dependencies(
-            model: { body, timeout in try await model.send(body, timeout: timeout) },
+            model: { body, timeout in try await model.send(body, timeout: timeout, task: carry.runID) },
             observe: {
                 var observation = await liveObservation(harnessAnswer: harnessAnswer)
                 // The app the owner was in when the task began.

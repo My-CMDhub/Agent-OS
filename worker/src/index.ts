@@ -18,6 +18,7 @@
  *   /gemini-live-token  → Gemini Live API ephemeral token, one use, model locked
  *   /openai-realtime-token → OpenAI Realtime ephemeral client secret (60 s), gpt-realtime-mini locked
  *   /gemini-generate    → Gemini generateContent for the agent loop; allow-listed models, fields and tools
+ *   /openai-agent       → OpenAI Chat Completions, the agent loop's fallback; allow-listed models, fields, function tools only
  *
  * Secrets:
  *   CLICKY_CLIENT_KEY, ANTHROPIC_API_KEY, ELEVENLABS_API_KEY, ASSEMBLYAI_API_KEY,
@@ -27,6 +28,7 @@
  */
 
 import { buildGeminiGenerate } from "./gemini";
+import { buildOpenAIAgent } from "./openai";
 
 interface Env {
   CLICKY_CLIENT_KEY?: string;
@@ -82,6 +84,8 @@ export default {
           return await handleOpenAIRealtimeToken(env);
         case "/gemini-generate":
           return await handleGeminiGenerate(request, env);
+        case "/openai-agent":
+          return await handleOpenAIAgent(request, env);
       }
     } catch (error) {
       console.error(`[${url.pathname}] Unhandled error:`, error);
@@ -318,6 +322,15 @@ async function handleGeminiGenerate(request: Request, env: Env): Promise<Respons
   if ("error" in built) return jsonResponse({ error: built.error }, 400);
   const response = await fetch(built.url, built.init);
   if (!response.ok) return upstreamErrorResponse("/gemini-generate", response);
+  return new Response(await response.text(), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+async function handleOpenAIAgent(request: Request, env: Env): Promise<Response> {
+  if (!env.OPENAI_API_KEY) return missingSecretResponse("OPENAI_API_KEY");
+  const built = buildOpenAIAgent(await request.text(), env.OPENAI_API_KEY);
+  if ("error" in built) return jsonResponse({ error: built.error }, built.status);
+  const response = await fetch(built.url, built.init);
+  if (!response.ok) return upstreamErrorResponse("/openai-agent", response);
   return new Response(await response.text(), { status: 200, headers: { "content-type": "application/json" } });
 }
 

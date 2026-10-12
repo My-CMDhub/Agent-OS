@@ -19,12 +19,15 @@
 import Foundation
 
 nonisolated enum AgentModelProvider: String {
-    case gemini, claude
+    case gemini, claude, openai
 
     /// `defaults write <bundle id> ClickyAgentModelProvider claude` switches back.
+    /// `--agent-model=openai:<id>` runs on OpenAI for a comparison (`AgentLoopOpenAI`).
     static let defaultsKey = "ClickyAgentModelProvider"
-    static var configured: AgentModelProvider { from(UserDefaults.standard.string(forKey: defaultsKey)) }
-    static func from(_ value: String?) -> AgentModelProvider { value.flatMap(AgentModelProvider.init(rawValue:)) ?? .gemini }
+    static var configured: AgentModelProvider { from(UserDefaults.standard.string(forKey: defaultsKey), arguments: CommandLine.arguments) }
+    static func from(_ value: String?, arguments: [String] = []) -> AgentModelProvider {
+        AgentLoopOpenAI.pinnedModel(arguments: arguments) != nil ? .openai : value.flatMap(AgentModelProvider.init(rawValue:)) ?? .gemini
+    }
 }
 
 nonisolated enum AgentLoopGemini {
