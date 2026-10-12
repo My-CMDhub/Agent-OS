@@ -2276,6 +2276,7 @@ final class HarnessServer {
         dryRun: Bool,
         bindingSubject: ActionBinding.Subject? = nil,
         linkURL: String? = nil,
+        verb: String? = nil,
         into response: inout [String: Any]
     ) -> GateResult {
         let described = HarnessPolicy.describe(decision)
@@ -2290,7 +2291,7 @@ final class HarnessServer {
                                 outcome: "kernelRefused", note: "refused: \(reason)")
 
         case .requireConfirmation(let reason, let destructive):
-            let shape = Self.confirmationShape(for: request, bundleIdentifier: bundleIdentifier, linkURL: linkURL)
+            let shape = Self.confirmationShape(for: request, bundleIdentifier: bundleIdentifier, linkURL: linkURL, verb: verb)
             var confirmedBy: String?
             var confirmation: [String: Any] = [:]
             var refusal: (outcome: String, note: String)?
@@ -2457,10 +2458,13 @@ final class HarnessServer {
 
     /// The request shape a ticket or rule is matched against: raw strings, so
     /// two titles that `forDisplay` would truncate alike stay distinct.
+    /// `verb`: what will really be done, when it is not the request's own verb — a select of a
+    /// switch's LABEL is a click on the switch (360e64b), and the card must say so, not
+    /// "Select an item". The re-issued request retargets the same way, so its ticket matches.
     nonisolated static func confirmationShape(for request: HarnessRequest, bundleIdentifier: String?,
-                                              linkURL: String? = nil) -> HarnessConfirmations.Shape {
+                                              linkURL: String? = nil, verb: String? = nil) -> HarnessConfirmations.Shape {
         HarnessConfirmations.Shape(
-            verb: request.verb.rawValue,
+            verb: verb ?? request.verb.rawValue,
             bundleIdentifier: bundleIdentifier,
             rawTarget: auditTarget(for: request) ?? "",
             // A rename's new name is what the owner approves, so a ticket binds it.
@@ -3080,7 +3084,9 @@ final class HarnessServer {
         )
         let gated = gate(decision, request: request, appName: snapshot.applicationName,
                          bundleIdentifier: snapshot.bundleIdentifier, dryRun: dryRun,
-                         bindingSubject: bindingSubject, linkURL: notifyingLink, into: &response)
+                         bindingSubject: bindingSubject, linkURL: notifyingLink,
+                         verb: response["retargetedFromLabel"] as? Bool == true && action == .click ? HarnessVerb.click.rawValue : nil,
+                         into: &response)
 
         guard gated.executable else {
             response["ok"] = false

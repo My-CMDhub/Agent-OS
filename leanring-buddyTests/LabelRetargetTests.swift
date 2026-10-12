@@ -146,4 +146,15 @@ struct LabelRetargetTests {
         let far = row(claimants: [nil, wifi])
         #expect(HarnessPolicy.controlNamed(byLabel: far.label, inWindow: far.window, linked: nil) == nil)
     }
+
+    /// The card says what will happen: a select of the Wi‑Fi label is a click on the switch,
+    /// never "Select an item" (2026-10-13). The re-issue computes the same shape, so it matches.
+    @Test func aRetargetedSelectAsksAboutAClick() throws {
+        let data = try JSONSerialization.data(withJSONObject: ["verb": "select", "title": "Wi\u{2011}Fi", "expectApp": "System Settings"])
+        let request = try HarnessPolicy.decode(line: String(decoding: data, as: UTF8.self)).get()
+        #expect(HarnessServer.confirmationShape(for: request, bundleIdentifier: "com.apple.systempreferences").verb == "select")
+        let clicked = HarnessServer.confirmationShape(for: request, bundleIdentifier: "com.apple.systempreferences", verb: "click")
+        #expect(clicked.verb == "click")
+        #expect(clicked == HarnessServer.confirmationShape(for: request, bundleIdentifier: "com.apple.systempreferences", verb: "click"))
+    }
 }
