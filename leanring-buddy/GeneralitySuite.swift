@@ -183,8 +183,32 @@ enum GeneralitySuite {
     /// Matching nodes across the app's windows on this Space; 0 when the app is not running,
     /// nil when a read failed (never absence). Counts VISIBLE list rows only: an item scrolled
     /// out of a long list is missed, and a selection change can add an editor node — the owner's
-    /// leftovers are few. ponytail: an app not running reads 0, so a task that launches it passes
-    /// on a leftover; read the app's store (not its UI) if that ever matters.
+    /// leftovers are few. A quit app reads 0 here; `countBeforeLaunchingIfNeeded` launches it first.
+    /// The before count with the app's own leftovers in it. These tasks start with the app QUIT
+    /// (the suite quits what it launched), and a quit app reads 0 — so yesterday's "JARVIS test
+    /// reminder" counted as created when the task launched Reminders (review of e9ff3fa,
+    /// 2026-10-12). Launch it behind, count once a window reads, quit it again so the task starts
+    /// as before; anything that does not happen in time is nil, never 0.
+    static func countBeforeLaunchingIfNeeded(_ bundle: String, _ match: @escaping @Sendable (AccessibilityElementNode) -> Bool) async -> Int? {
+        if NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first != nil {
+            return await Task.detached { appCount(bundle, match) }.value
+        }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return nil }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        guard let app = try? await NSWorkspace.shared.openApplication(at: url, configuration: configuration) else { return nil }
+        var count: Int?
+        for _ in 0..<25 {
+            try? await Task.sleep(for: .milliseconds(200))
+            let pid = app.processIdentifier
+            let windows = await Task.detached { CoverageAudit.windows(of: pid).count }.value
+            if windows > 0 { count = await Task.detached { appCount(bundle, match) }.value; break }
+        }
+        app.terminate()
+        for _ in 0..<15 where !app.isTerminated { try? await Task.sleep(for: .milliseconds(200)) }
+        return app.isTerminated ? count : nil
+    }
+
     nonisolated static func appCount(_ bundle: String, _ match: (AccessibilityElementNode) -> Bool) -> Int? {
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { return 0 }
         var value: AnyObject?
@@ -420,7 +444,8 @@ enum GeneralitySuite {
             var state = before(task.apps)
             state.files = await Task.detached { userFolderEntries() }.value
             let created = task.created
-            let countBefore = await Task.detached { created.map { appCount($0.bundle, $0.match) } }.value
+            var countBefore: Int?? = nil
+            if let created { countBefore = .some(await countBeforeLaunchingIfNeeded(created.bundle, created.match)) }
             var result: [String: Any] = ["id": task.id, "pattern": task.pattern, "words": task.words, "heldOut": task.heldOut, "findOut": task.findOut]
             let run = await AgentLoopProbe.goalRun(words: task.words, harness: harness, confirmations: confirmations)
             result.merge(run) { current, _ in current }
@@ -428,7 +453,7 @@ enum GeneralitySuite {
             result["modelCalls"] = modelCalls(run: run["run"] as? String ?? "")
             var checked = run
             if let created {
-                checked["countBefore"] = countBefore ?? nil
+                checked["countBefore"] = (countBefore ?? nil) as Any
                 checked["countAfter"] = await Task.detached { appCount(created.bundle, created.match) }.value
             }
             result["check"] = await task.check(spoken, checked)
