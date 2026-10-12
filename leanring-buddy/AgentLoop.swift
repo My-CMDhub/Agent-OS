@@ -357,6 +357,9 @@ final class AgentLoop {
         /// What an ok type_text typed — a created item's name must be in one (G05 2026-10-13).
         /// In memory only, never in a checkpoint.
         var typed: String? = nil
+        /// What an ok press resolved to (`resolved.role`, or `AXSwitch` by subrole): a toggle
+        /// claim needs a toggle pressed (U02 2026-10-13). In memory only.
+        var pressedRole: String? = nil
     }
 
     /// An ask_owner the run paused on: its call's id, and the results of the
@@ -767,6 +770,7 @@ final class AgentLoop {
                 }
                 var result: [String: Any] = [:]
                 var call: RealtimeToolCall?
+                var pressedRole: String?
                 var harnessMs = 0
                 var waited = false
                 var args: [String: Any] = [:]
@@ -822,6 +826,7 @@ final class AgentLoop {
                     args = Self.loggedArguments(for: parsed)
                     let dispatch = await dependencies.execute(parsed, true, observation, remaining())
                     (result, harnessMs, waited, call) = (dispatch.result, dispatch.harnessMilliseconds, dispatch.waitedForConfirmation, parsed)
+                    pressedRole = RealtimeOpenAppTool.pressedRole(dispatch.harnessResponse)
                     record(parsed, dispatch)
                 }
                 if phase == .waitingForCard { move(to: .acting) }
@@ -839,7 +844,7 @@ final class AgentLoop {
                 receipts.append(Receipt(step: step, toolName: call?.name ?? toolName, ok: ok, error: error,
                                         progress: Self.progressLine(toolName: toolName, call: call, result: result),
                                         words: Self.plainWords(toolName: toolName, args: args),
-                                        typed: ok && toolName == RealtimeVoiceVerbs.typeTextName ? call?.text : nil))
+                                        typed: ok && toolName == RealtimeVoiceVerbs.typeTextName ? call?.text : nil, pressedRole: pressedRole))
                 var fields: [String: Any] = ["tool": toolName, "args": args, "ok": ok, "error": error ?? NSNull(), "harnessMs": harnessMs,
                                              "waitedForConfirmation": waited]
                 if !(web is NSNull) { fields["web"] = web }
@@ -1068,10 +1073,18 @@ final class AgentLoop {
     /// Close, a panel's kill button) is a close: the same run's second done.
     static func doneChallenge(summary: String, evidence: [Int], receipts: [Receipt], currentStep: Int? = nil) -> String? {
         // Backed by the steps it CITES (review of e98f476): an old ok result elsewhere in the run is no receipt.
-        let okTools = Set(receipts.filter { $0.ok && (evidence.isEmpty || evidence.contains($0.step)) }.map(\.toolName))
+        let cited = receipts.filter { $0.ok && (evidence.isEmpty || evidence.contains($0.step)) }
+        var okTools = Set(cited.map(\.toolName))
+        // U02 2026-10-13: "Wi-Fi has been turned off" after a press on the switch's label.
+        if cited.contains(where: { pressTools.contains($0.toolName) && $0.pressedRole.map(RealtimeOpenAppTool.toggleRoles.contains) == true }) {
+            okTools.insert(RealtimeOpenAppTool.toggleReceipt)
+        }
         for receiptsNeeded in RealtimeOpenAppTool.firstPersonClaims(summary) + effectClaims(summary).map(Optional.some) {
             if var needed = receiptsNeeded {
                 if needed.contains(RealtimeVoiceVerbs.closeName) { needed.formUnion(pressTools) }
+                if needed == [RealtimeOpenAppTool.toggleReceipt], !okTools.contains(RealtimeOpenAppTool.toggleReceipt) {
+                    return "no ok press on a switch, checkbox or radio button backs that claim"
+                }
                 if okTools.isDisjoint(with: needed) { return "no ok \(needed.sorted().joined(separator: " or ")) result backs that claim" }
             } else if !okTools.contains(where: RealtimeVoiceVerbs.isActingTool) {
                 return "nothing was done this task, yet the summary says done"
@@ -1116,8 +1129,12 @@ final class AgentLoop {
         // B05BEFEE (2026-10-08) claimed a draft "with the Meet link" it never wrote: draft-style effects need their own kind.
         (["drafted", "pasted"], [RealtimeVoiceVerbs.typeTextName, RealtimeVoiceVerbs.pressMenuName]),
         (["copied", "attached", "scheduled"], pressTools),
-        (["added", "created"], pressTools.union([RealtimeVoiceVerbs.typeTextName]))
+        (["added", "created"], pressTools.union([RealtimeVoiceVerbs.typeTextName])),
+        // U02 2026-10-13: only a press that resolved to a toggle (`Receipt.pressedRole`).
+        (toggleWords, [RealtimeOpenAppTool.toggleReceipt])
     ]
+    /// "turned" and "switched" claim a toggle only with on/off within four words after.
+    static let toggleWords: Set<String> = ["turned", "switched", "toggled", "enabled", "disabled", "muted", "unmuted"]
     /// Within three words before an effect, a word that says it did not happen.
     static let effectNegations: Set<String> = ["not", "no", "never", "nothing", "couldn't", "didn't", "wasn't", "weren't", "isn't",
                                                "aren't", "hasn't", "haven't", "unable", "without", "cannot", "can't", "failed", "neither", "nor"]
@@ -1157,6 +1174,8 @@ final class AgentLoop {
             let attributed = attributionStart(words) ?? words.count
             for (index, word) in words.enumerated() where index < attributed || words[attributed..<index].contains(where: effectPersons.contains) {
                 guard let kind = effectWords.first(where: { $0.words.contains(word) }) else { continue }
+                if word == "turned" || word == "switched",
+                   !words[(index + 1)..<min(words.count, index + 5)].contains(where: { $0 == "on" || $0 == "off" }) { continue }
                 if words[max(0, index - 3)..<index].contains(where: { effectNegations.contains($0) || $0.hasSuffix("n't") }) { continue }
                 if hasNamedThirdPartyAgent(words, cased: cased[sentence], at: index) { continue }
                 if isStateReading(words, at: index) { continue }
@@ -1169,15 +1188,21 @@ final class AgentLoop {
     /// G11 2026-10-11: "The scheme selected in Xcode is leanring-buddy" reads a state, not a
     /// press. "selected" is a state after is/are/currently/now/an article, or with is/are
     /// within three words after it and no "I"/"we" just before; "I selected X" still needs a press.
+    /// A toggle word ("Wi-Fi is turned off", U02) is a state only after is/are/currently/an article.
     static let stateParticiples: Set<String> = ["selected"]
     static func isStateReading(_ words: [String], at index: Int) -> Bool {
-        guard stateParticiples.contains(words[index]) else { return false }
+        let toggle = toggleWords.contains(words[index])
+        guard stateParticiples.contains(words[index]) || toggle else { return false }
         // First person rules out a state on BOTH branches (security review of 061122e:
         // "I now selected Delete" passed as one).
         let before = words[max(0, index - 3)..<index]
         if before.contains(where: { RealtimeOpenAppTool.firstPersonSubjects.contains($0) || effectPersons.contains($0) }) { return false }
-        if index > 0, ["is", "are", "currently", "now", "the", "a", "an"].contains(words[index - 1]) { return true }
-        return words[(index + 1)..<min(words.count, index + 4)].contains { $0 == "is" || $0 == "are" }
+        // "Wi-Fi is now turned off" reports a change: "now" is a state for "selected" only.
+        if index > 0, ["is", "are", "currently", "the", "a", "an"].contains(words[index - 1]) || (!toggle && words[index - 1] == "now") {
+            return true
+        }
+        // "Bluetooth was switched on and is ready" is a change: the is-after reading is "selected"'s only.
+        return !toggle && words[(index + 1)..<min(words.count, index + 4)].contains { $0 == "is" || $0 == "are" }
     }
 
     /// G20 2026-10-10 (run C708CCDF): "Swift was originally created by Chris Lattner"

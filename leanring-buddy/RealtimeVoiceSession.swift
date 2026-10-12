@@ -842,7 +842,7 @@ final class RealtimeVoiceSession {
             line.eventTrail = marks.eventTrail
             line.claimedWithoutReceipt = RealtimeOpenAppTool.claimedWithoutReceipt(
                 transcript: marks.transcript,
-                okToolNames: Set(marks.decisions.filter { $0.dispatch?.harnessConfirmed == true }.map(\.call.name)))
+                okToolNames: RealtimeOpenAppTool.okReceiptNames(marks.decisions))
             line.internalWordsSpoken = RealtimeOpenAppTool.internalWordsSpoken(marks.transcript).count
             // One line per tool call to voice-decisions.log, joinable on turnId.
             RealtimeDecisionTrace.append(marks.decisions, turnID: line.turnID, stack: line.stack, source: probeMode ? "notchProbe" : fixtureMic ? "scenarioRun" : "live",

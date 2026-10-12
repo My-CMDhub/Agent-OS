@@ -313,7 +313,7 @@ enum ScenarioRunner {
     /// (`pointWhenTelling`) is a point's receipt.
     nonisolated static func claimLeftStanding(transcript: String, decisions: [RealtimeToolDecision], pointed: Bool, corrected: Bool) -> Bool {
         guard !corrected else { return false }
-        let ok = Set(decisions.filter { $0.dispatch?.harnessConfirmed == true }.map(\.call.name))
+        let ok = RealtimeOpenAppTool.okReceiptNames(decisions)
             .union(pointed ? [RealtimeVoiceVerbs.pointAtName] : [])
         return RealtimeOpenAppTool.firstPersonClaims(transcript).contains { needed in
             needed.map(ok.isDisjoint) ?? !ok.contains(where: RealtimeVoiceVerbs.isActingTool)

@@ -1273,8 +1273,31 @@ nonisolated enum RealtimeOpenAppTool {
         // G16 2026-10-11: an ok open_settings_pane backs "opened" (and go_to_folder).
         (["opened"], [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.openURLName, RealtimeVoiceVerbs.focusAppName,
                       RealtimeVoiceVerbs.pressMenuName, RealtimeVoiceVerbs.pressElementName,
-                      SettingsPaneLinks.toolName, RealtimeVoiceVerbs.goToFolderName])
+                      SettingsPaneLinks.toolName, RealtimeVoiceVerbs.goToFolderName]),
+        // Launch suite U02 2026-10-13: "turned off" after a press on the Wi-Fi switch's LABEL.
+        // Only a press that resolved to a toggle backs it (`okReceiptNames`).
+        (["turned off", "turned on", "switched off", "switched on", "toggled", "enabled", "disabled", "muted", "unmuted"], [toggleReceipt])
     ]
+
+    /// Not a tool: the receipt an ok press on a toggle carries (`okReceiptNames`, `AgentLoop.Receipt.pressedRole`).
+    static let toggleReceipt = "press on a toggle"
+    static let toggleRoles: Set<String> = ["AXCheckBox", "AXRadioButton", "AXSwitch"]
+
+    /// What a press resolved to: `AXSwitch` by subrole, else the role; nil for no press.
+    static func pressedRole(_ harnessResponse: [String: Any]?) -> String? {
+        guard let resolved = harnessResponse?["resolved"] as? [String: Any] else { return nil }
+        return resolved["subrole"] as? String == "AXSwitch" ? "AXSwitch" : resolved["role"] as? String
+    }
+
+    /// The ok tools of a turn, plus `toggleReceipt` when an ok press_element resolved to a toggle.
+    static func okReceiptNames(_ decisions: [RealtimeToolDecision]) -> Set<String> {
+        let ok = decisions.filter { $0.dispatch?.harnessConfirmed == true }
+        var names = Set(ok.map(\.call.name))
+        if ok.contains(where: { $0.call.name == RealtimeVoiceVerbs.pressElementName && pressedRole($0.dispatch?.harnessResponse).map(toggleRoles.contains) == true }) {
+            names.insert(toggleReceipt)
+        }
+        return names
+    }
 
     /// The live line's `claimedWithoutReceipt`, by kind: "clicked" needs an ok
     /// press_element or press_menu, "highlighted" an ok point or press,
@@ -1304,8 +1327,12 @@ nonisolated enum RealtimeOpenAppTool {
         guard !admitsFailure(transcript) else { return nil }
         let pointReceipts = kindClaims.first { $0.phrases == pointClaimPhrases }?.receipts
         for receipts in firstPersonClaims(transcript) {
-            let tried = decisions.filter { RealtimeVoiceVerbs.isActingTool($0.call.name) && (receipts?.contains($0.call.name) ?? true) }
-            guard !tried.contains(where: { $0.dispatch?.harnessConfirmed == true }) else { continue }
+            // A toggle claim is tried by a press, and backed only by one that resolved to a toggle.
+            let toggle = receipts == [toggleReceipt]
+            let tried = decisions.filter {
+                RealtimeVoiceVerbs.isActingTool($0.call.name) && (toggle ? $0.call.name == RealtimeVoiceVerbs.pressElementName : receipts?.contains($0.call.name) ?? true)
+            }
+            guard !tried.contains(where: { $0.dispatch?.harnessConfirmed == true && (!toggle || okReceiptNames([$0]).contains(toggleReceipt)) }) else { continue }
             // C5 02-51-12Z: "I have highlighted it for you." with nothing pointed at or
             // pressed: the owner looks for a mark that is not there. Only a point claim
             // is corrected untried; "Opened it." with nothing tried stays as it was.
@@ -1313,7 +1340,8 @@ nonisolated enum RealtimeOpenAppTool {
                 if receipts == pointReceipts { return correction(reason: "nothing was pointed at or highlighted") }
                 continue
             }
-            let reason = ((failed.dispatch?.result["message"] as? String) ?? (failed.dispatch?.result["error"] as? String))
+            let reason = toggle && failed.dispatch?.harnessConfirmed == true ? "what was pressed is not a switch"
+                : ((failed.dispatch?.result["message"] as? String) ?? (failed.dispatch?.result["error"] as? String))
                 .map { UntrustedText(String($0.prefix(160))).forDisplay } ?? "no action was taken"
             return correction(reason: reason)
         }
@@ -1349,7 +1377,12 @@ nonisolated enum RealtimeOpenAppTool {
         for (words, isQuestion) in sentences(transcript) {
             if !isQuestion, words.first == "done" || words.prefix(2) == ["all", "done"] { claims.append(nil) }
             for (index, word) in words.enumerated() where word.hasSuffix("ed") {
-                guard let kind = kindClaims.first(where: { $0.phrases.contains { $0.split(separator: " ").last.map(String.init) == word } })
+                // "turned off": the -ed word leads a two-word phrase (U02 2026-10-13).
+                guard let kind = kindClaims.first(where: { $0.phrases.contains { phrase in
+                    let phraseWords = phrase.split(separator: " ").map(String.init)
+                    return phraseWords.last == word
+                        || (phraseWords.count == 2 && phraseWords[0] == word && index + 1 < words.count && words[index + 1] == phraseWords[1])
+                } })
                 else { continue }
                 // B3 03-34-52Z: "I have not pressed the Create account button" claims nothing.
                 if words[max(0, index - 3)..<index].contains(where: { ["not", "never", "no", "nothing"].contains($0) || $0.hasSuffix("n't") }) {

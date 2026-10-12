@@ -1385,3 +1385,59 @@ struct TaskSessionTests {
                                         receipts: []) == nil)
     }
 }
+
+/// Launch suite U02 2026-10-13 (run 4206F2B3): "turn off Wi-Fi" pressed the switch's
+/// LABEL (AXStaticText "Wi‑Fi"; the harness read it `alreadySelected`), then said
+/// "Wi-Fi has been turned off in System Settings." Wi-Fi was still on. A toggle claim
+/// needs an ok press whose RESOLVED target was a toggle.
+@MainActor struct ToggleClaimTests {
+    func receipts(pressedRole: String?) -> [AgentLoop.Receipt] {
+        [AgentLoop.Receipt(step: 1, toolName: "open_settings_pane", ok: true, error: nil),
+         AgentLoop.Receipt(step: 2, toolName: "press_element", ok: true, error: nil, pressedRole: pressedRole)]
+    }
+
+    @Test func u02sLabelPressIsNoReceiptForTurnedOff() {
+        let said = "Wi-Fi has been turned off in System Settings."
+        #expect(AgentLoop.doneChallenge(summary: said, evidence: [1, 2], receipts: receipts(pressedRole: "AXStaticText")) != nil)
+        #expect(AgentLoop.doneChallenge(summary: said, evidence: [1, 2], receipts: receipts(pressedRole: nil)) != nil)
+        #expect(AgentLoop.doneChallenge(summary: said, evidence: [1, 2], receipts: receipts(pressedRole: "AXCheckBox")) == nil)
+        #expect(AgentLoop.doneChallenge(summary: said, evidence: [1, 2], receipts: receipts(pressedRole: "AXSwitch")) == nil)
+        #expect(AgentLoop.doneChallenge(summary: said, evidence: [1, 2], receipts: receipts(pressedRole: "AXRadioButton")) == nil)
+        // A toggle press cited elsewhere is no receipt for this done.
+        #expect(AgentLoop.doneChallenge(summary: said, evidence: [1], receipts: receipts(pressedRole: "AXCheckBox")) != nil)
+    }
+
+    @Test func everyToggleWordIsAClaim() {
+        for said in ["I've turned off Wi-Fi.", "I turned Wi-Fi off.", "Bluetooth was switched on.", "Do Not Disturb has been enabled.",
+                     "The firewall was disabled.", "Toggled dark mode.", "The microphone was muted.", "I unmuted you."] {
+            #expect(AgentLoop.doneChallenge(summary: said, evidence: [], receipts: receipts(pressedRole: "AXButton")) != nil, "\(said)")
+            #expect(AgentLoop.doneChallenge(summary: said, evidence: [], receipts: receipts(pressedRole: "AXCheckBox")) == nil, "\(said)")
+        }
+    }
+
+    @Test func aNegatedOrPresentStateToggleClaimsNothing() {
+        for said in ["I couldn't turn off Wi-Fi.", "Wi-Fi was not turned off.", "Wi-Fi is turned off.", "Bluetooth is currently disabled.",
+                     "The page says the feature is disabled.", "I turned to the next page."] {
+            #expect(AgentLoop.doneChallenge(summary: said, evidence: [], receipts: receipts(pressedRole: "AXStaticText")) == nil, "\(said)")
+        }
+        // First person, or "now", is still a change claimed.
+        for said in ["I made sure it is disabled. I disabled it.", "Wi-Fi is now turned off."] {
+            #expect(AgentLoop.doneChallenge(summary: said, evidence: [], receipts: receipts(pressedRole: "AXStaticText")) != nil, "\(said)")
+        }
+    }
+
+    @Test func theVoiceTurnCorrectsAToggleClaimAfterALabelPress() {
+        func press(role: String) -> RealtimeToolDecision {
+            RealtimeToolDecision(call: RealtimeToolCall(callID: "p", name: "press_element", appName: "System Settings"), callUptime: 1,
+                                 offeredBeforeCall: nil,
+                                 dispatch: RealtimeToolDispatch(result: ["ok": true], harnessMilliseconds: 1, waitedForConfirmation: false,
+                                                                harnessResponse: ["ok": true, "resolved": ["role": role]]))
+        }
+        #expect(RealtimeOpenAppTool.receiptCorrection(transcript: "I've turned off Wi-Fi, sir.", decisions: [press(role: "AXStaticText")]) != nil)
+        #expect(RealtimeOpenAppTool.receiptCorrection(transcript: "I've turned off Wi-Fi, sir.", decisions: [press(role: "AXCheckBox")]) == nil)
+        #expect(RealtimeOpenAppTool.claimedWithoutReceipt(transcript: "Wi-Fi turned off.",
+                                                          okToolNames: RealtimeOpenAppTool.okReceiptNames([press(role: "AXStaticText")])))
+        #expect(!RealtimeOpenAppTool.claimedWithoutReceipt(transcript: "Wi-Fi turned off.",
+                                                           okToolNames: RealtimeOpenAppTool.okReceiptNames([press(role: "AXCheckBox")])))
+    }
+}
