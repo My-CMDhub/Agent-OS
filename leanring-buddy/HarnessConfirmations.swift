@@ -516,6 +516,7 @@ final class HarnessConfirmations: ObservableObject {
         case "scroll": phrase = "Scroll"
         case "openURL": phrase = "Open a page"
         case "renameItem": phrase = "Rename an item"
+        case "moveItems": phrase = "Move items"
         default: phrase = verbTitle(shape.verb)
         }
         if shape.thenConfirm { phrase += " and submit it" }
@@ -569,6 +570,7 @@ final class HarnessConfirmations: ObservableObject {
         case "scroll": return "Scrolls \(target) in \(app)"
         case "openURL": return "Opens the page \(target)"
         case "renameItem": return "Renames \(target) in \(app) to the name above"
+        case "moveItems": return "Moves \(target) in \(app) into the folder above"
         default: return "\(verbTitle(shape.verb)) \(target) in \(app)"
         }
     }

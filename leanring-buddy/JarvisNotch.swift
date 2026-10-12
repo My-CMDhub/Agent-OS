@@ -275,6 +275,12 @@ nonisolated enum JarvisNotchReason {
         "renameEditorMissing": "the rename field didn\u{2019}t open",
         "renameNotCommitted": "the rename didn\u{2019}t commit",
         "renameFailed": "Rename didn\u{2019}t start",
+        // move_items (2026-10-13).
+        "moveItemNotFound": "that item isn\u{2019}t listed",
+        "moveNameTaken": "that name is already there",
+        "moveDestinationUnknown": "I need the folder\u{2019}s path",
+        "moveDestinationUnavailable": "the folder didn\u{2019}t open as a list",
+        "moveFailed": "the move didn\u{2019}t start",
         "renameBusy": "another rename is open"
     ]
 

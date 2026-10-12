@@ -141,12 +141,16 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
         let findsFile = name == RealtimeVoiceVerbs.findFileName
         // rename_item's `name` is the listed item's (`elementName`), its new name rides in `text`.
         let renames = name == RealtimeVoiceVerbs.renameItemName
-        return RealtimeToolCall(callID: callID, name: name, appName: findsFile || renames ? nil : text(arguments?["name"]) ?? text(arguments?["app"]),
-                                words: words, path: path, shortcut: text(arguments?["shortcut"]),
+        // move_items' names ride in `path` (exact labels, untrimmed), its folder in `text`.
+        let moves = name == RealtimeVoiceVerbs.moveItemsName
+        return RealtimeToolCall(callID: callID, name: name, appName: findsFile || renames || moves ? nil : text(arguments?["name"]) ?? text(arguments?["app"]),
+                                words: words, path: moves ? (arguments?["names"] as? [Any])?.compactMap { $0 as? String } : path,
+                                shortcut: text(arguments?["shortcut"]),
                                 elementName: renames ? text(arguments?["name"]) : nil,
                                 // go_to_folder's path rides in `text`: `path` is press_menu's list.
                                 text: name == RealtimeVoiceVerbs.goToFolderName ? text(arguments?["folder"]) ?? text(arguments?["path"])
-                                    : findsFile ? text(arguments?["name"]) : renames ? text(arguments?["new_name"]) : nil,
+                                    : findsFile ? text(arguments?["name"]) : renames ? text(arguments?["new_name"])
+                                    : moves ? text(arguments?["to_folder"]) : nil,
                                 what: text(arguments?["what"]),
                                 url: text(arguments?["url"]), goal: text(arguments?["goal"]))
     }
@@ -408,6 +412,13 @@ nonisolated enum RealtimeOpenAppTool {
                 return refuse("missingName", "rename_item needs the item's name as listed and the new name")
             }
             return encoded(["verb": "renameItem", "title": item, "text": newName, "expectApp": HarnessGoToFolder.finderBundleIdentifier])
+        }
+        // move_items: Finder's own Copy / Move Item Here, only with Finder in front (the harness checks).
+        if call.name == RealtimeVoiceVerbs.moveItemsName {
+            guard let names = call.path, !names.isEmpty, let folder = call.text else {
+                return refuse("missingName", "move_items needs each item's name as listed and the folder to move them into")
+            }
+            return encoded(["verb": "moveItems", "path": names, "text": folder, "expectApp": HarnessGoToFolder.finderBundleIdentifier])
         }
         guard let appName = call.appName else {
             return RealtimeVoiceVerbs.allToolNames.contains(call.name)

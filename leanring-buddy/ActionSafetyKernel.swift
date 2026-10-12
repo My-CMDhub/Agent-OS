@@ -501,7 +501,22 @@ enum ActionSafetyKernel {
     /// is not destructive — but the words in BOTH names are judged as a press's
     /// are: an irreversible word refuses, a destructive or publishing word asks.
     static func evaluateRename(from oldName: String, to newName: String) -> SafetyDecision {
-        let names = [oldName, newName].map { $0.lowercased() }
+        evaluateNames([oldName, newName])
+    }
+
+    /// A Finder move (`HarnessMoveItems`): inside the owner's folders it is not
+    /// destructive, but every item's name and the destination get the word checks
+    /// — and the Trash is deleting by another road, so it refuses.
+    static func evaluateMove(names: [String], destination: String) -> SafetyDecision {
+        if destination.split(separator: "/").contains(where: { $0.lowercased() == ".trash" }) {
+            return .refuse(reason: "moving into the Trash is deleting; that is the owner's to do")
+        }
+        // The destination folder's own name, not the whole path: the owner's home folder is not a word to judge.
+        return evaluateNames(names + [(destination as NSString).lastPathComponent])
+    }
+
+    private static func evaluateNames(_ raw: [String]) -> SafetyDecision {
+        let names = raw.map { $0.lowercased() }
         for name in names {
             if let keyword = irreversibleTitleKeywords.first(where: name.contains) {
                 return .refuse(reason: irreversibleRefusalReason(keyword: keyword))

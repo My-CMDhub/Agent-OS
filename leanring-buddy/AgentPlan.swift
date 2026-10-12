@@ -44,7 +44,7 @@ nonisolated enum AgentPlan {
         RealtimeVoiceVerbs.annotateName: [["shapes"]], AgentLoopTools.searchWebName: [["query"]],
         AgentLoopGemini.webLookupName: [["question"]], AgentLoopTools.doneName: [["summary"]],
         SettingsPaneLinks.toolName: [["name"]], RealtimeVoiceVerbs.findFileName: [["name"]],
-        RealtimeVoiceVerbs.renameItemName: [["name", "new_name"]]
+        RealtimeVoiceVerbs.renameItemName: [["name", "new_name"]], RealtimeVoiceVerbs.moveItemsName: [["names", "to_folder"]]
     ]
 
     /// Anthropic tool JSON. Each step is a flat object: `tool` plus that
@@ -73,6 +73,8 @@ nonisolated enum AgentPlan {
                 "url": text("open_url: the full address."),
                 "folder": text("go_to_folder: the folder's path, for example ~/Downloads."),
                 "new_name": text("rename_item: the new name, with its extension."),
+                "names": ["type": "array", "items": ["type": "string"], "description": "move_items: each item's name as listed."],
+                "to_folder": text("move_items: the folder's path, or a folder's name in the same window."),
                 "query": text("search_web: the words."),
                 "question": text("web_lookup: the question."),
                 "summary": text("done: what was achieved, spoken to the owner."),

@@ -175,13 +175,18 @@ enum HarnessVerb: String, CaseIterable {
     /// measured 2026-10-13). Mutating; the kernel judges both names' words.
     case renameItem
 
+    /// Finder: move listed items into another folder — select them, Edit's ⌘C, Go to
+    /// Folder, Edit's ⌥⌘V Move Item Here (`HarnessMoveItems`, measured 2026-10-13).
+    /// Mutating; the kernel judges every name's words. The clipboard is restored.
+    case moveItems
+
     /// Whether this verb can change the world. The kill switch stops these and
     /// leaves the read-only pair working, so an operator who tripped it can
     /// still look at the machine and find out why.
     var isMutating: Bool {
         switch self {
         case .ping, .snapshot, .menus, .windows, .look, .status, .highlight: return false
-        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick, .helpSearch, .goToFolder, .renameItem: return true
+        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick, .helpSearch, .goToFolder, .renameItem, .moveItems: return true
         }
     }
 
@@ -211,7 +216,7 @@ enum HarnessVerb: String, CaseIterable {
         // `goToFolder` writes into Finder's own Go to Folder field: `goToFolderResponse`.
         // `renameItem` names a listed item and drives Finder's own editor: `renameItemResponse`.
         case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight, .scroll, .openURL, .visionClick,
-             .helpSearch, .goToFolder, .renameItem: return nil
+             .helpSearch, .goToFolder, .renameItem, .moveItems: return nil
         }
     }
 }
@@ -787,6 +792,19 @@ enum HarnessPolicy {
             guard raw.expectApp != nil else { return .failure(.missingField("expectApp")) }
             if let problem = HarnessRenameItem.nameProblem(text) { return .failure(.invalidField(field: "text", value: problem)) }
         }
+        // moveItems: the items as listed (path), the destination folder (text), in Finder (checked live).
+        if verb == .moveItems {
+            guard !path.isEmpty else { return .failure(.missingField("path")) }
+            guard !text.isEmpty else { return .failure(.missingField("text")) }
+            guard raw.expectApp != nil else { return .failure(.missingField("expectApp")) }
+            guard path.count <= HarnessMoveItems.maximumItems, Set(path).count == path.count else {
+                return .failure(.invalidField(field: "path", value: "more than \(HarnessMoveItems.maximumItems) names, or one twice"))
+            }
+            if let problem = path.lazy.compactMap(HarnessRenameItem.nameProblem).first { return .failure(.invalidField(field: "path", value: problem)) }
+            if text.count > HarnessGoToFolder.maximumPathLength || text.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
+                return .failure(.invalidField(field: "text", value: "too long or a control character"))
+            }
+        }
         if verb == .type {
             guard !text.isEmpty else {
                 return .failure(.missingField("text"))
@@ -820,6 +838,8 @@ enum HarnessPolicy {
             // a second field only two verbs would ever set.
             title: (verb == .menu || verb == .menus) && !path.isEmpty
                 ? path.joined(separator: " > ")
+                // moveItems' target is every item it moves, so the audit line and a ticket name them all.
+                : verb == .moveItems ? path.joined(separator: ", ")
                 // openURL's target is its page, so the audit line and a ticket name it.
                 : (statusItem ?? url?.absoluteString ?? (verb == .helpSearch || verb == .goToFolder ? text : raw.title) ?? ""),
             role: raw.role,
@@ -1186,6 +1206,8 @@ enum HarnessObservability {
         "notFinder",
         // renameItem naming an item the window does not list, or a name it already lists.
         "renameItemNotFound", "renameNameTaken", "renameBusy",
+        // moveItems naming an item the window does not list, a name the destination lists, or no known destination.
+        "moveItemNotFound", "moveNameTaken", "moveDestinationUnknown",
         // `LockScreenGuard` doing its job. Measured 2026-09-13: a probe left
         // running against a locked screen wrote 12,881 `anomalySuppressed`
         // audit lines naming this rule — one per refusal, each also a line of
@@ -2048,6 +2070,9 @@ final class HarnessServer {
 
         case .renameItem:
             return renameItemResponse(request, dryRun: dryRun, startedAt: startedAt)
+
+        case .moveItems:
+            return moveItemsResponse(request, dryRun: dryRun, startedAt: startedAt)
         }
     }
 
@@ -2468,7 +2493,7 @@ final class HarnessServer {
             bundleIdentifier: bundleIdentifier,
             rawTarget: auditTarget(for: request) ?? "",
             // A rename's new name is what the owner approves, so a ticket binds it.
-            text: request.verb == .type || request.verb == .renameItem ? request.text : nil,
+            text: request.verb == .type || request.verb == .renameItem || request.verb == .moveItems ? request.text : nil,
             mode: request.verb == .type ? request.mode.rawValue : nil,
             withinNamed: request.withinNamed,
             nearPoint: request.nearPoint,
@@ -4248,6 +4273,72 @@ final class HarnessServer {
         }
         response["verification"] = ["status": "confirmed", "evidence": run.report["evidence"] ?? NSNull()]
         return finish("confirmed", kernel: described.decision)
+    }
+
+    // MARK: moveItems
+
+    /// Finder's move (`HarnessMoveItems`, measured 2026-10-13). Finder only, by
+    /// bundle identifier; the items, the destination, Copy and Go to Folder are
+    /// read before anything is pressed, then the kernel judges every name and the
+    /// app policy and tickets apply. Dry run stops after those checks.
+    private func moveItemsResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        var response: [String: Any] = ["dryRun": dryRun]
+        guard let (application, bar) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response) else { return response }
+        func finish(_ outcome: String, kernel: String = "n/a", error: String? = nil, message: String? = nil) -> [String: Any] {
+            response["ok"] = error == nil
+            if let error { response["error"] = error }
+            if let message { response["message"] = message }
+            audit(request, dryRun: dryRun, kernel: kernel, outcome: outcome, startedAt: startedAt)
+            return response
+        }
+        guard application.bundleIdentifier == HarnessGoToFolder.finderBundleIdentifier else {
+            return finish("notFinder", error: "notFinder",
+                          message: "moving files is Finder's; Finder is not the app in front, so nothing was moved. Focus Finder first.")
+        }
+        guard HarnessMoveItems.menuItem(withShortcut: HarnessMoveItems.copyShortcut, in: bar, children: AccessibilityMenu.liveChildren) != nil,
+              let goToFolder = goToFolderMenuItem(in: bar) else {
+            return finish("moveFailed", error: "moveFailed", message: "Finder's menus have no single ⌘C Copy and Go to Folder… items; nothing was moved")
+        }
+        let plan: HarnessMoveItems.Plan
+        switch HarnessMoveItems.plan(names: request.path, destination: request.text, processIdentifier: application.processIdentifier) {
+        case .failure(let failure): return finish(failure.code, error: failure.code, message: failure.message)
+        case .success(let planned): plan = planned
+        }
+        response["resolved"] = ["names": plan.names.map { UntrustedText($0).forDisplay }, "listed": plan.listedCount,
+                                "destination": UntrustedText(plan.destination).forDisplay]
+        let decision = applyAppPolicy(to: ActionSafetyKernel.evaluateMove(names: plan.names, destination: plan.destination),
+                                      bundleIdentifier: application.bundleIdentifier, into: &response)
+        let described = HarnessPolicy.describe(decision)
+        let gated = gate(decision, request: request, appName: application.localizedName,
+                         bundleIdentifier: application.bundleIdentifier, dryRun: dryRun, into: &response)
+        guard gated.executable else {
+            return finish(gated.outcome, kernel: described.decision, error: gated.outcome, message: response["message"] == nil ? gated.note : nil)
+        }
+        guard !dryRun else {
+            response["performed"] = ["status": "skipped", "reason": "dry run — the items and the destination were found; nothing was selected or moved"]
+            return finish("dryRun", kernel: described.decision)
+        }
+        phaseTiming.actionStarting()
+        let run = HarnessMoveItems.move(plan, bar: bar, goToFolderItem: goToFolder)
+        phaseTiming.actionReturned()
+        response.merge(run.report) { _, new in new }
+        if let failure = run.failure {
+            guard failure.code == "notObserved" else { return finish(failure.code, kernel: described.decision, error: failure.code, message: failure.message) }
+            response["verification"] = ["status": "notObserved"]
+            return finish("notObserved", kernel: described.decision, error: "notVerified", message: failure.message)
+        }
+        response["verification"] = ["status": "confirmed", "evidence": run.report["evidence"] ?? NSNull()]
+        return finish("confirmed", kernel: described.decision)
+    }
+
+    /// Finder's one enabled Go > Go to Folder… item.
+    private func goToFolderMenuItem(in bar: AccessibilityMenu.Node) -> AXUIElement? {
+        let goItems = AccessibilityMenu.entries(of: bar, children: AccessibilityMenu.liveChildren)
+            .filter { $0.label == HarnessGoToFolder.goMenuTitle }
+        let items = goItems.count == 1
+            ? AccessibilityMenu.entries(of: goItems[0], children: AccessibilityMenu.liveChildren).filter { HarnessGoToFolder.isGoToFolderItem($0.label) }
+            : []
+        return items.count == 1 && items[0].isEnabled ? items[0].element : nil
     }
 
     // MARK: windows / focus

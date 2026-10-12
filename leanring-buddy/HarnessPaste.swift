@@ -72,9 +72,7 @@ enum HarnessPaste {
 
     static func pasteMenuItem(in bar: AccessibilityMenu.Node,
                               children: (AccessibilityMenu.Node) -> [AccessibilityMenu.Node]) -> Result<AccessibilityMenu.Node, HandsRefusal> {
-        let matches = AccessibilityMenu.entries(of: bar, children: children)
-            .flatMap { AccessibilityMenu.entries(of: $0, children: children) }
-            .filter { $0.role == AccessibilityMenu.menuItemRole && $0.shortcut == pasteShortcut }
+        let matches = menuItems(withShortcut: pasteShortcut, in: bar, children: children)
         guard matches.count == 1, let item = matches.first else {
             return .failure(HandsRefusal(code: "pasteUnavailable", message: matches.isEmpty
                 ? "the app's menus have no ⌘V Paste item; nothing was pasted"
@@ -84,6 +82,14 @@ enum HarnessPaste {
         // owner's image greys it out for a text field until our text is written. `paste`
         // re-reads it after the write (G04 2026-10-11: pasteUnavailable 5x in one run).
         return .success(item)
+    }
+
+    /// Every menu item, one level under each bar item, whose shortcut is exactly `shortcut`.
+    static func menuItems(withShortcut shortcut: String?, in bar: AccessibilityMenu.Node,
+                          children: (AccessibilityMenu.Node) -> [AccessibilityMenu.Node]) -> [AccessibilityMenu.Node] {
+        AccessibilityMenu.entries(of: bar, children: children)
+            .flatMap { AccessibilityMenu.entries(of: $0, children: children) }
+            .filter { $0.role == AccessibilityMenu.menuItemRole && $0.shortcut == shortcut }
     }
 
     // MARK: verification and restore
@@ -137,11 +143,11 @@ enum HarnessPaste {
     }
 
     /// Every item, every type's data — in memory only, never logged or sent.
-    private static func snapshot(_ pasteboard: NSPasteboard) -> [[(NSPasteboard.PasteboardType, Data)]] {
+    static func snapshot(_ pasteboard: NSPasteboard) -> [[(NSPasteboard.PasteboardType, Data)]] {
         (pasteboard.pasteboardItems ?? []).map { item in item.types.compactMap { type in item.data(forType: type).map { (type, $0) } } }
     }
 
-    private static func restore(_ saved: [[(NSPasteboard.PasteboardType, Data)]], to pasteboard: NSPasteboard) {
+    static func restore(_ saved: [[(NSPasteboard.PasteboardType, Data)]], to pasteboard: NSPasteboard) {
         pasteboard.clearContents()
         let items = saved.map { entries -> NSPasteboardItem in
             let item = NSPasteboardItem()

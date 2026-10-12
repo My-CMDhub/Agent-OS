@@ -142,23 +142,14 @@ nonisolated enum HarnessRenameItem {
     /// free and finds empty space to click. Reads only — a dry run stops here.
     static func plan(item: String, newName: String, processIdentifier: pid_t) -> Result<Plan, Failure> {
         // Bound every read below, not just the first element's (CLAUDE.md: set it system-wide).
-        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), readTimeoutSeconds)
-        let application = AXUIElementCreateApplication(processIdentifier)
-        AXUIElementSetMessagingTimeout(application, readTimeoutSeconds)
-        guard let window = browserWindow(main: element(application, kAXMainWindowAttribute), windows: elements(application, kAXWindowsAttribute),
-                                         isStandard: { string($0, kAXSubroleAttribute) == kAXStandardWindowSubrole as String },
-                                         hasList: { !findLists(under: $0, depth: listSearchDepth).isEmpty }) else {
+        let outline: AXUIElement, listRows: [AXUIElement], names: [String?]
+        switch fileList(processIdentifier: processIdentifier) {
+        case .noWindow:
             return .failure(Failure(code: "renameItemNotFound", message: "Finder has no browser window open; nothing was renamed"))
-        }
-        // The file list is the one list whose rows carry names; the sidebar's rows carry none.
-        let lists = findLists(under: window, depth: listSearchDepth).compactMap { list -> (AXUIElement, [AXUIElement], [String?])? in
-            let listRows = rows(of: list)
-            let names = listRows.map(rowName)
-            return names.contains { $0 != nil } ? (list, listRows, names) : nil
-        }
-        guard lists.count == 1, case let (outline, listRows, names)? = lists.first else {
+        case .noSingleList:
             return .failure(Failure(code: "renameItemNotFound",
                                     message: "the Finder window in front shows no single file list — rename works in list view (View > as List); nothing was renamed"))
+        case .list(let list): (outline, listRows, names) = (list.outline, list.rows, list.names)
         }
         // Finder's name editor already open (File > New Folder leaves it open, maybe with typed text in it).
         let focused = HarnessHands.focusedElement(processIdentifier: processIdentifier)
@@ -215,6 +206,38 @@ nonisolated enum HarnessRenameItem {
         }
         return .success(Plan(processIdentifier: processIdentifier, outline: outline, row: listRows[index], oldName: item,
                              point: point, listedCount: names.count, editorValue: openValue))
+    }
+
+    struct FileList {
+        let window: AXUIElement
+        let outline: AXUIElement
+        let rows: [AXUIElement]
+        let names: [String?]
+    }
+
+    enum FileListRead {
+        case list(FileList)
+        case noWindow
+        case noSingleList
+    }
+
+    /// The browser window's one file list (list view), its rows and their names. Reads only.
+    static func fileList(processIdentifier: pid_t) -> FileListRead {
+        // Bound every read below, not just the first element's (CLAUDE.md: set it system-wide).
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), readTimeoutSeconds)
+        let application = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(application, readTimeoutSeconds)
+        guard let window = browserWindow(main: element(application, kAXMainWindowAttribute), windows: elements(application, kAXWindowsAttribute),
+                                         isStandard: { string($0, kAXSubroleAttribute) == kAXStandardWindowSubrole as String },
+                                         hasList: { !findLists(under: $0, depth: listSearchDepth).isEmpty }) else { return .noWindow }
+        // The file list is the one list whose rows carry names; the sidebar's rows carry none.
+        let lists = findLists(under: window, depth: listSearchDepth).compactMap { list -> FileList? in
+            let listRows = rows(of: list)
+            let names = listRows.map(rowName)
+            return names.contains { $0 != nil } ? FileList(window: window, outline: list, rows: listRows, names: names) : nil
+        }
+        guard lists.count == 1 else { return .noSingleList }
+        return .list(lists[0])
     }
 
     struct Run {
@@ -349,19 +372,19 @@ nonisolated enum HarnessRenameItem {
         return nil
     }
 
-    private static func string(_ element: AXUIElement, _ attribute: String) -> String? {
+    static func string(_ element: AXUIElement, _ attribute: String) -> String? {
         var value: AnyObject?
         return AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success ? value as? String : nil
     }
 
-    private static func element(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
+    static func element(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
         var value: AnyObject?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
               let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return (value as! AXUIElement)
     }
 
-    private static func elements(_ element: AXUIElement, _ attribute: String) -> [AXUIElement] {
+    static func elements(_ element: AXUIElement, _ attribute: String) -> [AXUIElement] {
         var value: AnyObject?
         AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         return (value as? [AXUIElement]) ?? []
