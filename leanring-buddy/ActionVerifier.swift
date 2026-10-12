@@ -151,6 +151,23 @@ enum ActionVerifier {
         return nil
     }
 
+    /// Reads until the value has held still for `quietSeconds` (or `capSeconds` pass), and
+    /// returns the last value and whether it held. Focus HOPS after some actions — File > New
+    /// Reminder put it on the window at 88 ms and the new row's field at 365 ms (2026-10-13) —
+    /// so a change counts once it holds, or the next step reads a moment that is not over yet.
+    static func settle<Value: Equatable>(read: () -> Value?, quietSeconds: Double, capSeconds: Double, interval: Double,
+                                         now: () -> Double, sleep: (Double) -> Void) -> (value: Value?, held: Bool) {
+        let start = now()
+        var last = read(), stillSince = start
+        while now() - start < capSeconds {
+            sleep(interval)
+            let current = read()
+            if current != last { last = current; stillSince = now() }
+            if now() - stillSince >= quietSeconds { return (last, true) }
+        }
+        return (last, false)
+    }
+
     /// The loop, generic over what a walk returns so a test can drive it
     /// without a cross-process read.
     static func poll<Snapshot>(

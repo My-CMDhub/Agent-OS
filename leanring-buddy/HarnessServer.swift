@@ -3888,6 +3888,15 @@ final class HarnessServer {
 
         switch verification {
         case .confirmed(let milliseconds):
+            // The confirmation is a moment; the next step reads what follows it. Let focus hold
+            // still first (`ActionVerifier.settle`, G05 2026-10-13: confirmed on the window at
+            // 71 ms, the new reminder's field took focus ~300 ms later, typing was refused 3/3).
+            let settledAt = Date()
+            let settled = ActionVerifier.settle(
+                read: { AccessibilityMenu.pressReading(item: element, application: application).focused },
+                quietSeconds: 0.25, capSeconds: 1.5, interval: 0.05,
+                now: { Date().timeIntervalSince1970 }, sleep: { Thread.sleep(forTimeInterval: $0) })
+            response["focusSettle"] = ["held": settled.held, "milliseconds": Int(Date().timeIntervalSince(settledAt) * 1000)]
             // Either baseline can confirm here, so say which one did.
             let windowsAfter = AccessibilityMenu.windowCount(for: application)
             response["verification"] = [

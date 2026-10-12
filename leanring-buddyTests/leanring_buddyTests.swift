@@ -4233,3 +4233,35 @@ private func binding(target: pid_t? = 800, selection chosen: ActionBinding.Selec
     let appKit = NSEvent.mouseLocation
     #expect(abs(cursor.x - appKit.x) <= 1 && abs(cursor.y - appKit.y) <= 1, "CG \(cursor) vs AppKit \(appKit)")
 }
+
+/// G05 2026-10-13: after File > New Reminder focus HOPS — window at 88 ms, the new row's field at 365 ms
+/// (another run: field, window, field at 666 ms) — and the verifier confirmed on the first hop (71 ms), so the
+/// typing that followed in the same reply read the window and was refused 3/3. A focus change counts once it holds.
+struct FocusSettleTests {
+    @Test func focusCountsOnlyOnceItHoldsStill() {
+        // One read every 50 ms: window, window, field, field, field, field, field, field…
+        var reads = ["w", "w", "f", "f", "f", "f", "f", "f", "f", "f"].makeIterator()
+        var clock = 0.0
+        let settled = ActionVerifier.settle(read: { reads.next() }, quietSeconds: 0.25, capSeconds: 1.5,
+                                            interval: 0.05, now: { clock }, sleep: { clock += $0 })
+        #expect(settled.value == "f")
+        #expect(settled.held == true)
+    }
+
+    @Test func aFocusThatNeverHoldsStopsAtTheCapAndSaysSo() {
+        var flip = false
+        var clock = 0.0
+        let settled = ActionVerifier.settle(read: { flip.toggle(); return flip ? "w" : "f" }, quietSeconds: 0.25, capSeconds: 1.5,
+                                            interval: 0.05, now: { clock }, sleep: { clock += $0 })
+        #expect(settled.held == false)
+        #expect(clock >= 1.5 && clock < 1.7)
+    }
+
+    @Test func anAlreadyStillFocusCostsOnlyTheQuietWindow() {
+        var clock = 0.0
+        let settled = ActionVerifier.settle(read: { "f" }, quietSeconds: 0.25, capSeconds: 1.5,
+                                            interval: 0.05, now: { clock }, sleep: { clock += $0 })
+        #expect(settled.held == true)
+        #expect(clock <= 0.3)
+    }
+}
