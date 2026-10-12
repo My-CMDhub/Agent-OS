@@ -42,6 +42,11 @@ enum GeneralitySuite {
         /// A creation task's items: counted right before the task and again at the check, which
         /// passes only on MORE (`createdVerdict`). Presence alone passed on an earlier run's leftovers.
         var created: (bundle: String, match: @Sendable (AccessibilityElementNode) -> Bool)? = nil
+        /// A `~/JARVIS-sandbox` task (`LaunchSuite.swift`): the fixture is written fresh before it, the checker gets
+        /// `sandboxBefore`/`sandboxAfter` listings, and these paths (what the task was asked to create) are removed after.
+        var sandbox: Set<String>? = nil
+        /// World reads taken right before the goal run, merged into what the checker gets.
+        var pre: (() -> [String: Any])? = nil
         /// (spoken answer, the goal run's report) -> evidence with "passed".
         let check: (_ spoken: String, _ run: [String: Any]) async -> [String: Any]
     }
@@ -164,7 +169,7 @@ enum GeneralitySuite {
 
     // MARK: Checker helpers (each reads in-process; only booleans and counts are reported)
 
-    static func verdict(_ passed: Bool, _ evidence: [String: Any] = [:]) -> [String: Any] {
+    nonisolated static func verdict(_ passed: Bool, _ evidence: [String: Any] = [:]) -> [String: Any] {
         evidence.merging(["passed": passed]) { _, new in new }
     }
 
@@ -406,9 +411,11 @@ enum GeneralitySuite {
 
     static func run(harness: HarnessServer, confirmations: HarnessConfirmations) async {
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let directory = MeasurementLogFile.directoryURL.appendingPathComponent("generality/\(stamp)", isDirectory: true)
+        let launch = CommandLine.arguments.contains("--launch-suite")
+        let directory = MeasurementLogFile.directoryURL.appendingPathComponent("\(launch ? "launch" : "generality")/\(stamp)", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        var meta: [String: Any] = ["timestamp": stamp, "model": AgentLoopModel.firstModel(.configured), "provider": AgentModelProvider.configured.rawValue]
+        var meta: [String: Any] = ["timestamp": stamp, "model": AgentLoopModel.firstModel(.configured), "provider": AgentModelProvider.configured.rawValue,
+                                   "suite": launch ? "launch" : "generality"]
         var results: [[String: Any]] = []
         let url = directory.appendingPathComponent("results.json")
         func save() {
@@ -430,7 +437,7 @@ enum GeneralitySuite {
         let wanted = CommandLine.arguments.first { $0.hasPrefix("--generality-ids=") }
             .map { Set($0.dropFirst("--generality-ids=".count).split(separator: ",").map(String.init)) }
         let runStart = ProcessInfo.processInfo.systemUptime
-        for task in tasks where wanted?.contains(task.id) ?? true {
+        for task in launch ? launchTasks : tasks where wanted?.contains(task.id) ?? true {
             let idle = ScenarioRunner.secondsSinceLastInput()
             let ours = min(HarnessHands.ownInput.secondsSinceLastPost ?? .infinity, ProcessInfo.processInfo.systemUptime - runStart)
             if idle + 1 < ours {
@@ -447,11 +454,29 @@ enum GeneralitySuite {
             var countBefore: Int?? = nil
             if let created { countBefore = .some(await countBeforeLaunchingIfNeeded(created.bundle, created.match)) }
             var result: [String: Any] = ["id": task.id, "pattern": task.pattern, "words": task.words, "heldOut": task.heldOut, "findOut": task.findOut]
+            var sandboxBefore: [String: String]?
+            if task.sandbox != nil {
+                let fixture = Sandbox.setUp(known: Sandbox.knownNames)
+                guard let listing = fixture.listing else {
+                    result["status"] = "skipped"
+                    result["reason"] = "~/JARVIS-sandbox holds items this suite did not create (left for the owner): \(fixture.unknown)"
+                    results.append(result)
+                    save()
+                    print("🧭 \(task.id): skipped — sandbox not clean: \(fixture.unknown)")
+                    continue
+                }
+                sandboxBefore = listing
+            }
+            let pre = task.pre?() ?? [:]
             let run = await AgentLoopProbe.goalRun(words: task.words, harness: harness, confirmations: confirmations)
             result.merge(run) { current, _ in current }
             let spoken = run["spoken"] as? String ?? ""
             result["modelCalls"] = modelCalls(run: run["run"] as? String ?? "")
-            var checked = run
+            var checked = run.merging(pre) { current, _ in current }
+            if let sandboxBefore {
+                checked["sandboxBefore"] = sandboxBefore
+                checked["sandboxAfter"] = Sandbox.listing() as Any? ?? NSNull()
+            }
             if let created {
                 checked["countBefore"] = (countBefore ?? nil) as Any
                 checked["countAfter"] = await Task.detached { appCount(created.bundle, created.match) }.value
@@ -460,6 +485,11 @@ enum GeneralitySuite {
             result["status"] = (result["check"] as? [String: Any])?["passed"] as? Bool == true ? "passed" : "failed"
             let cleanup = await undo(state, apps: task.apps)
             result["cleanup"] = cleanup
+            if let asked = task.sandbox {
+                let down = Sandbox.tearDown(known: Set(Sandbox.manifest.keys).union(asked))
+                result["sandboxCleanup"] = ["removed": down.removed, "left": down.left]
+                if !down.left.isEmpty { print("🧭 \(task.id): left in ~/JARVIS-sandbox for the owner (not ours to delete): \(down.left)") }
+            }
             // Files are reported, never removed: the owner decides (G15 left two on the Desktop unseen).
             let files = cleanup["filesCreated"] as? [String] ?? [], left = cleanup["newWindowsLeft"] as? [String] ?? []
             if !files.isEmpty { filesCreated[task.id] = files }

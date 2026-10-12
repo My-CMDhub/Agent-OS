@@ -207,7 +207,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         // Generality suite: ~20 general-pattern tasks through the agent loop, each
         // judged by its own state checker; same start gate as the runner. Cards are
         // denied, never allowed; ~/Library/Logs/Clicky/generality/<ts>/, then quits.
-        if CommandLine.arguments.contains("--generality-suite") {
+        // `--launch-suite` runs the launch list (LaunchSuite.swift) through the same runner -> .../launch/<ts>/.
+        if CommandLine.arguments.contains("--generality-suite") || CommandLine.arguments.contains("--launch-suite") {
             confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
             Task { @MainActor in
                 await GeneralitySuite.run(harness: self.harnessServer, confirmations: self.confirmations)
