@@ -264,7 +264,11 @@ nonisolated enum JarvisNotchReason {
         "notFinder": "Finder isn\u{2019}t in front",
         "goToFolderUnavailable": "Go to Folder didn\u{2019}t open",
         "goToFolderFailed": "the folder path didn\u{2019}t take",
-        "goToFolderLeftOpen": "Go to Folder stayed open"
+        "goToFolderLeftOpen": "Go to Folder stayed open",
+        // find_file (2026-10-12).
+        "findFileBadName": "that isn\u{2019}t a file name",
+        "findFileTimedOut": "Spotlight didn\u{2019}t answer",
+        "findFileUnavailable": "Spotlight couldn\u{2019}t be asked"
     ]
 
     /// `subject` is the app HEARD for a heard-vs-named mismatch ("heard

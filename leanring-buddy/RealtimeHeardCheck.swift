@@ -925,9 +925,10 @@ nonisolated enum RealtimeHeardCheck {
     }
 
     /// Whether this tool is checked at all: every tool that names an app.
-    /// open_settings_pane names a pane, not an app: its allow-list is its guard.
+    /// open_settings_pane names a pane, not an app: its allow-list is its guard. find_file names a file.
     static func appliesTo(toolName: String) -> Bool {
         RealtimeVoiceVerbs.allToolNames.contains(toolName) && toolName != SettingsPaneLinks.toolName
+            && toolName != RealtimeVoiceVerbs.findFileName
     }
 
     /// Whether the check may REFUSE the call. Reads never are (slice 1b: four

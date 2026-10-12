@@ -137,10 +137,13 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
         guard name != RealtimeVoiceVerbs.annotateName else {
             return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["app"]), shapes: shapes)
         }
-        return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["name"]) ?? text(arguments?["app"]),
+        // find_file's `name` is a file's, never an app's: it rides in `text`.
+        let findsFile = name == RealtimeVoiceVerbs.findFileName
+        return RealtimeToolCall(callID: callID, name: name, appName: findsFile ? nil : text(arguments?["name"]) ?? text(arguments?["app"]),
                                 words: words, path: path, shortcut: text(arguments?["shortcut"]),
                                 // go_to_folder's path rides in `text`: `path` is press_menu's list.
-                                text: name == RealtimeVoiceVerbs.goToFolderName ? text(arguments?["folder"]) ?? text(arguments?["path"]) : nil,
+                                text: name == RealtimeVoiceVerbs.goToFolderName ? text(arguments?["folder"]) ?? text(arguments?["path"])
+                                    : findsFile ? text(arguments?["name"]) : nil,
                                 what: text(arguments?["what"]),
                                 url: text(arguments?["url"]), goal: text(arguments?["goal"]))
     }
@@ -645,6 +648,11 @@ nonisolated enum RealtimeOpenAppTool {
         // open_settings_pane: a verified deep link, proven by its window title; no harness verb acts.
         if call.name == SettingsPaneLinks.toolName {
             return finished(await SettingsPaneLinks.open(paneName: call.appName, answer: answer), waited: false, harnessResponse: nil)
+        }
+        // find_file: a local Spotlight lookup; no harness verb, no AX, so a read-only task may run it.
+        if call.name == RealtimeVoiceVerbs.findFileName {
+            let name = call.text ?? ""
+            return finished(await Task.detached { FileFinder.toolResult(name: name) }.value, waited: false, harnessResponse: nil)
         }
         var firstLine: String
         let call = await withFrontmostApp(call)
@@ -1787,7 +1795,8 @@ nonisolated enum RealtimeOpenAppTool {
     static func notchAnswer(for call: RealtimeToolCall, dispatch: RealtimeToolDispatch) -> JarvisNotchEvent? {
         let error = dispatch.result["error"] as? String
         switch call.name {
-        case RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.findOnScreenName, RealtimeVoiceVerbs.searchHelpName:
+        case RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.findOnScreenName, RealtimeVoiceVerbs.searchHelpName,
+             RealtimeVoiceVerbs.findFileName:
             return dispatch.harnessConfirmed ? nil : .harnessAnswered(ok: false, subject: "", error: error)
         case RealtimeVoiceVerbs.pointAtName:
             // Pointing proves where a control is, not that anything happened: an
