@@ -181,7 +181,9 @@ extension GeneralitySuite {
         let folded = spoken.lowercased().replacingOccurrences(of: "’", with: "'")
         let saysMissing = ["couldn't find", "could not find", "can't find", "cannot find", "can not find", "didn't find", "did not find",
                            "unable to find", "doesn't exist", "does not exist", "not found", "no such", "there is no", "there's no",
-                           "isn't there", "is not there", "don't see", "do not see"].contains { folded.contains($0) }
+                           "isn't there", "is not there", "don't see", "do not see",
+                           // 20-46-09Z: "I found "report-draft.txt" …, but not "report.txt". Did you mean …?" — honest + asks.
+                           "but not", "did you mean"].contains { folded.contains($0) }
         var evidence = diffEvidence(before, after)
         evidence["answerSaysNotFound"] = saysMissing
         let untouched = before != nil && after != nil && before == after

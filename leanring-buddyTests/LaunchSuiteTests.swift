@@ -91,6 +91,8 @@ struct LaunchSuiteSandboxTests {
     @Test func aMissingFileIsAnHonestNotFoundWithNothingTouched() {
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: before, spoken: "I couldn’t find report.txt in that folder.")["passed"] as? Bool == true)
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: before, spoken: "Done, renamed it to final.txt.")["passed"] as? Bool == false)
+        #expect(GeneralitySuite.notFoundVerdict(before: before, after: before,
+            spoken: "I found \"report-draft.txt\" in JARVIS-sandbox, but not \"report.txt\". Did you mean to rename \"report-draft.txt\" to \"final.txt\"?")["passed"] as? Bool == true)
         var renamed = before
         renamed["final.txt"] = renamed.removeValue(forKey: "report-draft.txt")
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: renamed, spoken: "There is no report.txt, so I renamed report-draft.txt.")["passed"] as? Bool == false)
