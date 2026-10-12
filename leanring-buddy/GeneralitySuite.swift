@@ -187,7 +187,7 @@ enum GeneralitySuite {
     /// The before count with the app's own leftovers in it. These tasks start with the app QUIT
     /// (the suite quits what it launched), and a quit app reads 0 — so yesterday's "JARVIS test
     /// reminder" counted as created when the task launched Reminders (review of e9ff3fa,
-    /// 2026-10-12). Launch it behind, count once a window reads, quit it again so the task starts
+    /// 2026-10-12). Launch it behind, count once a window reads (10 s), quit it again so the task starts
     /// as before; anything that does not happen in time is nil, never 0.
     static func countBeforeLaunchingIfNeeded(_ bundle: String, _ match: @escaping @Sendable (AccessibilityElementNode) -> Bool) async -> Int? {
         if NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first != nil {
@@ -198,7 +198,7 @@ enum GeneralitySuite {
         configuration.activates = false
         guard let app = try? await NSWorkspace.shared.openApplication(at: url, configuration: configuration) else { return nil }
         var count: Int?
-        for _ in 0..<25 {
+        for _ in 0..<50 {   // 10 s: a cold first launch of Reminders took over 5 s (G05 20-05-26Z)
             try? await Task.sleep(for: .milliseconds(200))
             let pid = app.processIdentifier
             let windows = await Task.detached { CoverageAudit.windows(of: pid).count }.value
