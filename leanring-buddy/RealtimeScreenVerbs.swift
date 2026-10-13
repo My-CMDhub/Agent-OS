@@ -115,6 +115,8 @@ nonisolated enum RealtimeScreenVerbs {
         /// For a label that publishes no action: the nearest named ancestor
         /// that does and holds it (`press_element` presses that).
         var pressAncestor: RealtimeScreenPressTarget? = nil
+        /// A radio button's, checkbox's or switch's state as the snapshot read it; nil when not read.
+        var selected: Bool? = nil
 
         /// press_element has something to click (`RealtimeScreenCandidate.clickTarget`).
         var isClickable: Bool {
@@ -193,7 +195,7 @@ nonisolated enum RealtimeScreenVerbs {
                 next = candidate["parent"] as? Int
             }
             let kept = PoolElement(name: name, role: role, subrole: subrole, frame: frame, pressable: pressable, parent: parentIndex,
-                                   pressAncestor: ancestor)
+                                   pressAncestor: ancestor, selected: element["selected"] as? Bool)
             // One per name, except two clickable controls apart from each other (scenario
             // B12 2026-10-03: two "Download" buttons offered as one, and the press guessed).
             let sameName = pool.filter { $0.name == name }
@@ -247,7 +249,8 @@ nonisolated enum RealtimeScreenVerbs {
             candidates: offered.map { element in
                 RealtimeScreenCandidate(name: element.name, role: element.role, frame: element.frame,
                                         position: positionPhrase(of: element.frame, neighbours: neighbours, screens: display),
-                                        subrole: element.subrole, pressable: element.pressable, pressAncestor: element.pressAncestor)
+                                        subrole: element.subrole, pressable: element.pressable, pressAncestor: element.pressAncestor,
+                                        selected: element.selected)
             },
             elementCount: (response["elements"] as? [[String: Any]])?.count ?? 0,
             privacyDroppedCount: hidden,
@@ -510,6 +513,9 @@ nonisolated struct RealtimeScreenCandidate: Equatable, Sendable {
     /// `pressAncestor`, or not at all (`notPressable`).
     var pressable = true
     var pressAncestor: RealtimeScreenPressTarget? = nil
+    /// Without it a read could not say WHICH of Light/Dark/Auto is chosen: Gemini Flash and
+    /// gpt-5-mini re-read Appearance to the step cap, Claude answered from the picture (G14, 2026-10-13).
+    var selected: Bool? = nil
 
     var roleWord: String { RealtimeScreenVerbs.roleWord(role: role, subrole: subrole) }
 
@@ -529,7 +535,11 @@ nonisolated struct RealtimeScreenCandidate: Equatable, Sendable {
     /// by sight (`visionClick`), and the harness re-checks with this same rule.
     var axCanPress: Bool { pressable || HarnessHands.activeRoles.contains(role) || pressAncestor != nil }
 
-    var jsonObject: [String: Any] { ["name": name, "role": roleWord, "where": position] }
+    var jsonObject: [String: Any] {
+        var object: [String: Any] = ["name": name, "role": roleWord, "where": position]
+        if let selected { object["selected"] = selected }
+        return object
+    }
 
     /// "group \"Models\"": what was actually aimed at, for the model to repeat.
     var described: String { "\(roleWord) \(UntrustedText(name).forDisplay)" }

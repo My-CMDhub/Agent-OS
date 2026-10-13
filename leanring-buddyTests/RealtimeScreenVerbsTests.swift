@@ -64,6 +64,24 @@ struct RealtimeScreenVerbsTests {
         ]]
     }
 
+    /// G14 (2026-10-13): "light or dark?" — without the chosen option in the read, two models
+    /// re-read Appearance to the step cap. The snapshot's `selected` must reach the model.
+    @Test func aRadioButtonsStateReachesTheModel() {
+        var dark = element("AXRadioButton", "Dark", CGRect(x: 500, y: 400, width: 60, height: 40))
+        dark["selected"] = true
+        var light = element("AXRadioButton", "Light", CGRect(x: 400, y: 400, width: 60, height: 40))
+        light["selected"] = false
+        let response: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(screen),
+                                       "elements": [element("AXWindow", "Appearance", screen), light, dark,
+                                                    element("AXButton", "Auto", CGRect(x: 600, y: 400, width: 60, height: 40))]]
+        let objects = RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: response, words: "dark light auto", screens: [screen])
+            .candidates.map(\.jsonObject)
+        let state = Dictionary(uniqueKeysWithValues: objects.map { ($0["name"] as! String, $0["selected"] as? Bool) })
+        #expect(state["Dark"] == .some(true))
+        #expect(state["Light"] == .some(false))
+        #expect(state["Auto"] == .some(nil), "an unread state is absent, never false")
+    }
+
     private func offer(_ words: String) -> RealtimeScreenOffer {
         RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: cursorSnapshot, words: words, screens: [screen])
     }

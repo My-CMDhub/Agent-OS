@@ -291,6 +291,17 @@ struct AgentLoopTests {
         #expect(!text.contains("abcdefghijklmnop"))
     }
 
+    @Test func pageTextSaysWhichOptionIsChosen() {
+        let response: [String: Any] = ["elements": [
+            ["role": "AXButton", "name": "Light"],
+            ["role": "AXButton", "name": "Dark", "selected": true],
+            ["role": "AXButton", "name": "Auto"],
+            ["role": "AXCheckBox", "name": "Wi-Fi", "selected": false],
+            ["role": "AXRow", "name": "General", "selected": false]
+        ]]
+        #expect(AgentLoop.pageText(fromSnapshotResponse: response).text == "Light\nDark [selected]\nAuto\nWi-Fi [off]\nGeneral")
+    }
+
     @MainActor @Test func theFinalLinesClaimOnlyTheOutcome() {
         #expect(AgentLoop.finalLine(.done(summary: "The cheapest is Starter."), goal: "g", lastProgress: nil, step: 3)?.contains("The cheapest is Starter.") == true)
         let failed = AgentLoop.finalLine(.refusals(error: "elementNotFound"), goal: "g", lastProgress: "pressed Plans", step: 4) ?? ""

@@ -1471,9 +1471,14 @@ final class AgentLoop {
             if let parent = element["parent"] as? Int, elements.indices.contains(parent), elements[parent]["name"] as? String == element["name"] as? String {
                 continue
             }
-            if lines.last == name { continue }
-            lines.append(String(name.prefix(1500)))
-            total += min(name.count, 1500) + 1
+            // The chosen option, never only its name (G14 2026-10-13: Appearance's "Dark" button is
+            // AXSelected 1 and Light/Auto publish none; names alone sent two models round to the cap).
+            let toggle = ["AXCheckBox", "AXRadioButton"].contains(element["role"] as? String ?? "")
+            let state = element["selected"] as? Bool == true ? " [selected]" : element["selected"] as? Bool == false && toggle ? " [off]" : ""
+            let line = String(name.prefix(1500)) + state
+            if lines.last == line { continue }
+            lines.append(line)
+            total += min(name.count, 1500) + state.count + 1
             if total > pageTextCharacterLimit { return (SecretScanner.redact(lines.joined(separator: "\n")), true) }
         }
         return (SecretScanner.redact(lines.joined(separator: "\n")), false)
