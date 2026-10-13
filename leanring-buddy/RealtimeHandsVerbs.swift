@@ -111,6 +111,7 @@ nonisolated enum RealtimeHandsVerbs {
             }
             // The harness's own AXConfirm outcome ({published, axErrorRawValue}): a receipt reads it.
             if let confirm = response["confirm"] { result["confirm"] = confirm }
+            if let commits = response["fieldCommitsOnConfirm"] { result["fieldCommitsOnConfirm"] = commits }
         default:
             break
         }

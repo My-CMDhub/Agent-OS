@@ -273,6 +273,14 @@ struct AgentPlanTests {
         #expect(!AgentLoop.typeWasSubmitted(["ok": true]), "absent: not submitted")
         #expect(!AgentLoop.typeWasSubmitted(["ok": true, "confirm": ["published": false]]))
         #expect(!AgentLoop.typeWasSubmitted(["ok": true, "confirm": ["published": true, "axErrorRawValue": -25204]]))
+        // 09-14-58Z: a read after the typing showed Calendar's SUGGESTION line, not an event. Typed into a field
+        // that saves only when submitted, unsubmitted, is no creation whatever a read shows beside it.
+        var suggested = Self.e03
+        suggested[2] = .init(step: 3, toolName: "type_text", ok: true, error: nil, typed: "JARVIS test meeting tomorrow at 3 pm", awaitsCommit: true)
+        suggested[4] = .init(step: 5, toolName: "find_on_screen", ok: true, error: nil, shown: "JARVIS test meeting Tomorrow 3 pm to 4 pm")
+        #expect(AgentLoop.doneChallenge(summary: Self.e03Claim, evidence: [2, 3, 7], receipts: suggested, currentStep: 8)?.contains("submit true") == true)
+        #expect(AgentLoop.doneChallenge(summary: "I typed it into the new event box but did not save it.", evidence: [3],
+                                        receipts: suggested, currentStep: 8) == nil, "an honest summary is no claim")
         // A read BEFORE the typing proves nothing about it.
         let readFirst = [AgentLoop.Receipt(step: 1, toolName: "find_on_screen", ok: true, error: nil, shown: "JARVIS test meeting")] + Self.e03
         #expect(AgentLoop.doneChallenge(summary: Self.e03Claim, evidence: [3], receipts: readFirst, currentStep: 8) != nil)

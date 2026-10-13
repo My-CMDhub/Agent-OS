@@ -366,6 +366,10 @@ final class AgentLoop {
         /// An ok type_text the field took as submitted: its AXConfirm published and answered 0
         /// (`typeWasSubmitted`). Commit evidence for what it typed. In memory only.
         var submitted = false
+        /// An ok type_text into a field that saves only when submitted, not submitted: nothing exists
+        /// yet, whatever a read shows beside it (E03 2026-10-13: Calendar's suggestion line
+        /// "JARVIS test meeting Tomorrow 3 pm" passed for the event). In memory only.
+        var awaitsCommit = false
     }
 
     /// An ask_owner the run paused on: its call's id, and the results of the
@@ -858,7 +862,9 @@ final class AgentLoop {
                                         words: Self.plainWords(toolName: toolName, args: args),
                                         typed: ok && Self.namingTools.contains(toolName) ? call?.text : nil, pressedRole: pressedRole,
                                         shown: ok ? Self.appShownText(toolName: toolName, result: result) : nil,
-                                        submitted: ok && toolName == RealtimeVoiceVerbs.typeTextName && Self.typeWasSubmitted(result)))
+                                        submitted: ok && toolName == RealtimeVoiceVerbs.typeTextName && Self.typeWasSubmitted(result),
+                                        awaitsCommit: ok && toolName == RealtimeVoiceVerbs.typeTextName && !Self.typeWasSubmitted(result)
+                                            && result["fieldCommitsOnConfirm"] as? Bool == true))
                 var fields: [String: Any] = ["tool": toolName, "args": args, "ok": ok, "error": error ?? NSNull(), "harnessMs": harnessMs,
                                              "waitedForConfirmation": waited]
                 if !(web is NSNull) { fields["web"] = web }
@@ -1118,6 +1124,10 @@ final class AgentLoop {
                 return "no ok type_text typed \"\(name)\", the name the summary says was created"
             }
             if receipts[typedAt].toolName == RealtimeVoiceVerbs.renameItemName || receipts[typedAt].submitted { continue }
+            if receipts[typedAt].awaitsCommit {
+                return "\"\(name)\" was typed into an entry that saves only when submitted, and it was not submitted, so nothing was "
+                    + "created. Type it again with mode replace and submit true, or say only what was done"
+            }
             let seen = receipts[(typedAt + 1)...].contains { $0.ok && $0.shown?.lowercased().contains(wanted) == true }
                 || seenNow?.lowercased().contains(wanted) == true
             if !seen {

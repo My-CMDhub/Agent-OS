@@ -3362,6 +3362,9 @@ final class HarnessServer {
                 }
             }
 
+            // Whether this field saves only on Return / AXConfirm (Calendar's quick entry, a new
+            // Reminders row — 2026-10-13): typed-but-unsubmitted text there made nothing.
+            response["fieldCommitsOnConfirm"] = resolvedNode.publishedActionNames.contains(kAXConfirmAction)
             if request.thenConfirm {
                 // A missing AXConfirm is never a failure of the type — measured
                 // 2026-09-10, System Settings' search filtered live with no
