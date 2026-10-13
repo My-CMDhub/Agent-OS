@@ -3364,12 +3364,17 @@ final class HarnessServer {
 
             // Whether this field saves only on Return / AXConfirm (Calendar's quick entry, a new
             // Reminders row — 2026-10-13): typed-but-unsubmitted text there made nothing.
-            response["fieldCommitsOnConfirm"] = resolvedNode.publishedActionNames.contains(kAXConfirmAction)
+            // Asked of the LIVE element too: a target named from the walk may carry no action names
+            // (E03 09-27Z: "New Quick Event" by name read false, the same field by focus true).
+            var liveActionNames: CFArray?
+            let publishesConfirm = resolvedNode.publishedActionNames.contains(kAXConfirmAction)
+                || (AXUIElementCopyActionNames(element, &liveActionNames) == .success
+                    && ((liveActionNames as? [String]) ?? []).contains(kAXConfirmAction))
+            response["fieldCommitsOnConfirm"] = publishesConfirm
             if request.thenConfirm {
                 // A missing AXConfirm is never a failure of the type — measured
                 // 2026-09-10, System Settings' search filtered live with no
                 // confirm at all.
-                let publishesConfirm = resolvedNode.publishedActionNames.contains(kAXConfirmAction)
                 if publishesConfirm {
                     let confirmResult = AccessibilityActionPerformer.perform(kAXConfirmAction, on: element)
                     response["confirm"] = [

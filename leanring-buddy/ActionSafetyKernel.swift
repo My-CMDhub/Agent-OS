@@ -50,7 +50,10 @@ enum ActionSafetyKernel {
     /// sidebar row is anonymous, so the element a planner can name is the label
     /// two levels inside it. Selecting changes what is selected — the write
     /// itself cannot activate anything else.
-    static let navigationalSelectRoles: Set<String> = ["AXRow", "AXCell", "AXStaticText"]
+    /// `AXList`: Calendar's month view publishes each DAY as an AXList of its events; selecting
+    /// "Tuesday 6 October" was carded "unrecognised role AXList" in every E03 run (2026-10-13,
+    /// Gemini and Claude alike), so no model could reach a date. Selecting a day moves the view.
+    static let navigationalSelectRoles: Set<String> = ["AXRow", "AXCell", "AXStaticText", "AXList"]
 
     /// The only roles that may be typed into. Everything else is refused, not
     /// asked about: a role that does not accept text has no correct answer to
