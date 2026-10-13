@@ -54,6 +54,19 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Owner at the desk: lists each protected folder once so macOS asks for Files & Folders
+        // (Clicky is not in /Applications, so Settings offers no "+"). Counts only, never names.
+        if CommandLine.arguments.contains("--folder-access-request") {
+            let lines = ["Desktop", "Documents", "Downloads"].map { folder -> String in
+                let path = NSHomeDirectory() + "/" + folder
+                do { return "\(folder): granted, \(try FileManager.default.contentsOfDirectory(atPath: path).count) items" }
+                catch { return "\(folder): not granted (\((error as NSError).code))" }
+            }
+            try? lines.joined(separator: "\n").write(toFile: "/private/tmp/clicky-folder-access.txt", atomically: true, encoding: .utf8)
+            NSApp.terminate(nil)
+            return
+        }
+
         // Spends API credit: capture -> Claude -> TTS download, five times, then quits.
         if CommandLine.arguments.contains("--voice-latency-probe") {
             Task { @MainActor in
