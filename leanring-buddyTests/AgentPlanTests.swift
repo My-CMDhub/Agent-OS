@@ -289,6 +289,13 @@ struct AgentPlanTests {
                                              typed: "JARVIS test meeting tomorrow at 3 pm", submitted: true)]
         #expect(AgentLoop.doneChallenge(summary: "I opened Calendar and added the JARVIS test meeting for tomorrow at 3 pm.",
                                         evidence: [1, 8], receipts: resubmitted, currentStep: 9) == nil)
+        // G15 09-58Z: a Save sheet's name field also publishes AXConfirm; its Save BUTTON commits it.
+        let saved: [AgentLoop.Receipt] = [
+            .init(step: 1, toolName: "open_app", ok: true, error: nil),
+            .init(step: 2, toolName: "type_text", ok: true, error: nil, typed: "JARVIS test 3", awaitsCommit: true),
+            .init(step: 3, toolName: "press_element", ok: true, error: nil, pressedRole: "AXButton")]
+        #expect(AgentLoop.doneChallenge(summary: "Created a document and saved it to the Desktop named JARVIS test 3.",
+                                        evidence: [1, 2, 3], receipts: saved, currentStep: 4, seenNow: "JARVIS test 3.rtf") == nil)
         // A read BEFORE the typing proves nothing about it.
         let readFirst = [AgentLoop.Receipt(step: 1, toolName: "find_on_screen", ok: true, error: nil, shown: "JARVIS test meeting")] + Self.e03
         #expect(AgentLoop.doneChallenge(summary: Self.e03Claim, evidence: [3], receipts: readFirst, currentStep: 8) != nil)
