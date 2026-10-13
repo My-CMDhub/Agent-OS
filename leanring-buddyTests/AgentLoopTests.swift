@@ -484,10 +484,17 @@ struct AgentLoopTests {
                      app("Shortcuts", "/System/Applications/Shortcuts.app"), app("iPhone Mirroring", "/System/Applications/iPhone Mirroring.app"),
                      app("Time Machine", "/System/Applications/Time Machine.app"), app("Messages", "/System/Applications/Messages.app"),
                      app("Music", "/System/Applications/Music.app"), app("Photos", "/System/Applications/Photos.app"),
-                     app("Passwords", "/System/Applications/Passwords.app"), app("App Store", "/System/Applications/App Store.app")]
+                     app("Passwords", "/System/Applications/Passwords.app"), app("App Store", "/System/Applications/App Store.app"),
+                     app("Clock", "/System/Applications/Clock.app")]
         func heard(_ words: String, _ named: String) -> Bool {
             RealtimeHeardCheck.wordsNameTheApp(transcript: words, named: named, among: names)
         }
+        // Owner's ruling 2026-10-13: a fixed task noun names its built-in app, and only that one.
+        #expect(heard("set a timer for 10 minutes", "Clock"))
+        #expect(heard("set an alarm for 6:45 tomorrow", "Clock"))
+        #expect(heard("add a meeting tomorrow at 3 pm", "Calendar"))
+        #expect(!heard("set a timer for 10 minutes", "Calendar"))
+        #expect(!heard("what time is it", "Clock"))
         // A whole multi-word name anywhere; a one-word name or a distinctive word only right after a cue word.
         #expect(heard("switch Calendar to the month view", "Calendar"))
         #expect(heard("switch to reminders and add milk", "Reminders"))

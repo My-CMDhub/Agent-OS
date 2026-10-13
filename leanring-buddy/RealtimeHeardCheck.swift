@@ -277,6 +277,7 @@ nonisolated enum RealtimeHeardCheck {
         // Owner's ruling R1 (2026-10-06): a built-in app is the default for its own noun.
         let builtIn = path(url).hasPrefix("/System/Applications/")
         if builtIn, url.lastPathComponent == "System Settings.app", namesASettingsPane(spoken) || saysAPanesOwnName(spoken) { return true }
+        if builtIn, let nouns = builtInTaskNouns[url.lastPathComponent], !Set(nouns.flatMap(forms)).isDisjoint(with: Set(spoken)) { return true }
         return own.contains { tokens in
             if tokens.count == 1 {
                 if builtIn, !ownNameEverydayWords.contains(tokens[0]), !forms(tokens[0]).isDisjoint(with: Set(spoken)) { return true }
@@ -289,6 +290,12 @@ nonisolated enum RealtimeHeardCheck {
             }
         }
     }
+
+    /// Owner's ruling 2026-10-13 (launch E01 "set a timer for 10 minutes" asked which app): a FIXED
+    /// list of task nouns names its built-in app. Never model-written, so a page cannot widen it.
+    static let builtInTaskNouns: [String: [String]] = [
+        "Clock.app": ["timer", "alarm", "stopwatch"],
+        "Calendar.app": ["meeting", "event", "appointment"]]
 
     /// Built-in one-word app names that are everyday words: they still need a cue word (R1 keeps them out).
     static let ownNameEverydayWords: Set<String> = [
