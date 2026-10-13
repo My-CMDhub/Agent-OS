@@ -281,6 +281,14 @@ struct AgentPlanTests {
         #expect(AgentLoop.doneChallenge(summary: Self.e03Claim, evidence: [2, 3, 7], receipts: suggested, currentStep: 8)?.contains("submit true") == true)
         #expect(AgentLoop.doneChallenge(summary: "I typed it into the new event box but did not save it.", evidence: [3],
                                         receipts: suggested, currentStep: 8) == nil, "an honest summary is no claim")
+        // 09-34Z: the same receipts with a summary that names nothing the parser reads — still challenged.
+        #expect(AgentLoop.doneChallenge(summary: "I opened Calendar and added the JARVIS test meeting for tomorrow at 3 pm.",
+                                        evidence: [2, 3], receipts: suggested, currentStep: 8) != nil)
+        // A later submitted typing settles it.
+        let resubmitted = suggested + [.init(step: 8, toolName: "type_text", ok: true, error: nil,
+                                             typed: "JARVIS test meeting tomorrow at 3 pm", submitted: true)]
+        #expect(AgentLoop.doneChallenge(summary: "I opened Calendar and added the JARVIS test meeting for tomorrow at 3 pm.",
+                                        evidence: [1, 8], receipts: resubmitted, currentStep: 9) == nil)
         // A read BEFORE the typing proves nothing about it.
         let readFirst = [AgentLoop.Receipt(step: 1, toolName: "find_on_screen", ok: true, error: nil, shown: "JARVIS test meeting")] + Self.e03
         #expect(AgentLoop.doneChallenge(summary: Self.e03Claim, evidence: [3], receipts: readFirst, currentStep: 8) != nil)

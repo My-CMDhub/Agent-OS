@@ -1135,6 +1135,15 @@ final class AgentLoop {
                     + "does not make the thing exist (an entry may still need committing). Find it on screen, or say only what was done"
             }
         }
+        // Whatever the wording (E03 09-34Z: "added the JARVIS test meeting for tomorrow" names nothing the
+        // parser reads): text left unsubmitted in a field that saves only on submit made nothing, so a
+        // making verb is challenged while the task's last such typing is unsubmitted.
+        if let pending = receipts.lastIndex(where: \.awaitsCommit),
+           !receipts[(pending + 1)...].contains(where: \.submitted),
+           summary.range(of: #"(?i)\b(added|created|made|scheduled|saved|set up|booked)\b"#, options: .regularExpression) != nil {
+            return "text typed into an entry that saves only when submitted was never submitted, so nothing was added or created. "
+                + "Type it again with mode replace and submit true, or say only what was done"
+        }
         let okSteps = Set(receipts.filter(\.ok).map(\.step))
         let ranSteps = Set(receipts.map(\.step))
         let unbacked = evidence.filter { !okSteps.contains($0) && !($0 == currentStep && !ranSteps.contains($0)) }
