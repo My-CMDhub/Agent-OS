@@ -1135,7 +1135,7 @@ private func typeDecision(into node: AccessibilityElementNode) -> SafetyDecision
         typing: ActionSafetyKernel.TypingContext(
             mode: .insert,
             settableAttributes: ["AXValue"],
-            currentValueLength: 0,
+            currentValueLength: 5,
             aimedByFocus: false
         )
     )
@@ -1143,6 +1143,13 @@ private func typeDecision(into node: AccessibilityElementNode) -> SafetyDecision
     #expect(decision == .refuse(
         reason: ActionSafetyKernel.missingSettableAttributeRefusalReason(attribute: "AXSelectedText")
     ))
+    // An EMPTY field is the exception: inserting into nothing is writing the value (Mail's
+    // unfocused Subject:, live 2026-10-13) — nothing is there to lose.
+    let empty = ActionSafetyKernel.evaluate(
+        intent: ElementActionIntent(role: nil, title: "Search", action: .type),
+        resolvedNode: typingNode(role: "AXTextField"), matchCount: 1, visibleBounds: wholeScreen,
+        typing: ActionSafetyKernel.TypingContext(mode: .insert, settableAttributes: ["AXValue"], currentValueLength: 0, aimedByFocus: false))
+    #expect(empty == .allow)
 }
 
 @Test func replacingTextThatIsAlreadyThereAsksFirstAndSaysHowMuch() async throws {
@@ -4264,4 +4271,12 @@ struct FocusSettleTests {
         #expect(settled.held == true)
         #expect(clock <= 0.3)
     }
+}
+
+
+@Test func dontSaveThrowsWorkAwaySoItAsks() {
+    // Mail's save sheet, 2026-10-13: the agent pressed "Don’t Save" with no card.
+    #expect(ActionSafetyKernel.confirmPhrase(in: "Don\u{2019}t Save") == "don t save")
+    #expect(ActionSafetyKernel.confirmPhrase(in: "Don't Save") == "don t save")
+    #expect(ActionSafetyKernel.confirmPhrase(in: "Save") == nil)
 }

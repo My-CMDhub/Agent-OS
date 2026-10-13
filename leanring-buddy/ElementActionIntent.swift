@@ -800,6 +800,10 @@ enum AccessibilityTypePerformer {
         switch mode {
         case .replace:
             error = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFString)
+        // An EMPTY field that offers no caret insert (Mail's unfocused Subject: AXSelectedText not
+        // settable, AXValue settable — live 2026-10-13): inserting into nothing IS replacing nothing.
+        case .insert where valueBefore.isEmpty && !settableAttributes(of: element).contains(kAXSelectedTextAttribute as String):
+            error = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFString)
         case .insert:
             if let refusal = caretAtEnd(of: element, valueBefore: valueBefore) {
                 return Outcome(attributeWritten: mode.settableAttributeRequired, error: .cannotComplete,

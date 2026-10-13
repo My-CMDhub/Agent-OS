@@ -325,6 +325,9 @@ enum ActionSafetyKernel {
         // Destructive words the substring list above does not reach.
         "deletion", "removal", "discard", "unsubscribe", "sign out", "leave", "deactivate", "uninstall", "revoke",
         "disconnect", "cancel subscription",
+        // "Don’t Save" throws unsaved work away (U04 2026-10-13: pressed with no card on Mail's
+        // save sheet). Split on non-letters, so it is "don t save" for either apostrophe.
+        "don t save",
         // Security approvals: a "yes" someone else is waiting for.
         "approve", "authorize", "authorise", "allow access", "yes it was me",
         // System Settings sharing and remote-access switches.
@@ -705,7 +708,10 @@ enum ActionSafetyKernel {
             }
             // The role said "text field". This is the element itself agreeing.
             let required = typing.mode.settableAttributeRequired
-            guard typing.settableAttributes.contains(required) else {
+            // Inserting into an empty field is writing its value (the performer does exactly that).
+            let emptyInsertByValue = typing.mode == .insert && typing.currentValueLength == 0
+                && typing.settableAttributes.contains(kAXValueAttribute as String)
+            guard typing.settableAttributes.contains(required) || emptyInsertByValue else {
                 return .refuse(reason: missingSettableAttributeRefusalReason(attribute: required))
             }
         }
