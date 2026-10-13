@@ -354,12 +354,18 @@ final class AgentLoop {
         var progress: String? = nil
         /// The same, by agent-loop.log's rules (`plainWords`): what the checkpoint keeps.
         var words: String? = nil
-        /// What an ok type_text typed — a created item's name must be in one (G05 2026-10-13).
-        /// In memory only, never in a checkpoint.
+        /// What an ok type_text (or rename_item) typed — a created item's name must be in one
+        /// (G05 2026-10-13). In memory only, never in a checkpoint.
         var typed: String? = nil
         /// What an ok press resolved to (`resolved.role`, or `AXSwitch` by subrole): a toggle
         /// claim needs a toggle pressed (U02 2026-10-13). In memory only.
         var pressedRole: String? = nil
+        /// What an ok read showed (`appShownText`: names, never a field's contents) — a created
+        /// item's name must be seen after its typing (E03 2026-10-13). In memory only.
+        var shown: String? = nil
+        /// An ok type_text the field took as submitted: its AXConfirm published and answered 0
+        /// (`typeWasSubmitted`). Commit evidence for what it typed. In memory only.
+        var submitted = false
     }
 
     /// An ask_owner the run paused on: its call's id, and the results of the
@@ -729,8 +735,14 @@ final class AgentLoop {
                                 "message": "this summary was written before \(readInBatch) returned; read its result, then call done"])
                         continue
                     }
+                    // A creation claim is held against the screen as it is NOW, after every step (E03 2026-10-13).
+                    var seenNow: String?
+                    if !Self.createdNames(summary).isEmpty {
+                        let page = await dependencies.readPage()
+                        if page["ok"] as? Bool == true { seenNow = page["text"] as? String }
+                    }
                     let challenge = summary.isEmpty ? "the summary is empty"
-                        : Self.doneChallenge(summary: summary, evidence: evidence, receipts: receipts, currentStep: step)
+                        : Self.doneChallenge(summary: summary, evidence: evidence, receipts: receipts, currentStep: step, seenNow: seenNow)
                     traced(["tool": toolName, "args": args, "ok": challenge == nil, "error": challenge == nil ? NSNull() : "doneUnbacked"])
                     guard let challenge else { return finish(.done(summary: summary)) }
                     if challengedDone { return finish(.failed(reason: "its summary claimed what no result of this task shows")) }
@@ -844,7 +856,9 @@ final class AgentLoop {
                 receipts.append(Receipt(step: step, toolName: call?.name ?? toolName, ok: ok, error: error,
                                         progress: Self.progressLine(toolName: toolName, call: call, result: result),
                                         words: Self.plainWords(toolName: toolName, args: args),
-                                        typed: ok && toolName == RealtimeVoiceVerbs.typeTextName ? call?.text : nil, pressedRole: pressedRole))
+                                        typed: ok && Self.namingTools.contains(toolName) ? call?.text : nil, pressedRole: pressedRole,
+                                        shown: ok ? Self.appShownText(toolName: toolName, result: result) : nil,
+                                        submitted: ok && toolName == RealtimeVoiceVerbs.typeTextName && Self.typeWasSubmitted(result)))
                 var fields: [String: Any] = ["tool": toolName, "args": args, "ok": ok, "error": error ?? NSNull(), "harnessMs": harnessMs,
                                              "waitedForConfirmation": waited]
                 if !(web is NSNull) { fields["web"] = web }
@@ -1071,7 +1085,7 @@ final class AgentLoop {
     /// own step when nothing ran there (`currentStep`): R2 980FBC67 cited it and
     /// paid a second model call to drop it. A close done by pressing (a menu's
     /// Close, a panel's kill button) is a close: the same run's second done.
-    static func doneChallenge(summary: String, evidence: [Int], receipts: [Receipt], currentStep: Int? = nil) -> String? {
+    static func doneChallenge(summary: String, evidence: [Int], receipts: [Receipt], currentStep: Int? = nil, seenNow: String? = nil) -> String? {
         // Backed by the steps it CITES (review of e98f476): an old ok result elsewhere in the run is no receipt.
         let cited = receipts.filter { $0.ok && (evidence.isEmpty || evidence.contains($0.step)) }
         var okTools = Set(cited.map(\.toolName))
@@ -1093,9 +1107,23 @@ final class AgentLoop {
         // A created item's NAME must have been typed this task (G05 2026-10-13: "created a reminder
         // called "JARVIS test reminder"" after a menu press and a look; nothing typed). Creation
         // sentences only — "opened the folder called scripts" names something that already exists.
-        let typedTexts = receipts.compactMap { $0.ok ? $0.typed?.lowercased() : nil }
-        for name in createdNames(summary) where !typedTexts.contains(where: { $0.contains(name.lowercased()) }) {
-            return "no ok type_text typed \"\(name)\", the name the summary says was created"
+        // And typing it is not making it (E03 2026-10-13: "added the meeting called JARVIS test meeting" —
+        // typed into Calendar's quick entry, which commits only on Return; 0 events after). The name must
+        // be SEEN after its typing: in a read's names (fields never list their contents) or the read
+        // taken at done (`seenNow`) — or the typing itself was submitted (AXConfirm answered 0).
+        // rename_item verifies the new name itself.
+        for name in createdNames(summary) {
+            let wanted = name.lowercased()
+            guard let typedAt = receipts.lastIndex(where: { $0.ok && $0.typed?.lowercased().contains(wanted) == true }) else {
+                return "no ok type_text typed \"\(name)\", the name the summary says was created"
+            }
+            if receipts[typedAt].toolName == RealtimeVoiceVerbs.renameItemName || receipts[typedAt].submitted { continue }
+            let seen = receipts[(typedAt + 1)...].contains { $0.ok && $0.shown?.lowercased().contains(wanted) == true }
+                || seenNow?.lowercased().contains(wanted) == true
+            if !seen {
+                return "nothing on screen after the typing shows \"\(name)\" outside the field it was typed into, and typing a name "
+                    + "does not make the thing exist (an entry may still need committing). Find it on screen, or say only what was done"
+            }
         }
         let okSteps = Set(receipts.filter(\.ok).map(\.step))
         let ranSteps = Set(receipts.map(\.step))
@@ -1103,13 +1131,40 @@ final class AgentLoop {
         return unbacked.isEmpty ? nil : "step \(unbacked.map(String.init).joined(separator: ", ")) has no ok result"
     }
 
-    /// Names a creation sentence gives in quotes: created/added/made … called/named/titled "X".
+    /// Names a creation sentence gives: created/added/made … called/named/titled "X" or X unquoted
+    /// (up to a joining word or punctuation: "called JARVIS test meeting for tomorrow"), and
+    /// "added X and Y to my list / calendar / reminders". A name cut short at a joining word still
+    /// matches inside the full one.
     static func createdNames(_ summary: String) -> [String] {
-        let pattern = #"(?i)\b(created|added|made|wrote|new)\b[^.!?]{0,60}?\b(called|named|titled)\s+["\u201C\u2018'](.{1,80}?)["\u201D\u2019']"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let range = NSRange(summary.startIndex..., in: summary)
-        return regex.matches(in: summary, range: range).compactMap { Range($0.range(at: 3), in: summary).map { String(summary[$0]) } }
+        func creation(_ verbs: String) -> String { #"(?i)\b(?:"# + verbs + #")\b[^.!?]{0,60}?\b(?:called|named|titled)\s+"# }
+        let quoted = creation("created|added|made|wrote|new|set up") + #"["\u201C\u2018'](.{1,80}?)["\u201D\u2019']"#
+        // Not "new" bare: "opened the new folder called scripts" names what was there.
+        let bare = creation("created|added|made|wrote|set up") + #"([^\s"\u201C\u2018'][^.,;:!?"\u201C\u201D\n]{0,79}?)"#
+            + #"(?=\s+(?:for|with|in|on|at|to|and|that|which|containing|from|under|inside|into|saying|due|by)\b|\s*[.,;:!?\n]|\s*$)"#
+        let addedTo = #"(?i)\badded\s+(?!(?:a|an|the|it|them|this|that|these|those|some|one|your|my|both|all)\b)"#
+            + #"([^.;:!?\n]{1,60}?)\s+to\s+(?:my|your|the)\s+(?:[\w'-]+\s+){0,2}?(?:list|calendar|reminders)\b"#
+        func captures(_ pattern: String) -> [String] {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+            return regex.matches(in: summary, range: NSRange(summary.startIndex..., in: summary))
+                .compactMap { Range($0.range(at: 1), in: summary).map { String(summary[$0]) } }
+        }
+        let items = captures(addedTo)
+            .filter { $0.range(of: #"\b(called|named|titled)\b"#, options: [.regularExpression, .caseInsensitive]) == nil }
+            .flatMap { $0.components(separatedBy: ",").flatMap { $0.components(separatedBy: " and ") } }
+        let names = (captures(quoted) + captures(bare) + items).map { $0.trimmingCharacters(in: .whitespaces) }
+        return names.filter { !$0.isEmpty }.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
     }
+
+    /// A type_text result whose field was submitted: the harness `confirm` (thenConfirm) says
+    /// AXConfirm was published and answered 0. Calendar's quick entry and a new Reminders row
+    /// commit only on Return or AXConfirm (measured 2026-10-13). Absent or anything else: not submitted.
+    nonisolated static func typeWasSubmitted(_ result: [String: Any]) -> Bool {
+        guard let confirm = result["confirm"] as? [String: Any] else { return false }
+        return confirm["published"] as? Bool == true && (confirm["axErrorRawValue"] as? NSNumber)?.intValue == 0
+    }
+
+    /// Tools whose ok result carries a name the task gave something (`Receipt.typed`).
+    static let namingTools: Set<String> = [RealtimeVoiceVerbs.typeTextName, RealtimeVoiceVerbs.renameItemName]
 
     static let pressTools: Set<String> = [RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName]
     // G16 2026-10-11: an ok open_settings_pane was no receipt for "opened Privacy & Security" (doneUnbacked x2).
