@@ -67,6 +67,8 @@ nonisolated enum AgentPlan {
                 "y": number("Step 1 only: down the screenshot, 0 to 1."),
                 "text": text("type_text: exactly the text to type."),
                 "mode": text("type_text: insert or replace."),
+                "submit": ["type": "boolean", "description": "type_text: true only to commit an entry that saves on Return (a quick-entry "
+                    + "box, a new list row); never to send a message."],
                 "direction": text("scroll: up, down, left or right."),
                 "amount": number("scroll: pages."),
                 "what": text("close: tab, window or app."),

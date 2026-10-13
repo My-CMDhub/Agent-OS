@@ -426,6 +426,43 @@ enum ActionSafetyKernel {
         }
     }
 
+    /// Owner's ruling 2026-10-13: no card on what touches only the owner's own organiser —
+    /// a card for what reaches a third person, personal or financial data, or a connection.
+    /// Live 2026-10-13: Calendar's quick entry and a new Reminders row are AXTextFields that
+    /// commit only on Return (AXConfirm), so E03/E04 typed and created nothing.
+    static let submitWithoutCardBundleIdentifiers: Set<String> = [
+        "com.apple.ical", "com.apple.reminders", "com.apple.notes", "com.apple.clock"
+    ]
+    /// Where submitting what was typed SENDS it: mail, messages, chat, and every browser
+    /// (`ScreenSecretGuard.isBrowser`). ponytail: a fixed list — an unlisted chat app still
+    /// cards, but its card may offer "Always"; read the app's category if one turns up.
+    static let submitSendsBundleIdentifiers: Set<String> = [
+        "com.apple.mail", "com.apple.mobilesms", "org.mozilla.firefox", "com.tinyspeck.slackmacgap", "com.hnc.discord",
+        "net.whatsapp.whatsapp", "desktop.whatsapp", "ru.keepcoder.telegram", "com.tdesktop.telegram",
+        "com.microsoft.teams", "com.microsoft.teams2", "us.zoom.xos"
+    ]
+
+    static func submitSends(bundleIdentifier: String?) -> Bool {
+        ScreenSecretGuard.isBrowser(bundleIdentifier)
+            || bundleIdentifier.map { submitSendsBundleIdentifiers.contains($0.lowercased()) } == true
+    }
+
+    /// `decision` with the submit rule laid over a `type` that AXConfirms (`thenConfirm`):
+    /// an organiser app keeps the kernel's answer, a sending app asks once (destructive:
+    /// Allow once or Deny, never Always), any other app asks. A refusal stays a refusal.
+    static func gatingSubmit(_ decision: SafetyDecision, thenConfirm: Bool, bundleIdentifier: String?) -> SafetyDecision {
+        guard thenConfirm, !(bundleIdentifier.map { submitWithoutCardBundleIdentifiers.contains($0.lowercased()) } == true)
+        else { return decision }
+        let sends = submitSends(bundleIdentifier: bundleIdentifier)
+        let reason = sends ? "submitting what was typed sends it to other people" : "submitting what was typed outside the owner's organiser apps"
+        switch decision {
+        case .refuse: return decision
+        case .requireConfirmation(let existing, let destructive):
+            return .requireConfirmation(reason: "\(existing); \(reason)", destructive: destructive || sends)
+        case .allow: return .requireConfirmation(reason: reason, destructive: sends)
+        }
+    }
+
     /// Apps that run arbitrary code or hold credentials. Starting one is asked about.
     static let launchConfirmationBundleIdentifiers: Set<String> = [
         "com.apple.Terminal", "com.googlecode.iterm2", "com.apple.ScriptEditor2",

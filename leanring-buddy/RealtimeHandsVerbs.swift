@@ -109,6 +109,8 @@ nonisolated enum RealtimeHandsVerbs {
             } else {
                 result["typedInto"] = target?.candidate?.described ?? "the field with keyboard focus"
             }
+            // The harness's own AXConfirm outcome ({published, axErrorRawValue}): a receipt reads it.
+            if let confirm = response["confirm"] { result["confirm"] = confirm }
         default:
             break
         }

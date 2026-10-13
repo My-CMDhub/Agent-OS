@@ -533,6 +533,9 @@ final class HarnessConfirmations: ObservableObject {
     /// from the verb and mode — never from the kernel's reason, which quotes
     /// app-written text. What the kernel matched is in Details.
     static func destructiveWarning(for shape: Shape) -> String {
+        if shape.verb == "type", shape.thenConfirm, ActionSafetyKernel.submitSends(bundleIdentifier: shape.bundleIdentifier) {
+            return "Sends it \u{2014} other people may see it"
+        }
         if shape.verb == "type", shape.mode == "replace" { return "Replaces everything in this field" }
         return "Destructive \u{2014} may not be undoable"
     }

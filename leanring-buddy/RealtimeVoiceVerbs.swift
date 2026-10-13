@@ -238,7 +238,8 @@ nonisolated enum RealtimeVoiceVerbs {
                                  Parameter(name: "amount", kind: .number, required: false,
                                            description: "How far, in pages (screens). Default 1.")] + positionParameters),
         Declaration(name: typeTextName,
-                    description: "Types text into a field of the app in front, as if from the keyboard. Never presses Enter or sends anything. "
+                    description: "Types text into a field of the app in front, as if from the keyboard. Never presses Enter or sends anything "
+                        + "(submit, below, commits an entry without a keystroke). "
                         + "Aim it by the field's name: the words printed in or beside it, for example \"Search\", looked up on screen. "
                         + "A position only for a field with no words; leave the aim out only for a field "
                         + "you know has keyboard focus — on a web page usually none has. Password fields are "
@@ -247,7 +248,10 @@ nonisolated enum RealtimeVoiceVerbs {
                                  Parameter(name: "text", description: "Exactly the text to type, as the owner gave it."),
                                  Parameter(name: "mode", required: false,
                                            description: "insert (default) adds at the end of what is there; replace swaps the whole field.",
-                                           options: TypeMode.allCases.map(\.rawValue))] + positionParameters),
+                                           options: TypeMode.allCases.map(\.rawValue)),
+                                 Parameter(name: "submit", kind: .flag, required: false,
+                                           description: "true only to commit an entry that saves on Return, such as a quick-entry box "
+                                            + "or a new list row (a Calendar event, a reminder). Never to send a message.")] + positionParameters),
         Declaration(name: openURLName,
                     description: "Opens a web page in a browser: the one named, or the default browser. Use it for a website "
                         + "(\"open LinkedIn in Chrome\" is https://www.linkedin.com/ in Google Chrome); open_app is for installed apps. "
@@ -952,6 +956,7 @@ nonisolated enum RealtimeDecisionTrace {
         // The text is the owner's: its length only, never the words.
         if let text = call.text { arguments["textLength"] = text.count }
         if let mode = call.mode { arguments["mode"] = mode }
+        if call.submit { arguments["submit"] = true }
         if let what = call.what { arguments["what"] = what }
         // A page's query can carry a search or an address: the host only.
         if let url = call.url { arguments["urlHost"] = URL(string: url)?.host ?? "<unreadable>" }

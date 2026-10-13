@@ -3088,7 +3088,7 @@ final class HarnessServer {
             return response
         }
         let decision = applyAppPolicy(
-            to: ActionSafetyKernel.gatingPersonNotifyingView(ActionSafetyKernel.evaluate(
+            to: ActionSafetyKernel.gatingSubmit(ActionSafetyKernel.gatingPersonNotifyingView(ActionSafetyKernel.evaluate(
                 intent: intent,
                 resolvedNode: resolvedNode,
                 matchCount: 1,
@@ -3099,7 +3099,7 @@ final class HarnessServer {
                 isListOption: isListOption,
                 opensPlainFinderFolder: plainFolder,
                 selectsListRow: selectsListRow
-            ), url: linkURL),
+            ), url: linkURL), thenConfirm: action == .type && request.thenConfirm, bundleIdentifier: snapshot.bundleIdentifier),
             bundleIdentifier: snapshot.bundleIdentifier, into: &response
         )
         let described = HarnessPolicy.describe(decision)

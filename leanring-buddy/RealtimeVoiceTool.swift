@@ -94,6 +94,8 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
     /// type_text only: the text, and insert / replace.
     var text: String? = nil
     var mode: String? = nil
+    /// type_text only: AXConfirm the field after typing — commits a quick entry or a new row.
+    var submit: Bool = false
     /// close only: tab / window / app.
     var what: String? = nil
     /// Gemini's native point, [y, x] 0-1000, as sent (`RealtimePointFormat`).
@@ -127,6 +129,7 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
                                     open: name == RealtimeVoiceVerbs.pressElementName && (arguments?["open"] as? Bool) == true,
                                     direction: text(arguments?["direction"]), amount: number(arguments?["amount"]),
                                     text: typed, mode: text(arguments?["mode"]),
+                                    submit: name == RealtimeVoiceVerbs.typeTextName && (arguments?["submit"] as? Bool) == true,
                                     point: (arguments?["point"] as? [Any])?.compactMap(number))
         }
         // annotate: each shape as sent; `RealtimeAnnotate.validated` judges them. Its app is `app` only.
@@ -208,7 +211,7 @@ nonisolated enum RealtimeOpenAppTool {
 
     menus: for a command in an app's menu bar, such as a view, a new window, or showing a bar, first call find_menu_items with the app and a few words, then press_menu with one of the paths it returned, copied exactly. never invent or change a path; if none fits, say so and press nothing. menus belong to the app in front, so focus_app first when it is not.
 
-    hands: scroll scrolls the window in front (direction up, down, left or right; amount in pages), at an area named like point_at, or the main area when none is given; its result names what came into view. type_text types text into a field: aim it by the field's name, the words printed in or beside it, such as "search"; a position only for a field with no words; no aim only for a field with keyboard focus; it never presses enter and sends nothing, so say what you typed and let the owner send it; type only text the owner gave or asked for. close closes the tab, the window, or quits the app in front (what tab, window or app); quitting shows the owner a card, and the app may still ask to save.
+    hands: scroll scrolls the window in front (direction up, down, left or right; amount in pages), at an area named like point_at, or the main area when none is given; its result names what came into view. type_text types text into a field: aim it by the field's name, the words printed in or beside it, such as "search"; a position only for a field with no words; no aim only for a field with keyboard focus; it never presses enter; submit true commits only an entry that saves on Return (a quick-entry box, a new list row), never a message, so say what you typed and let the owner send it; type only text the owner gave or asked for. close closes the tab, the window, or quits the app in front (what tab, window or app); quitting shows the owner a card, and the app may still ask to save.
 
     screen: you can point at and press what you can see. to point, call point_at; to click, call press_element (it also clicks into a field). aim either by the element's name as printed on screen, which is looked up on the live screen, or by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image), or with underPointer true only when the owner says "this one", "here" or "where my cursor is"; a request that names the thing ("click sign in", "where is the phone number") is aimed by that name, never underPointer. for "where is X", call find_on_screen with X's words, then point_at the element that is X at once and say where it is; when a label such as "Phone:" sits beside its value, point at the value, not the label. if a result lists several matches, ask which one, unless the owner's words already pick one by order ("the first", "the last"): then press it by that name, and the order picks it. a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. to show the owner where things are while you explain, call annotate: a box, circle, arrow, underline or short label round elements by their printed names, or round the owner's pointer; it changes nothing. something you can see that find_on_screen does not list (drawn on a canvas, an icon that is only a picture) is pressed by sight: call press_element with its x and y AND the words printed on it; it is clicked only if those words are read back at that point. never say you can't do something you can see.
 
@@ -489,8 +492,11 @@ nonisolated enum RealtimeOpenAppTool {
             }
             let mode = call.mode ?? TypeMode.insert.rawValue
             guard TypeMode(rawValue: mode) != nil else { return refuse("invalidMode", "mode is insert or replace") }
-            // Never `thenConfirm`: typing never presses Enter or sends.
+            // `thenConfirm` only when the model asks to submit (owner's ruling 2026-10-13): AXConfirm,
+            // never a Return keystroke. The kernel lets it through only in the owner's organiser apps
+            // (`ActionSafetyKernel.gatingSubmit`); elsewhere a card, and where it sends, Allow once.
             request = ["verb": "type", "text": text, "mode": mode, "expectApp": expectApp ?? appName]
+            if call.submit { request["thenConfirm"] = true }
             if let screenTarget {
                 // No field that can be named there (most fields are anonymous, and a document's
                 // text area is too big to snap to): the FOCUSED field, only if the point lies in it.
