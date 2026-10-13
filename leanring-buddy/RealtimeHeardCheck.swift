@@ -295,7 +295,9 @@ nonisolated enum RealtimeHeardCheck {
     /// list of task nouns names its built-in app. Never model-written, so a page cannot widen it.
     static let builtInTaskNouns: [String: [String]] = [
         "Clock.app": ["timer", "alarm", "stopwatch"],
-        "Calendar.app": ["meeting", "event", "appointment"]]
+        "Calendar.app": ["meeting", "event", "appointment"],
+        // Opening Mail reaches no one; a Send is always its own card (U04, owner's rule 2026-10-13).
+        "Mail.app": ["email"]]
 
     /// Built-in one-word app names that are everyday words: they still need a cue word (R1 keeps them out).
     static let ownNameEverydayWords: Set<String> = [

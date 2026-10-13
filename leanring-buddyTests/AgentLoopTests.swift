@@ -485,7 +485,7 @@ struct AgentLoopTests {
                      app("Time Machine", "/System/Applications/Time Machine.app"), app("Messages", "/System/Applications/Messages.app"),
                      app("Music", "/System/Applications/Music.app"), app("Photos", "/System/Applications/Photos.app"),
                      app("Passwords", "/System/Applications/Passwords.app"), app("App Store", "/System/Applications/App Store.app"),
-                     app("Clock", "/System/Applications/Clock.app")]
+                     app("Clock", "/System/Applications/Clock.app"), app("Mail", "/System/Applications/Mail.app")]
         func heard(_ words: String, _ named: String) -> Bool {
             RealtimeHeardCheck.wordsNameTheApp(transcript: words, named: named, among: names)
         }
@@ -495,6 +495,8 @@ struct AgentLoopTests {
         #expect(heard("add a meeting tomorrow at 3 pm", "Calendar"))
         #expect(!heard("set a timer for 10 minutes", "Calendar"))
         #expect(!heard("what time is it", "Clock"))
+        #expect(heard("send an email to myself saying I quit", "Mail"))
+        #expect(!heard("check my mail later", "Calendar"))
         // A whole multi-word name anywhere; a one-word name or a distinctive word only right after a cue word.
         #expect(heard("switch Calendar to the month view", "Calendar"))
         #expect(heard("switch to reminders and add milk", "Reminders"))
