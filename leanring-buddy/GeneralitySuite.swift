@@ -45,8 +45,9 @@ enum GeneralitySuite {
         /// A `~/JARVIS-sandbox` task (`LaunchSuite.swift`): the fixture is written fresh before it, the checker gets
         /// `sandboxBefore`/`sandboxAfter` listings, and these paths (what the task was asked to create) are removed after.
         var sandbox: Set<String>? = nil
-        /// World reads taken right before the goal run, merged into what the checker gets.
-        var pre: (() -> [String: Any])? = nil
+        /// World reads taken right before the goal run, merged into what the checker gets
+        /// (async: E01/E04 launch a quit app behind to read it, `readLaunchingIfNeeded`).
+        var pre: (() async -> [String: Any])? = nil
         /// (spoken answer, the goal run's report) -> evidence with "passed".
         let check: (_ spoken: String, _ run: [String: Any]) async -> [String: Any]
     }
@@ -195,23 +196,29 @@ enum GeneralitySuite {
     /// 2026-10-12). Launch it behind, count once a window reads (10 s), quit it again so the task starts
     /// as before; anything that does not happen in time is nil, never 0.
     static func countBeforeLaunchingIfNeeded(_ bundle: String, _ match: @escaping @Sendable (AccessibilityElementNode) -> Bool) async -> Int? {
+        await readLaunchingIfNeeded(bundle) { appCount(bundle, match) }
+    }
+
+    /// Any read of an app that may be quit, by the same launch-behind-and-quit rule.
+    static func readLaunchingIfNeeded<T: Sendable>(_ bundle: String, _ body: @escaping @Sendable () -> T?) async -> T? {
         if NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first != nil {
-            return await Task.detached { appCount(bundle, match) }.value
+            return await Task.detached { body() }.value
         }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return nil }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         guard let app = try? await NSWorkspace.shared.openApplication(at: url, configuration: configuration) else { return nil }
-        var count: Int?
+        var read: T?
         for _ in 0..<50 {   // 10 s: a cold first launch of Reminders took over 5 s (G05 20-05-26Z)
             try? await Task.sleep(for: .milliseconds(200))
             let pid = app.processIdentifier
             let windows = await Task.detached { CoverageAudit.windows(of: pid).count }.value
-            if windows > 0 { count = await Task.detached { appCount(bundle, match) }.value; break }
+            // A window can read before its content has loaded: a nil read is asked again until the deadline.
+            if windows > 0, let value = await Task.detached(operation: { body() }).value { read = value; break }
         }
         app.terminate()
         for _ in 0..<15 where !app.isTerminated { try? await Task.sleep(for: .milliseconds(200)) }
-        return app.isTerminated ? count : nil
+        return app.isTerminated ? read : nil
     }
 
     nonisolated static func appCount(_ bundle: String, _ match: (AccessibilityElementNode) -> Bool) -> Int? {
@@ -467,7 +474,7 @@ enum GeneralitySuite {
                 }
                 sandboxBefore = listing
             }
-            let pre = task.pre?() ?? [:]
+            let pre = await task.pre?() ?? [:]
             let run = await AgentLoopProbe.goalRun(words: task.words, harness: harness, confirmations: confirmations)
             result.merge(run) { current, _ in current }
             let spoken = run["spoken"] as? String ?? ""
