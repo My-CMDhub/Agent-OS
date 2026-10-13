@@ -196,7 +196,9 @@ extension GeneralitySuite {
     nonisolated static func isTestMeeting(_ description: String, day: String) -> Bool {
         let parts = description.components(separatedBy: ". Starts on ")
         guard parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces).lowercased() == meetingTitle.lowercased() else { return false }
-        let start = parts[1].lowercased()
+        // macOS writes "3:00\u{202F}pm" — a NARROW no-break space (live, 2026-10-13: two real events
+        // read as 0 because "3:00 pm" never matched). Any Unicode space counts as one.
+        let start = String(parts[1].lowercased().map { $0.isWhitespace ? " " : $0 })
         return ["\(day.lowercased()) at 3:00 pm", "\(day.lowercased()) at 3:00 p.m.", "\(day.lowercased()) at 15:00"].contains { start.hasPrefix($0) }
     }
 

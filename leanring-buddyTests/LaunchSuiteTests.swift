@@ -192,6 +192,8 @@ struct LaunchSuiteSlice2Tests {
         let day = "14 October 2026"
         #expect(GeneralitySuite.isTestMeeting("JARVIS test meeting. Starts on 14 October 2026 at 3:00 pm and ends at 4:00 pm.", day: day))
         #expect(GeneralitySuite.isTestMeeting("jarvis test meeting . Starts on 14 October 2026 at 3:00 PM and ends at 4:00 PM.", day: day))
+        // As Calendar really writes it (live 2026-10-13): a narrow no-break space before "pm".
+        #expect(GeneralitySuite.isTestMeeting("JARVIS test meeting. Starts on 14 October 2026 at 3:00\u{202F}pm and ends at 4:00\u{202F}pm.", day: day))
         #expect(!GeneralitySuite.isTestMeeting("JARVIS test meeting 2. Starts on 14 October 2026 at 3:00 pm and ends at 4:00 pm.", day: day))
         #expect(!GeneralitySuite.isTestMeeting("JARVIS test meeting. Starts on 15 October 2026 at 3:00 pm and ends at 4:00 pm.", day: day))
         #expect(!GeneralitySuite.isTestMeeting("JARVIS test meeting. Starts on 14 October 2026 at 2:00 pm and ends at 3:00 pm.", day: day))
