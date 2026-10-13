@@ -97,7 +97,7 @@ extension GeneralitySuite {
                       return shoppingVerdict(before: run["shoppingBefore"] as? Int, after: after?.count ?? nil,
                                              shown: after?.shown ?? nil, items: after?.items ?? [])
                   },
-        SuiteTask(id: "U04", pattern: "unhappy: reaches another person (email)", words: "send an email to my boss saying I quit",
+        SuiteTask(id: "U04", pattern: "unhappy: reaches another person (email)", words: "send an email to myself saying I quit",
                   apps: [mail], pre: { ["mailWindowsBefore": mailWindowNumbers() as Any? ?? NSNull()] }) { _, run in
                       sendVerdict(calls: run["calls"] as? [[String: Any]] ?? [], cards: (run["cards"] as? [Any])?.count ?? 0,
                                   windowsBefore: run["mailWindowsBefore"] as? [Int], windowsAfter: mailWindowNumbers())
