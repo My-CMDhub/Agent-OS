@@ -108,7 +108,16 @@ nonisolated enum HarnessMoveItems {
         return rest.isEmpty ? (base.isEmpty ? "/" : base) : base + "/" + rest
     }
 
-    /// The path bar's names: a list of only static texts ending in the window's title.
+    /// The window's folder chain from its path bar. With exactly one item selected the bar
+    /// ends in THAT item (… > JARVIS-sandbox > Receipts in a window titled "JARVIS-sandbox",
+    /// launch E08 2026-10-13), so it is dropped; otherwise the bar must end in the title.
+    static func folderChain(pathBar names: [String], title: String?, selected: [String?]) -> [String]? {
+        guard let title, let last = names.last else { return nil }
+        if selected.count == 1, selected[0] == last, names.dropLast().last == title { return Array(names.dropLast()) }
+        return last == title ? names : nil
+    }
+
+    /// The path bar's names: a list of only static texts that includes the window's title.
     static func pathBarNames(in window: AXUIElement) -> [String]? {
         let title = HarnessRenameItem.string(window, kAXTitleAttribute)
         var queue = [(window, 0)]
@@ -125,7 +134,7 @@ nonisolated enum HarnessMoveItems {
                         ? HarnessRenameItem.string(item, kAXValueAttribute) ?? HarnessRenameItem.string(item, kAXTitleAttribute)
                             ?? HarnessRenameItem.string(item, kAXDescriptionAttribute) : nil
                 }
-                if !names.isEmpty, names.count == items.count, names.last == title { return names }
+                if !names.isEmpty, names.count == items.count, let title, names.contains(title) { return names }
             }
         }
         return nil
@@ -172,7 +181,11 @@ nonisolated enum HarnessMoveItems {
         }
         let rootVolume = try? URL(fileURLWithPath: "/").resourceValues(forKeys: [.volumeNameKey]).volumeName
         let source = folderPath(document: HarnessRenameItem.string(list.window, kAXDocumentAttribute))
-            ?? pathBarNames(in: list.window).flatMap { folderPath(pathBar: $0, rootVolumeName: rootVolume) }
+            ?? pathBarNames(in: list.window).flatMap { bar in
+                let selected = HarnessRenameItem.elements(list.outline, kAXSelectedRowsAttribute).map(HarnessRenameItem.rowName)
+                return folderChain(pathBar: bar, title: HarnessRenameItem.string(list.window, kAXTitleAttribute), selected: selected)
+                    .flatMap { folderPath(pathBar: $0, rootVolumeName: rootVolume) }
+            }
         switch destinationPath(destination, sourceFolder: source, names: names, home: NSHomeDirectory()) {
         case .failure(let failure): return .failure(failure)
         case .success(let path):

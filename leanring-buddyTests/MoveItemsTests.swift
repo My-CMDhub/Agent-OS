@@ -61,6 +61,12 @@ struct MoveItemsTests {
         #expect(bar(["Backup", "Photos"]) == "/Volumes/Backup/Photos", "another volume lives under /Volumes")
         #expect(bar(["Macintosh HD", "Users", "a/b"]) == nil, "a shown slash is a colon on disk")
         #expect(bar([]) == nil)
+        let chain = { HarnessMoveItems.folderChain(pathBar: $0, title: "JARVIS-sandbox", selected: $1) }
+        let sandbox = ["Macintosh HD", "Users", "owner", "JARVIS-sandbox"]
+        #expect(chain(sandbox, []) == sandbox)
+        #expect(chain(sandbox + ["Receipts"], ["Receipts"]) == sandbox, "the bar ends in the one selected item")
+        #expect(chain(sandbox + ["Receipts"], []) == nil, "an unexplained last name is not the folder")
+        #expect(chain(sandbox + ["JARVIS-sandbox"], ["JARVIS-sandbox"]) == sandbox, "a selected item named like its folder")
     }
 
     @Test func aNameTheDestinationListsIsTakenCaseInsensitively() {
