@@ -115,7 +115,10 @@ nonisolated enum HarnessMoveItems {
         guard let title, let last = names.last else { return nil }
         // A row whose rename field is open reads its name EMPTY (launch E08 2026-10-14, diagnostic: "path bar: 5
         // names ending "untitled folder"; window "JARVIS-sandbox"; 1 selected") — still the one selected item.
-        if selected.count == 1, selected[0] == last || (selected[0] ?? "").isEmpty, names.dropLast().last == title {
+        // And Finder does not refresh the bar after a rename: launch E08 2026-10-14 20:33 read "5 names ending
+        // "untitled folder"" with the row already "Receipts". With one row selected, the one name past the
+        // title is the selection's, whatever it reads.
+        if selected.count == 1, names.dropLast().last == title {
             return Array(names.dropLast())
         }
         return last == title ? names : nil

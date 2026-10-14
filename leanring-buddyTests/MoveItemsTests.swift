@@ -70,6 +70,7 @@ struct MoveItemsTests {
         #expect(chain(sandbox + ["untitled folder"], [nil]) == sandbox, "its rename field open, the selected row reads no name")
         #expect(chain(sandbox + ["untitled folder"], [""]) == sandbox)
         #expect(chain(sandbox + ["untitled folder"], [nil, nil]) == nil, "two selected: which one the bar shows is unknown")
+        #expect(chain(sandbox + ["untitled folder"], ["Receipts"]) == sandbox, "the bar is stale after a rename")
     }
 
     @Test func aNameTheDestinationListsIsTakenCaseInsensitively() {
