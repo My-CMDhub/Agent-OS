@@ -67,6 +67,9 @@ struct MoveItemsTests {
         #expect(chain(sandbox + ["Receipts"], ["Receipts"]) == sandbox, "the bar ends in the one selected item")
         #expect(chain(sandbox + ["Receipts"], []) == nil, "an unexplained last name is not the folder")
         #expect(chain(sandbox + ["JARVIS-sandbox"], ["JARVIS-sandbox"]) == sandbox, "a selected item named like its folder")
+        #expect(chain(sandbox + ["untitled folder"], [nil]) == sandbox, "its rename field open, the selected row reads no name")
+        #expect(chain(sandbox + ["untitled folder"], [""]) == sandbox)
+        #expect(chain(sandbox + ["untitled folder"], [nil, nil]) == nil, "two selected: which one the bar shows is unknown")
     }
 
     @Test func aNameTheDestinationListsIsTakenCaseInsensitively() {

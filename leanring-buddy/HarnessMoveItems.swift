@@ -113,7 +113,11 @@ nonisolated enum HarnessMoveItems {
     /// launch E08 2026-10-13), so it is dropped; otherwise the bar must end in the title.
     static func folderChain(pathBar names: [String], title: String?, selected: [String?]) -> [String]? {
         guard let title, let last = names.last else { return nil }
-        if selected.count == 1, selected[0] == last, names.dropLast().last == title { return Array(names.dropLast()) }
+        // A row whose rename field is open reads its name EMPTY (launch E08 2026-10-14, diagnostic: "path bar: 5
+        // names ending "untitled folder"; window "JARVIS-sandbox"; 1 selected") — still the one selected item.
+        if selected.count == 1, selected[0] == last || (selected[0] ?? "").isEmpty, names.dropLast().last == title {
+            return Array(names.dropLast())
+        }
         return last == title ? names : nil
     }
 
