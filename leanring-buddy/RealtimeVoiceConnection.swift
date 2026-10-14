@@ -929,9 +929,9 @@ final class RealtimeVoiceConnection {
                             onConfirmationRequired agentCardOpened: (@MainActor () -> Void)? = nil,
                             isCurrent: @escaping @MainActor () -> Bool) async -> RealtimeToolDispatch? {
         // press_menu(shortcut:): the mapped item that owns it, by its path, so every gate below is the path's.
-        let call: RealtimeToolCall
+        let resolvedCall: RealtimeToolCall
         switch RealtimeOpenAppTool.withShortcutResolved(unresolvedCall, map: turn.affordanceMenuOffer) {
-        case .success(let resolved): call = resolved
+        case .success(let resolved): resolvedCall = resolved
         case .failure(let refusal):
             let refused = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: refusal), harnessMilliseconds: 0,
                                                waitedForConfirmation: false, harnessResponse: nil)
@@ -948,12 +948,13 @@ final class RealtimeVoiceConnection {
         var dispatch: RealtimeToolDispatch
         // Before the request, so the owner sees the intent while it runs;
         // from the tool's own argument, never from anything said aloud.
-        let isKnownTool = RealtimeVoiceVerbs.allToolNames.contains(call.name)
+        let isKnownTool = RealtimeVoiceVerbs.allToolNames.contains(resolvedCall.name)
         // The owner's words against the tool's app, before anything is focused,
         // opened, searched or pressed.
-        let heard = await heardCheck(for: call, in: turn)
+        let heard = await heardCheck(for: resolvedCall, in: turn)
         // The owner's words, once complete (the check above waited for them).
         let heardWords = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime) != nil ? turn.heardText : nil
+        let call = RealtimeOpenAppTool.droppingUnsaidPointer(resolvedCall, heard: heardWords)
         // open_url: the owner's words must name the site (hands design item 7).
         var siteRefusal: [String: Any]?
         if call.name == RealtimeVoiceVerbs.openURLName, checksSite {

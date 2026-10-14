@@ -1223,6 +1223,20 @@ nonisolated enum RealtimeOpenAppTool {
         heard.allSatisfy(\.isWhitespace) || RealtimeVoiceVerbs.foldedTokens(heard).contains(where: deicticWords.contains)
     }
 
+    /// underPointer the owner never said, on a call that aims without it: the flag is
+    /// dropped and the call is judged as if never sent — its name or position aims, and
+    /// a scroll with nothing else takes the window's main area. Scenario run 2026-10-14
+    /// 19-17-42Z: A3 "scroll down" and C5 (type_text with a name AND x, y) were refused
+    /// `underPointerNotSaid`, and both times the model asked the owner instead of retrying.
+    /// Nothing else aimed (a press, a point, a typing): still refused in `resolveScreenTarget`.
+    static func droppingUnsaidPointer(_ call: RealtimeToolCall, heard: String?) -> RealtimeToolCall {
+        guard call.underPointer, let heard, !heardPointsAtSomething(heard),
+              call.elementName != nil || (call.x != nil && call.y != nil) || call.name == RealtimeVoiceVerbs.scrollName else { return call }
+        var dropped = call
+        dropped.underPointer = false
+        return dropped
+    }
+
     /// The live screen's answer for a name: a forModel snapshot of the app in
     /// front (the find_on_screen read, under its policy), matched locally.
     /// `results`: the page's search results (`resultHeadings`) instead of a name's matches.

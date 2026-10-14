@@ -125,6 +125,21 @@ struct HandsVoiceTests {
         #expect(try await resolve(call, heard: nil, pointer: pointer).get() == pointer)
     }
 
+    // Scenario run 2026-10-14 19-17-42Z: A3 scroll and C5 type_text (name AND x, y) were refused for an
+    // unsaid underPointer, and the model asked instead of retrying. The flag goes; the rest of the call aims.
+    @Test func anUnsaidPointerIsDroppedWhenTheCallAimsWithoutIt() {
+        let drop = RealtimeOpenAppTool.droppingUnsaidPointer
+        let scroll = RealtimeToolCall(callID: "s", name: "scroll", appName: nil, underPointer: true)
+        #expect(!drop(scroll, "Scroll down.").underPointer, "a scroll with nothing else takes the main area")
+        let typed = RealtimeToolCall(callID: "t", name: "type_text", appName: nil, elementName: "Search", x: 0.13, y: 0.36, underPointer: true)
+        let kept = drop(typed, "Type Hello World in the search box.")
+        #expect(!kept.underPointer && kept.elementName == "Search" && kept.x == 0.13)
+        // Said, or no transcript yet: the pointer stays. Nothing else to aim with: kept, for resolveScreenTarget to refuse.
+        #expect(drop(scroll, "scroll this down").underPointer)
+        #expect(drop(scroll, nil).underPointer)
+        #expect(drop(RealtimeToolCall(callID: "p", name: "press_element", appName: nil, underPointer: true), "press it").underPointer)
+    }
+
     // MARK: Typing aimed by a position (scenarios A5, A9, C2, 03-34-52Z)
 
     /// Gemini aimed type_text by x, y in A5, A9 and C2: C2's point snapped to the page's
