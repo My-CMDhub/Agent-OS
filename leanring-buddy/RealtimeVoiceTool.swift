@@ -1443,7 +1443,9 @@ nonisolated enum RealtimeOpenAppTool {
                 }
                 let subject = words[max(0, index - 3)..<index].lastIndex(where: firstPersonSubjects.contains)
                 let asked = subject.map { $0 > 0 && questionAuxiliaries.contains(words[$0 - 1]) } ?? false
-                let leadsOrIt = !isQuestion && (index == 0 || (index + 1 < words.count && words[index + 1] == "it"))
+                // C5 2026-10-15: "The system has disabled it" — a perfect after another subject claims nothing of mine.
+                let othersPerfect = subject == nil && index > 0 && ["has", "had", "have"].contains(words[index - 1])
+                let leadsOrIt = !isQuestion && (index == 0 || (!othersPerfect && index + 1 < words.count && words[index + 1] == "it"))
                 if (subject != nil && !asked) || leadsOrIt { claims.append(kind.receipts) }
             }
         }
