@@ -1212,6 +1212,8 @@ struct RealtimeScreenVerbsTests {
                 node("AXStaticText", "hunter2", CGRect(x: 610, y: 752, width: 60, height: 18))
             ])
         ])
+        // B5: what lies under the scroll view's bottom edge is counted, so read_page can say the page goes on.
+        #expect(HarnessServer.namedBelowView(in: tree) == 1, "the margin row only; the row under the toolbar is above")
         let names = HarnessServer.namedElements(in: tree).compactMap { $0["name"] as? String }
         #expect(names.contains("Toolbar Save"))
         #expect(names.contains("Row on screen"))

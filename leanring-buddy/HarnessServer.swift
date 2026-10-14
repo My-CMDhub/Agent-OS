@@ -2181,6 +2181,8 @@ final class HarnessServer {
             // ancestor — the voice loop offers what is visible, and a label
             // inside a button is that button (`RealtimeScreenVerbs.visiblePool`).
             "elements": request.forModel ? Self.namedElements(in: rootNode) : actionable.map(Self.summarise),
+            // forModel: how many named elements the walk holds below the view — read_page says the page goes on.
+            "namedBelowView": request.forModel ? Self.namedBelowView(in: rootNode) : 0,
             "thinTree": snapshot.nodeCount < FirstSightWake.thinTreeNodes,
             "firstSightWake": snapshot.firstSightWake.map { ["nodesBefore": $0.nodesBefore, "nodesAfter": $0.nodesAfter,
                                                              "milliseconds": $0.milliseconds,
@@ -2238,6 +2240,22 @@ final class HarnessServer {
         }
         visit(rootNode, parent: nil, clip: rootNode.frameInAppKitCoordinates)
         return listed
+    }
+
+    /// Named elements the walk holds but scrolled out BELOW their scroll view (`namedElements`'
+    /// clip, AppKit: under its bottom edge). B5 2026-10-14: read_page answered screen 1 of a
+    /// three-screen article with nothing saying more was below, and the summary stopped there.
+    static func namedBelowView(in rootNode: AccessibilityElementNode) -> Int {
+        var count = 0
+        func visit(_ node: AccessibilityElementNode, clip: CGRect) {
+            let frame = node.frameInAppKitCoordinates
+            if node.listedName != nil, frame.width > 0, frame.height > 0, !clip.isNull, frame.maxY <= clip.minY { count += 1 }
+            if node.hidesChildrenFromWire { return }
+            let scrolls = (node.role == "AXScrollArea" || node.role == "AXWebArea") && frame.width > 0 && frame.height > 0
+            for child in node.children { visit(child, clip: scrolls ? clip.intersection(frame) : clip) }
+        }
+        visit(rootNode, clip: rootNode.frameInAppKitCoordinates)
+        return count
     }
 
     /// `verification.appeared`: names new since `namesBefore` (the full
