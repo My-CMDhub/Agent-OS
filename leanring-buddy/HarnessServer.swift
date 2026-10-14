@@ -4361,7 +4361,8 @@ final class HarnessServer {
         case .success(let planned): plan = planned
         }
         response["resolved"] = ["name": UntrustedText(plan.name).forDisplay, "parts": plan.controls.count, "targets": plan.targets,
-                                "before": plan.before.map { $0.map { UntrustedText($0).forDisplay } ?? "unread" }]
+                                "before": plan.before.map { $0.map { UntrustedText($0).forDisplay } ?? "unread" },
+                                "kind": plan.time == nil ? "steps" : "timeOfDay", "resolvedBy": plan.resolvedBy]
         let decision = applyAppPolicy(to: ActionSafetyKernel.evaluateAdjust(name: plan.name),
                                       bundleIdentifier: application.bundleIdentifier, into: &response)
         let described = HarnessPolicy.describe(decision)

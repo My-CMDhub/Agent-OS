@@ -31,6 +31,51 @@ struct HarnessAdjustTests {
         #expect(HarnessAdjust.valueProblem("00:10:00") == nil)
     }
 
+    // MARK: A time of day (Clock's alarm picker, 2026-10-15)
+
+    @Test func aTimeOfDayIsTwelveOrTwentyFourHour() {
+        typealias T = HarnessAdjust.ClockTime
+        #expect(HarnessAdjust.clockTime("6:45 AM") == T(hour: 6, minute: 45, second: nil))
+        #expect(HarnessAdjust.clockTime("6:45pm") == T(hour: 18, minute: 45, second: nil))
+        #expect(HarnessAdjust.clockTime("6:45 p.m.") == T(hour: 18, minute: 45, second: nil))
+        #expect(HarnessAdjust.clockTime("18:45") == T(hour: 18, minute: 45, second: nil))
+        #expect(HarnessAdjust.clockTime("6:45") == T(hour: 6, minute: 45, second: nil), "no am/pm is 24-hour")
+        #expect(HarnessAdjust.clockTime("06:45:30") == T(hour: 6, minute: 45, second: 30))
+        #expect(HarnessAdjust.clockTime("12:00 AM") == T(hour: 0, minute: 0, second: nil), "midnight")
+        #expect(HarnessAdjust.clockTime("12:30 PM") == T(hour: 12, minute: 30, second: nil), "noon")
+        for bad in ["0645", "13:00 PM", "0:30 am", "24:00", "6:60", "6:5", "6:45 xm", "6 AM", "", "6::45", "\u{0666}:45"] {
+            #expect(HarnessAdjust.clockTime(bad) == nil, "\(bad) is not a time")
+        }
+        #expect(HarnessAdjust.valueProblem("6:45 AM") == nil, "the wire takes a time")
+        #expect(HarnessAdjust.valueProblem("6:45 tomorrow") != nil)
+    }
+
+    @Test func theNewDateKeepsThePickersDayAndReplacesTheTimeOfDay() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "Australia/Sydney"))
+        // As read 2026-10-15 05:46 AEDT: the alarm picker holds 2000-01-01 18:41:42 UTC = 05:41:42 local.
+        let old = Date(timeIntervalSinceReferenceDate: 18 * 3600 + 41 * 60 + 42)
+        #expect(HarnessAdjust.timeText(old, in: calendar) == "05:41:42")
+        let time = try #require(HarnessAdjust.clockTime("6:45 AM"))
+        let new = try #require(HarnessAdjust.date(old, at: time, in: calendar))
+        #expect(HarnessAdjust.timeText(new, in: calendar) == "06:45:00", "seconds 0 when not given")
+        #expect(calendar.isDate(new, inSameDayAs: old), "the day is kept")
+        #expect(HarnessAdjust.shows(new, time, in: calendar))
+        #expect(!HarnessAdjust.shows(old, time, in: calendar))
+        // An AXIncrement after the write read 07:45 (the hour only): not 6:45.
+        #expect(!HarnessAdjust.shows(new.addingTimeInterval(3600), time, in: calendar))
+        // Seconds count only when asked for.
+        #expect(HarnessAdjust.shows(new.addingTimeInterval(5), time, in: calendar))
+        #expect(!HarnessAdjust.shows(new.addingTimeInterval(5), try #require(HarnessAdjust.clockTime("6:45:00")), in: calendar))
+    }
+
+    @Test func anUnnamedTimePickerStandsInOnlyWhenItIsTheOnlyOne() {
+        #expect(HarnessAdjust.onlyOne(["picker"]) == "picker")
+        #expect(HarnessAdjust.onlyOne(["start", "end"]) == nil, "never a guess among two")
+        #expect(HarnessAdjust.onlyOne([String]()) == nil)
+        #expect(HarnessAdjust.dateTimeRoles.contains("AXDateTimeArea"))
+    }
+
     // MARK: A control's number
 
     @Test func aControlsNumberIsTheFirstWholeNumberInItsValue() {
@@ -109,6 +154,7 @@ struct HarnessAdjustTests {
         #expect(RealtimeHeardCheck.refusesWithoutTranscript(toolName: "set_value", namedAppIsRunning: true))
         let declaration = try #require(RealtimeVoiceVerbs.openAIDeclarations.first { $0["name"] as? String == "set_value" })
         #expect((declaration["description"] as? String)?.contains("press_element \"Start\"") == true)
+        #expect((declaration["description"] as? String)?.contains("\"6:45 AM\"") == true, "an alarm's time goes in value")
         #expect(AgentPlan.requiredArguments["set_value"] == [["name", "value"]])
     }
 }

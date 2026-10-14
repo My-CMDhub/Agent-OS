@@ -28,6 +28,12 @@
 //  So each control is pressed first, then stepped one at a time with its number read
 //  back after every step. The pure half is unit-tested; the live half by running it.
 //
+//  A date-time picker is the other shape (Clock's add-alarm sheet, 2026-10-15): ONE
+//  anonymous AXDateTimeArea whose AXValue is a settable CFDate (2000-01-01 at the shown
+//  time) and whose AXIncrement steps the hour only. It is written, not stepped, from a
+//  time of day ("6:45 AM"), and read back twice. Being anonymous, it stands in for an
+//  unmatched name only when it is the window's one date-time picker.
+//
 
 import AppKit
 import ApplicationServices
@@ -48,15 +54,18 @@ nonisolated enum HarnessAdjust {
     /// How long a target with nothing adjustable is re-read (a Catalyst tree still building).
     static let shapeDeadlineSeconds = 2.0
     static let pollIntervalSeconds = 0.05
+    /// A date write is read back at once and again this much later.
+    static let writeRecheckSeconds = 0.3
     static let walkNodeLimit = 3000
     static let walkDepthLimit = 40
 
     // MARK: Pure
 
     /// Why `text` may not be a value to adjust to, nil when it may: whole numbers,
-    /// one per control, joined by ":" ("10", "0:10:00").
+    /// one per control, joined by ":" ("10", "0:10:00"), or a time of day ("6:45 AM").
     static func valueProblem(_ text: String) -> String? {
         if text.count > maximumValueLength { return "longer than \(maximumValueLength) characters" }
+        if clockTime(text) != nil { return nil }
         let parts = text.split(separator: ":", omittingEmptySubsequences: false)
         guard parts.allSatisfy({ !$0.isEmpty && $0.count <= 4 && $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) }) else {
             return "not whole numbers joined by \":\""
@@ -92,6 +101,67 @@ nonisolated enum HarnessAdjust {
         actions.contains(incrementAction) && actions.contains(decrementAction)
     }
 
+    // MARK: Pure — a time of day, for a date-time picker
+
+    /// A time of day asked for. `second` nil when not given (written as 0, not checked).
+    struct ClockTime: Equatable {
+        let hour: Int
+        let minute: Int
+        let second: Int?
+    }
+
+    /// "6:45 AM", "6:45pm", "6:45 a.m.", "18:45", "06:45", "6:45:30" — nil for anything
+    /// else ("0645", "13:00 PM", "6:5"). Without am/pm the hour is 24-hour.
+    static func clockTime(_ text: String) -> ClockTime? {
+        var body = text.lowercased().replacingOccurrences(of: ".", with: "").trimmingCharacters(in: .whitespaces)
+        var meridiem: String?
+        if let suffix = ["am", "pm"].first(where: body.hasSuffix) {
+            meridiem = suffix
+            body = String(body.dropLast(2)).trimmingCharacters(in: .whitespaces)
+        }
+        let parts = body.split(separator: ":", omittingEmptySubsequences: false)
+        guard (2...3).contains(parts.count),
+              parts.allSatisfy({ (1...2).contains($0.count) && $0.allSatisfy { $0.isASCII && $0.isNumber } }),
+              parts.dropFirst().allSatisfy({ $0.count == 2 }) else { return nil }
+        let numbers = parts.compactMap { Int($0) }
+        var hour = numbers[0]
+        if let meridiem {
+            guard (1...12).contains(hour) else { return nil }
+            hour = hour % 12 + (meridiem == "pm" ? 12 : 0)
+        }
+        guard hour < 24, numbers[1] < 60, numbers.count < 3 || numbers[2] < 60 else { return nil }
+        return ClockTime(hour: hour, minute: numbers[1], second: numbers.count == 3 ? numbers[2] : nil)
+    }
+
+    /// `old`'s day at `time` in `calendar` — the day is kept (Clock's alarm picker holds
+    /// 2000-01-01), only the time of day is replaced; seconds 0 unless given.
+    static func date(_ old: Date, at time: ClockTime, in calendar: Calendar) -> Date? {
+        var parts = calendar.dateComponents([.era, .year, .month, .day], from: old)
+        parts.hour = time.hour
+        parts.minute = time.minute
+        parts.second = time.second ?? 0
+        return calendar.date(from: parts)
+    }
+
+    /// Whether `date` shows `time` in `calendar` (seconds only when they were asked for).
+    static func shows(_ date: Date, _ time: ClockTime, in calendar: Calendar) -> Bool {
+        let parts = calendar.dateComponents([.hour, .minute, .second], from: date)
+        return parts.hour == time.hour && parts.minute == time.minute && (time.second == nil || parts.second == time.second)
+    }
+
+    static func timeText(_ date: Date, in calendar: Calendar) -> String {
+        let parts = calendar.dateComponents([.hour, .minute, .second], from: date)
+        return String(format: "%02d:%02d:%02d", parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0)
+    }
+
+    /// When nothing carries the asked name, the window's ONE date-time picker stands in
+    /// (Clock's alarm picker is anonymous) — never a pick among two.
+    static func onlyOne<T>(_ candidates: [T]) -> T? {
+        candidates.count == 1 ? candidates[0] : nil
+    }
+
+    static let dateTimeRoles: Set<String> = ["AXDateTimeArea", kAXDateFieldRole as String, kAXTimeFieldRole as String]
+
     // MARK: Live
 
     typealias Failure = HarnessRenameItem.Failure
@@ -105,6 +175,10 @@ nonisolated enum HarnessAdjust {
         let before: [String?]
         /// The named element when it is a group over the controls, read again after.
         let group: AXUIElement?
+        /// Set when the one control is a date-time picker: its date is WRITTEN, not stepped.
+        var time: ClockTime? = nil
+        /// "name", or "onlyDateTimeControl" when nothing carried the name.
+        var resolvedBy = "name"
     }
 
     /// Resolves `name` in the app's focused window to one adjustable control, or a
@@ -126,9 +200,26 @@ nonisolated enum HarnessAdjust {
             guard matches.count <= 1 else {
                 return .failure(Failure(code: "ambiguous", message: "\(matches.count) elements are named \(UntrustedText(name).forDisplay); nothing was changed"))
             }
+            let clock = clockTime(value)
             guard let target = matches.first else {
-                return .failure(Failure(code: "adjustNotFound",
-                                        message: "nothing in the window in front is named \(UntrustedText(name).forDisplay); nothing was changed"))
+                // Clock's alarm picker (2026-10-15) has no title, description or help, so a
+                // name the model chose ("time") matches nothing: a time stands in for the name
+                // only when the window holds exactly one date-time picker.
+                let pickers = clock == nil ? [] : find(under: window, where: isDateTimeControl)
+                guard let clock, let picker = onlyOne(pickers) else {
+                    return .failure(Failure(code: "adjustNotFound",
+                                            message: "nothing in the window in front is named \(UntrustedText(name).forDisplay)"
+                                                + (pickers.count > 1 ? " and it has \(pickers.count) time pickers, so none was guessed" : "")
+                                                + "; nothing was changed"))
+                }
+                return .success(timePlan(name: name, control: picker, time: clock, resolvedBy: "onlyDateTimeControl"))
+            }
+            if isDateTimeControl(target) {
+                guard let clock else {
+                    return .failure(Failure(code: "adjustValueMismatch", message: "\(UntrustedText(name).forDisplay) is a time picker; give a time "
+                                            + "such as \"6:45 AM\" or \"18:45\"; nothing was changed"))
+                }
+                return .success(timePlan(name: name, control: target, time: clock, resolvedBy: "name"))
             }
             let controls = isAdjustable(actions: actionNames(target)) ? [target]
                 : HarnessRenameItem.elements(target, kAXChildrenAttribute).filter { isAdjustable(actions: actionNames($0)) }
@@ -160,9 +251,42 @@ nonisolated enum HarnessAdjust {
         var failure: Failure?
     }
 
+    private static func timePlan(name: String, control: AXUIElement, time: ClockTime, resolvedBy: String) -> Plan {
+        Plan(name: name, controls: [control], targets: [time.hour, time.minute] + (time.second.map { [$0] } ?? []),
+             before: [dateValue(control).map { timeText($0, in: .current) }], group: nil, time: time, resolvedBy: resolvedBy)
+    }
+
+    /// Writes a date-time picker's date with the asked time of day, then reads it back at
+    /// once and again `writeRecheckSeconds` later — an AX write can answer success and be
+    /// ignored (CLAUDE.md, three tiers of evidence). Clock's alarm picker, 2026-10-15: a
+    /// write of 06:45 read back 06:45, and an AXIncrement after it read 07:45.
+    static func writeTime(_ control: AXUIElement, _ time: ClockTime) -> Run {
+        var run = Run()
+        let started = Date()
+        let calendar = Calendar.current
+        AXUIElementSetMessagingTimeout(control, writeTimeoutSeconds)
+        guard let old = dateValue(control), let new = date(old, at: time, in: calendar) else {
+            run.failure = Failure(code: "notAdjustable", message: "the time picker stopped showing a date; it was left where it is")
+            return run
+        }
+        let error = AXUIElementSetAttributeValue(control, kAXValueAttribute as CFString, new as NSDate)
+        let first = dateValue(control)
+        Thread.sleep(forTimeInterval: writeRecheckSeconds)
+        let second = dateValue(control)
+        run.report = ["write": Int(error.rawValue), "after": [first, second].map { $0.map { timeText($0, in: calendar) } ?? "unread" },
+                      "milliseconds": Int(Date().timeIntervalSince(started) * 1000)]
+        let held = [first, second].allSatisfy { $0.map { shows($0, time, in: calendar) } ?? false }
+        if !held {
+            run.failure = Failure(code: "adjustNotObserved", message: "the time picker does not read \(timeText(new, in: calendar)) after the write "
+                                  + "(the write answered \(error.rawValue)); it reads \(second.map { timeText($0, in: calendar) } ?? "nothing")")
+        }
+        return run
+    }
+
     /// Presses each control (Clock steps the SELECTED wheel), then steps it one at a
-    /// time, reading its number back after every step.
+    /// time, reading its number back after every step — or writes a time picker's date.
     static func adjust(_ plan: Plan) -> Run {
+        if let time = plan.time, let control = plan.controls.first { return writeTime(control, time) }
         var run = Run()
         let started = Date()
         var steps: [Int] = []
@@ -242,6 +366,21 @@ nonisolated enum HarnessAdjust {
     static func actionNames(_ element: AXUIElement) -> [String] {
         var names: CFArray?
         return AXUIElementCopyActionNames(element, &names) == .success ? (names as? [String]) ?? [] : []
+    }
+
+    /// The element's AXValue when it is a date (CFDate), nil otherwise.
+    static func dateValue(_ element: AXUIElement) -> Date? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == CFDateGetTypeID() else { return nil }
+        return value as? Date
+    }
+
+    /// A date-time role whose AXValue is a date the app says is settable.
+    static func isDateTimeControl(_ element: AXUIElement) -> Bool {
+        guard let role = HarnessRenameItem.string(element, kAXRoleAttribute), dateTimeRoles.contains(role), dateValue(element) != nil else { return false }
+        var settable: DarwinBoolean = false
+        return AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue
     }
 
     private static func bool(_ element: AXUIElement, _ attribute: String) -> Bool? {

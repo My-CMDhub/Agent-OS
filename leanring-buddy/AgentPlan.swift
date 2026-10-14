@@ -76,7 +76,7 @@ nonisolated enum AgentPlan {
                 "url": text("open_url: the full address."),
                 "folder": text("go_to_folder: the folder's path, for example ~/Downloads."),
                 "new_name": text("rename_item: the new name, with its extension."),
-                "value": text("set_value: whole numbers, one per part, joined by \":\", for example \"0:10:00\"."),
+                "value": text("set_value: whole numbers, one per part, joined by \":\", for example \"0:10:00\"; a time picker takes \"6:45 AM\"."),
                 "names": ["type": "array", "items": ["type": "string"], "description": "move_items: each item's name as listed."],
                 "to_folder": text("move_items: the folder's path, or a folder's name in the same window."),
                 "query": text("search_web: the words."),
