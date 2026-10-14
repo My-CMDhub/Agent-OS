@@ -1057,8 +1057,8 @@ final class RealtimeVoiceConnection {
             dispatch = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: screenRefusal), harnessMilliseconds: 0,
                                             waitedForConfirmation: false, harnessResponse: nil)
             JarvisNotch.shared.handle(.harnessAnswered(ok: false, subject: "", error: screenRefusal.error))
-            // A typing position that named no field: say which fields are there (A5, C2 03-34-52Z).
-            if call.name == RealtimeVoiceVerbs.typeTextName, ["noFieldAtPoint", "positionOutOfRange"].contains(screenRefusal.error),
+            // A typing aim that named no field: say which fields are there (A5, C2 03-34-52Z; A9 20-10-57Z: "Post box").
+            if call.name == RealtimeVoiceVerbs.typeTextName, RealtimeOpenAppTool.typingRefusalsListingFields.contains(screenRefusal.error),
                let hint = await visibleFieldsHint(app: call.appName, display: turn.screenshotDisplayFrame, harnessAnswer: harnessAnswer) {
                 dispatch.result["message"] = screenRefusal.message + hint
             }

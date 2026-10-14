@@ -96,6 +96,15 @@ import Testing
 
     /// C3 reused C2's one-step words, so the voice never started a task, and nothing
     /// changed the front app: it could not reach the step it judges.
+    /// A9 20-10-57Z: nothing was typed, and the why said "composer holds 32 chars" — its placeholder.
+    @MainActor @Test func a9SaysTheComposerWasNeverTypedIntoWhenItIsAtItsStartLength() throws {
+        let a9 = try #require(ScenarioCatalog.all.first { $0.id == "A9" })
+        #expect(a9.baseline != nil)
+        #expect(ScenarioCatalog.composerWhy(chars: 32, atStart: 32).contains("unchanged since the start"))
+        #expect(ScenarioCatalog.composerWhy(chars: 20, atStart: 32) == "composer holds 20 chars")
+        #expect(ScenarioCatalog.composerWhy(chars: nil, atStart: 32) == "composer unread")
+    }
+
     @MainActor @Test func c3IsATaskWhoseFrontAppChangesMidStep() throws {
         let c3 = try #require(ScenarioCatalog.all.first { $0.id == "C3" })
         #expect(c3.fixtureID == "C3")

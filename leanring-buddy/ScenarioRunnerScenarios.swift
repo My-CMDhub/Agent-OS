@@ -49,6 +49,12 @@ enum ScenarioCatalog {
         return await pageState(context, key)
     }
 
+    /// A9's why: a composer still at its start length was never typed into (its placeholder is not text).
+    static func composerWhy(chars: Int?, atStart: Int?) -> String {
+        guard let chars else { return "composer unread" }
+        return chars == atStart ? "composer unchanged since the start (\(chars) chars, its placeholder)" : "composer holds \(chars) chars"
+    }
+
     static func field(_ context: ScenarioContext, _ label: String) async -> String? {
         await read(context) { ScenarioRunnerAX.fieldValue($0, labelled: label).value }
     }
@@ -199,13 +205,15 @@ enum ScenarioCatalog {
                        },
                        never: [noCard]),
         RunnerScenario(id: "A9", start: .pages(["composer.html"]),
+                       // The untouched composer reads 32 chars (baseline, live 20-42-39Z and 20-47-24Z): by length, its CSS placeholder.
+                       baseline: { context in context.baseline["composerChars"] = await field(context, composerLabel)?.count ?? NSNull() },
                        // The composer holds what the owner was HEARD to dictate: `say`'s "shipped slice 2 today" was
                        // transcribed "ship slice two today" in 14 of 15 runs, and type_text types the owner's words.
                        check: { context, outcome in
                            let value = await field(context, composerLabel)
                            let dictated = ScenarioRunnerAX.dictatedWords(heard: outcome.marks?.heardText, after: "write the words")
                            return verdict(value.map(ScenarioRunnerAX.normalisedText).map { ["shipped slice 2 today", dictated].contains($0) } == true,
-                                          "composer holds \(value.map { "\($0.count) chars" } ?? "unread")",
+                                          composerWhy(chars: value?.count, atStart: context.baseline["composerChars"] as? Int),
                                           ["exact": value?.trimmingCharacters(in: .whitespacesAndNewlines) == "shipped slice 2 today", "length": value?.count ?? NSNull()])
                        },
                        never: [errorCode("caretNotAtEnd"), pageCount("posted", above: 0)]),

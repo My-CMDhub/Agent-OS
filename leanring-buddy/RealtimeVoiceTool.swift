@@ -642,6 +642,10 @@ nonisolated enum RealtimeOpenAppTool {
     /// A9 live 02-30-16Z: a field's visible words may not be its name (LinkedIn's
     /// composer is "Text editor for creating content", its placeholder CSS), so an
     /// unaimed typing refusal names the fields that are there.
+    /// Typing refusals whose message gets `unaimedTypingHint`: a name or a position that found no field.
+    /// The model picks from the list; nothing is typed into a guess.
+    static let typingRefusalsListingFields: Set<String> = ["noFieldAtPoint", "positionOutOfRange", "elementNotFound"]
+
     static func unaimedTypingHint(fieldNames: [String]) -> String? {
         guard !fieldNames.isEmpty else { return nil }
         return " Text fields visible now: " + fieldNames.prefix(5).map { UntrustedText($0).forDisplay }.joined(separator: ", ")

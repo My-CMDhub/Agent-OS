@@ -483,6 +483,8 @@ struct RealtimeScreenVerbsTests {
         #expect(hint.contains("\"Text editor for creating content\""))
         #expect(hint.contains("type_text"))
         #expect(RealtimeOpenAppTool.unaimedTypingHint(fieldNames: []) == nil)
+        // A9 20-10-57Z: a name that found nothing ("Post box") is told the fields too.
+        #expect(RealtimeOpenAppTool.typingRefusalsListingFields.contains("elementNotFound"))
     }
 
     /// C4 live (02-51-12Z), after the pool kept same-named controls: "delete the first
