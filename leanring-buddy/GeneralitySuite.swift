@@ -47,11 +47,13 @@ enum GeneralitySuite {
         var sandbox: Set<String>? = nil
         /// World reads taken right before the goal run, merged into what the checker gets
         /// (async: E01/E04 launch a quit app behind to read it, `readLaunchingIfNeeded`).
+        /// `pre` returning a string under `skipReasonKey` skips the task before the goal run.
         var pre: (() async -> [String: Any])? = nil
         /// (spoken answer, the goal run's report) -> evidence with "passed".
         let check: (_ spoken: String, _ run: [String: Any]) async -> [String: Any]
     }
 
+    nonisolated static let skipReasonKey = "skipReason"
     nonisolated static let finder = "com.apple.finder", settings = "com.apple.systempreferences", notes = "com.apple.Notes",
                reminders = "com.apple.reminders", calendar = "com.apple.iCal", calculator = "com.apple.calculator",
                activity = "com.apple.ActivityMonitor", xcode = "com.apple.dt.Xcode", textEdit = "com.apple.TextEdit",
@@ -475,6 +477,17 @@ enum GeneralitySuite {
                 sandboxBefore = listing
             }
             let pre = await task.pre?() ?? [:]
+            // A pre-read that cannot make the task provable stops it BEFORE the agent acts (E01/E02, 2026-10-14).
+            if let reason = pre[skipReasonKey] as? String {
+                result["status"] = "skipped"
+                result["reason"] = reason
+                result["cleanup"] = await undo(state, apps: task.apps)
+                if let asked = task.sandbox { _ = Sandbox.tearDown(known: Set(Sandbox.manifest.keys).union(asked)) }
+                results.append(result)
+                save()
+                print("🧭 \(task.id): skipped — \(reason)")
+                continue
+            }
             let run = await AgentLoopProbe.goalRun(words: task.words, harness: harness, confirmations: confirmations)
             result.merge(run) { current, _ in current }
             let spoken = run["spoken"] as? String ?? ""

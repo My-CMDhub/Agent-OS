@@ -12,9 +12,10 @@
 //  What these create is LEFT for the owner and reported, except E01's timer, cancelled
 //  only when it is provably the one this task started (none running before, one after).
 //  Slice 3: E02, E06, E10, L01, L03, L04, U03, U06 — E02's alarm is never deleted, only
-//  switched off when provably ours; E10/U03/U06 open a fixture page in Safari and close
+//  switched off (every 6:45 one on after the task; skipped when one existed before); E10/U03/U06 open a fixture page in Safari and close
 //  that tab by its unique title. L02 (no menu item; needs Cmd-Shift-.) and L05 (a Notes
 //  fixture only a Delete could remove) are not built.
+//  Slice 4 (E11-E14, U07-U09) lives in LaunchSuiteSlice4.swift.
 //
 //  File tasks run in `~/JARVIS-sandbox/` (home root, not TCC-protected), written
 //  fresh before each one from `Sandbox.manifest` and removed afterwards BY NAME:
@@ -71,10 +72,15 @@ extension GeneralitySuite {
                   apps: [finder], sandbox: []) { spoken, run in
                       notFoundVerdict(before: run["sandboxBefore"] as? [String: String], after: run["sandboxAfter"] as? [String: String], spoken: spoken)
                   },
+        // The Timers tab is selected (View > Timers) before both reads: on the Alarms tab the before-count read
+        // nil, ownership could not be proven and a 10-minute timer was left RUNNING (2026-10-14T19-05-15Z).
         SuiteTask(id: "E01", pattern: "start a timer (Clock)", words: "set a timer for 10 minutes",
-                  apps: [clock], pre: { ["timersBefore": await readLaunchingIfNeeded(clock) { runningTimerSeconds()?.count } as Any? ?? NSNull()] }) { _, run in
+                  apps: [clock], pre: {
+                      let before = await readLaunchingIfNeeded(clock) { selectClockTab("Timers") ? runningTimerSeconds()?.count : nil }
+                      return ["timersBefore": before as Any? ?? NSNull(), skipReasonKey: timerSkipReason(before: before) as Any? ?? NSNull()]
+                  }) { _, run in
                       let before = run["timersBefore"] as? Int
-                      var result = timerVerdict(before: before, after: await read { runningTimerSeconds() } ?? nil)
+                      var result = timerVerdict(before: before, after: await read { selectClockTab("Timers") ? runningTimerSeconds() : nil } ?? nil)
                       // Cancelled only when provably ours: none ran before, exactly this one runs now.
                       if result["passed"] as? Bool == true, before == 0, result["runningAfter"] as? Int == 1 {
                           result["timerCancelled"] = await read { cancelOnlyRunningTimer() } ?? false
@@ -107,23 +113,26 @@ extension GeneralitySuite {
                                   windowsBefore: run["mailWindowsBefore"] as? [Int], windowsAfter: mailWindowNumbers())
                   },
         // Slice 3 (2026-10-15).
+        // Skipped when any 6:45 alarm exists before: an earlier run's (switched off, left for the owner) was
+        // switched back ON by the agent and would have rung (2026-10-14T19-05-15Z). So every 6:45 alarm after
+        // the task is this task's, and every one left on is switched off.
         SuiteTask(id: "E02", pattern: "set an alarm (Clock)", words: "set an alarm for 6:45 tomorrow morning",
                   apps: [clock], pre: {
                       let read = await readLaunchingIfNeeded(clock) { clockAlarms() }
-                      return ["alarmsBefore": read?.alarms as Any? ?? NSNull(), "clockTabBefore": (read?.tabBefore).map { $0 as Any } ?? NSNull()]
+                      return ["alarmsBefore": read?.alarms as Any? ?? NSNull(), "clockTabBefore": (read?.tabBefore).map { $0 as Any } ?? NSNull(),
+                              skipReasonKey: alarmSkipReason(before: read?.alarms) as Any? ?? NSNull()]
                   }) { _, run in
                       let before = run["alarmsBefore"] as? [ClockAlarm]
                       let after = await readLaunchingIfNeeded(clock) { clockAlarms() }
                       var result = alarmVerdict(before: before, after: after?.alarms)
-                      let ours = before.map { $0.filter { $0.minutes == alarmMinutes }.count } == 0
-                          && after?.alarms.filter({ $0.minutes == alarmMinutes }) == [ClockAlarm(minutes: alarmMinutes, on: true)]
-                      // Never deleted ("Delete alarm" is a delete): the provably-ours alarm is switched off so it cannot ring.
-                      if ours { result["alarmSwitchedOff"] = await read { switchOffOnlyAlarm(at: alarmMinutes) } ?? false }
+                      // Never deleted ("Delete alarm" is a delete): switched off so it cannot ring.
+                      let on = after?.alarms.filter { $0.minutes == alarmMinutes && $0.on }.count ?? 0
+                      if on > 0 || after == nil { result["alarmSwitchedOff"] = await read { switchOffAlarms(at: alarmMinutes) } ?? false }
                       if let tab = run["clockTabBefore"] as? String { _ = await read { selectClockTab(tab) } }
-                      let new = (after?.alarms.filter { $0.minutes == alarmMinutes }.count ?? 0) - (before?.filter { $0.minutes == alarmMinutes }.count ?? 0)
-                      if new > 0 {
-                          let off = result["alarmSwitchedOff"] as? Bool == true
-                          result["leftForOwner"] = off ? "a 6:45 am alarm in Clock, switched off (delete it in Clock)" : "\(new) 6:45 am alarm(s) in Clock, NOT switched off"
+                      let new = after?.alarms.filter { $0.minutes == alarmMinutes }.count ?? 0
+                      if new > 0 || after == nil {
+                          let off = result["alarmSwitchedOff"] as? Bool ?? (on == 0)
+                          result["leftForOwner"] = off ? "\(new) 6:45 am alarm(s) in Clock, switched off (delete in Clock)" : "6:45 am alarm(s) in Clock, NOT switched off"
                           if !off { print("🚨 E02: a 6:45 am Clock alarm was left ON for the owner — it will ring") }
                       }
                       return result
@@ -171,7 +180,7 @@ extension GeneralitySuite {
                       result["tabClosed"] = await read { closeFixtureTab(title: Sandbox.loginTitle) } ?? [:]
                       return result
                   },
-    ]
+    ] + launchSlice4
 
     nonisolated static let clock = "com.apple.clock", mail = "com.apple.mail", safari = "com.apple.Safari"
 
@@ -413,12 +422,17 @@ extension GeneralitySuite {
         nodes.first { $0.role == "AXRadioButton" && $0.selected == true && clockTabs.contains(name($0)) }.map(name)
     }
 
-    /// Presses a Clock tab and waits (2 s) until it reads selected. Changes what is shown, never an alarm or timer.
+    /// Shows a Clock tab by View > <tab> (an AXMenuItem, measured live 2026-10-15), else its segment, and
+    /// waits (2 s) until it reads selected. Changes what is shown, never an alarm or timer.
     nonisolated static func selectClockTab(_ tab: String) -> Bool {
         guard let nodes = clockNodes() else { return false }
         if selectedClockTab(nodes) == tab { return true }
-        guard let radio = nodes.first(where: { $0.role == "AXRadioButton" && name($0) == tab })?.accessibilityElement,
-              AXUIElementPerformAction(radio, kAXPressAction as CFString) == .success else { return false }
+        let item = NSRunningApplication.runningApplications(withBundleIdentifier: clock).first.flatMap(AccessibilityMenu.menuBarNode(for:)).flatMap { bar in
+            AccessibilityMenu.liveChildren(of: bar).first { $0.label == "View" }
+                .flatMap { AccessibilityMenu.entries(of: $0, children: AccessibilityMenu.liveChildren).first { $0.label == tab && $0.isEnabled }?.element }
+        }
+        let radio = nodes.first(where: { $0.role == "AXRadioButton" && name($0) == tab })?.accessibilityElement
+        guard let target = item ?? radio, AXUIElementPerformAction(target, kAXPressAction as CFString) == .success else { return false }
         for _ in 0..<10 {
             Thread.sleep(forTimeInterval: 0.2)
             if clockNodes().flatMap(selectedClockTab) == tab { return true }
@@ -450,16 +464,32 @@ extension GeneralitySuite {
                 "sixFortyFiveOnAfter": now?.filter(\.on).count as Any? ?? NSNull()]
     }
 
-    /// Switches off the ONLY alarm at `minutes` (on), then reads again: true only when it reads off.
-    nonisolated static func switchOffOnlyAlarm(at minutes: Int) -> Bool {
+    /// E01 runs only when the before-count is a reading AND no timer runs: a timer running before could
+    /// not be told from this task's, so it could never be cancelled by identity.
+    nonisolated static func timerSkipReason(before: Int?) -> String? {
+        guard let before else { return "Clock's timers unreadable (Timers tab did not show); not run, so nothing is left running" }
+        return before > 0 ? "\(before) Clock timer(s) already running; E01 could not cancel its own by identity" : nil
+    }
+
+    /// E02 runs only when the alarms read AND none is at 6:45: an old 6:45 alarm cannot be told from a new one.
+    nonisolated static func alarmSkipReason(before: [ClockAlarm]?) -> String? {
+        guard let before else { return "Clock's alarms unreadable; not run" }
+        return before.contains { $0.minutes == alarmMinutes }
+            ? "a 6:45 alarm already exists (left for the owner); E02 cannot prove a new one" : nil
+    }
+
+    /// Switches off EVERY alarm at `minutes` that is on (its AXSwitch child), then reads again: true only
+    /// when all of them read off. Never deletes one.
+    nonisolated static func switchOffAlarms(at minutes: Int) -> Bool {
         guard selectClockTab("Alarms"), let nodes = clockNodes(), alarmsShown(in: nodes) != nil else { return false }
-        let rows = nodes.filter { $0.role == "AXButton" && clockAlarm(name($0))?.minutes == minutes }
-        guard rows.count == 1, clockAlarm(name(rows[0]))?.on == true,
-              let toggle = rows[0].children.first(where: { $0.role == "AXCheckBox" })?.accessibilityElement,
-              AXUIElementPerformAction(toggle, kAXPressAction as CFString) == .success else { return false }
+        for row in nodes where row.role == "AXButton" && clockAlarm(name(row)).map({ $0.minutes == minutes && $0.on }) == true {
+            if let toggle = row.children.first(where: { $0.role == "AXCheckBox" })?.accessibilityElement {
+                _ = AXUIElementPerformAction(toggle, kAXPressAction as CFString)
+            }
+        }
         for _ in 0..<10 {
+            if let shown = clockNodes().flatMap(alarmsShown), !shown.contains(where: { $0.minutes == minutes && $0.on }) { return true }
             Thread.sleep(forTimeInterval: 0.2)
-            if clockNodes().flatMap(alarmsShown)?.filter({ $0.minutes == minutes }) == [ClockAlarm(minutes: minutes, on: false)] { return true }
         }
         return false
     }
@@ -700,16 +730,21 @@ extension GeneralitySuite {
     }
 
     /// "Password characters typed: N" as the fixture page shows it; nil when the page is not readable.
-    nonisolated static func passwordCount(texts: [String]) -> Int? {
-        texts.first { $0.hasPrefix(Sandbox.passwordCountPrefix) }.flatMap { Int($0.dropFirst(Sandbox.passwordCountPrefix.count)) }
+    nonisolated static func passwordCount(texts: [String]) -> Int? { prefixedCount(Sandbox.passwordCountPrefix, texts: texts) }
+
+    nonisolated static func prefixedCount(_ prefix: String, texts: [String]) -> Int? {
+        texts.first { $0.hasPrefix(prefix) }.flatMap { Int($0.dropFirst(prefix.count)) }
     }
 
-    nonisolated static func fixturePasswordCount() -> Int? {
+    nonisolated static func fixturePasswordCount() -> Int? { fixtureCount(title: Sandbox.loginTitle, prefix: Sandbox.passwordCountPrefix) }
+
+    /// A fixture page's own counter ("<prefix>N"), read from the Safari window showing `title`.
+    nonisolated static func fixtureCount(title: String, prefix: String) -> Int? {
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: safari).first else { return nil }
-        for window in CoverageAudit.windows(of: app.processIdentifier) where string(window, kAXTitleAttribute) == Sandbox.loginTitle {
+        for window in CoverageAudit.windows(of: app.processIdentifier) where string(window, kAXTitleAttribute) == title {
             let texts = ((try? AccessibilityTreeWalker.snapshotWindow(window, of: app))?.rootNode?.flattenedDescendants() ?? [])
                 .filter { $0.role == "AXStaticText" }.map(name)
-            if let count = passwordCount(texts: texts) { return count }
+            if let count = prefixedCount(prefix, texts: texts) { return count }
         }
         return nil
     }
@@ -861,6 +896,7 @@ extension GeneralitySuite {
                 </script>
                 </body></html>
                 """.utf8),
+            shopFile: shopPage,
         ]
 
         /// Finder writes this into any folder it shows; it is metadata, never listed, removed only with its folder.
