@@ -49,12 +49,14 @@ nonisolated enum RealtimeVoiceVerbs {
     static let renameItemName = "rename_item"
     /// Finder's move of listed items into a folder (`HarnessMoveItems`, measured 2026-10-13).
     static let moveItemsName = "move_items"
+    /// Steps a picker, slider or stepper to whole numbers (`HarnessAdjust`, measured 2026-10-14 on Clock's timer).
+    static let setValueName = "set_value"
     /// A local Spotlight lookup by name (`FileFinder`, owner's ruling 2026-10-12): paths only, no harness.
     static let findFileName = "find_file"
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName, searchHelpName,
                                             findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
                                             openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName, goToFolderName,
-                                            findFileName, renameItemName, moveItemsName]
+                                            findFileName, renameItemName, moveItemsName, setValueName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
@@ -76,7 +78,7 @@ nonisolated enum RealtimeVoiceVerbs {
 
     /// Tools whose app may be omitted: the app in front is meant.
     static func takesFrontmostApp(_ toolName: String) -> Bool {
-        readOnlyToolNames.contains(toolName) || [pressElementName, scrollName, typeTextName, closeName].contains(toolName)
+        readOnlyToolNames.contains(toolName) || [pressElementName, scrollName, typeTextName, closeName, setValueName].contains(toolName)
     }
 
     /// Enough to hold every View-menu toggle of a native app and short enough
@@ -184,6 +186,13 @@ nonisolated enum RealtimeVoiceVerbs {
                     parameters: [Parameter(name: "names", kind: .list,
                                            description: "Each item's name exactly as the window lists it, with its extension, for example [\"invoice-a.pdf\"]."),
                                  Parameter(name: "to_folder", description: "The folder: its path (starting with / or ~) or a folder's name in the same window.")]),
+        Declaration(name: setValueName,
+                    description: "Sets a picker, slider or stepper in the window of the app in front to whole numbers, one step at a time, "
+                        + "and reads it back. For a time picker give every part: Clock's timer is named \"Timer\" and takes \"h:mm:ss\", "
+                        + "so a 10-minute timer is set_value name \"Timer\" value \"0:10:00\", then press_element \"Start\".",
+                    parameters: [appInFront,
+                                 Parameter(name: "name", description: "The control's exact name as find_on_screen lists it, for example \"Timer\"."),
+                                 Parameter(name: "value", description: "Whole numbers, one per part, joined by \":\", for example \"0:10:00\" or \"75\".")]),
         Declaration(name: findFileName,
                     description: "Finds files, folders or apps on this Mac by name (Spotlight); returns up to \(FileFinder.maximumPaths) paths. "
                         + "Then go_to_folder a folder's path to look inside it.",
@@ -659,6 +668,8 @@ nonisolated enum RealtimeVoiceVerbs {
             return "Looking for \u{2018}\(call.text.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2019} on this Mac\u{2026}"
         case moveItemsName:
             return "Moving \(call.path?.count ?? 0) item\(call.path?.count == 1 ? "" : "s")\u{2026}"
+        case setValueName:
+            return "Setting \(call.elementName.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2026}"
         case renameItemName:
             return "Renaming \(call.elementName.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2026}"
         case goToFolderName:

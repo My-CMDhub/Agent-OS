@@ -929,7 +929,7 @@ nonisolated enum RealtimeHeardCheck {
     /// changes only the view, so it keeps the checks it has.
     static func refusesWithoutTranscript(toolName: String, namedAppIsRunning: Bool) -> Bool {
         [RealtimeVoiceVerbs.pressMenuName, RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.typeTextName,
-         RealtimeVoiceVerbs.closeName].contains(toolName)
+         RealtimeVoiceVerbs.closeName, RealtimeVoiceVerbs.setValueName].contains(toolName)
             || (toolName == RealtimeOpenAppTool.name && !namedAppIsRunning)
     }
 

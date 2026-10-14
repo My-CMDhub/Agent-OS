@@ -44,7 +44,8 @@ nonisolated enum AgentPlan {
         RealtimeVoiceVerbs.annotateName: [["shapes"]], AgentLoopTools.searchWebName: [["query"]],
         AgentLoopGemini.webLookupName: [["question"]], AgentLoopTools.doneName: [["summary"]],
         SettingsPaneLinks.toolName: [["name"]], RealtimeVoiceVerbs.findFileName: [["name"]],
-        RealtimeVoiceVerbs.renameItemName: [["name", "new_name"]], RealtimeVoiceVerbs.moveItemsName: [["names", "to_folder"]]
+        RealtimeVoiceVerbs.renameItemName: [["name", "new_name"]], RealtimeVoiceVerbs.moveItemsName: [["names", "to_folder"]],
+        RealtimeVoiceVerbs.setValueName: [["name", "value"]]
     ]
 
     /// Anthropic tool JSON. Each step is a flat object: `tool` plus that
@@ -59,7 +60,7 @@ nonisolated enum AgentPlan {
                 "tool": text("The tool this step calls, for example \"press_menu\"."),
                 "app": text("The app, as that tool takes it."),
                 "name": text("open_app / focus_app: the app's name. press_element / point_at / type_text / scroll: the element's exact name. "
-                    + "find_file: the file or folder's name. rename_item: the item's name as listed."),
+                    + "find_file: the file or folder's name. rename_item: the item's name as listed. set_value: the control's name."),
                 "words": text("find_menu_items / find_on_screen / search_help: a few words."),
                 "path": ["type": "array", "items": ["type": "string"], "description": "press_menu: the menu path, split at \" > \"."],
                 "shortcut": text("press_menu: instead of a path, the shortcut an App verbs line shows."),
@@ -75,6 +76,7 @@ nonisolated enum AgentPlan {
                 "url": text("open_url: the full address."),
                 "folder": text("go_to_folder: the folder's path, for example ~/Downloads."),
                 "new_name": text("rename_item: the new name, with its extension."),
+                "value": text("set_value: whole numbers, one per part, joined by \":\", for example \"0:10:00\"."),
                 "names": ["type": "array", "items": ["type": "string"], "description": "move_items: each item's name as listed."],
                 "to_folder": text("move_items: the folder's path, or a folder's name in the same window."),
                 "query": text("search_web: the words."),

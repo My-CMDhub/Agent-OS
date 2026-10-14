@@ -146,14 +146,17 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
         let renames = name == RealtimeVoiceVerbs.renameItemName
         // move_items' names ride in `path` (exact labels, untrimmed), its folder in `text`.
         let moves = name == RealtimeVoiceVerbs.moveItemsName
-        return RealtimeToolCall(callID: callID, name: name, appName: findsFile || renames || moves ? nil : text(arguments?["name"]) ?? text(arguments?["app"]),
+        // set_value's `name` is the control's (`elementName`), its app is `app`, its numbers ride in `text`.
+        let sets = name == RealtimeVoiceVerbs.setValueName
+        return RealtimeToolCall(callID: callID, name: name,
+                                appName: findsFile || renames || moves ? nil : sets ? text(arguments?["app"]) : text(arguments?["name"]) ?? text(arguments?["app"]),
                                 words: words, path: moves ? (arguments?["names"] as? [Any])?.compactMap { $0 as? String } : path,
                                 shortcut: text(arguments?["shortcut"]),
-                                elementName: renames ? text(arguments?["name"]) : nil,
+                                elementName: renames || sets ? text(arguments?["name"]) : nil,
                                 // go_to_folder's path rides in `text`: `path` is press_menu's list.
                                 text: name == RealtimeVoiceVerbs.goToFolderName ? text(arguments?["folder"]) ?? text(arguments?["path"])
                                     : findsFile ? text(arguments?["name"]) : renames ? text(arguments?["new_name"])
-                                    : moves ? text(arguments?["to_folder"]) : nil,
+                                    : moves ? text(arguments?["to_folder"]) : sets ? text(arguments?["value"]) : nil,
                                 what: text(arguments?["what"]),
                                 url: text(arguments?["url"]), goal: text(arguments?["goal"]))
     }
@@ -516,6 +519,11 @@ nonisolated enum RealtimeOpenAppTool {
             } else {
                 request["target"] = "focused"
             }
+        case RealtimeVoiceVerbs.setValueName:
+            guard let control = call.elementName, let value = call.text else {
+                return refuse("missingName", "set_value needs the control's name as listed and its value, for example \"0:10:00\"")
+            }
+            request = ["verb": "adjust", "title": control, "text": value, "expectApp": expectApp ?? appName]
         case RealtimeVoiceVerbs.closeName:
             guard let what = call.what, RealtimeHandsVerbs.closeTargets.contains(what) else {
                 return refuse("invalidWhat", "close needs what: tab, window or app")

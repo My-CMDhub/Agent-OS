@@ -180,13 +180,19 @@ enum HarnessVerb: String, CaseIterable {
     /// Mutating; the kernel judges every name's words. The clipboard is restored.
     case moveItems
 
+    /// Step a picker, slider or stepper (one publishing AXIncrement/AXDecrement), or a
+    /// group of them, to whole numbers: press it, step one at a time, read each step back
+    /// (`HarnessAdjust`, measured 2026-10-14 on Clock's timer). Mutating; navigation for
+    /// the kernel after its name's words.
+    case adjust
+
     /// Whether this verb can change the world. The kill switch stops these and
     /// leaves the read-only pair working, so an operator who tripped it can
     /// still look at the machine and find out why.
     var isMutating: Bool {
         switch self {
         case .ping, .snapshot, .menus, .windows, .look, .status, .highlight: return false
-        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick, .helpSearch, .goToFolder, .renameItem, .moveItems: return true
+        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick, .helpSearch, .goToFolder, .renameItem, .moveItems, .adjust: return true
         }
     }
 
@@ -216,7 +222,7 @@ enum HarnessVerb: String, CaseIterable {
         // `goToFolder` writes into Finder's own Go to Folder field: `goToFolderResponse`.
         // `renameItem` names a listed item and drives Finder's own editor: `renameItemResponse`.
         case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight, .scroll, .openURL, .visionClick,
-             .helpSearch, .goToFolder, .renameItem, .moveItems: return nil
+             .helpSearch, .goToFolder, .renameItem, .moveItems, .adjust: return nil
         }
     }
 }
@@ -805,6 +811,13 @@ enum HarnessPolicy {
                 return .failure(.invalidField(field: "text", value: "too long or a control character"))
             }
         }
+        // adjust: the control as listed (title), its number(s) (text), in the app it was meant for.
+        if verb == .adjust {
+            guard !(raw.title ?? "").isEmpty else { return .failure(.missingField("title")) }
+            guard !text.isEmpty else { return .failure(.missingField("text")) }
+            guard raw.expectApp != nil else { return .failure(.missingField("expectApp")) }
+            if let problem = HarnessAdjust.valueProblem(text) { return .failure(.invalidField(field: "text", value: problem)) }
+        }
         if verb == .type {
             guard !text.isEmpty else {
                 return .failure(.missingField("text"))
@@ -1230,6 +1243,8 @@ enum HarnessObservability {
         "renameItemNotFound", "renameNameTaken", "renameBusy",
         // moveItems naming an item the window does not list, a name the destination lists, or no known destination.
         "moveItemNotFound", "moveNameTaken", "moveDestinationUnknown",
+        // adjust naming nothing in the window, or something with no steps, or the wrong count of numbers.
+        "adjustNotFound", "notAdjustable", "adjustValueMismatch",
         // `LockScreenGuard` doing its job. Measured 2026-09-13: a probe left
         // running against a locked screen wrote 12,881 `anomalySuppressed`
         // audit lines naming this rule — one per refusal, each also a line of
@@ -2095,6 +2110,9 @@ final class HarnessServer {
 
         case .moveItems:
             return moveItemsResponse(request, dryRun: dryRun, startedAt: startedAt)
+
+        case .adjust:
+            return adjustResponse(request, dryRun: dryRun, startedAt: startedAt)
         }
     }
 
@@ -2515,7 +2533,7 @@ final class HarnessServer {
             bundleIdentifier: bundleIdentifier,
             rawTarget: auditTarget(for: request) ?? "",
             // A rename's new name is what the owner approves, so a ticket binds it.
-            text: request.verb == .type || request.verb == .renameItem || request.verb == .moveItems ? request.text : nil,
+            text: request.verb == .type || request.verb == .renameItem || request.verb == .moveItems || request.verb == .adjust ? request.text : nil,
             mode: request.verb == .type ? request.mode.rawValue : nil,
             withinNamed: request.withinNamed,
             nearPoint: request.nearPoint,
@@ -4318,6 +4336,54 @@ final class HarnessServer {
             return finish("notObserved", kernel: described.decision, error: "notVerified", message: failure.message)
         }
         response["verification"] = ["status": "confirmed", "evidence": run.report["evidence"] ?? NSNull()]
+        return finish("confirmed", kernel: described.decision)
+    }
+
+    // MARK: adjust
+
+    /// Steps a picker / slider / stepper to whole numbers (`HarnessAdjust`, measured
+    /// 2026-10-14). The control is resolved and its numbers read before anything is
+    /// pressed; the kernel judges its name and the app policy and tickets apply. Dry
+    /// run stops after those checks.
+    private func adjustResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        var response: [String: Any] = ["dryRun": dryRun]
+        guard let (application, _) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response) else { return response }
+        func finish(_ outcome: String, kernel: String = "n/a", error: String? = nil, message: String? = nil) -> [String: Any] {
+            response["ok"] = error == nil
+            if let error { response["error"] = error }
+            if let message { response["message"] = message }
+            audit(request, dryRun: dryRun, kernel: kernel, outcome: outcome, startedAt: startedAt)
+            return response
+        }
+        let plan: HarnessAdjust.Plan
+        switch HarnessAdjust.plan(name: request.title, value: request.text, processIdentifier: application.processIdentifier) {
+        case .failure(let failure): return finish(failure.code, error: failure.code, message: failure.message)
+        case .success(let planned): plan = planned
+        }
+        response["resolved"] = ["name": UntrustedText(plan.name).forDisplay, "parts": plan.controls.count, "targets": plan.targets,
+                                "before": plan.before.map { $0.map { UntrustedText($0).forDisplay } ?? "unread" }]
+        let decision = applyAppPolicy(to: ActionSafetyKernel.evaluateAdjust(name: plan.name),
+                                      bundleIdentifier: application.bundleIdentifier, into: &response)
+        let described = HarnessPolicy.describe(decision)
+        let gated = gate(decision, request: request, appName: application.localizedName,
+                         bundleIdentifier: application.bundleIdentifier, dryRun: dryRun, into: &response)
+        guard gated.executable else {
+            return finish(gated.outcome, kernel: described.decision, error: gated.outcome, message: response["message"] == nil ? gated.note : nil)
+        }
+        guard !dryRun else {
+            response["performed"] = ["status": "skipped", "reason": "dry run — the control and its numbers were read; nothing was pressed or stepped"]
+            return finish("dryRun", kernel: described.decision)
+        }
+        phaseTiming.actionStarting()
+        let run = HarnessAdjust.adjust(plan)
+        phaseTiming.actionReturned()
+        response["performed"] = run.report
+        if let failure = run.failure {
+            guard failure.code == "notObserved" else { return finish(failure.code, kernel: described.decision, error: failure.code, message: failure.message) }
+            response["verification"] = ["status": "notObserved"]
+            return finish("notObserved", kernel: described.decision, error: "notVerified", message: failure.message)
+        }
+        response["verification"] = ["status": "confirmed", "evidence": ["after": run.report["after"] ?? NSNull(), "group": run.report["groupAfter"] ?? NSNull()]]
         return finish("confirmed", kernel: described.decision)
     }
 
