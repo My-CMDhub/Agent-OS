@@ -4293,3 +4293,16 @@ struct FocusSettleTests {
     #expect(decide(["AXValue"]) == .allow)
     #expect(decide([]) == .refuse(reason: ActionSafetyKernel.nonTextRoleRefusalReason(role: "AXWebArea")))
 }
+
+
+@Test func placingAnOrderIsBuyingAndHasNoConfirmedPathPastIt() {
+    // Launch U08 2026-10-15: "Buy now" refused, "Place your order" matched nothing.
+    for title in ["Place your order", "Place Order", "Complete order", "Order now"] {
+        let decision = ActionSafetyKernel.evaluate(
+            intent: ElementActionIntent(role: nil, title: title, action: .press), resolvedNode: typingNode(role: "AXButton"),
+            matchCount: 1, visibleBounds: wholeScreen, typing: nil)
+        guard case .refuse = decision else { Issue.record("\(title) was not refused: \(decision)"); continue }
+    }
+    // Ordering a list is not buying.
+    #expect(ActionSafetyKernel.irreversibleTitleKeywords.first(where: "sort order".contains) == nil)
+}

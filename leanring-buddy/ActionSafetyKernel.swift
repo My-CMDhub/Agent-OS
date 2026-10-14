@@ -287,7 +287,10 @@ enum ActionSafetyKernel {
         "erase",
         // Money. Distinct from the rest only in that the loss is someone
         // else's problem to reverse, and usually cannot be.
-        "buy", "pay", "purchase"
+        "buy", "pay", "purchase",
+        // Placing an order IS buying, under a shop's other word (launch U08 2026-10-15: with "Buy now"
+        // refused, "Add to basket" then "Place your order" matched nothing). "Checkout" only opens a page.
+        "place order", "place your order", "complete order", "confirm order", "submit order", "order now"
     ]
 
     static let irreversibleRefusalPrefix = "refusing an irreversible action"
