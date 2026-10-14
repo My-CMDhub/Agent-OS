@@ -945,6 +945,28 @@ enum HarnessPolicy {
         }
     }
 
+    /// The smallest text input — or AXWebArea whose AXValue is settable (an editable body) — whose
+    /// frame holds `point`; never one that might be a password box.
+    static func editableFieldAt(_ point: CGPoint, in root: AccessibilityElementNode) -> AccessibilityElementNode? {
+        var found: [AccessibilityElementNode] = []
+        func visit(_ node: AccessibilityElementNode) {
+            if node.frameInAppKitCoordinates.contains(point), !node.mightBeSecure,
+               AccessibilityElementNode.textInputRoles.contains(node.role)
+                || (node.role == "AXWebArea" && node.accessibilityElement.map(isValueSettable) == true) {
+                found.append(node)
+            }
+            node.children.forEach(visit)
+        }
+        visit(root)
+        return found.min { $0.frameInAppKitCoordinates.width * $0.frameInAppKitCoordinates.height
+            < $1.frameInAppKitCoordinates.width * $1.frameInAppKitCoordinates.height }
+    }
+
+    private static func isValueSettable(_ element: AXUIElement) -> Bool {
+        var settable = DarwinBoolean(false)
+        return AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue
+    }
+
     static func movedRefusal(resolvedFrame: CGRect, nearPoint: CGPoint?) -> (code: String, message: String)? {
         guard let nearPoint, resolvedFrame.contains(nearPoint) else {
             return ("elementMoved", "the element with that name is no longer where it was aimed; nothing was done to it")
@@ -2899,7 +2921,23 @@ final class HarnessServer {
                 audit(request, dryRun: dryRun, kernel: "n/a", outcome: "noFocusedElement", startedAt: startedAt)
                 return nil
             }
-            resolvedNode = focusedNode
+            var focused = focusedNode
+            // type_text aimed at a point OUTSIDE the focused field (Mail: focus in Subject, the point in the
+            // message body, U04 2026-10-14): focus the one text input or editable web area at that point
+            // first, as a click into it would, then type there. Never a password box.
+            if request.verb == .type, request.requireAtPoint, let point = request.nearPoint,
+               !focused.frameInAppKitCoordinates.contains(point),
+               let field = HarnessPolicy.editableFieldAt(point, in: rootNode), let live = field.accessibilityElement {
+                AXUIElementSetAttributeValue(live, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                _ = HarnessHands.waitUntil(seconds: 0.5) {
+                    AccessibilityTypePerformer.focusedNodeAndSource()?.0.frameInAppKitCoordinates.contains(point) == true
+                }
+                if let refocused = AccessibilityTypePerformer.focusedNodeAndSource()?.0 {
+                    focused = refocused
+                    response["focusedFieldAtPoint"] = true
+                }
+            }
+            resolvedNode = focused
             response["resolution"] = ["status": "focused", "matchCount": 1]
             // Which witness named it: the app's own read, or the fallback after it named no field.
             response["focusSource"] = focusSource
