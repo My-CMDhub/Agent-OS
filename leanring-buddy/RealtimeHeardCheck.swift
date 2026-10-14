@@ -297,7 +297,9 @@ nonisolated enum RealtimeHeardCheck {
         "Clock.app": ["timer", "alarm", "stopwatch"],
         "Calendar.app": ["meeting", "event", "appointment"],
         // Opening Mail reaches no one; a Send is always its own card (U04, owner's rule 2026-10-13).
-        "Mail.app": ["email"]]
+        "Mail.app": ["email"],
+        // Launch E06 2026-10-15: "what's using the most storage on my Mac?" asked before opening Settings.
+        "System Settings.app": ["storage"]]
 
     /// Built-in one-word app names that are everyday words: they still need a cue word (R1 keeps them out).
     static let ownNameEverydayWords: Set<String> = [

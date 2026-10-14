@@ -496,6 +496,8 @@ struct AgentLoopTests {
         #expect(!heard("set a timer for 10 minutes", "Calendar"))
         #expect(!heard("what time is it", "Clock"))
         #expect(heard("send an email to myself saying I quit", "Mail"))
+        #expect(heard("what's using the most storage on my Mac?", "System Settings"))
+        #expect(!heard("what's using the most storage on my Mac?", "Finder"))
         #expect(!heard("check my mail later", "Calendar"))
         // A whole multi-word name anywhere; a one-word name or a distinctive word only right after a cue word.
         #expect(heard("switch Calendar to the month view", "Calendar"))
