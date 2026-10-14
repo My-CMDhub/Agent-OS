@@ -194,7 +194,9 @@ nonisolated enum AgentPlan {
                     return "step \(number): this task is read-only by the owner's words, and \(reason)"
                 }
             } else if !actedBefore, RealtimeVoiceVerbs.aimsAtScreen(tool), let name = step["name"] as? String, let elements = screenElements {
-                let matches = elements.filter { $0["name"] as? String == name }
+                // A label inside its own link counts once (B2 2026-10-14: link "Plans" + its text "Plans"
+                // refused four plans as "2 things", while find_on_screen offered one).
+                let matches = elements.filter { $0["name"] as? String == name && !AgentLoop.repeatsItsParentsName($0, in: elements) }
                 if !matches.isEmpty, matches.allSatisfy(AccessibilityElementNode.mightBeSecure(entry:)) {
                     return "step \(number): \(UntrustedText(name).forDisplay) is a password or secure field; nothing is typed or pressed there"
                 }

@@ -1538,6 +1538,13 @@ final class AgentLoop {
 
     // MARK: Page text (pure)
 
+    /// A `forModel` entry whose nearest listed ancestor carries the same name: Chromium's
+    /// AXLink "Plans" lists its AXStaticText "Plans" too. One thing on screen, not two.
+    nonisolated static func repeatsItsParentsName(_ element: [String: Any], in elements: [[String: Any]]) -> Bool {
+        guard let parent = element["parent"] as? Int, elements.indices.contains(parent) else { return false }
+        return elements[parent]["name"] as? String == element["name"] as? String
+    }
+
     /// The visible text of a `forModel` snapshot, in tree order: what the
     /// harness lists (`listedName`, clipped to what scrolls into view, never
     /// inside a text or password box), withheld names skipped, a name repeating
@@ -1549,9 +1556,7 @@ final class AgentLoop {
         for element in elements {
             guard element["role"] as? String != "AXWindow", !AccessibilityElementNode.withholdsName(entry: element),
                   let name = (element["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { continue }
-            if let parent = element["parent"] as? Int, elements.indices.contains(parent), elements[parent]["name"] as? String == element["name"] as? String {
-                continue
-            }
+            if repeatsItsParentsName(element, in: elements) { continue }
             // The chosen option, never only its name (G14 2026-10-13: Appearance's "Dark" button is
             // AXSelected 1 and Light/Auto publish none; names alone sent two models round to the cap).
             let toggle = ["AXCheckBox", "AXRadioButton"].contains(element["role"] as? String ?? "")

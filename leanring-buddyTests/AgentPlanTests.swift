@@ -128,6 +128,11 @@ struct AgentPlanTests {
         #expect(check([["tool": "press_element", "name": "Not here"]]) == nil, "no match: the resolver still has OCR and vision")
         #expect(check([["tool": "press_element", "name": "Back"], ["tool": "press_element", "name": "Recent"]]) == nil,
                 "after an acting step the screen may differ: not judged now")
+        // B2 2026-10-14: Chromium lists a link AND its own label; four plans were refused as "2 things named Plans".
+        let shop: [[String: Any]] = [["role": "AXWindow", "name": "Mimic Mobile"],
+                                     ["role": "AXLink", "name": "Plans", "parent": 0], ["role": "AXStaticText", "name": "Plans", "parent": 1]]
+        #expect(AgentPlan.livePrecheck([["tool": "press_element", "name": "Plans"]], menuOffer: nil, findOffer: nil, readOnly: false,
+                                       screenElements: shop) == nil)
     }
 
     @MainActor @Test func aPlanRunsItsStepsWithOneModelCallAndOneResult() async {
