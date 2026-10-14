@@ -680,7 +680,8 @@ final class AgentLoop {
                 var refusal = AgentPlan.precheck(steps)
                 if refusal == nil, let steps { refusal = await dependencies.planPrecheck(steps) }
                 if let refusal {
-                    traced(["tool": AgentPlan.name, "args": ["steps": steps?.count ?? 0], "ok": false, "error": "planRefused"])
+                    traced(["tool": AgentPlan.name, "args": ["steps": steps?.count ?? 0], "ok": false, "error": "planRefused",
+                            "refusal": AgentPlan.refusalCategory(refusal)])
                     results.append(Self.toolResultBlock(id: id, result: ["ok": false, "error": "planRefused", "message": "nothing was run: \(refusal)"]))
                     pending = results + pending
                     // A refused plan is a refusal like any other (review of e98f476).

@@ -136,6 +136,25 @@ nonisolated enum AgentPlan {
         return nil
     }
 
+    /// A refusal from `precheck`/`livePrecheck` as a fixed word for agent-loop.log: the
+    /// refusal text can carry screen names and menu paths, so the trace gets only this.
+    /// Matched on the fixed text around the untrusted part, never inside it.
+    static func refusalCategory(_ refusal: String) -> String {
+        var body = Substring(refusal)
+        if body.hasPrefix("step "), let colon = body.firstIndex(of: ":") { body = body[body.index(after: colon)...].drop { $0 == " " } }
+        let prefixes = [("a plan needs a list", "emptyPlan"), ("a plan runs at most", "tooManySteps"),
+                        ("ask_owner is its own reply", "askOwnerStep"), ("there is no tool named", "unknownTool"),
+                        ("done may only be the last", "doneNotLast"), ("a position is a point", "positionAfterFirst"),
+                        ("this task is read-only", "readOnly"), ("the menu path", "menuNotOffered"),
+                        ("nothing was pressed: no menu item", "shortcutNotMapped"),
+                        ("nothing was pressed: more than one menu item", "shortcutAmbiguous")]
+        if let match = prefixes.first(where: { body.hasPrefix($0.0) }) { return match.1 }
+        if body.drop(while: \.isNumber).hasPrefix(" things on screen are named") { return "ambiguousName" }
+        if body.hasSuffix("is a password or secure field; nothing is typed or pressed there") { return "secureField" }
+        if stepTools.contains(where: { body.hasPrefix("\($0) needs ") }) { return "missingArguments" }
+        return "other"
+    }
+
     /// Steps that only read: their result is something to see, so a plan stops after one.
     static func isReading(_ tool: String) -> Bool {
         [AgentLoopTools.readPageName, AgentLoopGemini.webLookupName, RealtimeVoiceVerbs.findOnScreenName,

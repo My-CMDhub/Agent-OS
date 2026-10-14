@@ -34,7 +34,8 @@ private func planReply(_ steps: [[String: Any]], id: String = "plan-1") -> [Stri
 
 @MainActor
 private func planLoop(_ script: PlanScript, precheck: (([[String: Any]]) async -> String?)? = nil,
-                      execute: ((RealtimeToolCall) -> RealtimeToolDispatch)? = nil) -> AgentLoop {
+                      execute: ((RealtimeToolCall) -> RealtimeToolDispatch)? = nil,
+                      trace: @escaping ([String: Any]) -> Void = { _ in }) -> AgentLoop {
     var dependencies = AgentLoop.Dependencies(
         model: { body, _ in
             script.bodies.append(body)
@@ -49,7 +50,7 @@ private func planLoop(_ script: PlanScript, precheck: (([[String: Any]]) async -
                                                          waitedForConfirmation: false, harnessResponse: ["ok": true])
         },
         readPage: { script.reads += 1; return ["ok": true, "text": "page"] },
-        trace: { _ in },
+        trace: trace,
         uptime: { script.now },
         frontBundle: { "com.apple.finder" })
     if let precheck { dependencies.planPrecheck = precheck }
@@ -160,6 +161,23 @@ struct AgentPlanTests {
         let combined = json(results(script)[0])
         #expect(combined["ok"] as? Bool == false)
         #expect(combined["error"] as? String == "planRefused")
+    }
+
+    @MainActor @Test func aRefusedPlansTraceLineSaysWhyWithoutTheScreenName() async {
+        let elements: [[String: Any]] = [["role": "AXButton", "name": "Secret Plans"], ["role": "AXLink", "name": "Secret Plans"]]
+        let script = PlanScript([planReply([["tool": "press_element", "name": "Secret Plans"]]),
+                                 reply([("done", ["summary": "Could not.", "evidence": []])])])
+        var lines: [[String: Any]] = []
+        _ = await planLoop(script, precheck: { steps in
+            AgentPlan.livePrecheck(steps, menuOffer: nil, findOffer: nil, readOnly: false, screenElements: elements)
+        }, trace: { lines.append($0) }).run(goal: "open plans")
+        let refused = lines.first { $0["error"] as? String == "planRefused" }
+        #expect(refused?["refusal"] as? String == "ambiguousName")
+        let written = String(decoding: (try? JSONSerialization.data(withJSONObject: refused ?? [:])) ?? Data(), as: UTF8.self)
+        #expect(!written.isEmpty && !written.contains("Secret"), "the trace carries the category, never the screen name")
+        #expect(AgentPlan.refusalCategory(AgentPlan.precheck(Array(repeating: ["tool": "read_page"], count: 7))!) == "tooManySteps")
+        #expect(AgentPlan.refusalCategory("step 1: \"this task is read-only\" is a password or secure field; nothing is typed or pressed there")
+                == "secureField", "a name that quotes another refusal's words cannot change the category")
     }
 
     @MainActor @Test func aPlanStopsAtNotObservedAndAfterARead() async {
