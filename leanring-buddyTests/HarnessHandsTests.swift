@@ -157,8 +157,13 @@ struct HarnessHandsTests {
     @Test func clickMethodsPressFirstExceptOnFieldsAndHonourAForcedMethod() {
         #expect(HarnessHands.clickMethods(publishesPress: true, role: "AXButton", forced: nil) == [.axPress, .click])
         #expect(HarnessHands.clickMethods(publishesPress: false, role: "AXButton", forced: nil) == [.click])
-        #expect(HarnessHands.clickMethods(publishesPress: true, role: "AXTextField", forced: nil) == [.click])
-        #expect(HarnessHands.clickMethods(publishesPress: true, role: "AXTextArea", forced: nil) == [.click])
+        // A field is focused by AXFocused first (no point, so no hit test): Reminders' "Add Time"
+        // is never its app's hit-test answer (E12, 2026-10-15). The click stays the fallback.
+        #expect(HarnessHands.clickMethods(publishesPress: true, role: "AXTextField", forced: nil) == [.axFocus, .click])
+        #expect(HarnessHands.clickMethods(publishesPress: false, role: "AXTextField", forced: nil) == [.axFocus, .click])
+        #expect(HarnessHands.clickMethods(publishesPress: true, role: "AXTextArea", forced: nil) == [.axFocus, .click])
+        #expect(HarnessHands.clickMethods(publishesPress: true, role: "AXTextField", forced: .axFocus) == [.axFocus])
+        #expect(HarnessHands.clickMethods(publishesPress: true, role: "AXTextField", forced: .click) == [.click], "a forced click still clicks")
         #expect(HarnessHands.clickMethods(publishesPress: true, role: "AXButton", forced: .click) == [.click])
         #expect(HarnessHands.clickMethods(publishesPress: true, role: "AXButton", forced: .axPress) == [.axPress])
         // Forced press with nothing to send is an empty plan — refused, never quietly a click.

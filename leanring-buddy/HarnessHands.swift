@@ -20,6 +20,8 @@ import Foundation
 /// How a click was (or may be forced to be) delivered.
 enum ClickMethod: String, CaseIterable {
     case axPress
+    /// A field's click only puts the caret in it: the same focus, written to the element.
+    case axFocus
     case click
 }
 
@@ -41,15 +43,21 @@ enum HarnessHands {
 
     /// The methods a click tries, in order. `AXPress` first when the element
     /// publishes it and is not a text input (pressing a field focuses nothing in
-    /// Chromium); a forced method runs alone, and a forced `axPress` on an element
-    /// that publishes none is an empty plan — refused, never quietly a click.
+    /// Chromium); a text input is focused by an `AXFocused` write first, which needs
+    /// no point — Reminders' "Add Time" field is never its own app's hit-test answer
+    /// (the row's AXGroup answers at 9 of 9 points over its sibling "Add Location"),
+    /// so its click was refused `clickTargetObscured`, while the focus write landed in
+    /// ≤129 ms and opened the field's own suggestions (E12, 2026-10-15). A forced method
+    /// runs alone, and a forced `axPress` on an element that publishes none is an
+    /// empty plan — refused, never quietly a click.
     static func clickMethods(publishesPress: Bool, role: String, forced: ClickMethod?) -> [ClickMethod] {
         switch forced {
         case .axPress: return publishesPress ? [.axPress] : []
+        case .axFocus: return [.axFocus]
         case .click: return [.click]
         case nil:
-            let textInput = AccessibilityElementNode.textInputRoles.contains(role)
-            return publishesPress && !textInput ? [.axPress, .click] : [.click]
+            if AccessibilityElementNode.textInputRoles.contains(role) { return [.axFocus, .click] }
+            return publishesPress ? [.axPress, .click] : [.click]
         }
     }
 

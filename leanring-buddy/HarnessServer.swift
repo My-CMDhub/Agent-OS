@@ -3563,7 +3563,7 @@ final class HarnessServer {
     // MARK: click
 
     /// `click` after the kernel and the gate: `AXPress` when the element publishes
-    /// it and is not a text input, a real left click at its visible centre
+    /// it and is not a text input, an `AXFocused` write on a text input, a real left click at its visible centre
     /// otherwise — or when the press went in and nothing could be seen to change
     /// (never on a toggle, which a second activation would undo). Each method is
     /// looked at before the next is tried; `method` says which one worked.
@@ -3610,9 +3610,27 @@ final class HarnessServer {
 
         phaseTiming.actionStarting()
         var pressError: AXError?
-        for method in methods {
+        methods: for method in methods {
             var attempt: [String: Any] = ["method": method.rawValue]
             switch method {
+            case .axFocus:
+                // No point is involved, so nothing drawn over the field can take the input; the
+                // app's own focus read is the evidence. Focus already there proves nothing: click.
+                var settable: DarwinBoolean = false
+                guard !focusedBefore, AXUIElementIsAttributeSettable(element, kAXFocusedAttribute as CFString, &settable) == .success,
+                      settable.boolValue else { continue }
+                let error = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                phaseTiming.actionReturned()
+                attempt["axErrorRawValue"] = Int(error.rawValue)
+                let focused = HarnessHands.waitUntil(seconds: HarnessHands.focusSettleSeconds) {
+                    HarnessHands.focusIsOn(element, processIdentifier: processIdentifier)
+                }
+                attempt["verified"] = focused
+                attempts.append(attempt)
+                guard focused else { continue }
+                evidence = "focus moved to the element"
+                response["method"] = method.rawValue
+                break methods
             case .axPress:
                 let result = AccessibilityActionPerformer.perform(kAXPressAction, on: element)
                 phaseTiming.actionReturned()
