@@ -185,6 +185,42 @@ struct AgentLoopTests {
         #expect(!AgentLoop.readStoppedAbovePage([]))
     }
 
+    /// E12 2026-10-15 (Gemini 3/3): the time typed into the title, no due time set, done claimed 5 pm. Asked once, by
+    /// the owner's words and the screen; a second done stands.
+    @MainActor @Test func aClockTimeShownOnlyInTypedTextIsAskedOnce() async {
+        let claim = "Created a reminder to call Mom at 5 pm today."
+        let script = Script([toolUse("type_text", ["text": "Call Mom at 5 pm today", "submit": true]),
+                             toolUse("done", ["summary": claim, "evidence": [1]], id: "first"),
+                             toolUse("done", ["summary": claim, "evidence": [1]])])
+        let gemini = ["ok": true, "window": "Reminders", "text": "Today, 1 reminder\nIncomplete, Call Mom at 5 pm today, Today"] as [String: Any]
+        let outcome = await loop(script, page: gemini).run(goal: "add a reminder", heard: "remind me to call Mom at 5 pm today")
+        #expect(outcome == .done(summary: claim))
+        let asked = (script.bodies[2]["messages"] as? [[String: Any]])?.last?["content"] as? [[String: Any]]
+        #expect((asked?.first?["content"] as? String)?.contains("5:00 pm") == true)
+        #expect(script.traces.filter { $0["error"] as? String == "timeNotSet" }.count == 1)
+
+        func typed(_ text: String, step: Int = 1) -> AgentLoop.Receipt {
+            AgentLoop.Receipt(step: step, toolName: "type_text", ok: true, error: nil, typed: text, submitted: true)
+        }
+        let heard = "remind me to call Mom at 5 pm today"
+        #expect(AgentLoop.unsetClockTime(heard: heard, receipts: [typed("Call Mom at 5 pm today")],
+                                         screen: "Incomplete, Call Mom at 5 pm today, Today") != nil)
+        // Claude 20-43-58Z: "5:00 PM" typed into Add Time; the row's due label, with Reminders' U+202F, is the evidence.
+        let claude = [typed("Call Mom"), typed("5:00 PM", step: 4)]
+        #expect(AgentLoop.unsetClockTime(heard: heard, receipts: claude, screen: "Incomplete, Call Mom, Today at 5:00\u{202F}pm") == nil)
+        #expect(AgentLoop.unsetClockTime(heard: heard, receipts: claude, screen: "Incomplete, Call Mom, Today at 5:00 pm") == nil)
+        #expect(AgentLoop.unsetClockTime(heard: heard, receipts: claude, screen: "Incomplete, Call Mom, Today at 6:00 pm") != nil)
+        // Read-only (nothing typed), and owner words with no time: never asked.
+        let read = AgentLoop.Receipt(step: 1, toolName: "read_page", ok: true, error: nil)
+        #expect(AgentLoop.unsetClockTime(heard: "what is on at 5 pm today", receipts: [read], screen: "Calendar") == nil)
+        #expect(AgentLoop.unsetClockTime(heard: "remind me to call Mom", receipts: [typed("Call Mom")], screen: "Call Mom") == nil)
+        // Owner's times, by the same reading; a bare number is none.
+        let times = ["5 pm", "5pm", "5:00 p.m.", "17:00", "6:45 am", "call 3 people"].map { AgentLoop.clockTimes(in: $0).first }
+        #expect(times == [.init(hour: 17, minute: 0, second: nil), .init(hour: 17, minute: 0, second: nil),
+                          .init(hour: 17, minute: 0, second: nil), .init(hour: 17, minute: 0, second: nil),
+                          .init(hour: 6, minute: 45, second: nil), nil])
+    }
+
     @MainActor @Test func aPressStopsTheLoopBeforeTheNextTool() async {
         let script = Script([toolUse("press_element", ["name": "Post"])])
         let agent = AgentLoop(dependencies: AgentLoop.Dependencies(

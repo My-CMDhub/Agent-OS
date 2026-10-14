@@ -415,6 +415,8 @@ final class AgentLoop {
     private var challengedDone = false
     /// `readStoppedAbovePage` asked once; a second done after it stands.
     private var challengedUnreadPage = false
+    /// `unsetClockTime` asked once; a second done after it stands.
+    private var challengedUnsetTime = false
     private var sameRefusal: (error: String, count: Int)?
     private var lastError: String?
     private var webUsed: [String: Int] = [:]
@@ -754,11 +756,22 @@ final class AgentLoop {
                         continue
                     }
                     // A creation claim is held against the screen as it is NOW, after every step (E03 2026-10-13).
+                    // So is an owner's clock time once something was typed (E12 2026-10-15) — one read for both.
+                    let checksTime = !challengedUnsetTime && !readOnly && !Self.clockTimes(in: heard ?? "").isEmpty
+                        && receipts.contains { $0.typed != nil }
                     var seenNow: String?
-                    if !Self.createdNames(summary).isEmpty {
+                    if checksTime || !Self.createdNames(summary).isEmpty {
                         let page = await dependencies.readPage()
                         // G15 2026-10-13: "saved … named JARVIS test 3" was challenged — the name was in the title only.
                         if page["ok"] as? Bool == true { seenNow = [page["window"] as? String, page["text"] as? String].compactMap { $0 }.joined(separator: "\n") }
+                    }
+                    // E12 2026-10-15 (Gemini 3/3): "Call Mom at 5 pm today" typed as the title, no due time, done claimed 5 pm.
+                    // By the owner's words and the screen, never the summary; asked once, a second done stands.
+                    if checksTime, let seenNow, let unset = Self.unsetClockTime(heard: heard, receipts: receipts, screen: seenNow) {
+                        challengedUnsetTime = true
+                        traced(["tool": toolName, "args": args, "ok": false, "error": "timeNotSet"])
+                        answer(["ok": false, "error": "timeNotSet", "message": unset + ", then call done again."])
+                        continue
                     }
                     let challenge = summary.isEmpty ? "the summary is empty"
                         : Self.doneChallenge(summary: summary, evidence: evidence, receipts: receipts, currentStep: step, seenNow: seenNow)
@@ -1169,6 +1182,44 @@ final class AgentLoop {
     static func readStoppedAbovePage(_ receipts: [Receipt]) -> Bool {
         guard let read = receipts.lastIndex(where: { $0.ok && $0.toolName == AgentLoopTools.readPageName }), receipts[read].moreBelow else { return false }
         return !receipts[(read + 1)...].contains { $0.ok && $0.toolName == RealtimeVoiceVerbs.scrollName }
+    }
+
+    /// The owner asked for a clock time and something was typed, yet the screen shows that time
+    /// nowhere outside the typed text: no item's own time holds it (E12 2026-10-15: the title
+    /// "Call Mom at 5 pm today", due "Today" only). A typing that is only a time went into a time
+    /// field and is not subtracted: Reminders' row "Today at 5:00 pm" holds what "5:00 PM" set.
+    /// ponytail: a time typed only as message text ("tell Bob 5 pm") is asked about once too; a second done stands.
+    static func unsetClockTime(heard: String?, receipts: [Receipt], screen: String) -> String? {
+        guard let asked = clockTimes(in: heard ?? "").first else { return nil }
+        let typed = receipts.compactMap { $0.ok ? $0.typed : nil }
+        guard !typed.isEmpty else { return nil }
+        var rest = folded(screen)
+        for text in typed.map(folded) where !text.replacingOccurrences(of: clockPattern, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces).isEmpty {
+            rest = rest.replacingOccurrences(of: text, with: " ", options: .caseInsensitive)
+        }
+        if clockTimes(in: rest).contains(asked) { return nil }
+        let said = String(format: "%d:%02d %@", (asked.hour + 11) % 12 + 1, asked.minute, asked.hour < 12 ? "am" : "pm")
+        return "the owner asked for \(said), and the screen shows that time nowhere outside text you typed, so no time is set. "
+            + "Set the item's own time (its date or time field), or say the time is not set"
+    }
+
+    /// "5 pm", "5pm", "5:00 p.m.", "6:45 am", "17:00" — a bare "5" is no time.
+    static let clockPattern = #"(?i)(?<![0-9:])([0-9]{1,2})(?::([0-9]{2}))?(?:\s*([ap])\.?\s*m\b\.?)?(?![0-9:])"#
+
+    static func clockTimes(in text: String) -> [HarnessAdjust.ClockTime] {
+        let text = folded(text)
+        guard let regex = try? NSRegularExpression(pattern: clockPattern) else { return [] }
+        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match in
+            func group(_ index: Int) -> String? { Range(match.range(at: index), in: text).map { String(text[$0]) } }
+            guard let hour = group(1), group(2) != nil || group(3) != nil else { return nil }
+            return HarnessAdjust.clockTime("\(hour):\(group(2) ?? "00")" + (group(3).map { " \($0)m" } ?? ""))
+        }
+    }
+
+    /// Lowercased, every whitespace one plain space: Reminders writes "5:00\u{202F}pm".
+    static func folded(_ text: String) -> String {
+        String(text.lowercased().map { $0.isWhitespace ? " " : $0 })
     }
 
     /// Names a creation sentence gives: created/added/made … called/named/titled "X" or X unquoted
