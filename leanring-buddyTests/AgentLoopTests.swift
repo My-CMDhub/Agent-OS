@@ -114,9 +114,50 @@ struct AgentLoopTests {
     @MainActor @Test func stopsAtTheStepCap() async {
         let script = Script([toolUse("scroll", ["direction": "down"])])
         let outcome = await loop(script).run(goal: "keep scrolling")
-        #expect(outcome == .stepCap)
+        #expect(outcome == .stepCap())
         #expect(script.executed.count == AgentLoop.maximumSteps)
-        #expect(script.bodies.count == 15)
+        // The wrap-up turn: a 16th call that declares only done and ask_owner; its scroll never runs.
+        #expect(script.bodies.count == 16)
+        let declared = (script.bodies.last?["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }
+        #expect(declared == ["done", "ask_owner"] || declared == ["ask_owner", "done"])
+        #expect(script.traces.last?["wrapUp"] as? Bool == true)
+        #expect(script.traces.dropLast().last?["error"] as? String == "wrapUpActing")
+    }
+
+    /// E12 2026-10-14: the reminder was set at step 15; the wrap-up turn may say so, through the same done checks.
+    @MainActor @Test func aDoneInTheWrapUpTurnStandsOnItsReceipts() async {
+        let script = Script(Array(repeating: toolUse("scroll", ["direction": "down"]), count: 15)
+                            + [toolUse("done", ["summary": "Scrolled to the plans.", "evidence": [15]])])
+        let outcome = await loop(script).run(goal: "scroll to the plans")
+        #expect(outcome == .done(summary: "Scrolled to the plans."))
+        #expect(script.executed.count == 15)
+        let wrapUpText = ((script.bodies.last?["messages"] as? [[String: Any]])?.last?["content"] as? [[String: Any]])?
+            .contains { ($0["text"] as? String)?.contains("step limit is reached") == true }
+        #expect(wrapUpText == true)
+        #expect(script.traces.last?["outcome"] as? String == "done")
+        #expect(script.traces.last?["wrapUp"] as? Bool == true)
+        #expect(script.traces.last?["steps"] as? Int == 15)
+    }
+
+    /// No turn is left to act on a challenge: the honest end is the cap, and the voice is told why.
+    @MainActor @Test func aChallengedDoneInTheWrapUpTurnEndsAsTheCapWithItsReason() async {
+        let script = Script(Array(repeating: toolUse("scroll", ["direction": "down"]), count: 15)
+                            + [toolUse("done", ["summary": "I pressed Post.", "evidence": [15]])])
+        let outcome = await loop(script).run(goal: "post it")
+        guard case .stepCap(let left?) = outcome else { Issue.record("not a reasoned stepCap: \(outcome)"); return }
+        #expect(script.bodies.count == 16)
+        #expect(script.traces.last?["outcome"] as? String == "stepCap")
+        let line = AgentLoop.finalLine(outcome, goal: "post it", lastProgress: nil, step: 15) ?? ""
+        #expect(line.contains("without finishing") && line.contains(left))
+    }
+
+    @MainActor @Test func anActingToolInTheWrapUpTurnIsNotRun() async {
+        let script = Script(Array(repeating: toolUse("scroll", ["direction": "down"]), count: 15)
+                            + [toolUses([("done", ["summary": "Scrolled.", "evidence": [15]]), ("press_element", ["name": "Post"])])])
+        let outcome = await loop(script).run(goal: "post it")
+        #expect(outcome == .stepCap())
+        #expect(!script.executed.contains { $0.name == "press_element" })
+        #expect(script.executed.count == 15)
     }
 
     @MainActor @Test func stopsAtTheTimeCap() async {

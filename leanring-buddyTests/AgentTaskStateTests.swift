@@ -110,7 +110,7 @@ private func fakeLoop(_ fake: Fake) -> AgentLoop {
     @Test func capsEndInTheirOwnPhase() async {
         let fake = Fake([call("scroll", ["direction": "down"])])
         let loop = fakeLoop(fake)
-        #expect(await loop.run(goal: "keep scrolling") == .stepCap)
+        #expect(await loop.run(goal: "keep scrolling") == .stepCap())
         #expect(loop.phase == .failed)
         #expect(AgentTaskPhase.ended(.timeCap) == .timedOut)
         #expect(loop.illegalTransitions == 0)

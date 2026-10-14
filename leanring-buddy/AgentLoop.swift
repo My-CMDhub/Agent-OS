@@ -35,7 +35,8 @@
 //      tool, host (fetch only, redacted), resultBytes, results (search),
 //      error; their time is inside modelMs — the API reports no per-tool ms)
 //    kind "end": run, goalHash, outcome (done | askOwner | failed | cancelled |
-//      stepCap | timeCap | refusals), steps, wallMs, model, error
+//      stepCap | timeCap | refusals), steps, wallMs, model, error; wrapUp: true
+//      (also on its step line) when it ended in the one turn after the step cap
 //    kind "modelFallback": from, to, status — the preferred model was not found
 //
 
@@ -297,7 +298,8 @@ final class AgentLoop {
         case askOwner(question: String)
         case failed(reason: String)
         case cancelled
-        case stepCap
+        /// `left`: why the wrap-up turn's done did not stand, for the voice.
+        case stepCap(left: String? = nil)
         case timeCap
         case refusals(error: String)
 
@@ -559,6 +561,8 @@ final class AgentLoop {
         let goal = self.goal, heard = self.heard
         /// The last batch's progress line, said once the next reply shows the task goes on.
         var heldProgress: String?
+        /// The one turn after the step cap (`wrapUpText`): done or ask_owner only, nothing acts.
+        var wrappingUp = false
 
         func finish(_ outcome: Outcome) -> Outcome {
             isRunning = false
@@ -571,6 +575,7 @@ final class AgentLoop {
                                        "model": modelUsed ?? NSNull(), "error": lastError ?? NSNull(),
                                        "uptime": MeasurementLogFile.roundedUptime(dependencies.uptime())]
             if case .refusals(let error) = outcome { line["error"] = error }
+            if wrappingUp { line["wrapUp"] = true }
             dependencies.trace(line)
             return outcome
         }
@@ -578,8 +583,15 @@ final class AgentLoop {
         while true {
             if Task.isCancelled { return finish(.cancelled) }
             if dependencies.uptime() - started >= Self.maximumSeconds { return finish(.timeCap) }
-            if step >= Self.maximumSteps { return finish(.stepCap) }
-            step += 1
+            // E12 2026-10-14 (3 runs, Claude and Gemini): the reminder was set at step 15 and the owner heard
+            // "couldn't finish". One more model call may report it; it never acts, and its done is judged as any.
+            if step >= Self.maximumSteps {
+                if wrappingUp { return finish(.stepCap()) }
+                wrappingUp = true
+                pending.append(["type": "text", "text": Self.wrapUpText])
+            } else {
+                step += 1
+            }
             move(to: .planning)
             dependencies.onStep(ConfirmationStep(current: step, total: Self.maximumSteps))
 
@@ -606,7 +618,8 @@ final class AgentLoop {
             if remaining() < 1 { return finish(.timeCap) }
             let reply: AgentModelReply
             do {
-                reply = try await dependencies.model(Self.requestBody(messages: messages, webUsed: webUsed, provider: provider, web: webToolsEnabled), remaining())
+                reply = try await dependencies.model(Self.requestBody(messages: messages, webUsed: webUsed, provider: provider,
+                                                                      web: webToolsEnabled, wrapUp: wrappingUp), remaining())
             } catch {
                 // A press during the call cancels it: that is a stop, not a failure.
                 if Task.isCancelled { return finish(.cancelled) }
@@ -622,6 +635,7 @@ final class AgentLoop {
                                        "stopReason": stopReason ?? NSNull(), "inputTokens": usage?["input_tokens"] ?? NSNull(),
                                        "outputTokens": usage?["output_tokens"] ?? NSNull(), "tool": NSNull(), "args": [String: Any](),
                                        "ok": NSNull(), "error": NSNull(), "harnessMs": NSNull(), "waitedForConfirmation": false]
+            if wrappingUp { line["wrapUp"] = true }
             func traced(_ fields: [String: Any]) {
                 line.merge(fields) { _, new in new }
                 line["uptime"] = MeasurementLogFile.roundedUptime(dependencies.uptime())
@@ -662,6 +676,11 @@ final class AgentLoop {
                 narrate(held)
             }
             heldProgress = nil
+            // Nothing acts after the cap: a reply holding any other call ends as the cap, none of it run.
+            if wrappingUp, let acting = toolUses.first(where: { ![AgentLoopTools.doneName, AgentLoopTools.askOwnerName].contains($0["name"] as? String) }) {
+                traced(["tool": (acting["name"] as? String) ?? NSNull(), "ok": false, "error": "wrapUpActing"])
+                return finish(.stepCap())
+            }
 
             // Up to `maximumBatch` calls run in order, each through the same path
             // and checks; the first that needs a fresh look stops the rest, which
@@ -750,6 +769,7 @@ final class AgentLoop {
                     if !challengedUnreadPage, Self.readStoppedAbovePage(receipts) {
                         challengedUnreadPage = true
                         traced(["tool": toolName, "args": args, "ok": false, "error": "pageUnread"])
+                        if wrappingUp { return finish(.stepCap(left: "its last read said more of the page lies below, unread")) }
                         answer(["ok": false, "error": "pageUnread",
                                 "message": "your last read_page said more of the page lies below the view, and nothing has scrolled since. "
                                     + "If the task needs the whole page, scroll down and read_page again; if not, call done again."])
@@ -770,6 +790,7 @@ final class AgentLoop {
                     if checksTime, let seenNow, let unset = Self.unsetClockTime(heard: heard, receipts: receipts, screen: seenNow) {
                         challengedUnsetTime = true
                         traced(["tool": toolName, "args": args, "ok": false, "error": "timeNotSet"])
+                        if wrappingUp { return finish(.stepCap(left: unset)) }
                         answer(["ok": false, "error": "timeNotSet", "message": unset + ", then call done again."])
                         continue
                     }
@@ -777,6 +798,8 @@ final class AgentLoop {
                         : Self.doneChallenge(summary: summary, evidence: evidence, receipts: receipts, currentStep: step, seenNow: seenNow)
                     traced(["tool": toolName, "args": args, "ok": challenge == nil, "error": challenge == nil ? NSNull() : "doneUnbacked"])
                     guard let challenge else { return finish(.done(summary: summary)) }
+                    // No turn is left to act on a challenge: the honest end is the cap, with why.
+                    if wrappingUp { return finish(.stepCap(left: challenge)) }
                     if challengedDone { return finish(.failed(reason: "its summary claimed what no result of this task shows")) }
                     challengedDone = true
                     answer(["ok": false, "error": "doneUnbacked",
@@ -984,18 +1007,23 @@ final class AgentLoop {
     /// Anthropic's server web tools; Gemini gets web_lookup (`AgentLoopGemini`),
     /// always declared once offered (its calls stay in the history; the cap is
     /// the loop's refusal). `web: false`: neither, for the screen-only baseline.
+    /// `wrapUp`: the turn after the step cap declares only done and ask_owner.
     static func requestBody(messages: [[String: Any]], webUsed: [String: Int] = [:], provider: AgentModelProvider = .claude,
-                            web: Bool = true) -> [String: Any] {
-        let webTools = !web ? [] : provider == .claude ? AgentLoopTools.webDeclarations(used: webUsed) : [AgentLoopGemini.webLookupDeclaration]
+                            web: Bool = true, wrapUp: Bool = false) -> [String: Any] {
+        let webTools = !web || wrapUp ? [] : provider == .claude ? AgentLoopTools.webDeclarations(used: webUsed) : [AgentLoopGemini.webLookupDeclaration]
+        let declared = wrapUp ? tools.filter { [AgentLoopTools.doneName, AgentLoopTools.askOwnerName].contains($0["name"] as? String) } : tools
         return [
             "max_tokens": maxTokens,
             "system": [["type": "text", "text": systemPrompt, "cache_control": ["type": "ephemeral"]]],
-            "tools": tools + webTools,
+            "tools": declared + webTools,
             // Up to `maximumBatch` calls per reply (the loop runs at most that many); forced tool choice is a 400 on Sonnet 5.5.
             "tool_choice": ["type": "auto"],
             "messages": messages
         ]
     }
+
+    static let wrapUpText = "The step limit is reached: no more actions. Report truthfully what the results show: call done if the goal "
+        + "is met, citing the steps whose ok results prove it; otherwise call done saying what is left. Any other tool ends the task unfinished."
 
     static func observationBlocks(_ observation: AgentObservation, step: Int) -> [[String: Any]] {
         var blocks: [[String: Any]] = []
@@ -1418,8 +1446,9 @@ final class AgentLoop {
         case .failed(let reason):
             return "system event, not the owner's words: the task stopped without finishing: \(reason).\(progress) "
                 + "tell the owner briefly that it did not work and why; claim nothing else. call no tool."
-        case .stepCap:
+        case .stepCap(let left):
             return "system event, not the owner's words: the task stopped after \(maximumSteps) steps without finishing.\(progress) "
+                + (left.map { "its last report could not be confirmed: \($0). " } ?? "")
                 + "tell the owner briefly; claim nothing else. call no tool."
         case .timeCap:
             return "system event, not the owner's words: the task stopped after \(Int(maximumSeconds)) seconds without finishing.\(progress) "
