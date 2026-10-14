@@ -452,6 +452,14 @@ enum HarnessPolicy {
             || ["AXDialog", "AXSystemDialog"].contains(window.subrole ?? "")
     }
 
+    /// A time typed into a single-line field that holds one time of day replaces it (E12 2026-10-15:
+    /// Reminders' "Add Time" fills in and selects "8:00 am" when focused; an insert made
+    /// "8:00 am5:00 pm" and Return kept 8:00 am). Swapping one time for another discards no one's writing.
+    static func replacesOnlyATime(text: String, currentValue: String?, role: String) -> Bool {
+        ActionSafetyKernel.singleLineTextRoles.contains(role) && HarnessAdjust.clockTime(text) != nil
+            && currentValue.flatMap(HarnessAdjust.clockTime) != nil
+    }
+
     /// Roles that label a control without being one.
     static let labelRoles: Set<String> = ["AXHeading", "AXStaticText", "AXImage"]
     /// What a label may stand for: a link or a button.
@@ -2499,6 +2507,11 @@ final class HarnessServer {
         return AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success ? value : nil
     }
 
+    /// The field reads a time of day other than `wanted` (an unreadable or non-time value is not "another time").
+    nonisolated static func showsAnotherTime(_ element: AXUIElement, _ wanted: HarnessAdjust.ClockTime) -> Bool {
+        AccessibilityTypePerformer.stringValue(of: element).flatMap(HarnessAdjust.clockTime).map { $0 != wanted } ?? false
+    }
+
     /// An element's AXRoleDescription ("list box"), or nil.
     nonisolated static func roleDescription(of element: AXUIElement) -> String? {
         var value: AnyObject?
@@ -3036,6 +3049,7 @@ final class HarnessServer {
     }
 
     private func actResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        var request = request
         guard var action = request.verb.elementAction else {
             return ["ok": false, "error": "unknownVerb", "message": "not an acting verb"]
         }
@@ -3086,12 +3100,17 @@ final class HarnessServer {
         // might be a secure field (role, subrole, or an unreadable subrole),
         // which the kernel refuses without its value.
         let liveElement = resolvedNode.accessibilityElement
+        // A time field holds one time: a time typed there replaces it, never appends (`replacesOnlyATime`).
+        let replacesATime = action == .type && !resolvedNode.mightBeSecure && HarnessPolicy.replacesOnlyATime(
+            text: request.text, currentValue: liveElement.flatMap(AccessibilityTypePerformer.stringValue), role: resolvedNode.role)
+        if replacesATime { request.mode = .replace }
         let typing = HarnessPolicy.typingContext(
             verb: request.verb, mode: request.mode, aimedByFocus: request.aimAtFocus, of: resolvedNode,
             settable: { liveElement.map(AccessibilityTypePerformer.settableAttributes) ?? [] },
             value: { liveElement.flatMap(AccessibilityTypePerformer.stringValue) }
         )
         var typingContext = typing?.context
+        typingContext?.replacesOnlyATime = replacesATime
         // The replace rule's one exception, from the harness's OWN record of the tabs it opened
         // and the text it typed: the same page it opened, and only its own text in the field.
         if typingContext?.mode == .replace, (typingContext?.currentValueLength ?? 0) > 0, let pid = snapshot.application?.processIdentifier,
@@ -3112,6 +3131,7 @@ final class HarnessServer {
         if var field = typing?.field {
             if typingContext?.inTabTheHarnessOpened == true { field["inTabTheHarnessOpened"] = true }
             if typingContext?.inNativeModalSheet == true { field["inNativeModalSheet"] = true }
+            if replacesATime { field["replacesOnlyATime"] = true }
             response["field"] = field
         }
         let isListOption = (action == .press || action == .click || action == .select) && resolvedNode.role == "AXStaticText"
@@ -3206,7 +3226,7 @@ final class HarnessServer {
         // when only pressable names were diffed.
         let namesBefore = AccessibilityDumpRunner.namedElementFingerprint(in: rootNode)
 
-        let performedOK: Bool
+        var performedOK: Bool
         var keystrokesSawTheText = false
         switch action {
         case .click:
@@ -3456,6 +3476,18 @@ final class HarnessServer {
                         "axErrorRawValue": confirmResult.error.rawValue,
                         "milliseconds": confirmResult.milliseconds
                     ]
+                    // A time field may fill in its OWN time as the confirm focuses it, and keep that (E12 2026-10-15:
+                    // Reminders' empty "Add Time" took "5:00 pm", AXConfirm focused it, it read "8:00 am" at once).
+                    // Written once more over the app's own default, then judged by what the field shows.
+                    if let wanted = HarnessAdjust.clockTime(request.text), Self.showsAnotherTime(element, wanted) {
+                        AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, request.text as CFString)
+                        _ = AccessibilityActionPerformer.perform(kAXConfirmAction, on: element)
+                        response["timeWrittenAgain"] = true
+                        if Self.showsAnotherTime(element, wanted) {
+                            performedOK = false
+                            response["message"] = "after submit the field shows another time, not \(UntrustedText(request.text).forDisplay); nothing else was tried"
+                        }
+                    }
                 } else {
                     response["confirm"] = ["published": false]
                 }

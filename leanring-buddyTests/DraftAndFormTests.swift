@@ -220,6 +220,27 @@ extension DraftAndFormTests {
         #expect(decide(.type, field("AXTextField"), draft: false, typing: typing(0, sheet: false)) == .allow)
     }
 
+    // E12 2026-10-15: Reminders' "Add Time" fills in and selects "8:00 am" when focused; an insert made
+    // "8:00 am5:00 pm" and Return kept 8:00 am. A time typed over a field's one time replaces it, uncarded.
+    @Test func aTimeTypedOverAFieldsOneTimeReplacesItWithoutACard() {
+        #expect(HarnessPolicy.replacesOnlyATime(text: "5:00 pm", currentValue: "8:00\u{202F}am", role: "AXTextField"))
+        #expect(HarnessPolicy.replacesOnlyATime(text: "17:00", currentValue: "8:00 am", role: "AXComboBox"))
+        #expect(!HarnessPolicy.replacesOnlyATime(text: "5:00 pm", currentValue: "", role: "AXTextField"))
+        #expect(!HarnessPolicy.replacesOnlyATime(text: "5:00 pm", currentValue: nil, role: "AXTextField"))
+        #expect(!HarnessPolicy.replacesOnlyATime(text: "5:00 pm", currentValue: "Lunch at 8:00 am", role: "AXTextField"))
+        #expect(!HarnessPolicy.replacesOnlyATime(text: "call at 5", currentValue: "8:00 am", role: "AXTextField"))
+        #expect(!HarnessPolicy.replacesOnlyATime(text: "5:00 pm", currentValue: "8:00 am", role: "AXTextArea"))
+        var context = ActionSafetyKernel.TypingContext(mode: .replace, settableAttributes: [kAXValueAttribute as String],
+                                                       currentValueLength: 7, aimedByFocus: true)
+        let field = AccessibilityElementNode(role: "AXTextField", subrole: nil, title: nil, value: "8:00 am",
+                                             frameInAppKitCoordinates: CGRect(x: 100, y: 100, width: 54, height: 18), depth: 3, children: [])
+        if case .requireConfirmation = decide(.type, field, draft: false, typing: context) {} else {
+            Issue.record("replacing a field's text still cards unless it is one time")
+        }
+        context.replacesOnlyATime = true
+        #expect(decide(.type, field, draft: false, typing: context) == .allow)
+    }
+
     @Test func onlyANativeSheetOrDialogWithNoWebAreaAboveCounts() {
         func step(_ role: String, _ subrole: String? = nil) -> HarnessPolicy.AncestorRole { .init(role: role, subrole: subrole) }
         let standard = step("AXWindow", "AXStandardWindow")

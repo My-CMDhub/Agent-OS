@@ -154,6 +154,8 @@ enum ActionSafetyKernel {
         /// The field sits in a NATIVE modal sheet or dialog (`HarnessPolicy.sitsInNativeModal`):
         /// a Save or Rename sheet's name field, read live by the harness. See the replace rule.
         var inNativeModalSheet = false
+        /// A time typed over the one time of day a field holds (`HarnessPolicy.replacesOnlyATime`).
+        var replacesOnlyATime = false
     }
 
     static func secureFieldRefusalReason(subrole: String) -> String {
@@ -805,8 +807,9 @@ enum ActionSafetyKernel {
         // Its default is the app's, not the owner's — never inside an AXWebArea.
         // A search box holds a query, not the owner's work (G12 2026-10-15: Font Book's search, re-typed,
         // was carded "replace would discard 9 characters" and denied).
+        // A time field's one time, typed over with another, is not writing (E12 2026-10-15: Reminders' "Add Time").
         if let typing, typing.mode == .replace, typing.currentValueLength > 0, resolvedNode.subrole != "AXSearchField",
-           !((typing.inTabTheHarnessOpened || typing.inNativeModalSheet) && singleLineTextRoles.contains(resolvedNode.role)) {
+           !((typing.inTabTheHarnessOpened || typing.inNativeModalSheet || typing.replacesOnlyATime) && singleLineTextRoles.contains(resolvedNode.role)) {
             return .requireConfirmation(
                 reason: replaceWouldDiscardReason(characterCount: typing.currentValueLength),
                 destructive: true

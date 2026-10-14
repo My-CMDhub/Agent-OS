@@ -263,7 +263,8 @@ nonisolated enum RealtimeVoiceVerbs {
                                            options: TypeMode.allCases.map(\.rawValue)),
                                  Parameter(name: "submit", kind: .flag, required: false,
                                            description: "true only to commit an entry that saves on Return, such as a quick-entry box "
-                                            + "or a new list row (a Calendar event, a reminder). Never to send a message.")] + positionParameters),
+                                            + "or a new list row (a Calendar event, a reminder), or a time field given a time such as \"5:00 PM\" "
+                                            + "(a reminder's \"Add Time\"). Never to send a message.")] + positionParameters),
         Declaration(name: openURLName,
                     description: "Opens a web page in a browser: the one named, or the default browser. Use it for a website "
                         + "(\"open LinkedIn in Chrome\" is https://www.linkedin.com/ in Google Chrome); open_app is for installed apps. "
