@@ -1072,6 +1072,10 @@ nonisolated enum RealtimeOpenAppTool {
             // found nearest (C2 03-34-52Z: the page heading, refused by the kernel). A label
             // (AXStaticText) goes to the harness, which types into the field it labels or refuses
             // (generality suite 2026-10-06: the Save sheet's "Save As:").
+            // A web area (Mail's message body, U04 2026-10-14) goes to the harness by its point: it focuses
+            // the area only if it is EDITABLE (AXValue settable) and types there, else refuses.
+            case .element(let candidate, _) where call.name == RealtimeVoiceVerbs.typeTextName && candidate.role == "AXWebArea":
+                return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .vision))
             case .element(let candidate, _) where call.name == RealtimeVoiceVerbs.typeTextName
                 && !RealtimeScreenVerbs.textInputRoles.contains(candidate.role) && candidate.role != "AXStaticText":
                 return refuse("noFieldAtPoint", "no text field is at that position; nothing was typed. " + typeByNameAdvice)
