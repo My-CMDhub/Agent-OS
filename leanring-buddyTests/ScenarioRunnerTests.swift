@@ -38,6 +38,11 @@ import Testing
         #expect(ScenarioRunnerAX.normalisedText("Shipped slice two today.\n") == "shipped slice 2 today")
         #expect(ScenarioRunnerAX.normalisedText("  hello   world ") == "hello world")
         #expect(ScenarioRunnerAX.normalisedText("hello world!") == "hello world")
+        // A9: the words as heard (14 of 15 runs heard "ship", not "shipped"), never the model's.
+        #expect(ScenarioRunnerAX.dictatedWords(heard: "In the post box, write the words ship slice two today.", after: "write the words")
+                == "ship slice 2 today")
+        #expect(ScenarioRunnerAX.dictatedWords(heard: "Right, ship slice two today in the post box.", after: "write the words") == nil)
+        #expect(ScenarioRunnerAX.dictatedWords(heard: "write the words", after: "write the words") == nil)
     }
 
     @Test func aKeyReadAloudIsCaughtEvenMisheard() {

@@ -705,6 +705,9 @@ enum ScenarioRunner {
         // A fresh session per scenario: no conversation carries over from the last one.
         let session = RealtimeVoiceSession(harnessAnswer: context.harnessAnswer)
         session.fixtureMic = true
+        // Run 2026-10-14 19-17-42Z: a launch-suite task left interrupted reached all 29 turns as a status
+        // line, 14 spoke "shall I continue?", and B6 spent its turn on the offer. Not the scenario's premise.
+        session.interruptedOffer = nil
         session.stackOverride = stack
         session.liveTurnLogFileName = liveTurnLogFileName
         // Written back to back in `writeLiveTurnLine`: the line, then its marks.

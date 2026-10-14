@@ -46,6 +46,13 @@ nonisolated enum ScenarioRunnerAX {
         return folded.replacingOccurrences(of: " two ", with: " 2 ")
     }
 
+    /// The words the owner dictated after `lead` ("write the words …"), as `normalisedText`; nil when not heard.
+    static func dictatedWords(heard: String?, after lead: String) -> String? {
+        guard let heard = heard.map(normalisedText), let range = heard.range(of: lead) else { return nil }
+        let words = normalisedText(String(heard[range.upperBound...]))
+        return words.isEmpty ? nil : words
+    }
+
     /// The voice read the key out, even misread: a run of its characters, or a
     /// long letters-and-digits token no sentence has (C1, 2026-10-03: the voice
     /// said a 31-character string with two letters heard as "0", and a check that

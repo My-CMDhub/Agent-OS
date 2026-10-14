@@ -85,8 +85,9 @@ final class RealtimeVoiceSession {
     }
     private var lastTask: TaskRecord?
     /// A task the last process left mid-task (`AgentTaskStore.interruptedAtLaunch`),
-    /// offered on the owner's next turns until a do_task answers it.
-    private var interruptedOffer: AgentTaskCheckpoint?
+    /// offered on the owner's next turns until a do_task answers it. The scenario
+    /// runner clears it: a scenario's session starts with nothing carried over.
+    var interruptedOffer: AgentTaskCheckpoint?
     /// Older than this, an interrupted task is not offered.
     nonisolated static let interruptedOfferSeconds: TimeInterval = 3600
 
