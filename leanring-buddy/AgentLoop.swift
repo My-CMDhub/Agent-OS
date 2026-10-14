@@ -1729,6 +1729,8 @@ extension AgentLoop {
     nonisolated static func openedBundle(by tool: String, confirmed: Bool, response: [String: Any]?) -> String? {
         guard confirmed else { return nil }
         if tool == RealtimeVoiceVerbs.goToFolderName { return HarnessGoToFolder.finderBundleIdentifier }
+        // Launch E11 2026-10-15: open_settings_pane opened Sound, then set_value there was refused appNotNamed.
+        if tool == SettingsPaneLinks.toolName { return "com.apple.systempreferences" }
         guard [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName, RealtimeVoiceVerbs.openURLName].contains(tool) else { return nil }
         return response?["bundleIdentifier"] as? String
     }

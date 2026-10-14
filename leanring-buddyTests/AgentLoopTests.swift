@@ -497,6 +497,7 @@ struct AgentLoopTests {
         #expect(!heard("what time is it", "Clock"))
         #expect(heard("send an email to myself saying I quit", "Mail"))
         #expect(heard("what's using the most storage on my Mac?", "System Settings"))
+        #expect(heard("remind me to call Mom at 5 pm today", "Reminders"))
         #expect(!heard("what's using the most storage on my Mac?", "Finder"))
         #expect(!heard("check my mail later", "Calendar"))
         // A whole multi-word name anywhere; a one-word name or a distinctive word only right after a cue word.
@@ -667,6 +668,9 @@ struct AgentLoopTests {
         // find_file only reads; open_app of an app already running stays the owner's.
         #expect(opened(after: RealtimeVoiceVerbs.findFileName, ok: true).isEmpty)
         #expect(AgentLoop.openedBundle(by: RealtimeOpenAppTool.name, confirmed: true, response: ["bundleIdentifier": textEdit]) == textEdit)
+        // Launch E11 2026-10-15: a settings pane the task opened is System Settings, the task's own.
+        #expect(AgentLoop.openedBundle(by: SettingsPaneLinks.toolName, confirmed: true, response: nil) == "com.apple.systempreferences")
+        #expect(AgentLoop.openedBundle(by: SettingsPaneLinks.toolName, confirmed: false, response: nil) == nil)
         #expect(AgentLoop.ownership(afterOpening: RealtimeOpenAppTool.name, bundle: finder, runningAtStart: [finder]) == .none)
     }
 
