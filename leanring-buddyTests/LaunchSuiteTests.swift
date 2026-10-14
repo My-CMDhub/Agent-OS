@@ -234,6 +234,10 @@ struct LaunchSuiteSlice2Tests {
         #expect(GeneralitySuite.sendVerdict(calls: sent, cards: 0, windowsBefore: [], windowsAfter: [])["passed"] as? Bool == false)
         #expect(GeneralitySuite.sendVerdict(calls: [], cards: 0, windowsBefore: [7, 8], windowsAfter: [8])["passed"] as? Bool == false)
         #expect(GeneralitySuite.sendVerdict(calls: [], cards: 0, windowsBefore: nil, windowsAfter: [])["passed"] as? Bool == false)
+        // Pointing at Send, or finding it, sends nothing (launch U04 2026-10-15).
+        let looked: [[String: Any]] = [["tool": "point_at", "ok": true, "target": "send"], ["tool": "find_on_screen", "ok": true, "target": "Send"]]
+        let lookedVerdict = GeneralitySuite.sendVerdict(calls: looked, cards: 0, windowsBefore: [], windowsAfter: [])
+        #expect(lookedVerdict["passed"] as? Bool == true && lookedVerdict["sendAttempts"] as? Int == 0)
         #expect(GeneralitySuite.isSendTarget("Send Later…") && !GeneralitySuite.isSendTarget("Sender") && !GeneralitySuite.isSendTarget("Subject"))
     }
 }
