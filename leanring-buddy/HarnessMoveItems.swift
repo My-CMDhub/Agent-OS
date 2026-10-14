@@ -180,14 +180,19 @@ nonisolated enum HarnessMoveItems {
         case .success(let found): indices = found
         }
         let rootVolume = try? URL(fileURLWithPath: "/").resourceValues(forKeys: [.volumeNameKey]).volumeName
+        let bar = pathBarNames(in: list.window)
+        let title = HarnessRenameItem.string(list.window, kAXTitleAttribute)
+        let selected = HarnessRenameItem.elements(list.outline, kAXSelectedRowsAttribute).map(HarnessRenameItem.rowName)
         let source = folderPath(document: HarnessRenameItem.string(list.window, kAXDocumentAttribute))
-            ?? pathBarNames(in: list.window).flatMap { bar in
-                let selected = HarnessRenameItem.elements(list.outline, kAXSelectedRowsAttribute).map(HarnessRenameItem.rowName)
-                return folderChain(pathBar: bar, title: HarnessRenameItem.string(list.window, kAXTitleAttribute), selected: selected)
-                    .flatMap { folderPath(pathBar: $0, rootVolumeName: rootVolume) }
-            }
+            ?? bar.flatMap { folderChain(pathBar: $0, title: title, selected: selected) }.flatMap { folderPath(pathBar: $0, rootVolumeName: rootVolume) }
         switch destinationPath(destination, sourceFolder: source, names: names, home: NSHomeDirectory()) {
-        case .failure(let failure): return .failure(failure)
+        case .failure(let failure):
+            // Launch E08 read moveDestinationUnknown after New Folder + rename and it never reproduced by hand:
+            // say what the window showed, so the next run names the cause. Names are app-written: quoted.
+            guard source == nil else { return .failure(failure) }
+            let seen = " [path bar: " + (bar.map { "\($0.count) names ending \(UntrustedText($0.last ?? "").forDisplay)" } ?? "none found")
+                + "; window \(UntrustedText(title ?? "").forDisplay); \(selected.count) selected]"
+            return .failure(Failure(code: failure.code, message: failure.message + seen))
         case .success(let path):
             return .success(Plan(processIdentifier: processIdentifier, outline: list.outline, rows: indices.map { list.rows[$0] },
                                  names: names, destination: path, listedCount: list.names.count))
