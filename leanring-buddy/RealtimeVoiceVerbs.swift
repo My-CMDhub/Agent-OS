@@ -190,11 +190,12 @@ nonisolated enum RealtimeVoiceVerbs {
                     description: "Sets a picker, slider or stepper in the window of the app in front to whole numbers, one step at a time, "
                         + "and reads it back. For a time picker give every part: Clock's timer is named \"Timer\" and takes \"h:mm:ss\", "
                         + "so a 10-minute timer is set_value name \"Timer\" value \"0:10:00\", then press_element \"Start\". "
-                        + "A time-of-day picker (an alarm) takes the time itself: value \"6:45 AM\" or \"18:45\"; if it has no name, name it \"time\".",
+                        + "A time-of-day picker (an alarm) takes the time itself: value \"6:45 AM\" or \"18:45\"; if it has no name, name it \"time\". "
+                        + "A level slider takes a percent: Sound's \"Output volume\" value \"30%\".",
                     parameters: [appInFront,
                                  Parameter(name: "name", description: "The control's exact name as find_on_screen lists it, for example \"Timer\"."),
                                  Parameter(name: "value", description: "Whole numbers, one per part, joined by \":\", for example \"0:10:00\" or \"75\"; "
-                                           + "for a time-of-day picker, the time, for example \"6:45 AM\".")]),
+                                           + "for a time-of-day picker, the time, for example \"6:45 AM\"; for a level slider, a percent, for example \"30%\".")]),
         Declaration(name: findFileName,
                     description: "Finds files, folders or apps on this Mac by name (Spotlight); returns up to \(FileFinder.maximumPaths) paths. "
                         + "Then go_to_folder a folder's path to look inside it.",

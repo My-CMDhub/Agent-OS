@@ -76,6 +76,45 @@ struct HarnessAdjustTests {
         #expect(HarnessAdjust.dateTimeRoles.contains("AXDateTimeArea"))
     }
 
+    // MARK: A level on a number-valued slider (Settings › Sound "Output volume", 2026-10-15)
+
+    @Test func aLevelIsAPercentOfTheRangeOrANumberInsideIt() throws {
+        #expect(HarnessAdjust.level("30%")! == (30, true))
+        #expect(HarnessAdjust.level("30 percent")! == (30, true))
+        #expect(HarnessAdjust.level("30 Per Cent")! == (30, true))
+        #expect(HarnessAdjust.level("30")! == (30, false))
+        for bad in ["", "%", "30.5%", "-30%", "thirty", "12345%", "\u{0663}0%"] { #expect(HarnessAdjust.level(bad) == nil, "\(bad) is not a level") }
+        #expect(HarnessAdjust.valueProblem("30%") == nil && HarnessAdjust.valueProblem("30 percent") == nil, "the wire takes a percent")
+        // The volume slider: 0...1, so "30" and "30%" both mean 0.30.
+        let unit = 0.0...1.0
+        #expect(try #require(HarnessAdjust.levelTarget("30%", range: unit)) == 0.3)
+        #expect(try #require(HarnessAdjust.levelTarget("30", range: unit)) == 0.3)
+        #expect(HarnessAdjust.levelTarget("130%", range: unit) == nil)
+        // 0...100: the two readings agree. Elsewhere a bare number is absolute and must lie inside.
+        #expect(HarnessAdjust.levelTarget("30", range: 0...100) == 30 && HarnessAdjust.levelTarget("30%", range: 0...100) == 30)
+        #expect(HarnessAdjust.levelTarget("25%", range: 10...50) == 20)
+        #expect(HarnessAdjust.levelTarget("30", range: 10...50) == 30)
+        #expect(HarnessAdjust.levelTarget("60", range: 10...50) == nil)
+        // No range is guessed for a value outside 0...1.
+        #expect(HarnessAdjust.range(min: 0, max: 1, current: 0.392) == 0...1)
+        #expect(HarnessAdjust.range(min: nil, max: nil, current: 0.392) == 0...1)
+        #expect(HarnessAdjust.range(min: nil, max: nil, current: 7) == nil)
+        #expect(HarnessAdjust.range(min: 0, max: nil, current: 0.5) == nil)
+        #expect(HarnessAdjust.range(min: 1, max: 1, current: 1) == nil)
+        #expect(HarnessAdjust.levelRoles.contains("AXSlider") && !HarnessAdjust.levelRoles.contains("AXCheckBox"), "a checkbox's 0/1 is not a level")
+    }
+
+    @Test func steppingALevelStopsAtTheNearestItCanReach() {
+        let tolerance = HarnessAdjust.levelTolerance(0...1)
+        #expect(abs(tolerance - 0.005) < 1e-12)
+        // Measured: 0.392 (osascript 39), each step 0.100. One step down reads 0.292, within half a step of 0.30: stop.
+        #expect(HarnessAdjust.levelStep(from: 0.392, to: 0.3, tolerance: tolerance, lastStep: nil) == "AXDecrement")
+        #expect(HarnessAdjust.levelStep(from: 0.292, to: 0.3, tolerance: tolerance, lastStep: 0.1) == nil)
+        #expect(HarnessAdjust.levelStep(from: 0.9, to: 0.3, tolerance: tolerance, lastStep: 0.1) == "AXDecrement")
+        #expect(HarnessAdjust.levelStep(from: 0.1, to: 0.3, tolerance: tolerance, lastStep: 0.1) == "AXIncrement")
+        #expect(HarnessAdjust.levelStep(from: 0.302, to: 0.3, tolerance: tolerance, lastStep: nil) == nil, "within half a percent is there")
+    }
+
     // MARK: A control's number
 
     @Test func aControlsNumberIsTheFirstWholeNumberInItsValue() {
@@ -155,6 +194,7 @@ struct HarnessAdjustTests {
         let declaration = try #require(RealtimeVoiceVerbs.openAIDeclarations.first { $0["name"] as? String == "set_value" })
         #expect((declaration["description"] as? String)?.contains("press_element \"Start\"") == true)
         #expect((declaration["description"] as? String)?.contains("\"6:45 AM\"") == true, "an alarm's time goes in value")
+        #expect((declaration["description"] as? String)?.contains("\"Output volume\" value \"30%\"") == true, "a level goes in as a percent")
         #expect(AgentPlan.requiredArguments["set_value"] == [["name", "value"]])
     }
 }

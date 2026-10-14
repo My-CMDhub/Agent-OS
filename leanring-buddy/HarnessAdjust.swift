@@ -65,7 +65,7 @@ nonisolated enum HarnessAdjust {
     /// one per control, joined by ":" ("10", "0:10:00"), or a time of day ("6:45 AM").
     static func valueProblem(_ text: String) -> String? {
         if text.count > maximumValueLength { return "longer than \(maximumValueLength) characters" }
-        if clockTime(text) != nil { return nil }
+        if clockTime(text) != nil || level(text) != nil { return nil }
         let parts = text.split(separator: ":", omittingEmptySubsequences: false)
         guard parts.allSatisfy({ !$0.isEmpty && $0.count <= 4 && $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) }) else {
             return "not whole numbers joined by \":\""
@@ -162,6 +162,52 @@ nonisolated enum HarnessAdjust {
 
     static let dateTimeRoles: Set<String> = ["AXDateTimeArea", kAXDateFieldRole as String, kAXTimeFieldRole as String]
 
+    // MARK: Pure — a level on a number-valued slider
+
+    /// Roles whose AXValue may be a NUMBER on a range (Settings › Sound "Output volume":
+    /// AXSlider, 0.392 on 0...1, 2026-10-15). A checkbox's 0/1 is a number too, so the role gates it.
+    static let levelRoles: Set<String> = [kAXSliderRole as String, kAXIncrementorRole as String]
+
+    /// "30", "30%", "30 percent", "30 per cent" — a whole number, and whether it was a percent.
+    static func level(_ text: String) -> (amount: Double, percent: Bool)? {
+        var body = text.lowercased().trimmingCharacters(in: .whitespaces)
+        let suffix = ["%", "percent", "per cent"].first(where: body.hasSuffix)
+        if let suffix { body = String(body.dropLast(suffix.count)).trimmingCharacters(in: .whitespaces) }
+        guard (1...4).contains(body.count), body.allSatisfy({ $0.isASCII && $0.isNumber }), let amount = Double(body) else { return nil }
+        return (amount, suffix != nil)
+    }
+
+    /// The control's range: AXMinValue...AXMaxValue, or 0...1 when both are missing and the value
+    /// lies in it; nil otherwise (no range is guessed for a value outside 0...1).
+    static func range(min: Double?, max: Double?, current: Double) -> ClosedRange<Double>? {
+        if let min, let max { return min < max ? min...max : nil }
+        return min == nil && max == nil && (0...1).contains(current) ? 0...1 : nil
+    }
+
+    /// The number `text` asks for on `range`, nil when it lies outside. A percent is that share
+    /// of the range; on 0...1 a bare number is a percent too ("set volume to 30" means 0.30, and
+    /// on 0...100 the two readings agree); elsewhere a bare number is absolute and must lie inside.
+    static func levelTarget(_ text: String, range: ClosedRange<Double>) -> Double? {
+        guard let (amount, percent) = level(text) else { return nil }
+        if percent || range == 0...1 {
+            return (0...100).contains(amount) ? range.lowerBound + amount / 100 * (range.upperBound - range.lowerBound) : nil
+        }
+        return range.contains(amount) ? amount : nil
+    }
+
+    /// A written level counts as there within half a percent of its range.
+    static func levelTolerance(_ range: ClosedRange<Double>) -> Double {
+        (range.upperBound - range.lowerBound) * 0.005
+    }
+
+    /// The action that moves a level toward `target`, nil when it is there: within `tolerance`,
+    /// or within half the step it last moved (the step cannot get closer).
+    static func levelStep(from current: Double, to target: Double, tolerance: Double, lastStep: Double?) -> String? {
+        let gap = abs(target - current)
+        if gap <= tolerance || lastStep.map({ gap <= $0 / 2 + 1e-9 }) == true { return nil }
+        return current < target ? incrementAction : decrementAction
+    }
+
     // MARK: Live
 
     typealias Failure = HarnessRenameItem.Failure
@@ -177,8 +223,17 @@ nonisolated enum HarnessAdjust {
         let group: AXUIElement?
         /// Set when the one control is a date-time picker: its date is WRITTEN, not stepped.
         var time: ClockTime? = nil
-        /// "name", or "onlyDateTimeControl" when nothing carried the name.
+        /// Set when the one control is a number-valued slider: written or stepped to a level.
+        var level: Level? = nil
+        /// "name", "label" (the control the named text labels), or "onlyDateTimeControl" when nothing carried the name.
         var resolvedBy = "name"
+    }
+
+    struct Level {
+        let target: Double
+        let range: ClosedRange<Double>
+        /// AXIsAttributeSettable said yes: written, else stepped (asked, never trusted — read back).
+        let settable: Bool
     }
 
     /// Resolves `name` in the app's focused window to one adjustable control, or a
@@ -201,7 +256,7 @@ nonisolated enum HarnessAdjust {
                 return .failure(Failure(code: "ambiguous", message: "\(matches.count) elements are named \(UntrustedText(name).forDisplay); nothing was changed"))
             }
             let clock = clockTime(value)
-            guard let target = matches.first else {
+            guard let named = matches.first else {
                 // Clock's alarm picker (2026-10-15) has no title, description or help, so a
                 // name the model chose ("time") matches nothing: a time stands in for the name
                 // only when the window holds exactly one date-time picker.
@@ -214,12 +269,29 @@ nonisolated enum HarnessAdjust {
                 }
                 return .success(timePlan(name: name, control: picker, time: clock, resolvedBy: "onlyDateTimeControl"))
             }
+            // A name on a label is the control that names itself by it (AXTitleUIElement): Settings ›
+            // Sound's "Output volume" is an AXStaticText; the slider beside it is described "Output
+            // volume, Output volume" (2026-10-15), so E11 matched the label and read notAdjustable. The
+            // mute AXCheckBox names itself by the same label, so only an adjustable one counts.
+            let labelled = HarnessRenameItem.string(named, kAXRoleAttribute) == kAXStaticTextRole as String
+                ? onlyOne(find(under: window) { element in
+                    (HarnessRenameItem.element(element, kAXTitleUIElementAttribute).map { CFEqual($0, named) } ?? false)
+                        && (levelRoles.contains(HarnessRenameItem.string(element, kAXRoleAttribute) ?? "")
+                            || isAdjustable(actions: actionNames(element)) || isDateTimeControl(element))
+                })
+                : nil
+            let target = labelled ?? named
+            let resolvedBy = labelled == nil ? "name" : "label"
+            if let role = HarnessRenameItem.string(target, kAXRoleAttribute), levelRoles.contains(role),
+               let current = numberAttribute(target, kAXValueAttribute) {
+                return levelPlan(name: name, control: target, current: current, value: value, resolvedBy: resolvedBy)
+            }
             if isDateTimeControl(target) {
                 guard let clock else {
                     return .failure(Failure(code: "adjustValueMismatch", message: "\(UntrustedText(name).forDisplay) is a time picker; give a time "
                                             + "such as \"6:45 AM\" or \"18:45\"; nothing was changed"))
                 }
-                return .success(timePlan(name: name, control: target, time: clock, resolvedBy: "name"))
+                return .success(timePlan(name: name, control: target, time: clock, resolvedBy: resolvedBy))
             }
             let controls = isAdjustable(actions: actionNames(target)) ? [target]
                 : HarnessRenameItem.elements(target, kAXChildrenAttribute).filter { isAdjustable(actions: actionNames($0)) }
@@ -241,7 +313,8 @@ nonisolated enum HarnessAdjust {
             if let unreadable = before.firstIndex(where: { number(in: $0) == nil }) {
                 return .failure(Failure(code: "notAdjustable", message: "part \(unreadable + 1) of \(UntrustedText(name).forDisplay) shows no number to step; nothing was changed"))
             }
-            return .success(Plan(name: name, controls: controls, targets: numbers, before: before, group: controls.count > 1 || !CFEqual(controls[0], target) ? target : nil))
+            return .success(Plan(name: name, controls: controls, targets: numbers, before: before, group: controls.count > 1 || !CFEqual(controls[0], target) ? target : nil,
+                                 resolvedBy: resolvedBy))
         }
     }
 
@@ -254,6 +327,102 @@ nonisolated enum HarnessAdjust {
     private static func timePlan(name: String, control: AXUIElement, time: ClockTime, resolvedBy: String) -> Plan {
         Plan(name: name, controls: [control], targets: [time.hour, time.minute] + (time.second.map { [$0] } ?? []),
              before: [dateValue(control).map { timeText($0, in: .current) }], group: nil, time: time, resolvedBy: resolvedBy)
+    }
+
+    private static func levelPlan(name: String, control: AXUIElement, current: Double, value: String, resolvedBy: String) -> Result<Plan, Failure> {
+        let display = UntrustedText(name).forDisplay
+        var settable: DarwinBoolean = false
+        let writable = AXUIElementIsAttributeSettable(control, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue
+        guard writable || isAdjustable(actions: actionNames(control)) else {
+            return .failure(Failure(code: "notAdjustable", message: "\(display) can neither be written nor stepped; nothing was changed"))
+        }
+        guard let range = range(min: numberAttribute(control, kAXMinValueAttribute), max: numberAttribute(control, kAXMaxValueAttribute), current: current) else {
+            return .failure(Failure(code: "notAdjustable", message: "\(display) reads \(current) and publishes no range (AXMinValue/AXMaxValue), "
+                                    + "so no level was guessed; nothing was changed"))
+        }
+        guard let target = levelTarget(value, range: range) else {
+            return .failure(Failure(code: "adjustValueMismatch", message: "\(display) runs \(levelText(range.lowerBound))-\(levelText(range.upperBound)); "
+                                    + "give a percent such as \"30%\"\(range == 0...1 ? "" : " or a number inside that range"); nothing was changed"))
+        }
+        return .success(Plan(name: name, controls: [control], targets: [], before: [levelText(current)], group: nil,
+                             level: Level(target: target, range: range, settable: writable), resolvedBy: resolvedBy))
+    }
+
+    static func levelText(_ value: Double) -> String { String(format: "%.3f", value) }
+
+    /// Writes a level when the app says AXValue is settable, else steps it with AXIncrement /
+    /// AXDecrement — Settings › Sound "Output volume", 2026-10-15: settable false, a write
+    /// answered -25200 and moved nothing; each step moved exactly 0.100, read back at once
+    /// (66 ms, 15 ms). A step can only land on current ± k·step, so it stops at the nearest and
+    /// says so. Either way the level is read again `writeRecheckSeconds` later.
+    static func setLevel(_ control: AXUIElement, _ level: Level) -> Run {
+        var run = Run()
+        let started = Date()
+        let tolerance = levelTolerance(level.range)
+        AXUIElementSetMessagingTimeout(control, writeTimeoutSeconds)
+        func read() -> Double? { numberAttribute(control, kAXValueAttribute) }
+        func finish(mode: String, settled: Double?, extra: [String: Any]) -> Run {
+            Thread.sleep(forTimeInterval: writeRecheckSeconds)
+            let later = read()
+            run.report = extra.merging(["mode": mode, "target": levelText(level.target),
+                                        "after": [settled, later].map { $0.map(levelText) ?? "unread" },
+                                        "milliseconds": Int(Date().timeIntervalSince(started) * 1000)]) { _, new in new }
+            return run
+        }
+        if level.settable {
+            let error = AXUIElementSetAttributeValue(control, kAXValueAttribute as CFString, NSNumber(value: level.target))
+            let first = read()
+            run = finish(mode: "write", settled: first, extra: ["write": Int(error.rawValue)])
+            let reads = [first, read()]
+            if !reads.allSatisfy({ $0.map { abs($0 - level.target) <= tolerance } ?? false }) {
+                run.failure = Failure(code: "adjustNotObserved", message: "the control does not read \(levelText(level.target)) after the write "
+                                      + "(the write answered \(error.rawValue)); it reads \(reads.last.flatMap { $0.map(levelText) } ?? "nothing")")
+            }
+            return run
+        }
+        guard var current = read() else {
+            run.failure = Failure(code: "notAdjustable", message: "the control stopped showing a number; it was left where it is")
+            return run
+        }
+        var steps = 0
+        var lastStep: Double?
+        func stepped(_ action: String, from: Double) -> Double? {
+            _ = AXUIElementPerformAction(control, action as CFString)
+            steps += 1
+            let deadline = Date().addingTimeInterval(stepDeadlineSeconds)
+            repeat {
+                if let now = read(), now != from { return now }
+                Thread.sleep(forTimeInterval: pollIntervalSeconds)
+            } while Date() < deadline
+            return nil
+        }
+        while let action = levelStep(from: current, to: level.target, tolerance: tolerance, lastStep: lastStep) {
+            guard steps < maximumSteps, let now = stepped(action, from: current) else {
+                run = finish(mode: "steps", settled: current, extra: ["steps": steps])
+                run.failure = Failure(code: steps < maximumSteps ? "adjustStuck" : "adjustTooFar",
+                                      message: "the control did not move from \(levelText(current)) toward \(levelText(level.target)) "
+                                          + "(\(action)); it is at its limit, or the app ignores the step")
+                return run
+            }
+            lastStep = abs(now - current)
+            // A step that lands farther away than where it started went past: one step back, and stop
+            // (live: 0.330 toward 0.300 read 0.230, stepped back to 0.330).
+            if abs(level.target - now) > abs(level.target - current) {
+                current = stepped(action == incrementAction ? decrementAction : incrementAction, from: now) ?? now
+                break
+            }
+            current = now
+        }
+        run = finish(mode: "steps", settled: current, extra: ["steps": steps, "step": lastStep.map(levelText) ?? NSNull()])
+        let later = read()
+        if later.map({ abs($0 - current) > tolerance }) ?? true {
+            run.failure = Failure(code: "adjustNotObserved", message: "the control read \(levelText(current)) after stepping and "
+                                  + "\(later.map(levelText) ?? "nothing") \(Int(writeRecheckSeconds * 1000)) ms later")
+        } else if abs(current - level.target) > tolerance {
+            run.report["note"] = "the control moves in steps of \(lastStep.map(levelText) ?? "an unknown size"); "
+                + "\(levelText(current)) is the nearest it reaches to \(levelText(level.target))"
+        }
+        return run
     }
 
     /// Writes a date-time picker's date with the asked time of day, then reads it back at
@@ -287,6 +456,7 @@ nonisolated enum HarnessAdjust {
     /// time, reading its number back after every step — or writes a time picker's date.
     static func adjust(_ plan: Plan) -> Run {
         if let time = plan.time, let control = plan.controls.first { return writeTime(control, time) }
+        if let level = plan.level, let control = plan.controls.first { return setLevel(control, level) }
         var run = Run()
         let started = Date()
         var steps: [Int] = []
@@ -374,6 +544,14 @@ nonisolated enum HarnessAdjust {
         guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
               let value, CFGetTypeID(value) == CFDateGetTypeID() else { return nil }
         return value as? Date
+    }
+
+    /// The attribute when it is a number (CFNumber), nil otherwise.
+    static func numberAttribute(_ element: AXUIElement, _ attribute: String) -> Double? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == CFNumberGetTypeID() else { return nil }
+        return (value as? NSNumber)?.doubleValue
     }
 
     /// A date-time role whose AXValue is a date the app says is settable.
