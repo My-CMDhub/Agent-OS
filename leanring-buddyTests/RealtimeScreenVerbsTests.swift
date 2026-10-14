@@ -1204,7 +1204,10 @@ struct RealtimeScreenVerbsTests {
             node("AXScrollArea", nil, CGRect(x: 0, y: 100, width: 1000, height: 600), children: [
                 node("AXStaticText", "Row under the toolbar", CGRect(x: 10, y: 720, width: 200, height: 20)),
                 node("AXStaticText", "Row on screen", CGRect(x: 10, y: 400, width: 200, height: 20)),
-                node("AXStaticText", "Margin row", CGRect(x: 10, y: 20, width: 200, height: 20))
+                node("AXStaticText", "Margin row", CGRect(x: 10, y: 20, width: 200, height: 20)),
+                // Chromium below the fold (B5 2026-10-15): clipped to the view's bottom edge, zero height.
+                node("AXStaticText", "Screen 3 paragraph", CGRect(x: 10, y: 100, width: 200, height: 0)),
+                node("AXStaticText", "Meaningless frame", .zero)
             ]),
             // Chromium's contenteditable: the draft is child static text.
             node("AXTextArea", "Message", CGRect(x: 0, y: 0, width: 1000, height: 90), children: [
@@ -1215,7 +1218,7 @@ struct RealtimeScreenVerbsTests {
             ])
         ])
         // B5: what lies under the scroll view's bottom edge is counted, so read_page can say the page goes on.
-        #expect(HarnessServer.namedBelowView(in: tree) == 1, "the margin row only; the row under the toolbar is above")
+        #expect(HarnessServer.namedBelowView(in: tree) == 2, "the margin row and Chromium's edge-pinned paragraph; not the row above, not (0,0,0,0)")
         let names = HarnessServer.namedElements(in: tree).compactMap { $0["name"] as? String }
         #expect(names.contains("Toolbar Save"))
         #expect(names.contains("Row on screen"))

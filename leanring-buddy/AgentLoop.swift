@@ -370,6 +370,8 @@ final class AgentLoop {
         /// yet, whatever a read shows beside it (E03 2026-10-13: Calendar's suggestion line
         /// "JARVIS test meeting Tomorrow 3 pm" passed for the event). In memory only.
         var awaitsCommit = false
+        /// An ok read_page that said more of the page lies below the view (`moreBelow`). In memory only.
+        var moreBelow = false
     }
 
     /// An ask_owner the run paused on: its call's id, and the results of the
@@ -411,6 +413,8 @@ final class AgentLoop {
     /// The previous step's tool_result (or a correction), sent with the next observation.
     private var pending: [[String: Any]] = []
     private var challengedDone = false
+    /// `readStoppedAbovePage` asked once; a second done after it stands.
+    private var challengedUnreadPage = false
     private var sameRefusal: (error: String, count: Int)?
     private var lastError: String?
     private var webUsed: [String: Int] = [:]
@@ -740,6 +744,15 @@ final class AgentLoop {
                                 "message": "this summary was written before \(readInBatch) returned; read its result, then call done"])
                         continue
                     }
+                    // B5 2026-10-14 (0897DD71): read_page said moreBelow, and done summarised screen 1. Asked once, by receipts.
+                    if !challengedUnreadPage, Self.readStoppedAbovePage(receipts) {
+                        challengedUnreadPage = true
+                        traced(["tool": toolName, "args": args, "ok": false, "error": "pageUnread"])
+                        answer(["ok": false, "error": "pageUnread",
+                                "message": "your last read_page said more of the page lies below the view, and nothing has scrolled since. "
+                                    + "If the task needs the whole page, scroll down and read_page again; if not, call done again."])
+                        continue
+                    }
                     // A creation claim is held against the screen as it is NOW, after every step (E03 2026-10-13).
                     var seenNow: String?
                     if !Self.createdNames(summary).isEmpty {
@@ -798,7 +811,7 @@ final class AgentLoop {
                     let readStart = dependencies.uptime()
                     result = await dependencies.readPage()
                     harnessMs = Int(((dependencies.uptime() - readStart) * 1000).rounded())
-                    args = ["textLength": (result["text"] as? String)?.count ?? 0]
+                    args = ["textLength": (result["text"] as? String)?.count ?? 0, "moreBelow": result["moreBelow"] as? Bool ?? false]
                 case AgentLoopGemini.webLookupName:
                     let question = (input["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     let url = (input["url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -866,7 +879,8 @@ final class AgentLoop {
                                         shown: ok ? Self.appShownText(toolName: toolName, result: result) : nil,
                                         submitted: ok && toolName == RealtimeVoiceVerbs.typeTextName && Self.typeWasSubmitted(result),
                                         awaitsCommit: ok && toolName == RealtimeVoiceVerbs.typeTextName && !Self.typeWasSubmitted(result)
-                                            && result["fieldCommitsOnConfirm"] as? Bool == true))
+                                            && result["fieldCommitsOnConfirm"] as? Bool == true,
+                                        moreBelow: ok && toolName == AgentLoopTools.readPageName && result["moreBelow"] as? Bool == true))
                 var fields: [String: Any] = ["tool": toolName, "args": args, "ok": ok, "error": error ?? NSNull(), "harnessMs": harnessMs,
                                              "waitedForConfirmation": waited]
                 if !(web is NSNull) { fields["web"] = web }
@@ -1149,6 +1163,12 @@ final class AgentLoop {
         let ranSteps = Set(receipts.map(\.step))
         let unbacked = evidence.filter { !okSteps.contains($0) && !($0 == currentStep && !ranSteps.contains($0)) }
         return unbacked.isEmpty ? nil : "step \(unbacked.map(String.init).joined(separator: ", ")) has no ok result"
+    }
+
+    /// The task's last ok read_page said `moreBelow`, and no ok scroll came after it.
+    static func readStoppedAbovePage(_ receipts: [Receipt]) -> Bool {
+        guard let read = receipts.lastIndex(where: { $0.ok && $0.toolName == AgentLoopTools.readPageName }), receipts[read].moreBelow else { return false }
+        return !receipts[(read + 1)...].contains { $0.ok && $0.toolName == RealtimeVoiceVerbs.scrollName }
     }
 
     /// Names a creation sentence gives: created/added/made … called/named/titled "X" or X unquoted

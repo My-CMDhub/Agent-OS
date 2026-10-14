@@ -2253,11 +2253,14 @@ final class HarnessServer {
     /// Named elements the walk holds but scrolled out BELOW their scroll view (`namedElements`'
     /// clip, AppKit: under its bottom edge). B5 2026-10-14: read_page answered screen 1 of a
     /// three-screen article with nothing saying more was below, and the summary stopped there.
+    /// Zero HEIGHT counts: Chromium clips a below-the-fold element's frame to the viewport, so
+    /// screens 2 and 3 read (47, 900, 630, 0) with the view's bottom at 900 (raw AX, 2026-10-15).
+    /// Zero width does not: (0, 0, 0, 0) is the meaningless frame, never a place.
     static func namedBelowView(in rootNode: AccessibilityElementNode) -> Int {
         var count = 0
         func visit(_ node: AccessibilityElementNode, clip: CGRect) {
             let frame = node.frameInAppKitCoordinates
-            if node.listedName != nil, frame.width > 0, frame.height > 0, !clip.isNull, frame.maxY <= clip.minY { count += 1 }
+            if node.listedName != nil, frame.width > 0, !clip.isNull, frame.maxY <= clip.minY { count += 1 }
             if node.hidesChildrenFromWire { return }
             let scrolls = (node.role == "AXScrollArea" || node.role == "AXWebArea") && frame.width > 0 && frame.height > 0
             for child in node.children { visit(child, clip: scrolls ? clip.intersection(frame) : clip) }

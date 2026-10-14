@@ -63,7 +63,7 @@ private func dispatch(ok: Bool, error: String? = nil) -> RealtimeToolDispatch {
 }
 
 @MainActor
-private func loop(_ script: Script, image: Bool = false, front: (() -> String?)? = nil,
+private func loop(_ script: Script, image: Bool = false, front: (() -> String?)? = nil, page: [String: Any] = ["ok": true, "text": "page"],
                   execute: ((RealtimeToolCall) async -> RealtimeToolDispatch)? = nil) -> AgentLoop {
     AgentLoop(dependencies: AgentLoop.Dependencies(
         model: { body, timeout in
@@ -86,7 +86,7 @@ private func loop(_ script: Script, image: Bool = false, front: (() -> String?)?
             if let execute { return await execute(call) }
             return dispatch(ok: true)
         },
-        readPage: { ["ok": true, "text": "page"] },
+        readPage: { page },
         onStep: { script.steps.append($0) },
         narrate: { script.narrations.append($0) },
         trace: { script.traces.append($0) },
@@ -165,6 +165,24 @@ struct AgentLoopTests {
         #expect(AgentLoop.doneChallenge(summary: "Done.", evidence: [], receipts: []) != nil)
         #expect(AgentLoop.doneChallenge(summary: "It worked.", evidence: [2],
                                         receipts: [AgentLoop.Receipt(step: 2, toolName: "scroll", ok: false, error: "x")]) != nil)
+    }
+
+    /// B5 2026-10-14 (0897DD71): read_page said moreBelow, done summarised screen 1. Asked once; a second done stands.
+    @MainActor @Test func aDoneRightAfterAReadThatSaidMoreBelowIsAskedOnce() async {
+        let script = Script([toolUse("read_page"),
+                             toolUse("done", ["summary": "The article is about a lighthouse.", "evidence": [1]], id: "first"),
+                             toolUse("done", ["summary": "The article is about a lighthouse.", "evidence": [1]])])
+        let outcome = await loop(script, page: ["ok": true, "text": "page", "moreBelow": true]).run(goal: "summarise this page")
+        #expect(outcome == .done(summary: "The article is about a lighthouse."))
+        let asked = (script.bodies[2]["messages"] as? [[String: Any]])?.last?["content"] as? [[String: Any]]
+        #expect((asked?.first?["content"] as? String)?.contains("pageUnread") == true)
+        #expect(script.traces.contains { $0["error"] as? String == "pageUnread" })
+        // By receipts: a scroll after the read, or a later read with nothing below, answers it.
+        let read = AgentLoop.Receipt(step: 1, toolName: "read_page", ok: true, error: nil, moreBelow: true)
+        #expect(AgentLoop.readStoppedAbovePage([read]))
+        #expect(!AgentLoop.readStoppedAbovePage([read, AgentLoop.Receipt(step: 2, toolName: "scroll", ok: true, error: nil)]))
+        #expect(!AgentLoop.readStoppedAbovePage([read, AgentLoop.Receipt(step: 2, toolName: "read_page", ok: true, error: nil)]))
+        #expect(!AgentLoop.readStoppedAbovePage([]))
     }
 
     @MainActor @Test func aPressStopsTheLoopBeforeTheNextTool() async {
