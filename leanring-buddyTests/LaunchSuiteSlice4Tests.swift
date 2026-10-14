@@ -49,18 +49,32 @@ struct LaunchSuiteSlice4Tests {
     /// The Today count must load to be a reading; only incomplete "call mom" rows count.
     @Test func aRemindIsANewCallMomRowDueTodayAtFive() {
         let buttons = ["Today, 0 reminders", "Scheduled, 0 reminders", "All, 7 reminders"]
-        let empty = Suite.remindersRead(buttons: buttons, rows: [(description: "Incomplete, milk", texts: ["milk"])])
+        let empty = Suite.remindersRead(buttons: buttons, rows: [(description: "Incomplete, milk", title: "milk")])
         #expect(empty == Suite.RemindersToday(today: 0, callMom: []))
         #expect(Suite.remindersRead(buttons: ["All, 7 reminders"], rows: []) == nil)
-        let made = Suite.remindersRead(buttons: ["Today, 1 reminder"], rows: [(description: "Incomplete, Call Mom", texts: ["Call Mom", "Today, 5:00 pm"]),
-                                                                              (description: "Completed, call mom", texts: [])])
+        let made = Suite.remindersRead(buttons: ["Today, 1 reminder"], rows: [(description: "Incomplete, Call Mom, Today at 5:00\u{202F}pm", title: "Call Mom"),
+                                                                              (description: "Completed, call mom", title: "call mom")])
         #expect(made?.callMom.count == 1)
         #expect(Suite.callMomVerdict(before: empty, after: made)["passed"] as? Bool == true)
-        let wrongTime = Suite.RemindersToday(today: 1, callMom: ["Incomplete, Call Mom | Today, 3:00 pm"])
+        let wrongTime = Suite.RemindersToday(today: 1, callMom: ["Incomplete, Call Mom, Today at 3:00 pm"], callMomDue: [", Today at 3:00 pm"])
         #expect(Suite.callMomVerdict(before: empty, after: wrongTime)["passed"] as? Bool == false)
-        let notToday = Suite.RemindersToday(today: 0, callMom: ["Incomplete, Call Mom | 5:00 pm"])
+        let notToday = Suite.RemindersToday(today: 0, callMom: ["Incomplete, Call Mom, 16/10/2026 at 5:00 pm"], callMomDue: [", 16/10/2026 at 5:00 pm"])
         #expect(Suite.callMomVerdict(before: empty, after: notToday)["passed"] as? Bool == false)
         #expect(Suite.callMomVerdict(before: nil, after: made)["passed"] as? Bool == false)
+    }
+
+    /// E12 2026-10-14T20-20-15Z passed "5 pm" on the TITLE the agent typed; the row was due "Today" with no time.
+    @Test func fivePmIsReadFromTheDueDateNotTheTitle() {
+        let row = (description: "Incomplete, Call Mom today at 5pm, Today", title: "Call Mom today at 5pm" as String?)
+        #expect(Suite.dueText(row.description, title: row.title) == ", Today")
+        let read = Suite.remindersRead(buttons: ["Today, 1 reminder"], rows: [row])
+        let none = Suite.RemindersToday(today: 0, callMom: [])
+        #expect(Suite.callMomVerdict(before: none, after: read)["fivePmDue"] as? Bool == false)
+        let timed = Suite.remindersRead(buttons: ["Today, 1 reminder"], rows: [(description: "Incomplete, Call Mom today at 5pm, Today at 5:00 pm", title: "Call Mom today at 5pm")])
+        #expect(Suite.callMomVerdict(before: none, after: timed)["passed"] as? Bool == true)
+        // A title that did not read back proves no due date.
+        #expect(Suite.dueText("Incomplete, Call Mom at 5pm, Today", title: nil) == "")
+        #expect(Suite.dueText("Incomplete, Call Mom at 5pm, Today", title: "Call Dad") == "")
     }
 
     @Test func tomorrowsDayListAndItsTimedTitles() {

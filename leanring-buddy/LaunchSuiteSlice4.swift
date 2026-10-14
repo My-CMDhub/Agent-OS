@@ -130,20 +130,32 @@ extension GeneralitySuite {
     //
     // The sidebar's AXGrid "Pinned lists and system Smart Lists" holds AXButtons described "Today, 0 reminders"
     // and "Scheduled, 0 reminders"; a list item is an AXCell "Incomplete, milk" over an AXGroup of the same
-    // name, an AXCheckBox "Mark as completed" and an AXTextField holding the title. No reminder on this Mac had
-    // a due date, so where a row shows "5:00 pm" is unmeasured: every text inside the row is searched.
+    // name, an AXCheckBox "Mark as completed" and an AXTextField holding the title. A due row (2026-10-15) is
+    // described "Incomplete, <title>, Today at 5:00 pm" and shows "Today, 5:00 pm" beneath it. Only the part
+    // AFTER the title is the due date: E12's run typed the title "Call Mom today at 5pm" and passed 5 pm on it.
+    // The Today count moves only when the date COMMITS: a date written into the row's focused "Add Date" field
+    // reads "Today" in the row while the count stays put (measured: 1 -> 1, committed on leaving the field).
 
     nonisolated struct RemindersToday: Sendable, Equatable {
         let today: Int
-        /// Each incomplete "call mom" row's texts, joined.
+        /// Each incomplete "call mom" row's description.
         let callMom: [String]
+        /// Each one's due date: its description after the title ("" when the title did not read back).
+        var callMomDue: [String] = []
     }
 
     /// nil until the Today smart list's count has loaded ("none" must be a reading).
-    nonisolated static func remindersRead(buttons: [String], rows: [(description: String, texts: [String])]) -> RemindersToday? {
+    /// `title` is the row's title field: the due date is only what follows it.
+    nonisolated static func remindersRead(buttons: [String], rows: [(description: String, title: String?)]) -> RemindersToday? {
         guard let today = buttons.compactMap(reminderList).first(where: { $0.name == "Today" })?.count else { return nil }
         let calls = rows.filter { $0.description.hasPrefix("Incomplete, ") && folded($0.description).contains("call mom") }
-        return RemindersToday(today: today, callMom: calls.map { ([$0.description] + $0.texts).joined(separator: " | ") })
+        return RemindersToday(today: today, callMom: calls.map(\.description), callMomDue: calls.map { dueText($0.description, title: $0.title) })
+    }
+
+    /// "Incomplete, Call Mom today at 5pm, Today at 5:00 pm" titled "Call Mom today at 5pm" -> ", Today at 5:00 pm".
+    nonisolated static func dueText(_ description: String, title: String?) -> String {
+        guard let title, !title.isEmpty, description.hasPrefix("Incomplete, " + title) else { return "" }
+        return String(description.dropFirst(("Incomplete, " + title).count))
     }
 
     nonisolated static func folded(_ text: String) -> String {
@@ -168,7 +180,9 @@ extension GeneralitySuite {
     nonisolated static func remindersToday() -> RemindersToday? {
         guard let nodes = appNodes(reminders) else { return nil }
         let buttons = nodes.filter { $0.role == "AXButton" }.map(name)
-        let rows = nodes.filter { $0.role == "AXCell" }.map { cell in (description: name(cell), texts: cell.flattenedDescendants().dropFirst().map(name).filter { !$0.isEmpty }) }
+        let rows = nodes.filter { $0.role == "AXCell" }.map { cell in
+            (description: name(cell), title: cell.flattenedDescendants().first { $0.role == "AXTextField" }?.value?.raw)
+        }
         return remindersRead(buttons: buttons, rows: rows)
     }
 
@@ -177,16 +191,17 @@ extension GeneralitySuite {
         folded(text).range(of: #"(?<![0-9:])(5(:00)? ?p\.?m\b|17:00(?![0-9]))"#, options: .regularExpression) != nil
     }
 
-    /// E12: one more incomplete "call mom" row, the Today count grew, and a call-mom row shows 5 pm.
+    /// E12: one more incomplete "call mom" row, the Today count grew, and a call-mom row is DUE at 5 pm.
     nonisolated static func callMomVerdict(before: RemindersToday?, after: RemindersToday?) -> [String: Any] {
         guard let before, let after else {
             return ["passed": false, "truth": "unreadable (Reminders' Today count did not load)",
                     "readBefore": before != nil, "readAfter": after != nil]
         }
-        let atFive = after.callMom.contains(where: saysFivePM)
+        let atFive = after.callMomDue.contains(where: saysFivePM)
         return ["passed": after.callMom.count > before.callMom.count && after.today > before.today && atFive,
                 "callMomBefore": before.callMom.count, "callMomAfter": after.callMom.count, "todayBefore": before.today,
-                "todayAfter": after.today, "fivePmShown": atFive, "rowsSeen": after.callMom.map { String($0.prefix(120)) }]
+                "todayAfter": after.today, "fivePmDue": atFive, "rowsSeen": after.callMom.map { String($0.prefix(120)) },
+                "dueSeen": after.callMomDue]
     }
 
     /// Presses "Mark as completed" on the ONLY incomplete call-mom row, then reads again (2 s): true when none is left.
