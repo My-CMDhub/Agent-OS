@@ -1017,9 +1017,47 @@ enum HarnessHands {
     /// focus. Secure input and focus are re-checked between chunks: the owner may
     /// click away mid-text, or a password box may take focus, and the rest must
     /// not follow it there.
+    /// The text a typing target holds. An editable web area (Mail's message body) answers AXValue ""
+    /// and keeps its text in descendant AXStaticTexts: live 2026-10-14, 10 keys landed as "probe body"
+    /// while the area's own value read 0 and the type reported performFailed.
+    static func typedTextValue(of element: AXUIElement) -> String? {
+        var role: AnyObject?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+        guard role as? String == "AXWebArea" else { return AccessibilityTypePerformer.stringValue(of: element) }
+        var queue = [element], texts: [String] = [], seen = 0
+        // ponytail: first 400 nodes; a long thread above the caret could hide the typed text.
+        while !queue.isEmpty, seen < 400 {
+            let node = queue.removeFirst()
+            seen += 1
+            var nodeRole: AnyObject?, value: AnyObject?, children: AnyObject?
+            AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &nodeRole)
+            if nodeRole as? String == "AXStaticText", AXUIElementCopyAttributeValue(node, kAXValueAttribute as CFString, &value) == .success,
+               let text = value as? String { texts.append(text) }
+            AXUIElementCopyAttributeValue(node, kAXChildrenAttribute as CFString, &children)
+            queue += (children as? [AXUIElement]) ?? []
+        }
+        return texts.joined()
+    }
+
+    /// Moves an AXWebArea's caret to its end marker and reads the selection back as a string:
+    /// true only when both answered and nothing is selected.
+    static func webAreaCaretMovedToEnd(_ element: AXUIElement) -> Bool {
+        var role: AnyObject?, end: AnyObject?, range: AnyObject?, selected: AnyObject?, text: AnyObject?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+        guard role as? String == "AXWebArea",
+              AXUIElementCopyAttributeValue(element, "AXEndTextMarker" as CFString, &end) == .success, let end,
+              AXUIElementCopyParameterizedAttributeValue(element, "AXTextMarkerRangeForUnorderedTextMarkers" as CFString,
+                                                         [end, end] as CFArray, &range) == .success, let range,
+              AXUIElementSetAttributeValue(element, "AXSelectedTextMarkerRange" as CFString, range) == .success,
+              AXUIElementCopyAttributeValue(element, "AXSelectedTextMarkerRange" as CFString, &selected) == .success, let selected,
+              AXUIElementCopyParameterizedAttributeValue(element, "AXStringForTextMarkerRange" as CFString, selected, &text) == .success
+        else { return false }
+        return (text as? String)?.isEmpty == true
+    }
+
     static func typeByKeystrokes(_ text: String, mode: TypeMode, into element: AXUIElement, processIdentifier: pid_t,
                                  fingerprintBefore: Set<String>, secureInput: () -> SecureInputState) -> KeystrokeOutcome {
-        let valueBefore = AccessibilityTypePerformer.stringValue(of: element)
+        let valueBefore = typedTextValue(of: element)
         let valueLengthBefore = valueBefore?.count
         let valueLengthUTF16 = valueBefore?.utf16.count
         // An insert goes at the end: move a caret the focusing click left mid-text, then read where it is.
@@ -1037,7 +1075,12 @@ enum HarnessHands {
                 AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, allValue)
             }
         }
-        let selection = AccessibilityTypePerformer.selectedRange(of: element)
+        var selection = AccessibilityTypePerformer.selectedRange(of: element)
+        // A web area has no AXSelectedTextRange; WebKit's text markers move its caret to the end and
+        // prove nothing is selected (Mail's body, live 2026-10-14) — else the refusals below stand.
+        if selection == nil, mode == .insert, webAreaCaretMovedToEnd(element) {
+            selection = CFRange(location: valueLengthUTF16 ?? 0, length: 0)
+        }
         let selectionCoversValue = mode == .replace && (valueLengthUTF16 ?? 0) > 0
             && selection.map { $0.location == 0 && $0.length == valueLengthUTF16 } == true
         // The push-to-talk key's release is the owner's input too: give it a moment.
@@ -1067,7 +1110,7 @@ enum HarnessHands {
         var valueLengthAfter: Int?
         var evidence: String?
         waitUntil(seconds: keystrokeVerifySeconds) {
-            let valueAfter = AccessibilityTypePerformer.stringValue(of: element)
+            let valueAfter = typedTextValue(of: element)
             valueLengthAfter = valueAfter?.count
             evidence = selectionCoversValue
                 ? (valueAfter == text ? "the field now reads the typed text in place of what it held" : nil)

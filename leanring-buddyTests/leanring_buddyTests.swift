@@ -4280,3 +4280,16 @@ struct FocusSettleTests {
     #expect(ActionSafetyKernel.confirmPhrase(in: "Don't Save") == "don t save")
     #expect(ActionSafetyKernel.confirmPhrase(in: "Save") == nil)
 }
+
+
+@Test func anEditableWebAreaTakesTextAndAPageDoesNot() {
+    // Mail's message body is an AXWebArea whose AXValue is settable (live 2026-10-14).
+    func decide(_ settable: Set<String>) -> SafetyDecision {
+        ActionSafetyKernel.evaluate(
+            intent: ElementActionIntent(role: nil, title: "", action: .type), resolvedNode: typingNode(role: "AXWebArea"),
+            matchCount: 1, visibleBounds: wholeScreen,
+            typing: ActionSafetyKernel.TypingContext(mode: .insert, settableAttributes: settable, currentValueLength: 0, aimedByFocus: true))
+    }
+    #expect(decide(["AXValue"]) == .allow)
+    #expect(decide([]) == .refuse(reason: ActionSafetyKernel.nonTextRoleRefusalReason(role: "AXWebArea")))
+}

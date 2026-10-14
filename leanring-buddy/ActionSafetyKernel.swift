@@ -558,6 +558,13 @@ enum ActionSafetyKernel {
         return evaluateNames(names + [(destination as NSString).lastPathComponent])
     }
 
+    /// Stepping a picker or slider (`HarnessAdjust`) is navigation-class (owner's ruling
+    /// 2026-10-13: no card unless it reaches a person, personal or financial data or a
+    /// connection) — but the control's name gets the word checks first.
+    static func evaluateAdjust(name: String) -> SafetyDecision {
+        evaluateNames([name])
+    }
+
     private static func evaluateNames(_ raw: [String]) -> SafetyDecision {
         let names = raw.map { $0.lowercased() }
         for name in names {
@@ -698,7 +705,10 @@ enum ActionSafetyKernel {
         }
 
         if case .type = intent.action {
-            guard typeableRoles.contains(resolvedNode.role) else {
+            // An EDITABLE web area is a text body (Mail's message body, live 2026-10-14: AXWebArea,
+            // focus and AXValue settable). A page's is not editable, so it stays refused.
+            let editableWebArea = resolvedNode.role == "AXWebArea" && typing?.settableAttributes.contains(kAXValueAttribute as String) == true
+            guard typeableRoles.contains(resolvedNode.role) || editableWebArea else {
                 return .refuse(reason: nonTextRoleRefusalReason(role: resolvedNode.role))
             }
             // No context means nobody asked the element anything, which is our
@@ -786,6 +796,7 @@ enum ActionSafetyKernel {
         guard navigationalRoles(for: intent.action).contains(resolvedNode.role)
                 || (intent.action == .open && opensPlainFinderFolder)
                 || (intent.action == .select && selectsListRow)
+                || (intent.action == .type && resolvedNode.role == "AXWebArea" && typing?.settableAttributes.contains(kAXValueAttribute as String) == true)
                 || ((intent.action == .press || intent.action == .click)
                     && (resolvedNode.subrole.map(navigationalPressSubroles.contains) == true || isListOption)) else {
             return .requireConfirmation(reason: "unrecognised role \(resolvedNode.role)")
