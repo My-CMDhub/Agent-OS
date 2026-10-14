@@ -445,8 +445,22 @@ enum ActionSafetyKernel {
     static let submitSendsBundleIdentifiers: Set<String> = [
         "com.apple.mail", "com.apple.mobilesms", "org.mozilla.firefox", "com.tinyspeck.slackmacgap", "com.hnc.discord",
         "net.whatsapp.whatsapp", "desktop.whatsapp", "ru.keepcoder.telegram", "com.tdesktop.telegram",
-        "com.microsoft.teams", "com.microsoft.teams2", "us.zoom.xos"
+        "com.microsoft.teams", "com.microsoft.teams2", "us.zoom.xos", "com.apple.facetime"
     ]
+
+    /// Submitting needs no card: the organiser apps, and Apple's own apps — G12 2026-10-15, a Font Book
+    /// search commit was carded and denied; it reaches no one — except those that send (above) and those
+    /// that run code or hold credentials (`launchConfirmationBundleIdentifiers`: Terminal, Passwords…).
+    /// A third-party app keeps its card: what its commit does is unknown.
+    static func submitNeedsNoCard(bundleIdentifier: String?) -> Bool {
+        guard let id = bundleIdentifier?.lowercased() else { return false }
+        if submitWithoutCardBundleIdentifiers.contains(id) { return true }
+        return id.hasPrefix("com.apple.") && !submitSends(bundleIdentifier: id) && !submitRunsCode(bundleIdentifier: id)
+    }
+
+    static func submitRunsCode(bundleIdentifier: String?) -> Bool {
+        bundleIdentifier.map { id in launchConfirmationBundleIdentifiers.contains { $0.lowercased() == id.lowercased() } } == true
+    }
 
     static func submitSends(bundleIdentifier: String?) -> Bool {
         ScreenSecretGuard.isBrowser(bundleIdentifier)
@@ -457,10 +471,11 @@ enum ActionSafetyKernel {
     /// an organiser app keeps the kernel's answer, a sending app asks once (destructive:
     /// Allow once or Deny, never Always), any other app asks. A refusal stays a refusal.
     static func gatingSubmit(_ decision: SafetyDecision, thenConfirm: Bool, bundleIdentifier: String?) -> SafetyDecision {
-        guard thenConfirm, !(bundleIdentifier.map { submitWithoutCardBundleIdentifiers.contains($0.lowercased()) } == true)
-        else { return decision }
-        let sends = submitSends(bundleIdentifier: bundleIdentifier)
-        let reason = sends ? "submitting what was typed sends it to other people" : "submitting what was typed outside the owner's organiser apps"
+        guard thenConfirm, !submitNeedsNoCard(bundleIdentifier: bundleIdentifier) else { return decision }
+        let runs = submitRunsCode(bundleIdentifier: bundleIdentifier)
+        let sends = submitSends(bundleIdentifier: bundleIdentifier) || runs
+        let reason = runs ? "submitting what was typed runs it" : sends ? "submitting what was typed sends it to other people"
+            : "submitting what was typed in an app whose commit is unknown"
         switch decision {
         case .refuse: return decision
         case .requireConfirmation(let existing, let destructive):
@@ -785,7 +800,9 @@ enum ActionSafetyKernel {
         // Owner's ruling 2026-10-11 (G15): a native Save/Rename sheet's name field held
         // "Untitled"; the card was denied and the model inserted ("UntitledJARVIS test 3.rtf").
         // Its default is the app's, not the owner's — never inside an AXWebArea.
-        if let typing, typing.mode == .replace, typing.currentValueLength > 0,
+        // A search box holds a query, not the owner's work (G12 2026-10-15: Font Book's search, re-typed,
+        // was carded "replace would discard 9 characters" and denied).
+        if let typing, typing.mode == .replace, typing.currentValueLength > 0, resolvedNode.subrole != "AXSearchField",
            !((typing.inTabTheHarnessOpened || typing.inNativeModalSheet) && singleLineTextRoles.contains(resolvedNode.role)) {
             return .requireConfirmation(
                 reason: replaceWouldDiscardReason(characterCount: typing.currentValueLength),

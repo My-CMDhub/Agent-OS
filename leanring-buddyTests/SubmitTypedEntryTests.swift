@@ -38,13 +38,40 @@ struct SubmitTypedEntryTests {
         }
     }
 
-    @Test func anyOtherAppAsksOnACardThatMayOfferAlways() {
-        for bundle in ["com.apple.TextEdit", "com.apple.finder", "com.todesktop.230313mzl4w4u92", nil] as [String?] {
+    @Test func aThirdPartyAppAsksOnACardThatMayOfferAlways() {
+        for bundle in ["com.todesktop.230313mzl4w4u92", "com.figma.Desktop", nil] as [String?] {
             guard case .requireConfirmation(_, let destructive) = submitted(in: bundle) else {
                 Issue.record("\(bundle ?? "nil") was not carded"); continue
             }
             #expect(!destructive, "\(bundle ?? "nil")")
         }
+    }
+
+    /// G12 2026-10-15: a Font Book search commit was carded and denied. Apple's own apps reach no one —
+    /// except those that send, and those that run code or hold credentials.
+    @Test func applesOwnAppsSubmitWithNoCardExceptThoseThatSendOrRunCode() {
+        for bundle in ["com.apple.FontBook", "com.apple.TextEdit", "com.apple.finder", "com.apple.systempreferences"] {
+            #expect(submitted(in: bundle) == typed(subrole: nil), "\(bundle)")
+        }
+        for bundle in ["com.apple.Terminal", "com.apple.ScriptEditor2", "com.apple.Passwords"] {
+            #expect(submitted(in: bundle) == .requireConfirmation(reason: "submitting what was typed runs it", destructive: true), "\(bundle)")
+        }
+        #expect(submitted(in: "com.apple.FaceTime") == .requireConfirmation(reason: "submitting what was typed sends it to other people",
+                                                                          destructive: true))
+    }
+
+    /// G12 2026-10-15: re-typing Font Book's search was carded "replace would discard 9 characters".
+    @Test func replacingASearchQueryNeedsNoCardButAFieldsTextStillDoes() {
+        func replace(subrole: String?) -> SafetyDecision {
+            let field = AccessibilityElementNode(role: "AXTextField", subrole: subrole, title: "Search", value: nil,
+                                                 frameInAppKitCoordinates: CGRect(x: 100, y: 100, width: 300, height: 24), depth: 2,
+                                                 children: [], publishedActionNames: ["AXConfirm"])
+            return ActionSafetyKernel.evaluate(
+                intent: ElementActionIntent(role: nil, title: "Search", action: .type), resolvedNode: field, matchCount: 1, visibleBounds: bounds,
+                typing: .init(mode: .replace, settableAttributes: [kAXValueAttribute], currentValueLength: 9, aimedByFocus: false))
+        }
+        #expect(replace(subrole: "AXSearchField") == .allow)
+        #expect(replace(subrole: nil) == .requireConfirmation(reason: ActionSafetyKernel.replaceWouldDiscardReason(characterCount: 9), destructive: true))
     }
 
     @Test func whereItReachesPeopleItIsASendAllowedOnceOnly() {
@@ -70,8 +97,8 @@ struct SubmitTypedEntryTests {
         #expect(ActionSafetyKernel.gatingSubmit(.allow, thenConfirm: false, bundleIdentifier: "com.apple.mail") == .allow)
         // A question already destructive keeps its flag and gains the reason.
         #expect(ActionSafetyKernel.gatingSubmit(.requireConfirmation(reason: "r", destructive: true), thenConfirm: true,
-                                                bundleIdentifier: "com.apple.TextEdit")
-                == .requireConfirmation(reason: "r; submitting what was typed outside the owner's organiser apps", destructive: true))
+                                                bundleIdentifier: "com.figma.Desktop")
+                == .requireConfirmation(reason: "r; submitting what was typed in an app whose commit is unknown", destructive: true))
     }
 
     @Test func submitIsTheHarnessesThenConfirmAndNeverImplied() throws {
