@@ -148,6 +148,13 @@ struct HarnessPasteTests {
         #expect(found.label == "Paste")
     }
 
+    /// G04/G21 2026-10-14: Notes re-checks the clipboard on a ~1 s cycle (Paste enabled
+    /// 689-704 ms after the write onto an empty clipboard), so a 0.3 s wait refused a paste
+    /// that would have worked whenever the owner's clipboard held no text.
+    @Test func pasteIsGivenAWholeClipboardCycleToEnable() {
+        #expect(HarnessPaste.enabledAfterWriteSeconds > 1.0)
+    }
+
     // MARK: verification and restore
 
     @Test func thePasteIsSeenByItsNonWhitespaceCharacters() {

@@ -167,8 +167,11 @@ enum HarnessPaste {
     }
 
     /// The gate already passed. Never presses Return, never falls back to keystrokes.
-    /// How long Paste may take to enable once our text is on the clipboard.
-    static let enabledAfterWriteSeconds = 0.3
+    /// How long Paste may take to enable once our text is on the clipboard. Notes re-checks
+    /// the clipboard on a ~1 s cycle, not on the write: measured 2026-10-15, 5/5 writes onto an
+    /// empty clipboard enabled Paste 689-704 ms later and a clear disabled it 1,003-1,016 ms
+    /// later. The old 0.3 s caught it only when Paste was already on (G04/G21 pasteUnavailable).
+    static let enabledAfterWriteSeconds = 1.5
 
     static func paste(_ text: String, into element: AXUIElement, application: NSRunningApplication,
                       secureInput: () -> SecureInputState) -> Outcome {
