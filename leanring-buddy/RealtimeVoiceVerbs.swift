@@ -586,13 +586,16 @@ nonisolated enum RealtimeVoiceVerbs {
             ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
                 .filter { $0.lowercased().hasSuffix(".app") }
                 .map { file -> AppName in
-                    let url = directory.appendingPathComponent(file, isDirectory: true)
+                    // Symlinks resolved: /Applications/Safari.app links into the Safari cryptex, and the running
+                    // Safari reports the resolved path — unresolved, one app read as two and every "Safari" request
+                    // stopped at ambiguousApp "Safari, Safari" (launch U08 2026-10-15).
+                    let url = directory.appendingPathComponent(file, isDirectory: true).resolvingSymlinksInPath()
                     return AppName(name: displayName(url), url: url, isFileName: true)
                 }
         }
         let installedPaths = Set(names.map { $0.url.standardizedFileURL.path })
         for application in NSWorkspace.shared.runningApplications where application.activationPolicy == .regular {
-            guard let name = application.localizedName, let url = application.bundleURL else { continue }
+            guard let name = application.localizedName, let url = application.bundleURL?.resolvingSymlinksInPath() else { continue }
             names.append(AppName(name: name, url: url, isFileName: !installedPaths.contains(url.standardizedFileURL.path)))
         }
         return names
