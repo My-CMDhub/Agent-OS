@@ -296,6 +296,10 @@ struct AgentPlanTests {
             .init(step: 3, toolName: "press_element", ok: true, error: nil, pressedRole: "AXButton")]
         #expect(AgentLoop.doneChallenge(summary: "Created a document and saved it to the Desktop named JARVIS test 3.",
                                         evidence: [1, 2, 3], receipts: saved, currentStep: 4, seenNow: "JARVIS test 3.rtf") == nil)
+        // Launch E03 2026-10-15 19-05Z: typed (and submitted) "JARVIS test meeting"; the true claim "added the meeting
+        // called JARVIS test meeting tomorrow at 3 pm" was challenged twice — "tomorrow" ended no name.
+        #expect(AgentLoop.createdNames("I added the meeting called JARVIS test meeting tomorrow at 3 pm to your calendar.")
+                == ["JARVIS test meeting"])
         // A read BEFORE the typing proves nothing about it.
         let readFirst = [AgentLoop.Receipt(step: 1, toolName: "find_on_screen", ok: true, error: nil, shown: "JARVIS test meeting")] + Self.e03
         #expect(AgentLoop.doneChallenge(summary: Self.e03Claim, evidence: [3], receipts: readFirst, currentStep: 8) != nil)

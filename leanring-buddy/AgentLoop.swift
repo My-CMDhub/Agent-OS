@@ -1159,7 +1159,7 @@ final class AgentLoop {
         let quoted = creation("created|added|made|wrote|new|set up") + #"["\u201C\u2018'](.{1,80}?)["\u201D\u2019']"#
         // Not "new" bare: "opened the new folder called scripts" names what was there.
         let bare = creation("created|added|made|wrote|set up") + #"([^\s"\u201C\u2018'][^.,;:!?"\u201C\u201D\n]{0,79}?)"#
-            + #"(?=\s+(?:for|with|in|on|at|to|and|that|which|containing|from|under|inside|into|saying|due|by)\b|\s*[.,;:!?\n]|\s*$)"#
+            + #"(?=\s+(?:for|with|in|on|at|to|and|that|which|containing|from|under|inside|into|saying|due|by|tomorrow|today|tonight|yesterday|next|this|every)\b|\s*[.,;:!?\n]|\s*$)"#
         let addedTo = #"(?i)\badded\s+(?!(?:a|an|the|it|them|this|that|these|those|some|one|your|my|both|all)\b)"#
             + #"([^.;:!?\n]{1,60}?)\s+to\s+(?:my|your|the)\s+(?:[\w'-]+\s+){0,2}?(?:list|calendar|reminders)\b"#
         func captures(_ pattern: String) -> [String] {
