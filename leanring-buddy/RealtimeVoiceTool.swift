@@ -489,6 +489,12 @@ nonisolated enum RealtimeOpenAppTool {
             // So a line break reaches the harness only to be PASTED, and only a note or document
             // editor takes it (`HarnessPaste`, 2026-10-10); Tab and the rest never leave here.
             let text = HarnessPaste.normalisedLineBreaks(rawText)
+            // Launch E03 2026-10-15: after typing a quick entry WITHOUT submit, the model sent a bare line
+            // break with submit true to commit it, and got an opaque invalidField. Say how commit works.
+            if call.submit, text.allSatisfy(\.isWhitespace) {
+                return refuse("submitNeedsText", "submit commits by typing: call type_text again with the WHOLE entry text, "
+                    + "mode replace and submit true (it replaces what is in the field, then commits it); never a line break")
+            }
             guard !HarnessPaste.containsControlCharactersOtherThanLineFeed(text) else {
                 return refuse("controlCharacterInText", "the text holds a Tab or another control character; nothing was typed. "
                     + "Type plain text, with no Enter — the owner sends it themselves.")

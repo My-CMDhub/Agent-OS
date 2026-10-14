@@ -86,6 +86,11 @@ struct SubmitTypedEntryTests {
         #expect(!plain.submit)
         #expect(try request(plain)["thenConfirm"] == nil)
         #expect(!RealtimeToolCall.parsed(callID: "p", name: "press_element", arguments: ["name": "Send", "submit": true]).submit)
+        // E03 2026-10-15: a bare line break with submit is told how commit works, never sent.
+        let blank = RealtimeToolCall.parsed(callID: "t", name: "type_text", arguments: ["app": "Calendar", "text": "\n", "submit": true])
+        if case .failure(let refusal) = RealtimeOpenAppTool.harnessRequestLine(for: blank, expectApp: "com.apple.iCal", screenTarget: nil) {
+            #expect(refusal.error == "submitNeedsText")
+        } else { Issue.record("a blank submit reached the harness") }
         // The harness's AXConfirm outcome reaches the tool result, where a receipt reads it.
         let confirm: [String: Any] = ["published": true, "axErrorRawValue": 0, "milliseconds": 12]
         let told = RealtimeHandsVerbs.result([:], call: parsed, target: nil, response: ["confirm": confirm])
