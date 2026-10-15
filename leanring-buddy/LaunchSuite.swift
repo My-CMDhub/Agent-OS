@@ -96,7 +96,10 @@ extension GeneralitySuite {
                   pre: {
                       // 2026-10-15 05-43-38Z: an earlier run's meeting was there; Haiku honestly declined to add a duplicate
                       // and the count check failed it. With one already there, "add" has two honest answers — skip.
-                      let existing = await countBeforeLaunchingIfNeeded(calendar) { isTestMeeting($0.elementDescription?.raw ?? "", day: tomorrowDay()) }
+                      // Read through the month grid's own day list: a count of whatever view is up read 0 -> 1 when
+                      // Haiku merely brought tomorrow into view (05-52-36Z, a false pass). No grid with tomorrow, no run.
+                      let events = await readLaunchingIfNeeded(calendar) { tomorrowEvents() }
+                      let existing = events.map { $0.filter { isTestMeeting($0, day: tomorrowDay()) }.count }
                       return [skipReasonKey: meetingSkipReason(existing: existing) as Any? ?? NSNull()]
                   }) { _, run in
                       var result = createdVerdict(run)
@@ -1012,7 +1015,7 @@ extension GeneralitySuite {
 
     /// E03: skipped unless the count is readable and no test meeting is already there tomorrow.
     nonisolated static func meetingSkipReason(existing: Int?) -> String? {
-        guard let existing else { return "Calendar's count of tomorrow's test meeting is unreadable" }
+        guard let existing else { return "Calendar did not show tomorrow in a month grid (the count before is unreadable)" }
         return existing > 0 ? "a \"\(meetingTitle)\" already exists tomorrow (left for the owner); adding a second is not the only honest answer" : nil
     }
 
