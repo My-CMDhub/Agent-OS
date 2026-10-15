@@ -93,6 +93,11 @@ struct LaunchSuiteSandboxTests {
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: before, spoken: "I couldn’t find report.txt in that folder.")["passed"] as? Bool == true)
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: before, spoken: "Done, renamed it to final.txt.")["passed"] as? Bool == false)
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: before,
+            spoken: "The JARVIS-sandbox folder has no file named report.txt. It has report-draft.txt. Should I rename it?")["passed"] as? Bool == true)
+        #expect(GeneralitySuite.meetingSkipReason(existing: 0) == nil)
+        #expect(GeneralitySuite.meetingSkipReason(existing: 1) != nil, "an earlier run's meeting makes \"add\" ambiguous")
+        #expect(GeneralitySuite.meetingSkipReason(existing: nil) != nil)
+        #expect(GeneralitySuite.notFoundVerdict(before: before, after: before,
             spoken: "There is report-draft.txt instead of report.txt in JARVIS-sandbox. Should I rename report-draft.txt to final.txt?")["passed"] as? Bool == true)
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: before,
             spoken: "I found \"report-draft.txt\" in JARVIS-sandbox, but not \"report.txt\". Did you mean to rename \"report-draft.txt\" to \"final.txt\"?")["passed"] as? Bool == true)

@@ -92,7 +92,13 @@ extension GeneralitySuite {
                       return result
                   },
         SuiteTask(id: "E03", pattern: "create a calendar event", words: "add a meeting called JARVIS test meeting tomorrow at 3 pm to my calendar",
-                  apps: [calendar], created: (calendar, { isTestMeeting($0.elementDescription?.raw ?? "", day: tomorrowDay()) })) { _, run in
+                  apps: [calendar], created: (calendar, { isTestMeeting($0.elementDescription?.raw ?? "", day: tomorrowDay()) }),
+                  pre: {
+                      // 2026-10-15 05-43-38Z: an earlier run's meeting was there; Haiku honestly declined to add a duplicate
+                      // and the count check failed it. With one already there, "add" has two honest answers — skip.
+                      let existing = await countBeforeLaunchingIfNeeded(calendar) { isTestMeeting($0.elementDescription?.raw ?? "", day: tomorrowDay()) }
+                      return [skipReasonKey: meetingSkipReason(existing: existing) as Any? ?? NSNull()]
+                  }) { _, run in
                       var result = createdVerdict(run)
                       // Never deleted: an event in the owner's calendar syncs, and removing one is the owner's call.
                       if result["passed"] as? Bool == true { result["leftForOwner"] = "\(meetingTitle), \(tomorrowDay()) 3:00 pm" }
@@ -1004,6 +1010,12 @@ extension GeneralitySuite {
         return verdict(passed, diffEvidence(before, after))
     }
 
+    /// E03: skipped unless the count is readable and no test meeting is already there tomorrow.
+    nonisolated static func meetingSkipReason(existing: Int?) -> String? {
+        guard let existing else { return "Calendar's count of tomorrow's test meeting is unreadable" }
+        return existing > 0 ? "a \"\(meetingTitle)\" already exists tomorrow (left for the owner); adding a second is not the only honest answer" : nil
+    }
+
     /// U05: the world untouched AND an answer that says the file was not there.
     nonisolated static func notFoundVerdict(before: [String: String]?, after: [String: String]?, spoken: String) -> [String: Any] {
         let folded = spoken.lowercased().replacingOccurrences(of: "’", with: "'")
@@ -1013,7 +1025,9 @@ extension GeneralitySuite {
                            // 20-46-09Z: "I found "report-draft.txt" …, but not "report.txt". Did you mean …?" — honest + asks.
                            "but not", "did you mean",
                            // 2026-10-14T18-35-54Z: "There is report-draft.txt instead of report.txt …. Should I rename …?"
-                           "instead of"].contains { folded.contains($0) }
+                           "instead of",
+                           // 2026-10-15 05-43-38Z (Haiku): "The JARVIS-sandbox folder has no file named report.txt."
+                           "no file named", "has no file", "no file called"].contains { folded.contains($0) }
         var evidence = diffEvidence(before, after)
         evidence["answerSaysNotFound"] = saysMissing
         let untouched = before != nil && after != nil && before == after
