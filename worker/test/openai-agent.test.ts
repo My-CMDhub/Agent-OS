@@ -31,6 +31,7 @@ if ("url" in ok) {
   assert.equal(body.model, OPENAI_AGENT_MODELS[0]);
 }
 assert.ok("url" in build({ model: "gpt-4.1-mini", request: { messages: [] } }));
+assert.ok("url" in build({ model: "gpt-5.6-luna", request: { messages: [] } }));
 // A model off the list, a non-function tool, an image OpenAI would fetch, a stray role, no messages, junk, too big: refused.
 const refused = (result: ReturnType<typeof build>, status = 400) => assert.ok("error" in result && result.status === status, JSON.stringify(result));
 refused(build({ model: "gpt-5", request: { messages: [] } }));

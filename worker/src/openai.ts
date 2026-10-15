@@ -4,7 +4,7 @@
 // answer (429/5xx/timeout), and whole runs for settled comparisons.
 
 // Must match AgentLoopOpenAI.models.
-export const OPENAI_AGENT_MODELS = ["gpt-5-mini", "gpt-4.1-mini"];
+export const OPENAI_AGENT_MODELS = ["gpt-5-mini", "gpt-4.1-mini", "gpt-5.6-luna"];
 const OPENAI_AGENT_FIELDS = ["messages", "tools", "tool_choice", "max_completion_tokens", "reasoning_effort"] as const;
 const OPENAI_AGENT_ROLES = new Set(["system", "developer", "user", "assistant", "tool"]);
 // One step is the history with one screenshot; ~1 MB measured scale, 8 MB leaves room and stops abuse.

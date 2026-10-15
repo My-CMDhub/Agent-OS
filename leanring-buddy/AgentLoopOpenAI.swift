@@ -16,17 +16,14 @@ import Foundation
 
 nonisolated enum AgentLoopOpenAI {
     /// Must match the worker's OPENAI_AGENT_MODELS. The first is the fallback.
-    static let models = ["gpt-5-mini", "gpt-4.1-mini"]
+    static let models = ["gpt-5-mini", "gpt-4.1-mini", "gpt-5.6-luna"]
     static let defaultModel = models[0]
     static let route = "/openai-agent"
     static let pinPrefix = "openai:"
 
     /// `--agent-model=openai:<id>` with a listed id; nil otherwise (an unlisted id never reaches the worker).
     static func pinnedModel(arguments: [String] = CommandLine.arguments) -> String? {
-        guard let value = arguments.last(where: { $0.hasPrefix(AgentLoopGemini.pinArgument) })?.dropFirst(AgentLoopGemini.pinArgument.count),
-              value.hasPrefix(pinPrefix) else { return nil }
-        let id = String(value.dropFirst(pinPrefix.count))
-        return models.contains(id) ? id : nil
+        AgentLoopGemini.pinnedModel(prefix: pinPrefix, models: models, arguments: arguments)
     }
 
     /// Gemini could not answer this step and another provider might: busy or

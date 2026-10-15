@@ -131,6 +131,10 @@ nonisolated struct AgentModelError: Error, CustomStringConvertible {
 actor AgentLoopModel {
     static let preferred = "claude-sonnet-5-5"
     static let fallback = "claude-sonnet-4-6"
+    static let haiku = "claude-haiku-5-5"
+    /// `--agent-model=claude:<id>` picks one of these for a comparison run (owner 2026-10-15: Haiku first).
+    static let pinnable = [preferred, haiku]
+    static let pinPrefix = "claude:"
     nonisolated let provider: AgentModelProvider
     private(set) var model: String
 
@@ -147,16 +151,24 @@ actor AgentLoopModel {
         switch provider {
         case .gemini: AgentLoopGemini.firstModel(arguments: arguments)
         case .openai: AgentLoopOpenAI.pinnedModel(arguments: arguments) ?? AgentLoopOpenAI.defaultModel
-        case .claude: preferred
+        case .claude: pinnedModel(arguments: arguments) ?? preferred
         }
     }
 
+    nonisolated static func pinnedModel(arguments: [String] = CommandLine.arguments) -> String? {
+        AgentLoopGemini.pinnedModel(prefix: pinPrefix, models: pinnable, arguments: arguments)
+    }
+
     /// Sonnet 5.5 refuses `disabled`; `between_tools` is its no-extended-thinking
-    /// setting and only it accepts it. The 4.6 fallback thinks only when asked.
+    /// setting and only it accepts it. Haiku 5.5 thinks by default and 400s on
+    /// `between_tools`; `disabled` is accepted at its default effort (medium), and
+    /// keeps the loop thinking-free, since it strips thinking blocks from the history.
+    /// The 4.6 fallback thinks only when asked.
     nonisolated static func completed(_ body: [String: Any], model: String) -> [String: Any] {
         var body = body
         body["model"] = model
         if model == preferred { body["thinking"] = ["type": "between_tools"] }
+        if model == haiku { body["thinking"] = ["type": "disabled"] }
         return body
     }
 

@@ -107,7 +107,12 @@ struct AgentLoopOpenAITests {
     }
 
     @Test func aComparisonRunPinsOpenAIOnlyToAListedModel() {
-        #expect(AgentLoopOpenAI.models == ["gpt-5-mini", "gpt-4.1-mini"], "must match the worker's OPENAI_AGENT_MODELS")
+        #expect(AgentLoopOpenAI.models == ["gpt-5-mini", "gpt-4.1-mini", "gpt-5.6-luna"], "must match the worker's OPENAI_AGENT_MODELS")
+        #expect(AgentLoopOpenAI.pinnedModel(arguments: ["--agent-model=openai:gpt-5.6-luna"]) == "gpt-5.6-luna")
+        #expect(AgentLoopModel.firstModel(.openai, arguments: ["--agent-model=openai:gpt-5.6-luna"]) == "gpt-5.6-luna")
+        let luna = AgentLoopOpenAI.request(fromAnthropic: ["max_tokens": 2048, "messages": []], model: "gpt-5.6-luna")
+        #expect(luna["reasoning_effort"] as? String == "low" && luna["max_completion_tokens"] as? Int == 2048 && luna["temperature"] == nil,
+                "a GPT-5.x reasoning model: max_completion_tokens, an effort, no temperature")
         #expect(AgentLoopOpenAI.pinnedModel(arguments: ["--agent-model=openai:gpt-5-mini"]) == "gpt-5-mini")
         #expect(AgentLoopOpenAI.pinnedModel(arguments: ["--agent-model=openai:gpt-4.1-mini"]) == "gpt-4.1-mini")
         #expect(AgentLoopOpenAI.pinnedModel(arguments: ["--agent-model=openai:gpt-5"]) == nil, "an unlisted id never reaches the worker")
@@ -120,6 +125,26 @@ struct AgentLoopOpenAITests {
         #expect(AgentLoopModel.firstModel(.openai, arguments: ["--agent-model=openai:gpt-4.1-mini"]) == "gpt-4.1-mini")
         #expect(AgentLoopModel.firstModel(.openai, arguments: []) == "gpt-5-mini")
         #expect(AgentLoopModel.firstModel(.gemini, arguments: []) == "gemini-3.1-pro-preview")
+    }
+
+    /// Owner 2026-10-15: Haiku 5.5 first, Sonnet 5.5 only if Haiku falls short.
+    @Test func aComparisonRunPinsClaudeOnlyToAListedModel() {
+        #expect(AgentLoopModel.pinnedModel(arguments: ["--agent-model=claude:claude-haiku-5-5"]) == "claude-haiku-5-5")
+        #expect(AgentLoopModel.pinnedModel(arguments: ["--agent-model=claude:claude-sonnet-5-5"]) == "claude-sonnet-5-5")
+        #expect(AgentLoopModel.pinnedModel(arguments: ["--agent-model=claude:claude-opus-5-5"]) == nil, "an unlisted id never reaches the worker")
+        #expect(AgentLoopModel.pinnedModel(arguments: ["--agent-model=claude-haiku-5-5"]) == nil, "the prefix names the provider")
+        #expect(AgentLoopModel.pinnedModel(arguments: ["--agent-model=claude:claude-haiku-5-5", "--agent-model=openai:gpt-5-mini"]) == nil, "the last pin wins")
+        #expect(AgentModelProvider.from(nil, arguments: ["--agent-model=claude:claude-haiku-5-5"]) == .claude)
+        #expect(AgentModelProvider.from("openai", arguments: ["--agent-model=claude:claude-haiku-5-5"]) == .claude)
+        #expect(AgentModelProvider.from(nil, arguments: ["--agent-model=claude:claude-opus-5-5"]) == .gemini, "an unlisted pin changes nothing")
+        #expect(AgentLoopModel.firstModel(.claude, arguments: ["--agent-model=claude:claude-haiku-5-5"]) == "claude-haiku-5-5")
+        #expect(AgentLoopModel.firstModel(.claude, arguments: []) == "claude-sonnet-5-5")
+        #expect(AgentLoopModel.firstModel(.gemini, arguments: ["--agent-model=claude:claude-haiku-5-5"]) == "gemini-3.1-pro-preview")
+        // Haiku 5.5 400s on between_tools (Sonnet 5.5 only) and accepts disabled at its default effort.
+        let thinking = { (model: String) in (AgentLoopModel.completed([:], model: model)["thinking"] as? [String: Any])?["type"] as? String }
+        #expect(thinking("claude-haiku-5-5") == "disabled")
+        #expect(thinking("claude-sonnet-5-5") == "between_tools")
+        #expect(AgentLoopModel.completed([:], model: "claude-haiku-5-5")["model"] as? String == "claude-haiku-5-5")
     }
 
     @MainActor @Test func openAIGetsTheGeminiToolListWithWebLookup() {

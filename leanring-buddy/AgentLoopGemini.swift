@@ -22,11 +22,14 @@ nonisolated enum AgentModelProvider: String {
     case gemini, claude, openai
 
     /// `defaults write <bundle id> ClickyAgentModelProvider claude` switches back.
-    /// `--agent-model=openai:<id>` runs on OpenAI for a comparison (`AgentLoopOpenAI`).
+    /// `--agent-model=openai:<id>` runs on OpenAI for a comparison (`AgentLoopOpenAI`),
+    /// `--agent-model=claude:<id>` on Claude (`AgentLoopModel.pinnable`).
     static let defaultsKey = "ClickyAgentModelProvider"
     static var configured: AgentModelProvider { from(UserDefaults.standard.string(forKey: defaultsKey), arguments: CommandLine.arguments) }
     static func from(_ value: String?, arguments: [String] = []) -> AgentModelProvider {
-        AgentLoopOpenAI.pinnedModel(arguments: arguments) != nil ? .openai : value.flatMap(AgentModelProvider.init(rawValue:)) ?? .gemini
+        if AgentLoopOpenAI.pinnedModel(arguments: arguments) != nil { return .openai }
+        if AgentLoopModel.pinnedModel(arguments: arguments) != nil { return .claude }
+        return value.flatMap(AgentModelProvider.init(rawValue:)) ?? .gemini
     }
 }
 
@@ -40,6 +43,15 @@ nonisolated enum AgentLoopGemini {
     static func firstModel(arguments: [String] = CommandLine.arguments) -> String {
         let pinned = arguments.last { $0.hasPrefix(pinArgument) }.map { String($0.dropFirst(pinArgument.count)) }
         return pinned.flatMap { models.contains($0) ? $0 : nil } ?? models[0]
+    }
+
+    /// The last `--agent-model=<prefix><id>` when the id is in `models`; nil otherwise
+    /// (an unlisted id never reaches the worker).
+    static func pinnedModel(prefix: String, models: [String], arguments: [String]) -> String? {
+        guard let value = arguments.last(where: { $0.hasPrefix(pinArgument) })?.dropFirst(pinArgument.count),
+              value.hasPrefix(prefix) else { return nil }
+        let id = String(value.dropFirst(prefix.count))
+        return models.contains(id) ? id : nil
     }
     static let webLookupName = "web_lookup"
     /// Per task.
