@@ -86,7 +86,8 @@ nonisolated enum AgentLoopOpenAI {
             request["tool_choice"] = "auto"
         }
         // Speed over depth for one step at a time, as Gemini 3's thinkingLevel low; 4.1 does not reason.
-        if model.hasPrefix("gpt-5") { request["reasoning_effort"] = "low" }
+        // gpt-5.6-luna on /v1/chat/completions refuses function tools with any effort but "none" (HTTP 400, 2026-10-16).
+        if model.hasPrefix("gpt-5") { request["reasoning_effort"] = model == "gpt-5.6-luna" ? "none" : "low" }
         return request
     }
 

@@ -111,8 +111,8 @@ struct AgentLoopOpenAITests {
         #expect(AgentLoopOpenAI.pinnedModel(arguments: ["--agent-model=openai:gpt-5.6-luna"]) == "gpt-5.6-luna")
         #expect(AgentLoopModel.firstModel(.openai, arguments: ["--agent-model=openai:gpt-5.6-luna"]) == "gpt-5.6-luna")
         let luna = AgentLoopOpenAI.request(fromAnthropic: ["max_tokens": 2048, "messages": []], model: "gpt-5.6-luna")
-        #expect(luna["reasoning_effort"] as? String == "low" && luna["max_completion_tokens"] as? Int == 2048 && luna["temperature"] == nil,
-                "a GPT-5.x reasoning model: max_completion_tokens, an effort, no temperature")
+        #expect(luna["reasoning_effort"] as? String == "none" && luna["max_completion_tokens"] as? Int == 2048 && luna["temperature"] == nil,
+                "Luna takes function tools on chat completions only at effort none; max_completion_tokens, no temperature")
         #expect(AgentLoopOpenAI.pinnedModel(arguments: ["--agent-model=openai:gpt-5-mini"]) == "gpt-5-mini")
         #expect(AgentLoopOpenAI.pinnedModel(arguments: ["--agent-model=openai:gpt-4.1-mini"]) == "gpt-4.1-mini")
         #expect(AgentLoopOpenAI.pinnedModel(arguments: ["--agent-model=openai:gpt-5"]) == nil, "an unlisted id never reaches the worker")
