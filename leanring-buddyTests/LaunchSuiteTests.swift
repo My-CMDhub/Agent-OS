@@ -97,6 +97,9 @@ struct LaunchSuiteSandboxTests {
         #expect(GeneralitySuite.meetingSkipReason(existing: 0) == nil)
         #expect(GeneralitySuite.meetingSkipReason(existing: 1) != nil, "an earlier run's meeting makes \"add\" ambiguous")
         #expect(GeneralitySuite.meetingSkipReason(existing: nil) != nil)
+        #expect(GeneralitySuite.shoppingSkipReason(shown: "Shopping", items: ["Milk", "Eggs"]) != nil)
+        #expect(GeneralitySuite.shoppingSkipReason(shown: "Shopping", items: ["Milk"]) == nil)
+        #expect(GeneralitySuite.shoppingSkipReason(shown: "Reminders", items: ["Milk", "Eggs"]) == nil, "another list says nothing about Shopping")
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: before,
             spoken: "There is report-draft.txt instead of report.txt in JARVIS-sandbox. Should I rename report-draft.txt to final.txt?")["passed"] as? Bool == true)
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: before,

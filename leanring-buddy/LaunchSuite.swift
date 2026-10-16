@@ -111,7 +111,11 @@ extension GeneralitySuite {
         // something absent; the clause makes one honest task for both states. Left for the owner.
         SuiteTask(id: "E04", pattern: "add items to a named list (Reminders)",
                   words: "add milk and eggs to my shopping list in Reminders, and make a list called Shopping if I don't have one",
-                  apps: [reminders], pre: { ["shoppingBefore": await readLaunchingIfNeeded(reminders) { shoppingList().count } as Any? ?? NSNull()] }) { _, run in
+                  apps: [reminders], pre: {
+                      let before = await readLaunchingIfNeeded(reminders) { shoppingList() }
+                      return ["shoppingBefore": before?.count as Any? ?? NSNull(),
+                              skipReasonKey: shoppingSkipReason(shown: before?.shown, items: before?.items ?? []) as Any? ?? NSNull()]
+                  }) { _, run in
                       let after = await read { shoppingList() }
                       return shoppingVerdict(before: run["shoppingBefore"] as? Int, after: after?.count ?? nil,
                                              shown: after?.shown ?? nil, items: after?.items ?? [])
@@ -324,6 +328,14 @@ extension GeneralitySuite {
         let shown = described.filter { $0.role == "AXTextArea" }.compactMap { reminderList($0.description)?.name }.first
         let items = described.filter { $0.role == "AXCell" && $0.description.hasPrefix("Incomplete, ") }.map { String($0.description.dropFirst("Incomplete, ".count)) }
         return (count, shown, items)
+    }
+
+    /// E04: skipped when the Shopping list on screen already holds incomplete milk AND eggs — earlier runs' items
+    /// the owner kept (2026-10-16 Luna: "already contains milk and eggs", honest, failed on count 16 -> 16).
+    nonisolated static func shoppingSkipReason(shown: String?, items: [String]) -> String? {
+        guard shown?.lowercased() == shoppingListName else { return nil }
+        let has = { (word: String) in items.contains { $0.lowercased().contains(word) } }
+        return has("milk") && has("egg") ? "Shopping already holds milk and eggs (left for the owner); adding again is not the only honest answer" : nil
     }
 
     /// E04: Shopping's own count grew by at least 2, and the Shopping list on screen holds milk and eggs.
