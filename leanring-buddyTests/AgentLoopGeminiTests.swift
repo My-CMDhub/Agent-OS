@@ -51,9 +51,9 @@ private func geminiLoop(_ run: Run, lookup: [String: Any]) -> AgentLoop {
 struct AgentLoopGeminiTests {
 
     @Test func theProviderDefaultsToGeminiAndSwitchesBackByOneSetting() {
-        #expect(AgentModelProvider.from(nil) == .gemini)
-        #expect(AgentModelProvider.from("claude") == .claude)
-        #expect(AgentModelProvider.from("nonsense") == .gemini)
+        #expect(AgentModelProvider.from(nil) == .claude)
+        #expect(AgentModelProvider.from("gemini") == .gemini, "the saved switch back")
+        #expect(AgentModelProvider.from("nonsense") == .claude)
         // The Claude backend stays: its model list and web tools are still built.
         #expect(AgentLoopModel(provider: .claude).provider == .claude)
         #expect(AgentLoopModel.geminiShouldFallBack(AgentModelError(status: 429, body: "RESOURCE_EXHAUSTED")))

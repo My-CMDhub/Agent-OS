@@ -123,11 +123,10 @@ nonisolated struct AgentModelError: Error, CustomStringConvertible {
     var isModelNotFound: Bool { status == 404 && body.contains("not_found_error") && body.contains("model") }
 }
 
-/// The loop's model. Gemini (default since 2026-10-05) through the worker's
-/// `/gemini-generate`, down `AgentLoopGemini.models` on a missing model, a
-/// refused key or spent quota; or Claude through `/chat` (a pass-through to
-/// /v1/messages), the preferred model first and on model-not-found the
-/// fallback. Each fallback is logged.
+/// The loop's model. Claude (default since 2026-10-16, owner's ruling) through `/chat` (a pass-through to
+/// /v1/messages): Haiku 5.5 first, Sonnet 5.5 when Haiku is missing, refused or slow, Sonnet 4.6 on
+/// model-not-found. Or Gemini through the worker's `/gemini-generate`, down `AgentLoopGemini.models`
+/// (OpenAI for a step it cannot answer). Each fallback is logged.
 actor AgentLoopModel {
     static let preferred = "claude-sonnet-5-5"
     static let fallback = "claude-sonnet-4-6"
@@ -141,6 +140,8 @@ actor AgentLoopModel {
     /// A Gemini step 429/5xx/timeout moved this task to OpenAI (`AgentLoopOpenAI.shouldFallBack`);
     /// it stays there, and the next task starts on Gemini again.
     private var openAITask: String?
+    /// A Haiku step that was missing, refused or slow moved this task to Sonnet 5.5; the next task starts on Haiku.
+    private var sonnetTask: String?
 
     init(provider: AgentModelProvider = .configured) {
         self.provider = provider
@@ -151,7 +152,7 @@ actor AgentLoopModel {
         switch provider {
         case .gemini: AgentLoopGemini.firstModel(arguments: arguments)
         case .openai: AgentLoopOpenAI.pinnedModel(arguments: arguments) ?? AgentLoopOpenAI.defaultModel
-        case .claude: pinnedModel(arguments: arguments) ?? preferred
+        case .claude: pinnedModel(arguments: arguments) ?? haiku
         }
     }
 
@@ -192,8 +193,20 @@ actor AgentLoopModel {
                 return try await openAI(body, model: AgentLoopOpenAI.defaultModel, deadline: deadline)
             }
         }
+        if model == Self.haiku, let task, task == sonnetTask {
+            return try await post(Self.completed(body, model: Self.preferred), timeout: timeout)
+        }
         do {
             return try await post(Self.completed(body, model: model), timeout: timeout)
+        } catch where model == Self.haiku && ((error as? AgentModelError)?.isModelNotFound == true || AgentLoopOpenAI.shouldFallBack(error))
+                    && !Task.isCancelled {
+            // Haiku runs every task; Sonnet 5.5 takes the step when Haiku is missing, refused or slow (owner 2026-10-16).
+            let status: Any = (error as? AgentModelError)?.status ?? "timeout"
+            MeasurementLogFile.appendJSONLine(["kind": "modelFallback", "from": model, "to": Self.preferred, "status": status],
+                                              toFileNamed: AgentLoop.traceFileName, rotatingAtBytes: HarnessServer.auditLogRotationBytes)
+            print("🤖 agent loop: \(model) answered \(status), retrying this task on \(Self.preferred)")
+            sonnetTask = task
+            return try await post(Self.completed(body, model: Self.preferred), timeout: deadline - ProcessInfo.processInfo.systemUptime)
         } catch let error as AgentModelError where error.isModelNotFound && model != Self.fallback {
             MeasurementLogFile.appendJSONLine(["kind": "modelFallback", "from": model, "to": Self.fallback, "status": error.status],
                                               toFileNamed: AgentLoop.traceFileName, rotatingAtBytes: HarnessServer.auditLogRotationBytes)

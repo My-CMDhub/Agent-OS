@@ -21,15 +21,18 @@ import Foundation
 nonisolated enum AgentModelProvider: String {
     case gemini, claude, openai
 
-    /// `defaults write <bundle id> ClickyAgentModelProvider claude` switches back.
-    /// `--agent-model=openai:<id>` runs on OpenAI for a comparison (`AgentLoopOpenAI`),
-    /// `--agent-model=claude:<id>` on Claude (`AgentLoopModel.pinnable`).
+    /// Claude (Haiku 5.5, Sonnet 5.5 behind it) runs every task since the owner's ruling 2026-10-16; Gemini and
+    /// OpenAI stay the conversational (voice) models. `defaults write <bundle id> ClickyAgentModelProvider gemini`
+    /// switches the loop back. `--agent-model=openai:<id>` runs on OpenAI for a comparison (`AgentLoopOpenAI`),
+    /// `--agent-model=claude:<id>` on Claude (`AgentLoopModel.pinnable`), `--agent-model=<gemini id>` on Gemini.
     static let defaultsKey = "ClickyAgentModelProvider"
     static var configured: AgentModelProvider { from(UserDefaults.standard.string(forKey: defaultsKey), arguments: CommandLine.arguments) }
     static func from(_ value: String?, arguments: [String] = []) -> AgentModelProvider {
         if AgentLoopOpenAI.pinnedModel(arguments: arguments) != nil { return .openai }
         if AgentLoopModel.pinnedModel(arguments: arguments) != nil { return .claude }
-        return value.flatMap(AgentModelProvider.init(rawValue:)) ?? .gemini
+        if let pinned = arguments.last(where: { $0.hasPrefix(AgentLoopGemini.pinArgument) })?.dropFirst(AgentLoopGemini.pinArgument.count),
+           AgentLoopGemini.models.contains(String(pinned)) { return .gemini }
+        return value.flatMap(AgentModelProvider.init(rawValue:)) ?? .claude
     }
 }
 
