@@ -94,6 +94,8 @@ struct LaunchSuiteSandboxTests {
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: before, spoken: "Done, renamed it to final.txt.")["passed"] as? Bool == false)
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: before,
             spoken: "The JARVIS-sandbox folder has no file named report.txt. It has report-draft.txt. Should I rename it?")["passed"] as? Bool == true)
+        #expect(GeneralitySuite.notFoundVerdict(before: before, after: before,
+            spoken: "I could not rename the file because the JARVIS-sandbox folder contains report-draft.txt, not report.txt. Nothing was renamed.")["passed"] as? Bool == true)
         #expect(GeneralitySuite.meetingSkipReason(existing: 0) == nil)
         #expect(GeneralitySuite.meetingSkipReason(existing: 1) != nil, "an earlier run's meeting makes \"add\" ambiguous")
         #expect(GeneralitySuite.meetingSkipReason(existing: nil) != nil)
