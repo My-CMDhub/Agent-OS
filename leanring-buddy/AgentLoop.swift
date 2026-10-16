@@ -386,6 +386,8 @@ final class AgentLoop {
         var awaitsCommit = false
         /// An ok read_page that said more of the page lies below the view (`moreBelow`). In memory only.
         var moreBelow = false
+        /// The items a rename_item / move_items named, ok or not (`unnamedSubstitute`). In memory only.
+        var targets: [String]? = nil
     }
 
     /// An ask_owner the run paused on: its call's id, and the results of the
@@ -903,6 +905,12 @@ final class AgentLoop {
                     }
                     let parsed = RealtimeToolCall.parsed(callID: toolUseID, name: toolName, arguments: input)
                     args = Self.loggedArguments(for: parsed)
+                    if let reason = Self.unnamedSubstitute(toolName: toolName, targets: Self.itemTargets(parsed) ?? [], heard: heard,
+                                                           receipts: receipts, made: artifacts) {
+                        result = RealtimeOpenAppTool.toolResult(for: RealtimeToolRefusal(error: Self.unnamedItemError, message: reason))
+                        call = parsed
+                        break
+                    }
                     let dispatch = await dependencies.execute(parsed, true, observation, remaining())
                     (result, harnessMs, waited, call) = (dispatch.result, dispatch.harnessMilliseconds, dispatch.waitedForConfirmation, parsed)
                     pressedRole = RealtimeOpenAppTool.pressedRole(dispatch.harnessResponse)
@@ -928,7 +936,8 @@ final class AgentLoop {
                                         submitted: ok && toolName == RealtimeVoiceVerbs.typeTextName && Self.typeWasSubmitted(result),
                                         awaitsCommit: ok && toolName == RealtimeVoiceVerbs.typeTextName && !Self.typeWasSubmitted(result)
                                             && result["fieldCommitsOnConfirm"] as? Bool == true,
-                                        moreBelow: ok && toolName == AgentLoopTools.readPageName && result["moreBelow"] as? Bool == true))
+                                        moreBelow: ok && toolName == AgentLoopTools.readPageName && result["moreBelow"] as? Bool == true,
+                                        targets: call.flatMap(Self.itemTargets)))
                 var fields: [String: Any] = ["tool": toolName, "args": args, "ok": ok, "error": error ?? NSNull(), "harnessMs": harnessMs,
                                              "waitedForConfirmation": waited]
                 if !(web is NSNull) { fields["web"] = web }
@@ -1242,6 +1251,39 @@ final class AgentLoop {
         let said = String(format: "%d:%02d %@", (asked.hour + 11) % 12 + 1, asked.minute, asked.hour < 12 ? "am" : "pm")
         return "the owner asked for \(said), and the screen shows that time nowhere outside text you typed, so no time is set. "
             + "Set the item's own time (its date or time field), or say the time is not set"
+    }
+
+    static let unnamedItemError = "unnamedItem"
+
+    /// rename_item's item, move_items' items; nil for every other call.
+    static func itemTargets(_ call: RealtimeToolCall) -> [String]? {
+        switch call.name {
+        case RealtimeVoiceVerbs.renameItemName: return call.elementName.map { [$0] }
+        case RealtimeVoiceVerbs.moveItemsName: return call.path
+        default: return nil
+        }
+    }
+
+    /// U05 2026-10-16 (gpt-5.6-luna): "rename report.txt in JARVIS-sandbox to final.txt" — report.txt was not
+    /// listed, and the next rename_item renamed report-draft.txt, a file the owner never named. After this task's
+    /// rename_item / move_items found nothing by a name, the same tool may act on a DIFFERENT item only when the
+    /// owner's words name it (with or without its extension) or this task made it; else it is refused, unrun.
+    /// ponytail: a substring match on the heard words; a one-letter stem ("a.txt") passes on almost any words.
+    static func unnamedSubstitute(toolName: String, targets: [String], heard: String?, receipts: [Receipt], made: [String]) -> String? {
+        let missing = receipts.filter { $0.toolName == toolName && ["renameItemNotFound", "moveItemNotFound"].contains($0.error ?? "") }
+            .flatMap { $0.targets ?? [] }
+        guard !missing.isEmpty else { return nil }
+        let words = (heard ?? "").lowercased()
+        let tried = Set(missing.map { $0.lowercased() })
+        let madeNames = Set((made + receipts.compactMap { $0.ok ? $0.typed : nil }).map { $0.lowercased() })
+        guard let other = targets.first(where: { name in
+            let lower = name.lowercased(), stem = (lower as NSString).deletingPathExtension
+            let named = words.contains(lower) || (!stem.isEmpty && words.contains(stem))
+            return !tried.contains(lower) && !madeNames.contains(lower) && !named
+        }) else { return nil }
+        let notThere = missing.map { UntrustedText($0).forDisplay }.joined(separator: ", ")
+        return "nothing was done: \(notThere) is not listed, and \(UntrustedText(other).forDisplay) is a different item "
+            + "the owner's words do not name and this task did not make — ask the owner (ask_owner) before acting on it"
     }
 
     /// "5 pm", "5pm", "5:00 p.m.", "6:45 am", "17:00" — a bare "5" is no time.

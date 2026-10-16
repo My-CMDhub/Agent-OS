@@ -262,6 +262,49 @@ struct AgentLoopTests {
                           .init(hour: 6, minute: 45, second: nil), nil])
     }
 
+    // U05 2026-10-16 (gpt-5.6-luna): report.txt was not listed, and the next rename took report-draft.txt.
+    @MainActor @Test func aRenameAfterNotFoundMayNotTakeAnItemTheOwnerNeverNamed() async {
+        let heard = "rename report.txt in JARVIS-sandbox to final.txt"
+        let script = Script([toolUse("go_to_folder", ["folder": "~/Desktop/JARVIS-sandbox"]),
+                             toolUse("rename_item", ["name": "report.txt", "new_name": "final.txt"]),
+                             toolUse("rename_item", ["name": "report-draft.txt", "new_name": "final.txt"]),
+                             toolUse("ask_owner", ["question": "There is no report.txt; did you mean report-draft.txt?"])])
+        let outcome = await loop(script, execute: { call in
+            call.elementName == "report.txt" ? dispatch(ok: false, error: "renameItemNotFound") : dispatch(ok: true)
+        }).run(goal: "rename report.txt to final.txt", heard: heard)
+        #expect(outcome == .askOwner(question: "There is no report.txt; did you mean report-draft.txt?"))
+        // The substitute never reached the harness.
+        #expect(script.executed.map(\.elementName) == [nil, "report.txt"])
+        #expect(script.traces.filter { $0["error"] as? String == AgentLoop.unnamedItemError }.count == 1)
+
+        func notFound(_ tool: String, _ names: [String], error: String = "renameItemNotFound") -> AgentLoop.Receipt {
+            AgentLoop.Receipt(step: 2, toolName: tool, ok: false, error: error, targets: names)
+        }
+        let luna = [notFound("rename_item", ["report.txt"])]
+        let reason = AgentLoop.unnamedSubstitute(toolName: "rename_item", targets: ["report-draft.txt"], heard: heard, receipts: luna, made: [])
+        #expect(reason?.contains("\"report.txt\" is not listed") == true && reason?.contains("ask_owner") == true)
+        // The owner's words name it, in full or without its extension, any case: it passes.
+        for words in ["rename report.txt or else Report-Draft.txt to final.txt", "rename report-draft to final.txt"] {
+            #expect(AgentLoop.unnamedSubstitute(toolName: "rename_item", targets: ["report-draft.txt"], heard: words, receipts: luna, made: []) == nil)
+        }
+        // The same name again (after go_to_folder) is a retry, not a substitute.
+        #expect(AgentLoop.unnamedSubstitute(toolName: "rename_item", targets: ["REPORT.txt"], heard: heard, receipts: luna, made: []) == nil)
+        // No earlier not-found: a first try is never judged here.
+        #expect(AgentLoop.unnamedSubstitute(toolName: "rename_item", targets: ["report-draft.txt"], heard: heard, receipts: [], made: []) == nil)
+        // A not-found of the OTHER tool does not carry over.
+        #expect(AgentLoop.unnamedSubstitute(toolName: "move_items", targets: ["report-draft.txt"], heard: heard, receipts: luna, made: []) == nil)
+        // move_items: an item this task made (shown, or named by its own ok rename) passes; an unnamed one does not.
+        let moves = [notFound("move_items", ["notes.txt"], error: "moveItemNotFound")]
+        let moveWords = "move notes.txt into Archive"
+        #expect(AgentLoop.unnamedSubstitute(toolName: "move_items", targets: ["Archive Draft"], heard: moveWords, receipts: moves,
+                                            made: ["Archive Draft"]) == nil)
+        let renamed = AgentLoop.Receipt(step: 1, toolName: "rename_item", ok: true, error: nil, typed: "notes final.txt")
+        #expect(AgentLoop.unnamedSubstitute(toolName: "move_items", targets: ["notes final.txt"], heard: moveWords, receipts: [renamed] + moves,
+                                            made: []) == nil)
+        #expect(AgentLoop.unnamedSubstitute(toolName: "move_items", targets: ["notes.txt", "notes-old.txt"], heard: moveWords, receipts: moves,
+                                            made: [])?.contains("\"notes-old.txt\"") == true)
+    }
+
     @MainActor @Test func aPressStopsTheLoopBeforeTheNextTool() async {
         let script = Script([toolUse("press_element", ["name": "Post"])])
         let agent = AgentLoop(dependencies: AgentLoop.Dependencies(
