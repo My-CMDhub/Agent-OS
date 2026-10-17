@@ -63,4 +63,39 @@ struct HaikuGapTests {
         let focusedButton = node("AXButton", frame: title.frameInAppKitCoordinates, element: AXUIElementCreateApplication(90001))
         #expect(HarnessPolicy.focusedFieldHeld(by: cell, focused: focusedButton) == nil)
     }
+
+    // Slice 5 (2026-10-17): multi-app workflows.
+
+    @Test func makingVerbsEndReadOnlyAndQuestionsStayReadOnly() {
+        for words in ["find the biggest file in my JARVIS-sandbox folder and remind me to review it tomorrow",
+                      "look up the current temperature in Sydney and put it in a new note titled JARVIS weather",
+                      "jot down the tracking number"] {
+            #expect(!AgentLoop.isReadOnlyTask(words: words), "\(words)")
+        }
+        for words in ["what does my shopping note say?", "find the biggest file in my Downloads folder",
+                      "what's the record temperature in Sydney?", "where is my copy of the lease?", "check the App Store for updates"] {
+            #expect(AgentLoop.isReadOnlyTask(words: words), "\(words)")
+        }
+    }
+
+    @Test func anAgentStepActsInAnAppTheOwnersWordsAlsoName() {
+        func app(_ name: String, _ path: String) -> RealtimeVoiceVerbs.AppName {
+            RealtimeVoiceVerbs.AppName(name: name, url: URL(fileURLWithPath: path), isFileName: true)
+        }
+        let names = [app("Notes", "/System/Applications/Notes.app"), app("Safari", "/Applications/Safari.app"),
+                     app("Weather", "/System/Applications/Weather.app"), app("Reminders", "/System/Applications/Reminders.app")]
+        let m03 = "summarise the lighthouse page I have open in Safari into a new note titled JARVIS lighthouse"
+        // R1 already names Notes by "a new note"; no task noun is needed.
+        #expect(RealtimeHeardCheck.wordsNameTheApp(transcript: m03, named: "Notes", among: names))
+        #expect(RealtimeHeardCheck.wordsNameTheApp(transcript: "look up the temperature in Sydney and put it in a new note", named: "Notes", among: names))
+        #expect(RealtimeHeardCheck.decide(transcript: m03, named: "Notes", among: names, toolName: RealtimeVoiceVerbs.pressMenuName).outcome
+            == .heardNamedMismatch)
+        #expect(RealtimeVoiceConnection.agentStepNamedByOwnersWords(outcome: .heardNamedMismatch, wordsNameTheApp: true))
+        #expect(RealtimeVoiceConnection.agentStepNamedByOwnersWords(outcome: .appNameUnclear, wordsNameTheApp: true))
+        // Words that do not name the app, ambiguity and an unconfirmed retry still refuse.
+        #expect(!RealtimeVoiceConnection.agentStepNamedByOwnersWords(outcome: .heardNamedMismatch, wordsNameTheApp: false))
+        #expect(!RealtimeVoiceConnection.agentStepNamedByOwnersWords(outcome: .ambiguousApp, wordsNameTheApp: true))
+        #expect(!RealtimeVoiceConnection.agentStepNamedByOwnersWords(outcome: .unconfirmedRetry, wordsNameTheApp: true))
+        #expect(!RealtimeHeardCheck.wordsNameTheApp(transcript: m03, named: "Reminders", among: names))
+    }
 }

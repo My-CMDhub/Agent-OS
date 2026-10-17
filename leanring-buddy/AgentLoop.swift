@@ -1998,7 +1998,10 @@ extension AgentLoop {
         "type", "write", "send", "post", "message", "reply", "comment", "connect", "follow", "like", "share", "ask", "fill", "submit",
         "create", "new", "close", "delete", "remove", "rename", "move", "save", "edit", "change", "add", "install", "buy", "order",
         "book", "sign", "run", "enter", "paste", "download", "upload", "enable", "disable", "set", "turn", "quit", "empty", "pay",
-        "publish", "invite", "accept", "apply", "join", "subscribe", "draft", "compose", "email", "dm", "call", "schedule"]
+        "publish", "invite", "accept", "apply", "join", "subscribe", "draft", "compose", "email", "dm", "call", "schedule",
+        // Launch M02 2026-10-17: "find the biggest file … and remind me to review it tomorrow" read as read-only.
+        // Not "note", "record", "copy", "store": nouns in questions ("what does my shopping note say?").
+        "remind", "put", "jot", "mark"]
     nonisolated static let exploringWords: Set<String> = [
         "find", "look", "check", "search", "show", "tell", "what", "what's", "whats", "which", "who", "where", "when", "how", "read",
         "summarise", "summarize", "report", "browse", "see", "watch", "explore", "research", "compare", "list", "review", "scan"]

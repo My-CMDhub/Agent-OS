@@ -1154,6 +1154,13 @@ final class RealtimeVoiceConnection {
         return callBundle != startBundle && !openedByTask.contains(callBundle)
     }
 
+    /// An agent step proceeds past another app heard, or an unrecognised slot word, when the owner's
+    /// words also name the call's own app (`RealtimeHeardCheck.wordsNameTheApp`, transcript only — a page
+    /// cannot widen it). Never past ambiguity or an unconfirmed retry.
+    nonisolated static func agentStepNamedByOwnersWords(outcome: RealtimeHeardCheck.Outcome, wordsNameTheApp: Bool) -> Bool {
+        wordsNameTheApp && (outcome == .heardNamedMismatch || outcome == .appNameUnclear)
+    }
+
     /// An agent step's heardNamedMismatch proceeds only in an app or tab this task
     /// opened itself: what the task opened, it opened on the owner's words.
     nonisolated static func agentStepMayActDespiteMismatch(outcome: RealtimeHeardCheck.Outcome, callBundle: String?,
@@ -1254,6 +1261,17 @@ final class RealtimeVoiceConnection {
             // (review of d2fe0d7: "post this in Slak" would type into whatever was
             // in front), except in an app this task itself opened or focused, and
             // only when no unclear word resembles an installed app.
+            // The owner's own words name THIS app too (R1: "into a new note" is Notes) beside another app or a
+            // topic word: they named both (launch M03 2026-10-17, "…in Safari into a new note": every Notes step
+            // refused heardNamedMismatch; M01 "…in Sydney … a new note": refused heardUnavailable on "sydney").
+            let ownWordsNameIt = isAgentStep && RealtimeHeardCheck.wordsNameTheApp(transcript: transcript, named: named, among: RealtimeVoiceVerbs.installedAppNames())
+            // A match, not noAppHeard: the owner named it, so it is no page word either (M03 re-run: "the lighthouse
+            // page" then refused open_app Notes as pageNotApp).
+            if isAgentStep, agentStepNamedByOwnersWords(outcome: decision.outcome, wordsNameTheApp: ownWordsNameIt) {
+                var proceeding = RealtimeHeardCheck.Decision(outcome: .match, heardApps: [named], tier: nil)
+                proceeding.heardSlot = decision.heardSlot
+                return (proceeding, true, false, pageApp)
+            }
             if isAgentStep, decision.outcome == .appNameUnclear,
                agentStepMayActDespiteUnclearWord(callBundle: callBundle, openedByTask: agentOpenedBundles,
                                                  unclearWords: decision.heardSlot, among: RealtimeVoiceVerbs.installedAppNames()) {
@@ -1271,7 +1289,7 @@ final class RealtimeVoiceConnection {
             let unnamed = isAgentStep && agentStepActsInUnnamedApp(
                 outcome: decision.outcome, mayRefuse: mayRefuseCall, callBundle: callBundle, startBundle: agentStartBundle,
                 openedByTask: agentOpenedBundles,
-                wordsNameTheApp: RealtimeHeardCheck.wordsNameTheApp(transcript: transcript, named: named, among: RealtimeVoiceVerbs.installedAppNames()))
+                wordsNameTheApp: ownWordsNameIt)
             // Only asked when it decides: open_app with no transcript.
             guard decision.outcome == .transcriptMissing, call.name == RealtimeOpenAppTool.name else { return (decision, true, unnamed, pageApp) }
             return (decision, RealtimeVoiceVerbs.isRunning(named: named), unnamed, pageApp)
