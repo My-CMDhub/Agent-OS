@@ -98,4 +98,24 @@ struct HaikuGapTests {
         #expect(!RealtimeVoiceConnection.agentStepNamedByOwnersWords(outcome: .unconfirmedRetry, wordsNameTheApp: true))
         #expect(!RealtimeHeardCheck.wordsNameTheApp(transcript: m03, named: "Reminders", among: names))
     }
+
+    /// M01 2026-10-17, the recorded shape: web_search asked beside open_app, stop_reason tool_use, no result block.
+    @MainActor @Test func aServerToolUseWithoutItsResultIsNeverReplayed() {
+        let unpaired: [String: Any] = ["stop_reason": "tool_use", "content": [
+            ["type": "text", "text": "Let me look that up and open Notes."],
+            ["type": "server_tool_use", "id": "srvtoolu_A", "name": "web_search", "input": ["query": "Sydney temperature"]],
+            ["type": "tool_use", "id": "toolu_B", "name": "open_app", "input": ["name": "Notes"]]]]
+        let replayed = AgentLoop.assistantContent(unpaired)
+        #expect(!replayed.contains { $0["type"] as? String == "server_tool_use" })
+        #expect(replayed.contains { $0["id"] as? String == "toolu_B" })
+        #expect(AgentLoop.unpairedServerToolUses(unpaired["content"] as! [[String: Any]]).map { $0["name"] as? String } == ["web_search"])
+        // A search with its result stays, the pair together.
+        let paired: [String: Any] = ["stop_reason": "end_turn", "content": [
+            ["type": "server_tool_use", "id": "srvtoolu_C", "name": "web_search", "input": ["query": "x"]],
+            ["type": "web_search_tool_result", "tool_use_id": "srvtoolu_C", "content": [["type": "web_search_result", "url": "https://a.example"]]],
+            ["type": "text", "text": "It is 21 degrees."]]]
+        let kept = AgentLoop.assistantContent(paired).compactMap { $0["type"] as? String }
+        #expect(kept == ["server_tool_use", "web_search_tool_result", "text"])
+        #expect(AgentLoop.unpairedServerToolUses(paired["content"] as! [[String: Any]]).isEmpty)
+    }
 }

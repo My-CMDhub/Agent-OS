@@ -674,11 +674,16 @@ final class AgentLoop {
             }
             let assistant = Self.assistantContent(reply.json)
             messages.append(["role": "assistant", "content": assistant])
+            let unrun = Self.unpairedServerToolUses((reply.json["content"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
+            if !unrun.isEmpty {
+                pending.append(["type": "text", "text": "Your \(Set(unrun).sorted().joined(separator: " and ")) in the last reply did not run "
+                    + "(no result came back). Call it again on its own if you still need it."])
+            }
             // Web tools the server ran inside this call: receipts of this step (a
             // done in the same reply may cite it), counted against the task's caps.
             // ponytail: no pause_turn resume; the caps (3 + 5) stay under the
             // server's 10-iteration loop, so it should not arise.
-            let webUses = Self.webUses(assistant)
+            let webUses = Self.webUses((reply.json["content"] as? [[String: Any]]) ?? [])
             if !webUses.isEmpty {
                 line["web"] = webUses.map(\.trace)
                 for use in webUses {
@@ -1132,12 +1137,25 @@ final class AgentLoop {
     /// an empty assistant message is a 400 on the next call.
     static func assistantContent(_ response: [String: Any]) -> [[String: Any]] {
         let truncated = response["stop_reason"] as? String == "max_tokens"
-        let kept = ((response["content"] as? [[String: Any]]) ?? []).filter {
+        let content = (response["content"] as? [[String: Any]]) ?? []
+        let unpaired = Set(unpairedServerToolUses(content).compactMap { $0["id"] as? String })
+        let kept = content.filter {
             let type = $0["type"] as? String
             return type != "thinking" && type != "redacted_thinking" && !(truncated && type == "tool_use")
                 && !(type == "text" && (($0["text"] as? String) ?? "").allSatisfy(\.isWhitespace))
+                && !(type == "server_tool_use" && ($0["id"] as? String).map(unpaired.contains) == true)
         }
         return kept.isEmpty ? [["type": "text", "text": truncated ? "(reply cut off)" : "(no reply)"]] : kept
+    }
+
+    /// `server_tool_use` blocks with no result block in the same reply. Launch M01 2026-10-17 (Haiku): a
+    /// web_search asked beside open_app came back with stop_reason tool_use and no web_search_tool_result,
+    /// and replaying it made every next call a 400 ("tool use … was found without a corresponding …").
+    /// Such a block is dropped from the history; the model is told the search did not run.
+    static func unpairedServerToolUses(_ content: [[String: Any]]) -> [[String: Any]] {
+        let answered = Set(content.filter { ($0["type"] as? String)?.hasSuffix("_tool_result") == true && $0["type"] as? String != "tool_result" }
+            .compactMap { $0["tool_use_id"] as? String })
+        return content.filter { $0["type"] as? String == "server_tool_use" && !(($0["id"] as? String).map(answered.contains) ?? false) }
     }
 
     /// What Claude is told of the goal: the owner's words when known (they are
