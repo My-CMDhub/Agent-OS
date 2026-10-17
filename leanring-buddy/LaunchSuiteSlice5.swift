@@ -10,6 +10,7 @@
 //  owner; M02's reminder is marked completed when it is provably this task's, never deleted.
 //
 
+import ApplicationServices
 import Foundation
 
 extension GeneralitySuite {
@@ -21,15 +22,15 @@ extension GeneralitySuite {
                       return noteVerdict(created: createdVerdict(run), title: weatherNoteTitle, texts: texts, holds: saysTemperature)
                   },
         // The reminder lands in whichever list Reminders shows (the owner's Shopping list on this Mac): no way to
-        // aim it elsewhere without creating or changing one of the owner's lists. Rows are read across that view.
+        // aim it elsewhere without creating or changing one of the owner's lists. Rows are read in the Scheduled smart list.
         SuiteTask(id: "M02", pattern: "multi-app: find a file -> dated reminder", words: "find the biggest file in my JARVIS-sandbox folder and remind me to review it tomorrow",
                   apps: [finder, reminders], sandbox: [],
                   pre: {
-                      let before = await readLaunchingIfNeeded(reminders) { reminderButtonsAndRows().flatMap { bigVideoDue(buttons: $0.buttons, rows: $0.rows) } }
+                      let before = await readLaunchingIfNeeded(reminders) { scheduledBigVideoDue() }
                       return ["bigVideoBefore": before as Any? ?? NSNull(), skipReasonKey: reviewSkipReason(before: before) as Any? ?? NSNull()]
                   }) { _, run in
                       let before = run["bigVideoBefore"] as? [String]
-                      let after = await readLaunchingIfNeeded(reminders) { reminderButtonsAndRows().flatMap { bigVideoDue(buttons: $0.buttons, rows: $0.rows) } }
+                      let after = await readLaunchingIfNeeded(reminders) { scheduledBigVideoDue() }
                       var result = reviewVerdict(before: before, after: after)
                       let new = (after?.count ?? 0) - (before?.count ?? 0)
                       if new > 0 {
@@ -89,6 +90,39 @@ extension GeneralitySuite {
     }
 
     // MARK: M02 — a dated reminder (rows as E12 measured them: "Incomplete, <title>, <due>")
+
+    /// The big-video rows of Reminders' Scheduled smart list, which holds every dated reminder whatever list it
+    /// landed in. Live M02 2026-10-17: the reminder ("…, Reminders, Tomorrow") sat in the Reminders list while the
+    /// view read showed another, so the checker saw none. Shown by View > Go To > Scheduled pressed over AX (menu
+    /// closed, a read-only view change); nil — never [] — when the menu item is missing or the press fails.
+    nonisolated static func scheduledBigVideoDue() -> [String]? {
+        guard let pid = pid(reminders), pressMenuPath(["View", "Go To", "Scheduled"], pid: pid) else { return nil }
+        for _ in 0..<10 {
+            Thread.sleep(forTimeInterval: 0.2)
+            if let rows = reminderButtonsAndRows(), rows.buttons.contains(where: { $0.hasPrefix("Scheduled") }),
+               let due = bigVideoDue(buttons: rows.buttons, rows: rows.rows) { return due }
+        }
+        return nil
+    }
+
+    /// AXPress on a menu item found by its titles from the menu bar down; false when any step is missing.
+    nonisolated static func pressMenuPath(_ path: [String], pid: pid_t) -> Bool {
+        func attribute(_ element: AXUIElement, _ name: String) -> AnyObject? {
+            var value: AnyObject?
+            return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
+        }
+        guard var current = attribute(AXUIElementCreateApplication(pid), kAXMenuBarAttribute).map({ $0 as! AXUIElement }) else { return false }
+        for title in path {
+            // A bar item or menu item holds its items inside one AXMenu child.
+            var items = (attribute(current, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+            if items.count == 1, (attribute(items[0], kAXRoleAttribute) as? String) == "AXMenu" {
+                items = (attribute(items[0], kAXChildrenAttribute) as? [AXUIElement]) ?? []
+            }
+            guard let next = items.first(where: { (attribute($0, kAXTitleAttribute) as? String) == title }) else { return false }
+            current = next
+        }
+        return AXUIElementPerformAction(current, kAXPressAction as CFString) == .success
+    }
 
     /// Each incomplete big-video row's due text (after the title); nil until the sidebar's Today count has loaded.
     nonisolated static func bigVideoDue(buttons: [String], rows: [(description: String, title: String?)]) -> [String]? {
