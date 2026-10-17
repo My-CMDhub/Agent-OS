@@ -173,17 +173,21 @@ extension GeneralitySuite {
         return nodes
     }
 
-    nonisolated static func callMomCells(_ nodes: [AccessibilityElementNode]) -> [AccessibilityElementNode] {
-        nodes.filter { $0.role == "AXCell" && name($0).hasPrefix("Incomplete, ") && folded(name($0)).contains("call mom") }
+    /// Incomplete rows holding any of `phrases` (folded): "call mom" for E12, "big-video"/"big video" for M02.
+    nonisolated static func callMomCells(_ nodes: [AccessibilityElementNode], phrases: [String] = ["call mom"]) -> [AccessibilityElementNode] {
+        nodes.filter { cell in cell.role == "AXCell" && name(cell).hasPrefix("Incomplete, ") && phrases.contains { folded(name(cell)).contains($0) } }
+    }
+
+    /// The sidebar's buttons and every row's description with its title field; nil when Reminders is unreadable.
+    nonisolated static func reminderButtonsAndRows() -> (buttons: [String], rows: [(description: String, title: String?)])? {
+        guard let nodes = appNodes(reminders) else { return nil }
+        return (nodes.filter { $0.role == "AXButton" }.map(name), nodes.filter { $0.role == "AXCell" }.map { cell in
+            (description: name(cell), title: cell.flattenedDescendants().first { $0.role == "AXTextField" }?.value?.raw)
+        })
     }
 
     nonisolated static func remindersToday() -> RemindersToday? {
-        guard let nodes = appNodes(reminders) else { return nil }
-        let buttons = nodes.filter { $0.role == "AXButton" }.map(name)
-        let rows = nodes.filter { $0.role == "AXCell" }.map { cell in
-            (description: name(cell), title: cell.flattenedDescendants().first { $0.role == "AXTextField" }?.value?.raw)
-        }
-        return remindersRead(buttons: buttons, rows: rows)
+        reminderButtonsAndRows().flatMap { remindersRead(buttons: $0.buttons, rows: $0.rows) }
     }
 
     /// "5:00 pm", "5 pm", "5:00\u{202F}p.m.", "17:00" — not "15:00" or "5:30 pm".
@@ -204,14 +208,14 @@ extension GeneralitySuite {
                 "dueSeen": after.callMomDue]
     }
 
-    /// Presses "Mark as completed" on the ONLY incomplete call-mom row, then reads again (2 s): true when none is left.
-    nonisolated static func completeOnlyCallMom() -> Bool {
-        guard let rows = appNodes(reminders).map(callMomCells), rows.count == 1,
+    /// Presses "Mark as completed" on the ONLY incomplete row holding `phrases`, then reads again (2 s): true when none is left.
+    nonisolated static func completeOnlyCallMom(phrases: [String] = ["call mom"]) -> Bool {
+        guard let rows = appNodes(reminders).map({ callMomCells($0, phrases: phrases) }), rows.count == 1,
               let box = rows[0].flattenedDescendants().first(where: { $0.role == "AXCheckBox" && name($0) == "Mark as completed" })?.accessibilityElement,
               AXUIElementPerformAction(box, kAXPressAction as CFString) == .success else { return false }
         for _ in 0..<10 {
             Thread.sleep(forTimeInterval: 0.2)
-            if appNodes(reminders).map(callMomCells)?.isEmpty == true { return true }
+            if appNodes(reminders).map({ callMomCells($0, phrases: phrases) })?.isEmpty == true { return true }
         }
         return false
     }

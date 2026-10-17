@@ -15,7 +15,7 @@
 //  switched off (every 6:45 one on after the task; skipped when one existed before); E10/U03/U06 open a fixture page in Safari and close
 //  that tab by its unique title. L02 (no menu item; needs Cmd-Shift-.) and L05 (a Notes
 //  fixture only a Delete could remove) are not built.
-//  Slice 4 (E11-E14, U07-U09) lives in LaunchSuiteSlice4.swift.
+//  Slice 4 (E11-E14, U07-U09) lives in LaunchSuiteSlice4.swift; slice 5 (M01-M03, multi-app) in LaunchSuiteSlice5.swift.
 //
 //  File tasks run in `~/JARVIS-sandbox/` (home root, not TCC-protected), written
 //  fresh before each one from `Sandbox.manifest` and removed afterwards BY NAME:
@@ -194,7 +194,7 @@ extension GeneralitySuite {
                       result["tabClosed"] = await read { closeFixtureTab(title: Sandbox.loginTitle) } ?? [:]
                       return result
                   },
-    ] + launchSlice4
+    ] + launchSlice4 + launchSlice5
 
     nonisolated static let clock = "com.apple.clock", mail = "com.apple.mail", safari = "com.apple.Safari"
 
