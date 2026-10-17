@@ -1908,6 +1908,12 @@ extension AgentLoop {
         return response?["bundleIdentifier"] as? String
     }
 
+    /// A confirmed press of an item in the Help menu (by path or by shortcut: the harness echoes the path).
+    /// ponytail: the English menu title only; a localised Help menu is not matched.
+    nonisolated static func helpMenuMayOpenAnotherApp(tool: String, confirmed: Bool, response: [String: Any]?) -> Bool {
+        tool == RealtimeVoiceVerbs.pressMenuName && confirmed && (response?["path"] as? [String])?.first == "Help"
+    }
+
     /// The apps a step may act in as the task's own: what it launched, and a
     /// browser whose tab in front is one the task opened.
     nonisolated static func openedByTask<Key: Hashable>(launched: Set<String>, taskTabs: [String: Set<Key>],
@@ -2282,6 +2288,20 @@ extension AgentLoop {
                 if let tab = await Task.detached(operation: { frontTab(of: bundle) }).value { carry.taskTabs[bundle, default: []].insert(tab) }
                 carry.tabHosts.append(.init(bundle: bundle, host: filled.url.flatMap { URL(string: $0)?.host }.map(SecretScanner.redact)))
             case .none: break
+            }
+        }
+        // A Help menu shows its help in ANOTHER app (Calculator Help → Tips, generality G07 2026-10-16: every step
+        // there refused heardNamedMismatch). Launched by this step's own press, that app is the task's.
+        if let dispatch, helpMenuMayOpenAnotherApp(tool: filled.name, confirmed: dispatch.harnessConfirmed, response: dispatch.harnessResponse) {
+            let menuApp = dispatch.harnessResponse?["bundleIdentifier"] as? String
+            var helper: String?
+            for _ in 0..<20 where helper == nil {
+                if let front = await frontApp()?.bundleIdentifier, front != menuApp { helper = front } else {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                }
+            }
+            if let helper, ownership(afterOpening: filled.name, bundle: helper, runningAtStart: carry.runningAtStart) == .app {
+                carry.launchedBundles.insert(helper)
             }
         }
         // voice-decisions.log, as a voice turn's calls are: the heard check, the offer, the rung.

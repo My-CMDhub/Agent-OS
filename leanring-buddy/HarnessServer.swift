@@ -562,6 +562,19 @@ enum HarnessPolicy {
         return named.count == 1 ? named[0] : nil
     }
 
+    /// The focused text input, when it lies INSIDE the element typed at (by identity). A new reminder's title
+    /// is an anonymous field inside its "Incomplete" cell, so the model names the cell (launch E12 2026-10-16:
+    /// refused "role AXCell does not accept text" with the caret already in the title). Focus is the witness:
+    /// the app put the caret there; no field is picked from a container by guess.
+    static func focusedFieldHeld(by container: AccessibilityElementNode, focused: AccessibilityElementNode) -> AccessibilityElementNode? {
+        guard AccessibilityElementNode.textInputRoles.contains(focused.role) || focused.isSecure,
+              let focusedElement = focused.accessibilityElement else { return nil }
+        func holds(_ node: AccessibilityElementNode) -> Bool {
+            node.accessibilityElement.map { CFEqual($0, focusedElement) } == true || node.children.contains(where: holds)
+        }
+        return container.children.contains(where: holds) ? focused : nil
+    }
+
     /// `fieldLabelled`'s `linked`, read live: the label's own AXServesAsTitleForUIElements and
     /// AXLinkedUIElements once, then each candidate field's AXTitleUIElement (one read per field).
     static func liveLabelLink(_ label: AccessibilityElementNode) -> (AccessibilityElementNode) -> Bool {
@@ -3095,6 +3108,13 @@ final class HarnessServer {
             // The label's own words are judged by the kernel too ("Type DELETE to confirm").
             labelTitle = namedNode.displayName?.raw ?? labelTitle
             response["retargetedFrom"] = Self.summarise(namedNode)
+        } else if action == .type, !request.aimAtFocus, !AccessibilityElementNode.textInputRoles.contains(namedNode.role),
+                  let focused = AccessibilityTypePerformer.focusedNodeAndSource()?.node,
+                  let field = HarnessPolicy.focusedFieldHeld(by: namedNode, focused: focused) {
+            resolvedNode = field
+            labelTitle = namedNode.displayName?.raw ?? labelTitle
+            response["retargetedFrom"] = Self.summarise(namedNode)
+            response["retargetedToFocus"] = true
         }
         response["resolved"] = Self.summarise(resolvedNode)
 

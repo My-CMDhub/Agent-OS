@@ -47,6 +47,31 @@ struct AccessibilityElementNode {
         title == nil && elementDescription == nil && value == nil && labelledByRoles.contains(role)
     }
 
+    /// An anonymous disclosure triangle takes the name of the label just right of it on its row, its next
+    /// sibling. Finder's Get Info (launch E14 2026-10-16): "General:" is a sibling AXStaticText, the triangle
+    /// publishes no title, description or label link, so nothing could aim at it and the section stayed shut.
+    /// Actions are read for a newly named one: the walk skipped them while it was anonymous.
+    /// ponytail: walk only; the pointer's hit test still sees the triangle anonymous.
+    static func namingDisclosureTriangles(_ children: [AccessibilityElementNode],
+                                          readActions: (AXUIElement) -> [String]) -> [AccessibilityElementNode] {
+        guard children.contains(where: { $0.role == "AXDisclosureTriangle" }) else { return children }
+        var named = children
+        for index in children.indices.dropLast() {
+            let triangle = children[index], label = children[index + 1]
+            let a = triangle.frameInAppKitCoordinates, b = label.frameInAppKitCoordinates
+            guard triangle.role == "AXDisclosureTriangle", triangle.displayName == nil, label.role == "AXStaticText",
+                  let text = label.value?.raw, a.width > 0, a.height > 0, b.minX >= a.maxX - 2, b.minX - a.maxX <= 12,
+                  abs(a.midY - b.midY) <= max(a.height, b.height) / 2 else { continue }
+            named[index] = AccessibilityElementNode(
+                role: triangle.role, subrole: triangle.subrole, title: nil, value: nil, labelledBy: text,
+                frameInAppKitCoordinates: a, depth: triangle.depth, children: triangle.children,
+                publishedActionNames: triangle.accessibilityElement.map(readActions) ?? triangle.publishedActionNames,
+                subroleReadFailed: triangle.subroleReadFailed, selected: triangle.selected, valueLength: triangle.valueLength,
+                accessibilityElement: triangle.accessibilityElement, frameReadFailed: triangle.frameReadFailed)
+        }
+        return named
+    }
+
     // MARK: What may leave the app — ONE predicate (review 2026-10-02)
     //
     // A copy per caller drifted: `summarise` named a password box by its bullets
@@ -1185,6 +1210,7 @@ enum AccessibilityTreeWalker {
 
             childNodes.append(childNode)
         }
+        childNodes = AccessibilityElementNode.namingDisclosureTriangles(childNodes, readActions: copyActionNames(from:))
 
         // Skip the action read where it cannot change the answer.
         //
