@@ -17,7 +17,9 @@ extension GeneralitySuite {
     static let launchSlice5: [SuiteTask] = [
         // No independent weather read exists (G19): the note must hold A temperature, not THE temperature.
         SuiteTask(id: "M01", pattern: "multi-app: web lookup -> new note", words: "look up the current temperature in Sydney and put it in a new note titled JARVIS weather",
-                  apps: [notes, weather, safari, chrome], created: (notes, { $0.listedName?.raw.contains(weatherNoteTitle) == true })) { _, run in
+                  apps: [notes, weather, safari, chrome], created: (notes, namesNote(weatherNoteTitle)),
+                  pre: { [skipReasonKey: noteSkipReason(existing: await countBeforeLaunchingIfNeeded(notes, namesNote(weatherNoteTitle)),
+                                                        title: weatherNoteTitle) as Any? ?? NSNull()] }) { _, run in
                       let texts = await read { noteTexts(titled: weatherNoteTitle) } ?? nil
                       return noteVerdict(created: createdVerdict(run), title: weatherNoteTitle, texts: texts, holds: saysTemperature)
                   },
@@ -46,8 +48,13 @@ extension GeneralitySuite {
                       return result
                   },
         SuiteTask(id: "M03", pattern: "multi-app: summarise a Safari page -> new note", words: "summarise the lighthouse page I have open in Safari into a new note titled JARVIS lighthouse",
-                  apps: [safari, notes], created: (notes, { $0.listedName?.raw.contains(lighthouseNoteTitle) == true }), sandbox: [Sandbox.lighthouseFile],
-                  pre: { ["pageOpened": await openFixturePage(Sandbox.lighthouseFile, title: Sandbox.lighthouseTitle)] }) { _, run in
+                  apps: [safari, notes], created: (notes, namesNote(lighthouseNoteTitle)), sandbox: [Sandbox.lighthouseFile],
+                  pre: {
+                      // Checked before the page opens, so a skip leaves no tab behind.
+                      if let reason = noteSkipReason(existing: await countBeforeLaunchingIfNeeded(notes, namesNote(lighthouseNoteTitle)),
+                                                     title: lighthouseNoteTitle) { return [skipReasonKey: reason] }
+                      return ["pageOpened": await openFixturePage(Sandbox.lighthouseFile, title: Sandbox.lighthouseTitle)]
+                  }) { _, run in
                       let texts = await read { noteTexts(titled: lighthouseNoteTitle) } ?? nil
                       var result = noteVerdict(created: createdVerdict(run), title: lighthouseNoteTitle, texts: texts) {
                           factsVerdict(spoken: $0, facts: lighthouseFacts)["passed"] as? Bool == true
@@ -70,6 +77,18 @@ extension GeneralitySuite {
         appNodes(notes).map { nodes in
             nodes.flatMap { [$0.listedName?.raw, $0.value?.raw].compactMap { $0 } }.filter { $0.lowercased().contains(title.lowercased()) }
         }
+    }
+
+    /// A node naming a note titled `title` — the created count's match and the skip's.
+    nonisolated static func namesNote(_ title: String) -> @Sendable (AccessibilityElementNode) -> Bool {
+        { $0.listedName?.raw.contains(title) == true }
+    }
+
+    /// M01/M03: skipped when an earlier run's note is still there (launch 2026-10-17T10-11-01Z: count 1 -> 1, a
+    /// false fail; a stray edit of the old note could as well pass) or when the count cannot be read.
+    nonisolated static func noteSkipReason(existing: Int?, title: String) -> String? {
+        guard let existing else { return "Notes' note list unreadable (the count before is unknown)" }
+        return existing > 0 ? "a note titled \"\(title)\" already exists (left for the owner); delete it in Notes to run this task" : nil
     }
 
     /// "22°C", "about 18 degrees", "-3 °F", "21.5 celsius" — a number standing before a temperature unit.

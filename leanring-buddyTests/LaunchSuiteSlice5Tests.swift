@@ -23,6 +23,15 @@ struct LaunchSuiteSlice5Tests {
         #expect(!Suite.saysTemperature("a few degrees warmer"))
     }
 
+    /// An earlier run's note skips M01/M03 before the agent acts (10-11-01Z: count 1 -> 1, a false fail),
+    /// and an unreadable count skips too — never read as "none there".
+    @Test func aLeftoverNoteOrAnUnreadableCountSkipsTheTask() {
+        #expect(Suite.noteSkipReason(existing: 0, title: "JARVIS weather") == nil)
+        #expect(Suite.noteSkipReason(existing: 1, title: "JARVIS weather")?.contains("JARVIS weather") == true)
+        #expect(Suite.noteSkipReason(existing: 3, title: "JARVIS lighthouse") != nil)
+        #expect(Suite.noteSkipReason(existing: nil, title: "JARVIS lighthouse") != nil)
+    }
+
     /// A note passes only when its count grew AND a text titled with it holds the content.
     @Test func aNoteMustBeNewAndHoldTheContent() {
         let grew: [String: Any] = ["passed": true, "countBefore": 0, "countAfter": 1], same: [String: Any] = ["passed": false, "countBefore": 1, "countAfter": 1]
