@@ -1079,7 +1079,13 @@ final class RealtimeVoiceConnection {
                 dispatch.result["message"] = message + hint
             }
             if turn.isAgentStep, call.name == RealtimeVoiceVerbs.pressMenuName, dispatch.result["error"] as? String == "notOffered" {
-                let listed = turn.affordanceMenuOffer?.app != nil && turn.affordanceMenuOffer?.app == dispatch.appCheck?["resolvedBundleId"] as? String
+                // By the call's own app: a path outside every offer is refused before any app check is recorded.
+                let appName = call.appName
+                let callBundle = await Task.detached { () -> String? in
+                    guard let appName, case .resolved(let bundle, _) = RealtimeVoiceVerbs.appIdentity(named: appName) else { return nil }
+                    return bundle
+                }.value
+                let listed = callBundle != nil && turn.affordanceMenuOffer?.app == callBundle
                 dispatch.result["message"] = RealtimeOpenAppTool.agentStepNotOfferedMessage(menuListed: listed)
             }
             // Both witnesses name one running app and only the app in front is
