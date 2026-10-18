@@ -518,6 +518,29 @@ enum HarnessPolicy {
 
     /// A label retargeted to its control is pressed as that control: a select (what
     /// press_element sends for a label that presses nothing) becomes a click, judged as one.
+    /// A click on a row of a native outline or table (or on the row's cell) is
+    /// navigation: the row is SELECTED (`AccessibilitySelectionPerformer`), never
+    /// clicked. E04 2026-10-17: Reminders' sidebar row "Shopping, 0 reminders, …" was
+    /// refused `clickTargetObscured` — its own list-name field sits at the row's centre —
+    /// and the model then pressed that name field instead. Never inside web content (a
+    /// web row's selection runs none of the page's click handlers); a forced method clicks.
+    /// The row's NAME field too, as a first click does, while its row is not selected and
+    /// it is the row's only text input — the E04 rerun pressed field "Shopping", whose focus
+    /// write left the owner's list name in edit mode. A selected row's fields, or a row with
+    /// several (a reminder being edited: title, Add Time), are still focused and clicked.
+    static func clickSelectsRow(chain: [AccessibilityElementNode], forced: ClickMethod?) -> Bool {
+        guard forced == nil, !chain.contains(where: { $0.role == "AXWebArea" }), let last = chain.last else { return false }
+        if ActionSafetyKernel.isListItemNameField(chain: chain),
+           let row = chain.dropLast().last(where: { $0.role == "AXRow" }) {
+            return row.selected == false
+                && row.flattenedDescendants().filter { AccessibilityElementNode.textInputRoles.contains($0.role) }.count == 1
+        }
+        var rowIndex = chain.count - 1
+        if last.role == "AXCell" { rowIndex -= 1 }
+        guard rowIndex >= 1, chain[rowIndex].role == "AXRow" else { return false }
+        return ["AXOutline", "AXTable"].contains(chain[rowIndex - 1].role)
+    }
+
     static func verbAfterLabelRetarget(_ action: ElementAction) -> ElementAction {
         action == .select ? .click : action
     }
@@ -3251,6 +3274,13 @@ final class HarnessServer {
 
         var performedOK: Bool
         var keystrokesSawTheText = false
+        // Judged as the click it was asked as (stricter than select); performed as a selection.
+        let clickSelectsRow = action == .click && ElementReachability.ancestorChain(to: resolvedNode, from: rootNode)
+            .map { HarnessPolicy.clickSelectsRow(chain: $0, forced: request.forcedClickMethod) } == true
+        if clickSelectsRow {
+            action = .select
+            response["selectedBy"] = "rowSelection"
+        }
         switch action {
         case .click:
             // Its own act and look (AXPress or a real click, focus or names as evidence).
@@ -3336,6 +3366,12 @@ final class HarnessServer {
                 ]
                 performedOK = false
             case .noSelectableAncestor(let levelsInspected):
+                // Nothing was written, so the click it was asked as is no second activation.
+                if clickSelectsRow {
+                    response["selectedBy"] = nil
+                    return clickAct(request, node: resolvedNode, rootNode: rootNode, snapshot: snapshot, namesBefore: namesBefore,
+                                    kernel: described.decision, dryRun: dryRun, startedAt: startedAt, response: response)
+                }
                 response["performed"] = ["status": "noSelectableAncestor", "levelsInspected": levelsInspected]
                 performedOK = false
             case .noLiveElement:
