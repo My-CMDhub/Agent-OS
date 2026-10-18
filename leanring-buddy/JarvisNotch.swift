@@ -233,6 +233,7 @@ nonisolated enum JarvisNotchReason {
         "lineBreakNeedsDocumentEditor": "line breaks only in a notes app",
         "lineBreakInsertOnly": "multi-line only adds, never replaces",
         "lineBreakNeedsTextArea": "that\u{2019}s not the text area",
+        "typeTargetIsControl": "that\u{2019}s a control, not a text field",
         "pasteUnavailable": "its Paste isn\u{2019}t available",
         "pasteboardAccessNotAllowed": "the clipboard is locked",
         "invalidDirection": "no direction was given",

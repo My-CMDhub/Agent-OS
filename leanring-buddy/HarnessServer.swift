@@ -556,9 +556,11 @@ enum HarnessPolicy {
     /// 3. a text input in the window whose title, description or placeholder IS
     ///    the name (a toolbar label sits under its field, so 2 misses it).
     /// The kernel then judges the field like any other (a password box refuses).
+    /// A control is never a label (probe 2026-10-19: "New Note", Notes' toolbar BUTTON, led to the search
+    /// field beside it on the toolbar row and was refused `fieldNotFocused`); `controlTypeRefusal` answers it.
     static func fieldLabelled(by label: AccessibilityElementNode, chain: [AccessibilityElementNode], name: String,
                               linked: (AccessibilityElementNode) -> Bool) -> AccessibilityElementNode? {
-        guard chain.count >= 2, let window = chain.first else { return nil }
+        guard chain.count >= 2, let window = chain.first, !HarnessHands.activeRoles.contains(label.role) else { return nil }
         func inputs(under root: AccessibilityElementNode) -> [AccessibilityElementNode] {
             // A password box is a candidate too (review of 5ceefcf): "Password:" must reach it, and the kernel
             // refuses it — never the nearest plain field, "Password hint".
@@ -583,6 +585,18 @@ enum HarnessPolicy {
         if let nearest = near.first { return near.count == 1 || near[1].1 - nearest.1 >= 1 ? nearest.0 : nil }
         let named = fields.filter { $0.fieldLabel?.raw == name }
         return named.count == 1 ? named[0] : nil
+    }
+
+    /// Typing aimed by name at a control (a button, a checkbox): refused before the kernel, saying where text
+    /// CAN go — the kernel's "does not accept text" reached the model as "no field has focus, find one".
+    /// Never a text input or what may be a password box: those go on to the kernel.
+    static func controlTypeRefusal(role: String) -> HandsRefusal? {
+        guard HarnessHands.activeRoles.contains(role), !AccessibilityElementNode.textInputRoles.contains(role),
+              role != "AXSecureTextField" else { return nil }
+        return HandsRefusal(code: "typeTargetIsControl",
+                            message: "that is a \(role), a control, not a text field; nothing was typed. Call type_text again with the "
+                                + "SAME text and no name to type where the keyboard focus is, or aim it at the text field itself. "
+                                + "If the field only appears after pressing this control, press it first.")
     }
 
     /// The focused text input, when it lies INSIDE the element typed at (by identity). A new reminder's title
@@ -1289,6 +1303,8 @@ enum HarnessObservability {
         "moveItemNotFound", "moveNameTaken", "moveDestinationUnknown",
         // adjust naming nothing in the window, or something with no steps, or the wrong count of numbers.
         "adjustNotFound", "notAdjustable", "adjustValueMismatch",
+        // Typing aimed at a button: the kernel's non-text refusal, said earlier and better.
+        "typeTargetIsControl",
         // `LockScreenGuard` doing its job. Measured 2026-09-13: a probe left
         // running against a locked screen wrote 12,881 `anomalySuppressed`
         // audit lines naming this rule — one per refusal, each also a line of
@@ -3227,6 +3243,14 @@ final class HarnessServer {
             bundleIdentifier: snapshot.bundleIdentifier, role: resolvedNode.role, mode: request.mode,
             secureInputOn: secureInputRead().isOn, focusedMightBeSecure: HarnessHands.focusedMightBeSecure(processIdentifier: pid),
             focusIsOnTarget: liveElement.map { HarnessHands.focusIsOn($0, processIdentifier: pid) } ?? false) {
+            response["ok"] = false
+            response["error"] = refusal.code
+            response["message"] = refusal.message
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: refusal.code, startedAt: startedAt)
+            return response
+        }
+        // After the paste gate: outside an editor a line break is refused whatever it was aimed at.
+        if action == .type, !request.aimAtFocus, let refusal = HarnessPolicy.controlTypeRefusal(role: resolvedNode.role) {
             response["ok"] = false
             response["error"] = refusal.code
             response["message"] = refusal.message

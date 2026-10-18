@@ -70,6 +70,29 @@ struct LabelledFieldTests {
         #expect(field(lone, [window, empty, lone]) == nil)
     }
 
+    /// Probe 2026-10-19: type at "New Note" (Notes' toolbar button) was retargeted to the search field beside it
+    /// and refused `fieldNotFocused`. A control is not a label; typing at one is refused saying where text goes.
+    @Test func aControlIsNeverTheLabelOfAField() {
+        let newNote = node("AXButton", "New Note", frame: CGRect(x: 400, y: 650, width: 30, height: 24))
+        let search = node("AXSearchField", nil, placeholder: "Search", frame: CGRect(x: 600, y: 650, width: 150, height: 24))
+        let toolbar = node("AXToolbar", nil, frame: CGRect(x: 0, y: 640, width: 800, height: 50), children: [newNote, search])
+        let notes = node("AXWindow", "Notes", frame: CGRect(x: 0, y: 0, width: 800, height: 700), children: [toolbar])
+        #expect(HarnessPolicy.fieldLabelled(by: newNote, chain: [notes, toolbar, newNote], name: "New Note", linked: { _ in false }) == nil)
+        // Even the app's own link cannot make a control a label.
+        #expect(HarnessPolicy.fieldLabelled(by: newNote, chain: [notes, toolbar, newNote], name: "New Note", linked: { _ in true }) == nil)
+        // The genuine label in the same place still leads to its field (the control above is the only change).
+        let label = node("AXStaticText", "Find:", frame: CGRect(x: 540, y: 652, width: 50, height: 20))
+        let bar = node("AXToolbar", nil, frame: CGRect(x: 0, y: 640, width: 800, height: 50), children: [label, search])
+        #expect(HarnessPolicy.fieldLabelled(by: label, chain: [notes, bar, label], name: "Find:", linked: { _ in false })?
+            .frameInAppKitCoordinates == search.frameInAppKitCoordinates)
+
+        #expect(HarnessPolicy.controlTypeRefusal(role: "AXButton")?.code == "typeTargetIsControl")
+        #expect(HarnessPolicy.controlTypeRefusal(role: "AXCheckBox")?.message.contains("no name") == true)
+        for role in ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSecureTextField", "AXStaticText", "AXCell", "AXWebArea"] {
+            #expect(HarnessPolicy.controlTypeRefusal(role: role) == nil, "\(role) goes on to the kernel")
+        }
+    }
+
     /// A position with no nameable field types only into the FOCUSED field, and
     /// only if the point lies inside it (`requireAtPoint` on the focused frame).
     @Test func aPositionTypesIntoTheFocusedFieldThatHoldsIt() throws {
