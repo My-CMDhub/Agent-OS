@@ -48,20 +48,36 @@ enum HarnessPaste {
         if focusedMightBeSecure || role == "AXSecureTextField" {
             return HandsRefusal(code: "secureField", message: ActionSafetyKernel.unreadableSubroleTypeRefusalReason)
         }
-        guard let bundleIdentifier, pasteLineBreakEditors.contains(bundleIdentifier),
-              AccessibilityElementNode.textInputRoles.contains(role) else {
+        guard let bundleIdentifier, pasteLineBreakEditors.contains(bundleIdentifier) else {
             return HandsRefusal(code: "lineBreakNeedsDocumentEditor",
                                 message: "a line break goes only into a note or document editor (TextEdit, Notes, Pages, Stickies); "
                                     + "anywhere else Return may send or run it. Nothing was typed — type one line at a time.")
         }
+        // The right app, the wrong element. Launch M01 2026-10-17: aimed at "New Note" (a button) in Notes,
+        // told "only a note editor, type one line at a time", Haiku typed title and body as two single
+        // lines and they ran together ("JARVIS weatherSydney…"). Say where the line break CAN go.
+        guard AccessibilityElementNode.textInputRoles.contains(role) else {
+            return HandsRefusal(code: "lineBreakNeedsTextArea",
+                                message: "that is a \(role), not the text itself; nothing was typed. A line break goes into the note's or "
+                                    + "document's own text: call type_text again with the SAME text and no name to type where the keyboard "
+                                    + "focus is, or aim it at the text area. Do not split the text into single lines.")
+        }
         if mode == .replace {
-            return HandsRefusal(code: "lineBreakInsertOnly", message: "multi-line text is inserted at the end, never replaces a field; nothing was pasted")
+            return HandsRefusal(code: "lineBreakInsertOnly", message: "multi-line text is inserted at the end, never replaces a field; nothing was pasted. "
+                                    + "Call type_text again with mode insert to add it after what is there.")
         }
         if !focusIsOnTarget {
             return HandsRefusal(code: "fieldNotFocused",
                                 message: "keyboard focus is not on the field, so a paste would land elsewhere; nothing was pasted")
         }
         return nil
+    }
+
+    /// Replacing an EMPTY field is inserting: nothing can be discarded. Launch M01 2026-10-17: Haiku typed
+    /// a title and body into a brand-new note with mode replace and was refused `lineBreakInsertOnly`.
+    /// Only a value read as empty counts (`stringValue` reads -25212 as ""); unreadable stays replace.
+    static func pasteMode(_ mode: TypeMode, currentValue: String?) -> TypeMode {
+        mode == .replace && currentValue == "" ? .insert : mode
     }
 
     // MARK: Edit > Paste, by its shortcut

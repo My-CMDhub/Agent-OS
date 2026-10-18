@@ -87,11 +87,36 @@ struct HarnessPasteTests {
         #expect(gate("com.apple.Notes", secureInputOn: true)?.code == "handOver")
         #expect(gate("com.apple.Notes", focusedMightBeSecure: true)?.code == "secureField")
         #expect(gate("com.apple.Notes", role: "AXSecureTextField")?.code == "secureField")
-        #expect(gate("com.apple.Notes", role: "AXButton")?.code == "lineBreakNeedsDocumentEditor")
+        #expect(gate("com.apple.Notes", role: "AXButton")?.code == "lineBreakNeedsTextArea")
         #expect(gate("com.apple.Notes", focusIsOnTarget: false)?.code == "fieldNotFocused")
         #expect(gate("com.apple.Notes", mode: .replace)?.code == "lineBreakInsertOnly")
         // A secret outranks the allowlist: refused as a secret even in a chat app.
         #expect(gate("com.apple.MobileSMS", secureInputOn: true)?.code == "handOver")
+    }
+
+    /// Launch M01 2026-10-17: aimed at Notes' "New Note" button, the refusal said "only a note editor — type one
+    /// line at a time", and title and body were typed as two single lines that ran together. In an editor app the
+    /// wrong element is told to keep the text whole and type at focus; elsewhere the old answer stands.
+    @Test func theWrongElementInAnEditorIsToldWhereTheLineBreakGoes() {
+        guard let refusal = gate("com.apple.Notes", role: "AXButton") else { Issue.record("a button took a line break"); return }
+        #expect(refusal.message.contains("AXButton"))
+        #expect(refusal.message.contains("no name"))
+        #expect(!refusal.message.contains("one line at a time"))
+        #expect(gate("com.apple.Notes", role: "AXStaticText")?.code == "lineBreakNeedsTextArea")
+        // Outside an editor, any role: still the editor refusal (Return may send there).
+        #expect(gate("com.apple.MobileSMS", role: "AXButton")?.code == "lineBreakNeedsDocumentEditor")
+        #expect(gate("com.apple.MobileSMS")?.code == "lineBreakNeedsDocumentEditor")
+    }
+
+    /// Replacing nothing is inserting; an unreadable or non-empty value keeps replace, so the gate still refuses it.
+    @Test func aReplaceOfAnEmptyFieldPastesAsAnInsert() {
+        #expect(HarnessPaste.pasteMode(.replace, currentValue: "") == .insert)
+        #expect(HarnessPaste.pasteMode(.replace, currentValue: nil) == .replace)
+        #expect(HarnessPaste.pasteMode(.replace, currentValue: "JARVIS weather") == .replace)
+        #expect(HarnessPaste.pasteMode(.replace, currentValue: " ") == .replace)
+        #expect(HarnessPaste.pasteMode(.insert, currentValue: "x") == .insert)
+        #expect(gate("com.apple.Notes", mode: HarnessPaste.pasteMode(.replace, currentValue: "")) == nil)
+        #expect(gate("com.apple.Notes", mode: HarnessPaste.pasteMode(.replace, currentValue: "old"))?.code == "lineBreakInsertOnly")
     }
 
     // MARK: Edit > Paste, found by its shortcut

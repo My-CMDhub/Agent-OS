@@ -254,8 +254,11 @@ enum ActionSafetyKernel {
     /// measured 2026-09-10 on Finder's "New Folder", which reads
     /// `AXEnabled == false` while focus is in the sidebar. Asking the item
     /// first is what makes `AXError 0` mean anything at all on this path.
+    /// Notes greys "New Note" while the note just made is still empty (launch M01 2026-10-17, pressed again in
+    /// the same step): a disabled item can mean its work is already done, so the reason says to look.
     static func menuItemDisabledRefusalReason(name: String) -> String {
-        "menu item \(name) is disabled (AXEnabled false) — pressing it would return success and do nothing"
+        "menu item \(name) is disabled (AXEnabled false) — pressing it would return success and do nothing; "
+            + "if something just did what it does, that may be why — look before trying again"
     }
 
     /// The second refusal with no confirmed path past it, and the only one that

@@ -3150,6 +3150,12 @@ final class HarnessServer {
         let replacesATime = action == .type && !resolvedNode.mightBeSecure && HarnessPolicy.replacesOnlyATime(
             text: request.text, currentValue: liveElement.flatMap(AccessibilityTypePerformer.stringValue), role: resolvedNode.role)
         if replacesATime { request.mode = .replace }
+        // A multi-line replace of an empty field goes as the insert it is (`HarnessPaste.pasteMode`).
+        if action == .type, request.text.contains("\n"), request.mode == .replace, !resolvedNode.mightBeSecure,
+           HarnessPaste.pasteMode(.replace, currentValue: liveElement.flatMap(AccessibilityTypePerformer.stringValue)) == .insert {
+            request.mode = .insert
+            response["replaceOfEmptyFieldInserted"] = true
+        }
         let typing = HarnessPolicy.typingContext(
             verb: request.verb, mode: request.mode, aimedByFocus: request.aimAtFocus, of: resolvedNode,
             settable: { liveElement.map(AccessibilityTypePerformer.settableAttributes) ?? [] },

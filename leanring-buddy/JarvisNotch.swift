@@ -232,6 +232,7 @@ nonisolated enum JarvisNotchReason {
         // Multi-line by paste (2026-10-10).
         "lineBreakNeedsDocumentEditor": "line breaks only in a notes app",
         "lineBreakInsertOnly": "multi-line only adds, never replaces",
+        "lineBreakNeedsTextArea": "that\u{2019}s not the text area",
         "pasteUnavailable": "its Paste isn\u{2019}t available",
         "pasteboardAccessNotAllowed": "the clipboard is locked",
         "invalidDirection": "no direction was given",
