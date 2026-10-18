@@ -203,6 +203,16 @@ enum ElementActionIntentResolver {
             let narrowed = candidates.filter { $0.node.frameInAppKitCoordinates.contains(point) }
             if !narrowed.isEmpty { candidates = narrowed }
         }
+        // One open menu item reached by two paths. L01 2026-10-18: Finder's Action pop-up
+        // published "Compress “Receipts”" twice — same role, same name, same 216x22 frame —
+        // as two elements identity cannot merge, so every press came back ambiguous. Two
+        // items of open menus cannot share one on-screen rect, so they are one thing.
+        // ponytail: menu items only; widen if another role shows the same double path.
+        if candidates.count > 1, let first = candidates.first?.node, first.role == AccessibilityMenu.menuItemRole,
+           first.frameInAppKitCoordinates.width > 0, first.frameInAppKitCoordinates.height > 0,
+           candidates.allSatisfy({ $0.node.role == first.role && $0.node.frameInAppKitCoordinates == first.frameInAppKitCoordinates }) {
+            candidates = [candidates[0]]
+        }
 
         switch candidates.count {
         case 0:
