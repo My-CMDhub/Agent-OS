@@ -15,7 +15,8 @@
 //  switched off (every 6:45 one on after the task; skipped when one existed before); E10/U03/U06 open a fixture page in Safari and close
 //  that tab by its unique title. L02 (no menu item; needs Cmd-Shift-.) and L05 (a Notes
 //  fixture only a Delete could remove) are not built.
-//  Slice 4 (E11-E14, U07-U09) lives in LaunchSuiteSlice4.swift; slice 5 (M01-M03, multi-app) in LaunchSuiteSlice5.swift.
+//  Slice 4 (E11-E14, U07-U09) lives in LaunchSuiteSlice4.swift; slice 5 (M01-M03, multi-app) in LaunchSuiteSlice5.swift;
+//  slice 6 (M04-M06: a branch, a three-step chain, a recovery) in LaunchSuiteSlice6.swift.
 //
 //  File tasks run in `~/JARVIS-sandbox/` (home root, not TCC-protected), written
 //  fresh before each one from `Sandbox.manifest` and removed afterwards BY NAME:
@@ -194,7 +195,7 @@ extension GeneralitySuite {
                       result["tabClosed"] = await read { closeFixtureTab(title: Sandbox.loginTitle) } ?? [:]
                       return result
                   },
-    ] + launchSlice4 + launchSlice5
+    ] + launchSlice4 + launchSlice5 + launchSlice6
 
     nonisolated static let clock = "com.apple.clock", mail = "com.apple.mail", safari = "com.apple.Safari"
 
@@ -877,7 +878,8 @@ extension GeneralitySuite {
         /// Every name this suite owns: the manifest plus what any task is asked to create.
         /// Set-up clears a crashed run's leftovers among these, and nothing else.
         nonisolated static var knownNames: Set<String> {
-            Set(manifest.keys).union(["report-final.txt", "Receipts", "Receipts/invoice-a.pdf", "Receipts/invoice-b.pdf", "Receipts.zip"])
+            Set(manifest.keys).union(["report-final.txt", "Receipts", "Receipts/invoice-a.pdf", "Receipts/invoice-b.pdf", "Receipts.zip",
+                                       "Paid", "Paid/invoice-a.pdf", "Paid/invoice-b.pdf"])
                 .union(pages.keys)
         }
 
