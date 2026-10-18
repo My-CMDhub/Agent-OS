@@ -1926,6 +1926,13 @@ extension AgentLoop {
         return response?["bundleIdentifier"] as? String
     }
 
+    /// The app whose affordance map later calls of the same reply are judged by: one a confirmed
+    /// open_app / focus_app brought forward. nil: the last look's map stands.
+    nonisolated static func mapRebuildBundle(after tool: String, confirmed: Bool, response: [String: Any]?) -> String? {
+        guard [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName].contains(tool) else { return nil }
+        return openedBundle(by: tool, confirmed: confirmed, response: response)
+    }
+
     /// A confirmed press of an item in the Help menu (by path or by shortcut: the harness echoes the path).
     /// ponytail: the English menu title only; a localised Help menu is not matched.
     nonisolated static func helpMenuMayOpenAnotherApp(tool: String, confirmed: Bool, response: [String: Any]?) -> Bool {
@@ -2310,6 +2317,12 @@ extension AgentLoop {
                 carry.tabHosts.append(.init(bundle: bundle, host: filled.url.flatMap { URL(string: $0)?.host }.map(SecretScanner.redact)))
             case .none: break
             }
+        }
+        // The rest of this reply is judged against the app it just opened, not the last look's (launch M05
+        // 2026-10-18: open_app Notes + press_menu File > New Note was refused notOffered against Finder's map).
+        // The same build the next look does; no map, no offer, and the press stays refused.
+        if let dispatch, let bundle = mapRebuildBundle(after: filled.name, confirmed: dispatch.harnessConfirmed, response: dispatch.harnessResponse) {
+            carry.mapOffer = await AffordanceMap.live(bundle: bundle, harnessAnswer: harnessAnswer)?.map.offer(readOnly: carry.readOnly)
         }
         // A Help menu shows its help in ANOTHER app (Calculator Help → Tips, generality G07 2026-10-16: every step
         // there refused heardNamedMismatch). Launched by this step's own press, that app is the task's.

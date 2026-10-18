@@ -77,4 +77,52 @@ struct AffordanceOfferTests {
         #expect(!RealtimeOpenAppTool.invalidatesAffordanceMap(error: "kernelRefused"))
         #expect(!RealtimeOpenAppTool.invalidatesAffordanceMap(error: nil))
     }
+
+    /// Launch M05 2026-10-18: one reply batched open_app Notes + press_menu File > New Note, and the press
+    /// was judged against the last look's Finder map. After a confirmed open/focus, the opened app's map judges.
+    @Test func anOpenInTheSameReplyRejudgesLaterPressesByTheOpenedAppsMap() throws {
+        let notes = "com.apple.Notes"
+        #expect(AgentLoop.mapRebuildBundle(after: RealtimeOpenAppTool.name, confirmed: true, response: ["bundleIdentifier": notes]) == notes)
+        #expect(AgentLoop.mapRebuildBundle(after: RealtimeVoiceVerbs.focusAppName, confirmed: true, response: ["bundleIdentifier": notes]) == notes)
+        #expect(AgentLoop.mapRebuildBundle(after: RealtimeOpenAppTool.name, confirmed: false, response: ["bundleIdentifier": notes]) == nil,
+                "an open that did not land changes nothing")
+        #expect(AgentLoop.mapRebuildBundle(after: RealtimeVoiceVerbs.pressMenuName, confirmed: true, response: ["bundleIdentifier": notes]) == nil)
+        #expect(AgentLoop.mapRebuildBundle(after: RealtimeVoiceVerbs.openURLName, confirmed: true, response: ["bundleIdentifier": "com.apple.Safari"]) == nil)
+
+        let newNote = ["File", "New Note"]
+        let notesMenus: [String: Any] = ["ok": true, "items": [["path": newNote, "enabled": true, "shortcut": "⌘N", "hasSubmenu": false]]]
+        let finderMap = try #require(AffordanceMap(menusResponse: menus, bundleIdentifier: "com.apple.finder", version: "1", pid: 1, builtUptime: 0))
+        let notesMap = try #require(AffordanceMap(menusResponse: notesMenus, bundleIdentifier: notes, version: "1", pid: 2, builtUptime: 1))
+        let call = RealtimeToolCall(callID: "1", name: RealtimeVoiceVerbs.pressMenuName, appName: "Notes", path: newNote)
+        func line(map: AffordanceMap) -> Result<String, RealtimeToolRefusal> {
+            let chosen = RealtimeOpenAppTool.pressOffer(path: newNote, thisTurn: nil, previousTurn: nil, followUpConfirmed: nil,
+                                                        affordanceMap: map.offer(readOnly: false), now: 2)
+            return RealtimeOpenAppTool.harnessRequestLine(for: call, expectApp: notes, offered: chosen.offer?.candidates, offeredApp: chosen.offer?.app)
+        }
+        guard case .failure(let refusal) = line(map: finderMap) else { Issue.record("the old app's map offers nothing in Notes"); return }
+        #expect(refusal.error == "notOffered")
+        guard case .success = line(map: notesMap) else { Issue.record("the opened app's own map offers its path"); return }
+        // The gate still holds: a path Notes' map does not list is refused against it.
+        let invented = RealtimeToolCall(callID: "2", name: RealtimeVoiceVerbs.pressMenuName, appName: "Notes", path: ["File", "Delete Everything"])
+        guard case .failure = RealtimeOpenAppTool.harnessRequestLine(for: invented, expectApp: notes, offered: notesMap.offer(readOnly: false).candidates,
+                                                                     offeredApp: notes) else { Issue.record("an unlisted path stays refused"); return }
+    }
+
+    /// The agent step's notOffered says what to do next; the voice turn's still says to press nothing and say so.
+    @Test func anAgentStepsNotOfferedSaysHowToRetry() {
+        let listed = RealtimeOpenAppTool.agentStepNotOfferedMessage(menuListed: true)
+        let unlisted = RealtimeOpenAppTool.agentStepNotOfferedMessage(menuListed: false)
+        #expect(listed.contains("call press_menu again"))
+        #expect(unlisted.contains("call find_menu_items"))
+        for message in [listed, unlisted] {
+            #expect(!message.contains("say so"), "a task's words ask for the outcome; the refusal must not steer to giving up")
+            #expect(message.hasPrefix("Nothing was pressed"))
+        }
+        let call = RealtimeToolCall(callID: "1", name: RealtimeVoiceVerbs.pressMenuName, appName: "Notes", path: ["File", "New Note"])
+        guard case .failure(let voice) = RealtimeOpenAppTool.harnessRequestLine(for: call, expectApp: "com.apple.Notes", offered: nil, offeredApp: nil) else {
+            Issue.record("nothing offered: refused"); return
+        }
+        #expect(voice.error == "notOffered")
+        #expect(voice.message.contains("press nothing and say so"), "an unasked press in a voice turn is still refused and said")
+    }
 }

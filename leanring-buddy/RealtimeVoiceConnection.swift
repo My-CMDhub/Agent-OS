@@ -1078,6 +1078,10 @@ final class RealtimeVoiceConnection {
                let message = dispatch.result["message"] as? String {
                 dispatch.result["message"] = message + hint
             }
+            if turn.isAgentStep, call.name == RealtimeVoiceVerbs.pressMenuName, dispatch.result["error"] as? String == "notOffered" {
+                let listed = turn.affordanceMenuOffer?.app != nil && turn.affordanceMenuOffer?.app == dispatch.appCheck?["resolvedBundleId"] as? String
+                dispatch.result["message"] = RealtimeOpenAppTool.agentStepNotOfferedMessage(menuListed: listed)
+            }
             // Both witnesses name one running app and only the app in front is
             // wrong: bring it forward through the harness (policy applies), then
             // run this call ONCE more. Never a loop, never a launch.

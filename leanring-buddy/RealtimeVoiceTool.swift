@@ -1783,6 +1783,18 @@ nonisolated enum RealtimeOpenAppTool {
     /// A mapped path the app no longer has: the map is stale, rebuilt at the next look.
     static func invalidatesAffordanceMap(error: String?) -> Bool { ["notFound", "targetIsSubmenu"].contains(error ?? "") }
 
+    /// An agent step's notOffered press: what to do next. A voice turn keeps "press nothing and say so"
+    /// (an unasked press is refused and said); a task's words already ask for the outcome, and that line
+    /// sent Haiku to ask_owner with the menu in view (launch M05 2026-10-18). The gate is unchanged:
+    /// the retry must still copy a listed path. `menuListed`: this app's App verbs are the step's offer.
+    static func agentStepNotOfferedMessage(menuListed: Bool) -> String {
+        "Nothing was pressed: that path is not among the menu commands listed for this app. "
+            + (menuListed
+                ? "Its menu is listed now (App verbs): if the task needs this command, call press_menu again with a path copied exactly from that list."
+                : "Its menu has not been listed yet: if the task needs this command, call find_menu_items for it, then press_menu with a path it returns.")
+            + " Press nothing the task does not need."
+    }
+
     /// A plain yes for this press or point (`RealtimeDecisionTrace.confirmedByPlainYes`),
     /// judged against ONE kind of offer: the previous turn's LATEST find
     /// (review 2026-09-30). A turn that searched the menus, then the window, and
