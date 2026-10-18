@@ -5499,6 +5499,7 @@ final class HarnessServer {
             in: inspection, primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height
         )
         payload["secretRedactions"] = secrets.redactions.count
+        payload["unreadSubtreesBlackedOut"] = inspection.windows.reduce(0) { $0 + $1.coveredLostSubtrees.count }
         if let refusal = secrets.refusal {
             payload["message"] = refusal
             return (payload, "captureFailed")

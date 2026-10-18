@@ -67,7 +67,8 @@ struct AccessibilityElementNode {
                 frameInAppKitCoordinates: a, depth: triangle.depth, children: triangle.children,
                 publishedActionNames: triangle.accessibilityElement.map(readActions) ?? triangle.publishedActionNames,
                 subroleReadFailed: triangle.subroleReadFailed, selected: triangle.selected, valueLength: triangle.valueLength,
-                accessibilityElement: triangle.accessibilityElement, frameReadFailed: triangle.frameReadFailed)
+                accessibilityElement: triangle.accessibilityElement, frameReadFailed: triangle.frameReadFailed,
+                childrenReadFailed: triangle.childrenReadFailed)
         }
         return named
     }
@@ -219,6 +220,10 @@ struct AccessibilityElementNode {
     /// item. Text in a node like this may be on screen and cannot be located.
     let frameReadFailed: Bool
 
+    /// The AXChildren read FAILED (not noValue/unsupported): a subtree nobody looked
+    /// at. Reminders' sidebar section headers (AXUnknown, -25200, count 1) do it.
+    let childrenReadFailed: Bool
+
     init(
         role: String,
         subrole: String?,
@@ -235,7 +240,8 @@ struct AccessibilityElementNode {
         selected: Bool? = nil,
         valueLength: Int? = nil,
         accessibilityElement: AXUIElement? = nil,
-        frameReadFailed: Bool = false
+        frameReadFailed: Bool = false,
+        childrenReadFailed: Bool = false
     ) {
         self.role = role
         self.subrole = subrole
@@ -255,6 +261,7 @@ struct AccessibilityElementNode {
         self.valueLength = valueLength
         self.accessibilityElement = accessibilityElement
         self.frameReadFailed = frameReadFailed
+        self.childrenReadFailed = childrenReadFailed
     }
 
     /// `selected` and `valueLength` from raw reads. An error of `.success` means
@@ -1243,7 +1250,8 @@ enum AccessibilityTreeWalker {
             selected: state?.selected,
             valueLength: state?.valueLength,
             accessibilityElement: element,
-            frameReadFailed: frameReadResult.frame == nil
+            frameReadFailed: frameReadResult.frame == nil,
+            childrenReadFailed: childReadResult.readFailed
         )
     }
 

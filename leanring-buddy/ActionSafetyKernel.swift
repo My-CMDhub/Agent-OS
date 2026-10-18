@@ -849,6 +849,25 @@ struct CaptureInspection {
         var subtreesLostToFailedReads = 0
         /// Why the walk never ran, when it threw.
         var failure: String? = nil
+
+        /// Lost subtrees the photograph blacks out instead of refusing: the node whose
+        /// children read failed has a real frame, so the camera need not see inside it.
+        /// Never in a window holding web content (CSS overflow draws children outside a
+        /// box's frame) and never a text input or a node that may itself be a password box.
+        /// Live 2026-10-19, Reminders: both lost subtrees were sidebar section headers
+        /// (AXUnknown valued "iCloud" / the account, 250x18, children -25200 by every read,
+        /// count 1), and `look` was refused on every step.
+        // ponytail: assumes a native view draws its children inside its own frame; an
+        // AppKit subview drawn outside it (clipsToBounds is off by default on macOS 14)
+        // would show unread. Upgrade: black out the nearest ancestor's frame instead.
+        var coveredLostSubtrees: [AccessibilityElementNode] {
+            guard !nodes.contains(where: { $0.role == "AXWebArea" }) else { return [] }
+            return nodes.filter {
+                $0.childrenReadFailed && !$0.frameReadFailed && !$0.mightBeSecure
+                    && !AccessibilityElementNode.textInputRoles.contains($0.role)
+                    && $0.frameInAppKitCoordinates.width > 0 && $0.frameInAppKitCoordinates.height > 0
+            }
+        }
     }
 
     /// The `AXError` raw value when `kAXWindows` could not be read; nil when it
@@ -882,8 +901,9 @@ struct CaptureInspection {
             var gaps: [String] = []
             if let failure = window.failure { gaps.append("could not be walked (\(failure))") }
             gaps += window.stopReasons.map(\.rawValue).sorted()
-            if window.subtreesLostToFailedReads > 0 {
-                gaps.append("lost \(window.subtreesLostToFailedReads) subtree(s) to failed children reads")
+            let uncovered = window.subtreesLostToFailedReads - window.coveredLostSubtrees.count
+            if uncovered > 0 {
+                gaps.append("lost \(uncovered) subtree(s) to failed children reads")
             }
             // Only what might be a password box counts (the shared predicate:
             // a text input, or an AXUnknown named by its value, whose subrole did

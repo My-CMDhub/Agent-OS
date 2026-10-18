@@ -772,11 +772,15 @@ nonisolated enum ScreenSecretGuard {
     static func secretsBeforeShutter(in inspection: CaptureInspection, primaryDisplayHeight: CGFloat)
         -> (redactions: [Redaction], refusal: String?) {
         let found = redactions(in: inspection.windows.flatMap(\.nodes), primaryDisplayHeight: primaryDisplayHeight)
+        // What the inspection did not read is not photographed either (`coveredLostSubtrees`).
+        let unread = inspection.windows.flatMap(\.coveredLostSubtrees).map {
+            Redaction(kind: "unreadSubtree", appKitRect: $0.frameInAppKitCoordinates, source: "frame")
+        }
         guard found.unlocated == 0 else {
-            return (found.redactions, "\(found.unlocated) secret-shaped text(s) in this app have no readable frame, "
+            return (found.redactions + unread, "\(found.unlocated) secret-shaped text(s) in this app have no readable frame, "
                 + "so they could not be blacked out — nothing was photographed")
         }
-        return (found.redactions, nil)
+        return (found.redactions + unread, nil)
     }
 
     /// The one per-display reason: the caller skips that display and sends the others.
