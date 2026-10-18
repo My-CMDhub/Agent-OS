@@ -912,7 +912,9 @@ enum HarnessHands {
 
     /// The vision click's (e): the topmost thing drawn at the point (top-left)
     /// is this app's, inside its FOCUSED window — so no other window, and no
-    /// other window of its own, covers it. Returns that window's AppKit frame.
+    /// other window of its own, covers it — except a transient popup of the same
+    /// app over that window (`transientPopupOverFocusedWindow`). Returns the AppKit
+    /// frame of the window actually hit.
     static func visionWindow(atTopLeft point: CGPoint, processIdentifier: pid_t) -> Result<CGRect, HandsRefusal> {
         let systemWide = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(systemWide, RealtimeScreenHitTest.messagingTimeoutSeconds)
@@ -938,15 +940,34 @@ enum HarnessHands {
         let application = AXUIElementCreateApplication(processIdentifier)
         AXUIElementSetMessagingTimeout(application, 0.5)
         var focused: AnyObject?
+        let notFocused = HandsRefusal(code: "visionNotInFocusedWindow",
+                                      message: "what is drawn at that point is not in the app's focused window; nothing was clicked")
         guard let window, AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute as CFString, &focused) == .success,
-              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID(), CFEqual(window, focused) else {
-            return .failure(HandsRefusal(code: "visionNotInFocusedWindow",
-                                         message: "what is drawn at that point is not in the app's focused window; nothing was clicked"))
-        }
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return .failure(notFocused) }
         guard let frame = liveAppKitFrame(of: window) else {
             return .failure(HandsRefusal(code: "frameUnreadable", message: "the window's frame could not be read; nothing was clicked"))
         }
+        if CFEqual(window, focused as! AXUIElement) { return .success(frame) }
+        // Another window of the SAME process (the pid check above): accepted only as
+        // a transient popup over the focused window — Reminders' "Add Date" suggestions.
+        var subrole: AnyObject?
+        AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subrole)
+        guard let focusedFrame = liveAppKitFrame(of: focused as! AXUIElement),
+              transientPopupOverFocusedWindow(subrole: subrole as? String, frame: frame, focusedWindowFrame: focusedFrame)
+        else { return .failure(notFocused) }
         return .success(frame)
+    }
+
+    /// Window subroles that are a passing popup, never a second document window.
+    static let transientPopupSubroles: Set<String> = ["AXDialog", "AXSystemDialog", "AXUnknown"]
+    /// How far outside the focused window a popup may sit and still be "over" it.
+    static let popupAdjoinPoints: CGFloat = 8
+
+    /// Pure: a same-process window that is not the focused one is clickable only
+    /// when it is a transient popup (subrole) touching the focused window.
+    static func transientPopupOverFocusedWindow(subrole: String?, frame: CGRect, focusedWindowFrame: CGRect) -> Bool {
+        guard let subrole, transientPopupSubroles.contains(subrole), frame.width > 0, frame.height > 0 else { return false }
+        return focusedWindowFrame.insetBy(dx: -popupAdjoinPoints, dy: -popupAdjoinPoints).intersects(frame)
     }
 
     /// The owner's mouse is still within reach of `point` (top-left, CGEvent's origin).

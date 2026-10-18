@@ -206,4 +206,24 @@ struct VisionClickTests {
         #expect((result["ocrText"] as? String)?.hasPrefix("\"") == true)
         #expect((result["target"] as? String)?.contains("Launch demo") == true)
     }
+
+    /// Reminders' "Add Date" suggestions open in a second window of the same app
+    /// (2026-10-19, E12/M02): a popup touching the focused window is clickable;
+    /// a second document window, or one far away, is still refused.
+    @Test func aTransientPopupOverTheFocusedWindowIsClickableAndNothingElseIs() {
+        let popup = CGRect(x: 600, y: 300, width: 180, height: 140)
+        #expect(HarnessHands.transientPopupOverFocusedWindow(subrole: "AXUnknown", frame: popup, focusedWindowFrame: window))
+        #expect(HarnessHands.transientPopupOverFocusedWindow(subrole: "AXDialog", frame: popup, focusedWindowFrame: window))
+        #expect(HarnessHands.transientPopupOverFocusedWindow(subrole: "AXSystemDialog", frame: popup, focusedWindowFrame: window))
+        // Adjoining just below the window's edge still counts; well clear of it does not.
+        #expect(HarnessHands.transientPopupOverFocusedWindow(subrole: "AXUnknown",
+                                                             frame: CGRect(x: 600, y: 84, width: 180, height: 12), focusedWindowFrame: window))
+        #expect(!HarnessHands.transientPopupOverFocusedWindow(subrole: "AXUnknown",
+                                                              frame: CGRect(x: 1200, y: 100, width: 180, height: 140), focusedWindowFrame: window))
+        // A second document window, an unread subrole, or a zero-area frame: refused.
+        #expect(!HarnessHands.transientPopupOverFocusedWindow(subrole: "AXStandardWindow", frame: popup, focusedWindowFrame: window))
+        #expect(!HarnessHands.transientPopupOverFocusedWindow(subrole: nil, frame: popup, focusedWindowFrame: window))
+        #expect(!HarnessHands.transientPopupOverFocusedWindow(subrole: "AXUnknown", frame: CGRect(x: 600, y: 300, width: 0, height: 0),
+                                                              focusedWindowFrame: window))
+    }
 }
