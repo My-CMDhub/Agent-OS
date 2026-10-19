@@ -3572,12 +3572,7 @@ final class HarnessServer {
 
             // Whether this field saves only on Return / AXConfirm (Calendar's quick entry, a new
             // Reminders row — 2026-10-13): typed-but-unsubmitted text there made nothing.
-            // Asked of the LIVE element too: a target named from the walk may carry no action names
-            // (E03 09-27Z: "New Quick Event" by name read false, the same field by focus true).
-            var liveActionNames: CFArray?
-            let publishesConfirm = resolvedNode.publishedActionNames.contains(kAXConfirmAction)
-                || (AXUIElementCopyActionNames(element, &liveActionNames) == .success
-                    && ((liveActionNames as? [String]) ?? []).contains(kAXConfirmAction))
+            let publishesConfirm = Self.publishesConfirm(resolvedNode, element)
             response["fieldCommitsOnConfirm"] = publishesConfirm
             if request.thenConfirm {
                 // A missing AXConfirm is never a failure of the type — measured
@@ -3708,6 +3703,15 @@ final class HarnessServer {
 
     // MARK: click
 
+    /// Whether a field publishes AXConfirm — asked of the LIVE element too: a target named from the
+    /// walk may carry no action names (E03 09-27Z: "New Quick Event" by name read false, by focus true).
+    private static func publishesConfirm(_ node: AccessibilityElementNode, _ element: AXUIElement) -> Bool {
+        var liveActionNames: CFArray?
+        return node.publishedActionNames.contains(kAXConfirmAction)
+            || (AXUIElementCopyActionNames(element, &liveActionNames) == .success
+                && ((liveActionNames as? [String]) ?? []).contains(kAXConfirmAction))
+    }
+
     /// `click` after the kernel and the gate: `AXPress` when the element publishes
     /// it and is not a text input, an `AXFocused` write on a text input, a real left click at its visible centre
     /// otherwise — or when the press went in and nothing could be seen to change
@@ -3726,6 +3730,11 @@ final class HarnessServer {
         }
         guard let element = node.accessibilityElement, let processIdentifier = snapshot.application?.processIdentifier else {
             return finish("noLiveElement", error: "noLiveElement")
+        }
+        // A text input that saves only on AXConfirm (Reminders' "Add Date"): whatever its popup then
+        // sets is not saved until the edit ends (M02 2026-10-19). The agent loop holds a claim to that.
+        if AccessibilityElementNode.textInputRoles.contains(node.role) {
+            response["fieldCommitsOnConfirm"] = Self.publishesConfirm(node, element)
         }
         let methods = HarnessHands.clickMethods(publishesPress: node.publishedActionNames.contains(kAXPressAction),
                                                 role: node.role, forced: request.forcedClickMethod)

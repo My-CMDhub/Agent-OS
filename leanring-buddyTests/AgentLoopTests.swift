@@ -226,6 +226,40 @@ struct AgentLoopTests {
         #expect(!AgentLoop.readStoppedAbovePage([]))
     }
 
+    /// M02 2026-10-19: press "Add Date" (a field saving only on AXConfirm), pick "Tomorrow" in its popup, claim
+    /// "due tomorrow" before the row's edit ended. Asked once, by receipts; a second done stands.
+    @MainActor @Test func aPopupPickInAnOpenEditIsAskedOnce() async {
+        let claim = "The reminder is due tomorrow."
+        let script = Script([toolUse("press_element", ["name": "Add Date"]), toolUse("press_element", ["name": "Tomorrow"]),
+                             toolUse("done", ["summary": claim, "evidence": [1, 2]], id: "first"),
+                             toolUse("done", ["summary": claim, "evidence": [1, 2]])])
+        let outcome = await loop(script, execute: { _ in
+            let field = script.executed.count == 1  // step 1 is the field press, step 2 the popup pick
+            return RealtimeToolDispatch(result: ["ok": true], harnessMilliseconds: 5, waitedForConfirmation: false,
+                                        harnessResponse: field ? ["ok": true, "fieldCommitsOnConfirm": true,
+                                                                  "resolved": ["role": "AXTextField", "subrole": NSNull()]]
+                                                               : ["ok": true, "method": "vision"])
+        }).run(goal: "add a due date of tomorrow to the reminder")
+        #expect(outcome == .done(summary: claim))
+        #expect(script.traces.filter { $0["error"] as? String == "editNotCommitted" }.count == 1)
+        let asked = (script.bodies[3]["messages"] as? [[String: Any]])?.last?["content"] as? [[String: Any]]
+        #expect((asked?.first?["content"] as? String)?.contains("editNotCommitted") == true)
+
+        let field = AgentLoop.Receipt(step: 1, toolName: "press_element", ok: true, error: nil, pressedRole: "AXTextField", opensEdit: true)
+        let pick = AgentLoop.Receipt(step: 2, toolName: "press_element", ok: true, error: nil)
+        #expect(AgentLoop.editLeftOpen([field, pick]) != nil)
+        // A later commit ends it: a submitted typing, or an ok button press.
+        #expect(AgentLoop.editLeftOpen([field, pick, AgentLoop.Receipt(step: 3, toolName: "type_text", ok: true, error: nil, submitted: true)]) == nil)
+        #expect(AgentLoop.editLeftOpen([field, pick, AgentLoop.Receipt(step: 3, toolName: "press_element", ok: true, error: nil,
+                                                                       pressedRole: "AXButton")]) == nil)
+        // A search field, or a field that does not commit on confirm, opens nothing.
+        #expect(!AgentLoop.pressOpensEdit(["fieldCommitsOnConfirm": true, "resolved": ["role": "AXTextField", "subrole": "AXSearchField"]]))
+        #expect(!AgentLoop.pressOpensEdit(["fieldCommitsOnConfirm": false, "resolved": ["role": "AXTextField"]]))
+        #expect(!AgentLoop.pressOpensEdit(["resolved": ["role": "AXButton"]]))
+        #expect(AgentLoop.pressOpensEdit(["fieldCommitsOnConfirm": true, "resolved": ["role": "AXTextField", "subrole": NSNull()]]))
+        #expect(AgentLoop.editLeftOpen([pick]) == nil)
+    }
+
     /// E12 2026-10-15 (Gemini 3/3): the time typed into the title, no due time set, done claimed 5 pm. Asked once, by
     /// the owner's words and the screen; a second done stands.
     @MainActor @Test func aClockTimeShownOnlyInTypedTextIsAskedOnce() async {

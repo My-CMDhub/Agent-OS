@@ -397,6 +397,10 @@ final class AgentLoop {
         /// yet, whatever a read shows beside it (E03 2026-10-13: Calendar's suggestion line
         /// "JARVIS test meeting Tomorrow 3 pm" passed for the event). In memory only.
         var awaitsCommit = false
+        /// An ok press into a field that saves only when its edit is committed (`fieldCommitsOnConfirm`,
+        /// never a search field): what its popup then sets is not saved yet (M02 2026-10-19, Reminders'
+        /// "Add Date" -> "Tomorrow"). In memory only.
+        var opensEdit = false
         /// An ok read_page that said more of the page lies below the view (`moreBelow`). In memory only.
         var moreBelow = false
         /// The items a rename_item / move_items named, ok or not (`unnamedSubstitute`). In memory only.
@@ -446,6 +450,8 @@ final class AgentLoop {
     private var challengedUnreadPage = false
     /// `unsetClockTime` asked once; a second done after it stands.
     private var challengedUnsetTime = false
+    /// `editLeftOpen` asked once; a second done after it stands.
+    private var challengedOpenEdit = false
     private var sameRefusal: (error: String, count: Int)?
     private var lastError: String?
     private var webUsed: [String: Int] = [:]
@@ -807,6 +813,17 @@ final class AgentLoop {
                                     + "If the task needs the whole page, scroll down and read_page again; if not, call done again."])
                         continue
                     }
+                    // M02 2026-10-19: a press opened a commit-on-confirm field's edit (a date popup's pick lands in it), and
+                    // nothing since ended it. By receipts, whatever the wording; asked once, a second done stands.
+                    if !challengedOpenEdit, let open = Self.editLeftOpen(receipts) {
+                        challengedOpenEdit = true
+                        traced(["tool": toolName, "args": args, "ok": false, "error": "editNotCommitted"])
+                        if wrappingUp { return finish(.stepCap(left: open)) }
+                        answer(["ok": false, "error": "editNotCommitted",
+                                "message": open + ". End the edit the way the app commits it, read the screen to see the value held, "
+                                    + "then call done again; if it is already saved, call done again."])
+                        continue
+                    }
                     // A creation claim is held against the screen as it is NOW, after every step (E03 2026-10-13).
                     // So is an owner's clock time once something was typed (E12 2026-10-15) — one read for both.
                     let checksTime = !challengedUnsetTime && !readOnly && !Self.clockTimes(in: heard ?? "").isEmpty
@@ -870,6 +887,7 @@ final class AgentLoop {
                 var result: [String: Any] = [:]
                 var call: RealtimeToolCall?
                 var pressedRole: String?
+                var opensEdit = false
                 var harnessMs = 0
                 var waited = false
                 var args: [String: Any] = [:]
@@ -932,6 +950,7 @@ final class AgentLoop {
                     let dispatch = await dependencies.execute(parsed, true, observation, remaining())
                     (result, harnessMs, waited, call) = (dispatch.result, dispatch.harnessMilliseconds, dispatch.waitedForConfirmation, parsed)
                     pressedRole = RealtimeOpenAppTool.pressedRole(dispatch.harnessResponse)
+                    opensEdit = toolName == RealtimeVoiceVerbs.pressElementName && Self.pressOpensEdit(dispatch.harnessResponse)
                     record(parsed, dispatch)
                 }
                 if phase == .waitingForCard { move(to: .acting) }
@@ -954,6 +973,7 @@ final class AgentLoop {
                                         submitted: ok && toolName == RealtimeVoiceVerbs.typeTextName && Self.typeWasSubmitted(result),
                                         awaitsCommit: ok && toolName == RealtimeVoiceVerbs.typeTextName && !Self.typeWasSubmitted(result)
                                             && result["fieldCommitsOnConfirm"] as? Bool == true,
+                                        opensEdit: ok && opensEdit,
                                         moreBelow: ok && toolName == AgentLoopTools.readPageName && result["moreBelow"] as? Bool == true,
                                         targets: call.flatMap(Self.itemTargets)))
                 var fields: [String: Any] = ["tool": toolName, "args": args, "ok": ok, "error": error ?? NSNull(), "harnessMs": harnessMs,
@@ -1365,6 +1385,21 @@ final class AgentLoop {
     nonisolated static func typeWasSubmitted(_ result: [String: Any]) -> Bool {
         guard let confirm = result["confirm"] as? [String: Any] else { return false }
         return confirm["published"] as? Bool == true && (confirm["axErrorRawValue"] as? NSNumber)?.intValue == 0
+    }
+
+    /// A harness press response that focused a text input saving only on AXConfirm — not a search field,
+    /// which filters as it is typed in and has nothing to save (`fieldCommitsOnConfirm` on `click`).
+    nonisolated static func pressOpensEdit(_ harnessResponse: [String: Any]?) -> Bool {
+        guard harnessResponse?["fieldCommitsOnConfirm"] as? Bool == true else { return false }
+        return (harnessResponse?["resolved"] as? [String: Any])?["subrole"] as? String != "AXSearchField"
+    }
+
+    /// The task's last ok press into a commit-on-confirm field, when nothing `committedAfter` it: a popup's
+    /// pick (a visionClick, no resolved role) does not end the edit. Why, in words, or nil.
+    static func editLeftOpen(_ receipts: [Receipt]) -> String? {
+        guard let open = receipts.lastIndex(where: \.opensEdit), !committedAfter(open, in: receipts) else { return nil }
+        return "step \(receipts[open].step) pressed into a field that saves only when its edit is committed, and nothing since "
+            + "committed it (no submitted type_text, no button press), so what it shows may not be saved yet"
     }
 
     /// What commits an entry typed at `index`: a later submitted typing, or a later ok press on a BUTTON —
