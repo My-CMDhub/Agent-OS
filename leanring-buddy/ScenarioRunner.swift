@@ -129,7 +129,9 @@ struct RunnerScenario {
     /// The fixture spoken; defaults to `id`.
     var utterance: String? = nil
     var requiresAgentLoop = false
-    /// Spoken first, `seconds` before the scenario's own utterance (B8's "stop").
+    /// Spoken first; the scenario's own utterance (B8's "stop") follows as soon as the task it
+    /// started is running, waiting at most `seconds`. A fixed 6 s wait landed B8's "stop" after
+    /// the task had ended: on Haiku B2 runs 4.3 s (scenario run 2026-10-18T20-45-38Z).
     var prelude: (utterance: String, seconds: Double)? = nil
     /// Quit after the scenario when they were not running before it.
     var quitIfLaunched: [String] = []
@@ -771,7 +773,7 @@ enum ScenarioRunner {
         if let prelude = scenario.prelude {
             _ = await speak(prelude.utterance)
             let until = uptime + prelude.seconds
-            while uptime < until { watch(); try? await Task.sleep(for: .milliseconds(100)) }
+            while uptime < until, session.agentLoop == nil { watch(); try? await Task.sleep(for: .milliseconds(100)) }
         }
         let turnID = await speak(scenario.fixtureID)
         let release = uptime
