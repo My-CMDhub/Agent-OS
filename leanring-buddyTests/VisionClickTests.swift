@@ -226,4 +226,20 @@ struct VisionClickTests {
         #expect(!HarnessHands.transientPopupOverFocusedWindow(subrole: "AXUnknown", frame: CGRect(x: 600, y: 300, width: 0, height: 0),
                                                               focusedWindowFrame: window))
     }
+
+    /// OCR wraps a label over two lines ("Today" above "19/10/2026", E12 2026-10-19): the line break
+    /// is a space. Each word must still be read exactly, and the run must still hold the point.
+    @Test func aLabelWrappedOverTwoLinesIsOneRunOfWords() {
+        let today = line([word("Today", 620, 50, y: 410)])
+        let date = line([word("19/10/2026", 620, 90, y: 390)])
+        let point = CGPoint(x: 650, y: 410)
+        guard case .matched(let text, _) = ScreenOCR.witness(lines: [date, today], point: point, label: "Today 19/10/2026") else {
+            Issue.record("the wrapped label was not read at the point"); return
+        }
+        #expect(text == "Today 19/10/2026", "read top to bottom, whatever order OCR listed the lines in")
+        #expect(ScreenOCR.witness(lines: [date, today], point: point, label: "Today 20/10/2026")
+            == .mismatch(textAtPoint: "19/10/2026\nToday"), "a different date is still a mismatch")
+        #expect(ScreenOCR.witness(lines: [date, today], point: point, label: "19/10/2026 Today")
+            == .mismatch(textAtPoint: "19/10/2026\nToday"), "out of reading order is not the label")
+    }
 }

@@ -58,14 +58,19 @@ nonisolated enum ScreenOCR {
     }
 
     /// The label (case, accents and punctuation folded) must be a run of words of
-    /// one line whose boxes hold the point. Exact tokens: OCR that misreads one
+    /// one line (or of the at-point lines read top to bottom) whose boxes hold the point. Exact tokens: OCR that misreads one
     /// letter is a mismatch, and a mismatch clicks nothing.
     static func witness(lines: [OCRLine], point: CGPoint, label: String) -> Witness {
         let wanted = RealtimeVoiceVerbs.foldedTokens(label)
         let atPoint = lines.filter { line in tokens(of: line).contains { reaches($0.frame, point) } }
         guard !atPoint.isEmpty else { return .noText }
         guard !wanted.isEmpty else { return .mismatch(textAtPoint: atPoint.map(\.text).joined(separator: "\n")) }
-        for line in atPoint {
+        // The at-point lines top to bottom as one more line: a label OCR wraps ("Today" over
+        // "19/10/2026", E12 2026-10-19) is one run of words once the line break is a space.
+        let stacked = atPoint.sorted { $0.frame.maxY > $1.frame.maxY }
+        let joined = OCRLine(text: stacked.map(\.text).joined(separator: " "), frame: stacked.map(\.frame).reduce(stacked[0].frame) { $0.union($1) },
+                             words: stacked.flatMap { $0.words.isEmpty ? [OCRWord(text: $0.text, frame: $0.frame)] : $0.words })
+        for line in atPoint + (atPoint.count > 1 ? [joined] : []) {
             let read = tokens(of: line)
             guard read.count >= wanted.count else { continue }
             for start in 0...(read.count - wanted.count) where read[start..<(start + wanted.count)].map(\.token) == wanted {
