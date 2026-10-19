@@ -204,7 +204,12 @@ enum GeneralitySuite {
     /// Any read of an app that may be quit, by the same launch-behind-and-quit rule.
     static func readLaunchingIfNeeded<T: Sendable>(_ bundle: String, _ body: @escaping @Sendable () -> T?) async -> T? {
         if NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first != nil {
-            return await Task.detached { body() }.value
+            // Running but not yet readable (a window still loading): asked again for 2 s, as a launch is.
+            for attempt in 0..<10 {
+                if let value = await Task.detached(operation: { body() }).value { return value }
+                if attempt < 9 { try? await Task.sleep(for: .milliseconds(200)) }
+            }
+            return nil
         }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return nil }
         let configuration = NSWorkspace.OpenConfiguration()

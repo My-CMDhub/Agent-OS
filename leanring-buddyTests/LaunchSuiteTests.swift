@@ -102,6 +102,13 @@ struct LaunchSuiteSandboxTests {
         #expect(GeneralitySuite.shoppingSkipReason(shown: "Shopping", items: ["Milk", "Eggs"]) != nil)
         #expect(GeneralitySuite.shoppingSkipReason(shown: "Shopping", items: ["Milk"]) == nil)
         #expect(GeneralitySuite.shoppingSkipReason(shown: "Reminders", items: ["Milk", "Eggs"]) == nil, "another list says nothing about Shopping")
+        // 2026-10-19: an unread count (no read, or a read with no list cells) skips before the run, never fails it.
+        #expect(GeneralitySuite.shoppingPre(nil)[GeneralitySuite.skipReasonKey] is String)
+        #expect(GeneralitySuite.shoppingPre((nil, "Shopping", []))[GeneralitySuite.skipReasonKey] is String)
+        #expect(GeneralitySuite.shoppingPre((nil, nil, []))["shoppingBefore"] is NSNull)
+        let counted = GeneralitySuite.shoppingPre((0, "Reminders", []))
+        #expect(counted["shoppingBefore"] as? Int == 0 && counted[GeneralitySuite.skipReasonKey] is NSNull)
+        #expect(GeneralitySuite.shoppingPre((3, "Shopping", ["Milk", "Eggs"]))[GeneralitySuite.skipReasonKey] is String)
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: before,
             spoken: "There is report-draft.txt instead of report.txt in JARVIS-sandbox. Should I rename report-draft.txt to final.txt?")["passed"] as? Bool == true)
         #expect(GeneralitySuite.notFoundVerdict(before: before, after: before,

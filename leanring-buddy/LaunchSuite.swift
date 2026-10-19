@@ -113,9 +113,10 @@ extension GeneralitySuite {
         SuiteTask(id: "E04", pattern: "add items to a named list (Reminders)",
                   words: "add milk and eggs to my shopping list in Reminders, and make a list called Shopping if I don't have one",
                   apps: [reminders], pre: {
-                      let before = await readLaunchingIfNeeded(reminders) { shoppingList() }
-                      return ["shoppingBefore": before?.count as Any? ?? NSNull(),
-                              skipReasonKey: shoppingSkipReason(shown: before?.shown, items: before?.items ?? []) as Any? ?? NSNull()]
+                      // 2026-10-19 09-42-21Z: before read null, so a run that added both failed. shoppingList() never
+                      // returns nil, so the launch wait took its first, empty read; a counted read is asked for again.
+                      let before = await readLaunchingIfNeeded(reminders) { shoppingListIfCounted() }
+                      return shoppingPre(before)
                   }) { _, run in
                       let after = await read { shoppingList() }
                       return shoppingVerdict(before: run["shoppingBefore"] as? Int, after: after?.count ?? nil,
@@ -321,6 +322,20 @@ extension GeneralitySuite {
             nodes += root.flattenedDescendants()
         }
         return shoppingRead(nodes.map { ($0.role, $0.elementDescription?.raw ?? "") })
+    }
+
+    /// `shoppingList` only when the sidebar's count was read; nil asks `readLaunchingIfNeeded` again.
+    nonisolated static func shoppingListIfCounted() -> (count: Int?, shown: String?, items: [String])? {
+        let read = shoppingList()
+        return read.count == nil ? nil : read
+    }
+
+    /// E04's pre: an unread count skips before the run — a broken read never becomes a failed task.
+    nonisolated static func shoppingPre(_ before: (count: Int?, shown: String?, items: [String])?) -> [String: Any] {
+        guard let before, let count = before.count else {
+            return ["shoppingBefore": NSNull(), skipReasonKey: "Reminders' list counts could not be read before the run (unreadable truth)"]
+        }
+        return ["shoppingBefore": count, skipReasonKey: shoppingSkipReason(shown: before.shown, items: before.items) as Any? ?? NSNull()]
     }
 
     nonisolated static func shoppingRead(_ described: [(role: String, description: String)]) -> (count: Int?, shown: String?, items: [String]) {
