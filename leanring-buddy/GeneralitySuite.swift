@@ -58,7 +58,7 @@ enum GeneralitySuite {
                reminders = "com.apple.reminders", calendar = "com.apple.iCal", calculator = "com.apple.calculator",
                activity = "com.apple.ActivityMonitor", xcode = "com.apple.dt.Xcode", textEdit = "com.apple.TextEdit",
                fontBook = "com.apple.FontBook", dictionary = "com.apple.Dictionary", cursor = "com.todesktop.230313mzl4w4u92",
-               weather = "com.apple.weather", chrome = "com.google.Chrome"
+               weather = "com.apple.weather", chrome = "com.google.Chrome", helpViewer = "com.apple.helpviewer"
 
     static var macOSVersion: String {
         let version = ProcessInfo.processInfo.operatingSystemVersion
@@ -89,8 +89,10 @@ enum GeneralitySuite {
                       let month = await read { appHas(calendar) { $0.listedName?.raw == "Month" && $0.selected == true } }
                       return verdict(month == true, ["monthSelected": month as Any? ?? NSNull()])
                   },
+        // Help Viewer (shown as "Tips") too: a task that opened it and left it running left "memory" in its search field,
+        // and the next run read that as its own typing (2026-10-18T20-40-46Z).
         SuiteTask(id: "G07", pattern: "Help-menu search", words: "open the Help menu in Calculator and search it for memory",
-                  apps: [calculator]) { spoken, run in
+                  apps: [calculator, helpViewer]) { spoken, run in
                       helpSearchVerdict(calls: run["calls"] as? [[String: Any]] ?? [], spoken: spoken)
                   },
         SuiteTask(id: "G08", pattern: "sort / read a table", words: "which process is using the most memory right now? check Activity Monitor",
@@ -306,7 +308,9 @@ enum GeneralitySuite {
         let found = searches.flatMap { $0["found"] as? [String] ?? [] }
         let said = Set(RealtimeVoiceVerbs.foldedTokens(spoken))
         let named = found.first { entry in
-            let words = Set(RealtimeVoiceVerbs.foldedTokens(entry).filter { $0.count >= 3 }).subtracting(RealtimeVoiceVerbs.ignoredQueryWords)
+            // 4+ letters: "use"/"mac" prefix-matched "User Guide", so "Use the scientific calculator on Mac" passed an
+            // answer naming no topic (2026-10-19T22-36-50Z). ponytail: a 3-letter topic word no longer counts.
+            let words = Set(RealtimeVoiceVerbs.foldedTokens(entry).filter { $0.count >= 4 }).subtracting(RealtimeVoiceVerbs.ignoredQueryWords)
             return !words.isEmpty && words.filter { word in said.contains { RealtimeVoiceVerbs.tokensMatch(word, $0) } }.count >= min(2, words.count)
         }
         return ["passed": named != nil, "memorySearches": searches.count, "resultsReturned": found.count]

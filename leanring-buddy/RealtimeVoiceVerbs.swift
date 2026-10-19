@@ -212,7 +212,8 @@ nonisolated enum RealtimeVoiceVerbs {
                     ]),
         Declaration(name: searchHelpName,
                     description: "Searches the Help menu of the app in front: returns menu commands you may then press with press_menu, and "
-                        + "help topic titles to read out (never pressed). Prefer find_menu_items when you know the command's words.",
+                        + "help topic titles to read out (never pressed). Prefer find_menu_items when you know the command's words. To search an "
+                        + "app's Help, use this, never its help window: that window's search field runs no search when typed into.",
                     parameters: [
                         appInFront,
                         Parameter(name: "words", description: "What to search the app's Help for, for example \"memory\".")

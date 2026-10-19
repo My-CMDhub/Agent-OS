@@ -185,5 +185,23 @@ struct HelpSearchTests {
         #expect(GeneralitySuite.helpSearchVerdict(calls: other, spoken: "show paper tape is in View")["passed"] as? Bool == false)
         let failed: [[String: Any]] = [["tool": "search_help", "ok": false, "words": "memory", "found": NSNull()]]
         #expect(GeneralitySuite.helpSearchVerdict(calls: failed, spoken: "memory functions in calculator")["passed"] as? Bool == false)
+        // Live 2026-10-19T22-36-50Z: "Calculator User Guide" is not "Use the scientific calculator on Mac".
+        let live: [[String: Any]] = [["tool": "search_help", "ok": true, "words": "memory",
+                                      "found": ["\"Choose the right mode in Calculator on Mac\"", "\"Use the scientific calculator on Mac\""]]]
+        #expect(GeneralitySuite.helpSearchVerdict(calls: live, spoken: "I chose Calculator Help, which opened the Calculator User Guide; "
+            + "the search did not return anything I could read.")["passed"] as? Bool == false)
+        #expect(GeneralitySuite.helpSearchVerdict(calls: live, spoken: "Two topics came back: Use the scientific calculator on Mac, "
+            + "and Choose the right mode.")["passed"] as? Bool == true)
+    }
+
+    /// G07 2026-10-18, measured live: Tips' AXSearchField took "memory" by AX write and answered
+    /// AXConfirm with success, and the window stayed on the welcome page — so the model is sent to
+    /// search_help, and the suite quits the Help Viewer a G07 run opened (its leftover query was
+    /// read as the next run's own typing).
+    @Test func helpSearchIsTheRouteAndG07CleansUpTheHelpViewer() throws {
+        let declaration = try #require(RealtimeVoiceVerbs.anthropicDeclarations().first { $0["name"] as? String == "search_help" })
+        #expect((declaration["description"] as? String)?.contains("never its help window") == true)
+        let g07 = try #require(GeneralitySuite.tasks.first { $0.id == "G07" })
+        #expect(g07.apps.contains("com.apple.helpviewer"))
     }
 }
