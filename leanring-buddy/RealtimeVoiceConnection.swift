@@ -1172,11 +1172,17 @@ final class RealtimeVoiceConnection {
     }
 
     /// An agent step's heardNamedMismatch proceeds only in an app or tab this task
-    /// opened itself: what the task opened, it opened on the owner's words.
+    /// opened itself (what the task opened, it opened on the owner's words), or in the
+    /// app in front when the owner asked: the app their words named is where it ends,
+    /// the one they were looking at is where it starts. Scenario run 2026-10-18T20-45-38Z
+    /// B13 "copy the order number into a new textedit note" with the order page in Chrome:
+    /// every Chrome step refused, so the task ended done with an empty note. The start app
+    /// already acts when no app is heard (`agentStepActsInUnnamedApp`); naming the
+    /// destination takes nothing away from it.
     nonisolated static func agentStepMayActDespiteMismatch(outcome: RealtimeHeardCheck.Outcome, callBundle: String?,
-                                                           openedByTask: Set<String>) -> Bool {
+                                                           openedByTask: Set<String>, startBundle: String? = nil) -> Bool {
         guard outcome == .heardNamedMismatch, let callBundle else { return false }
-        return openedByTask.contains(callBundle)
+        return openedByTask.contains(callBundle) || callBundle == startBundle
     }
 
     /// An agent step's appNameUnclear proceeds only in an app the task opened
@@ -1291,7 +1297,8 @@ final class RealtimeVoiceConnection {
             }
             // The same for another app named where to act: a page this task opened is its own
             // (live 2026-10-08: "…then send it on LinkedIn" refused every press in the Meet tab it opened).
-            if isAgentStep, agentStepMayActDespiteMismatch(outcome: decision.outcome, callBundle: callBundle, openedByTask: agentOpenedBundles) {
+            if isAgentStep, agentStepMayActDespiteMismatch(outcome: decision.outcome, callBundle: callBundle, openedByTask: agentOpenedBundles,
+                                                            startBundle: agentStartBundle) {
                 var proceeding = RealtimeHeardCheck.Decision(outcome: .noAppHeard, heardApps: [], tier: nil)
                 proceeding.heardSlot = decision.heardSlot
                 return (proceeding, true, false, pageApp)

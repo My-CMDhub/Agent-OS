@@ -715,6 +715,13 @@ struct RealtimeHeardCheckTests {
                                                                         openedByTask: []))
         #expect(!RealtimeVoiceConnection.agentStepMayActDespiteMismatch(outcome: .ambiguousApp, callBundle: "com.google.Chrome",
                                                                         openedByTask: ["com.google.Chrome"]))
+        // B13 "copy the order number into a new textedit note": the page in front when the owner asked is the source.
+        #expect(RealtimeVoiceConnection.agentStepMayActDespiteMismatch(outcome: .heardNamedMismatch, callBundle: "com.google.Chrome",
+                                                                       openedByTask: [], startBundle: "com.google.Chrome"))
+        #expect(!RealtimeVoiceConnection.agentStepMayActDespiteMismatch(outcome: .heardNamedMismatch, callBundle: "com.apple.Terminal",
+                                                                        openedByTask: [], startBundle: "com.google.Chrome"))
+        #expect(!RealtimeVoiceConnection.agentStepMayActDespiteMismatch(outcome: .ambiguousApp, callBundle: "com.google.Chrome",
+                                                                        openedByTask: [], startBundle: "com.google.Chrome"))
     }
 
     // Asking "did you mean LinkedIn?" cannot unlock a mismatch the task's own words hold: a loop step is never told to ask.
