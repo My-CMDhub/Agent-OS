@@ -116,12 +116,18 @@ extension GeneralitySuite {
     /// closed, a read-only view change); nil — never [] — when the menu item is missing or the press fails.
     nonisolated static func scheduledBigVideoDue() -> [String]? {
         guard let pid = pid(reminders), pressMenuPath(["View", "Go To", "Scheduled"], pid: pid) else { return nil }
-        for _ in 0..<10 {
+        // A date picked from the Add Date popup lands only when the row's edit ends (2026-10-19: the row read due ""
+        // at the check and "…, Reminders, Tomorrow" minutes later), so a row with no due text yet is read again.
+        var last: [String]?
+        for _ in 0..<15 {
             Thread.sleep(forTimeInterval: 0.2)
             if let rows = reminderButtonsAndRows(), rows.buttons.contains(where: { $0.hasPrefix("Scheduled") }),
-               let due = bigVideoDue(buttons: rows.buttons, rows: rows.rows) { return due }
+               let due = bigVideoDue(buttons: rows.buttons, rows: rows.rows) {
+                last = due
+                if !due.contains(where: { $0.trimmingCharacters(in: .whitespaces).isEmpty }) { return due }
+            }
         }
-        return nil
+        return last
     }
 
     /// AXPress on a menu item found by its titles from the menu bar down; false when any step is missing.
