@@ -372,7 +372,11 @@ struct RealtimeScreenVerbsTests {
         #expect(approximate.candidate == nil)
         #expect(approximate.point == CGPoint(x: 720, y: 450))
         let press = RealtimeToolCall(callID: "b", name: "press_element", appName: "Cursor", x: 0.5, y: 0.5)
-        if case .failure(let refusal) = await resolve(press, display: screen) { #expect(refusal.error == "nothingAtPoint") } else { Issue.record("pressed nothing") }
+        if case .failure(let refusal) = await resolve(press, display: screen) {
+            #expect(refusal.error == "nothingAtPoint")
+            // B6/B12 2026-10-18: the old wording sent the voice to ask the owner what the button said.
+            #expect(refusal.message.contains("find_on_screen") && refusal.message.contains("Do not ask the owner"))
+        } else { Issue.record("pressed nothing") }
         // A password box or Clicky itself under the point: refused for both.
         if case .failure(let refusal) = await resolve(point, display: screen, hit: { _ in .refused(error: "secureField") }) {
             #expect(refusal.error == "secureField")

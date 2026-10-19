@@ -1119,8 +1119,11 @@ nonisolated enum RealtimeOpenAppTool {
                     return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .vision))
                 }
                 if isPress {
-                    return refuse("nothingAtPoint", "nothing that can be pressed is at that position; nothing was pressed. If it is drawn "
-                        + "there with words on it, call press_element again with its x and y AND the name printed on it.")
+                    // Scenario run 2026-10-18T20-45-38Z B6 "post it", B12 "click download": "if it is drawn there with words on
+                    // it" was read as a question for the owner ("please tell me what they are"); the owner had already named it.
+                    return refuse("nothingAtPoint", "nothing that can be pressed is at that position; nothing was pressed. Do not ask the "
+                        + "owner what it says: call find_on_screen now with the words they used for it, then press_element with the name "
+                        + "it returns.")
                 }
                 return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .screenshotPoint))
             }
