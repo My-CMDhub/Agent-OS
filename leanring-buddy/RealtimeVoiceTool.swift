@@ -569,6 +569,12 @@ nonisolated enum RealtimeOpenAppTool {
                            "seconds": RealtimeScreenVerbs.pointHoldSeconds, "expectApp": expectApp ?? appName]
                 break
             }
+            // A popup's element (Reminders' "Tomorrow"): by sight at its own centre, its name read back there.
+            if isPress, target.inPopup {
+                request = ["verb": "visionClick", "title": target.name, "expectApp": expectApp ?? appName,
+                           "nearPoint": ["x": Double(target.frame.midX), "y": Double(target.frame.midY)]]
+                break
+            }
             // The target's own frame picks out a shared name; the harness re-reads
             // the element and refuses if the name now resolves somewhere else.
             // A press is the harness's `click`: AXPress where published, else a real

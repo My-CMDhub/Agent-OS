@@ -2188,8 +2188,10 @@ final class HarnessServer {
             return ["ok": false, "error": "policyRefused", "message": reason]
         }
         var snapshot: AccessibilityWindowSnapshot
+        let target: AccessibilityTreeWalker.FocusedWindowTarget
         do {
-            snapshot = try AccessibilityTreeWalker.snapshotFocusedWindow()
+            target = try AccessibilityTreeWalker.focusedWindowTarget()
+            snapshot = try AccessibilityTreeWalker.snapshotFocusedWindow(target)
         } catch {
             let code = Self.errorCode(for: error)
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: code, startedAt: startedAt)
@@ -2218,6 +2220,18 @@ final class HarnessServer {
         }
 
         let actionable = Self.actionableElements(in: rootNode)
+        // forModel: the same app's transient popups over the focused window are part of what the
+        // owner sees (`HarnessHands.transientPopupWindows`), each element marked `popup` so a press
+        // goes by sight at its centre. Parents are offset into the one list; an unwalkable popup is counted.
+        var elements = request.forModel ? Self.namedElements(in: rootNode) : actionable.map(Self.summarise)
+        var popupWindowsUnread = 0
+        if request.forModel {
+            for popup in HarnessHands.transientPopupWindows(over: target.window, processIdentifier: target.application.processIdentifier) {
+                guard let popupRoot = (try? AccessibilityTreeWalker.snapshotWindow(popup, of: target.application, timeLimitInSeconds: 1))?.rootNode
+                else { popupWindowsUnread += 1; continue }
+                elements += Self.popupElements(Self.namedElements(in: popupRoot), offset: elements.count)
+            }
+        }
         audit(request, dryRun: dryRun, kernel: "n/a", outcome: "ok", startedAt: startedAt)
 
         return [
@@ -2240,7 +2254,8 @@ final class HarnessServer {
             // forModel: every NAMED element, any role, with its nearest listed
             // ancestor — the voice loop offers what is visible, and a label
             // inside a button is that button (`RealtimeScreenVerbs.visiblePool`).
-            "elements": request.forModel ? Self.namedElements(in: rootNode) : actionable.map(Self.summarise),
+            "elements": elements,
+            "popupWindowsUnread": popupWindowsUnread,
             // forModel: how many named elements the walk holds below the view — read_page says the page goes on.
             "namedBelowView": request.forModel ? Self.namedBelowView(in: rootNode) : 0,
             "thinTree": snapshot.nodeCount < FirstSightWake.thinTreeNodes,
@@ -2248,6 +2263,16 @@ final class HarnessServer {
                                                              "milliseconds": $0.milliseconds,
                                                              "manualAccessibilityAXError": Int($0.manualAccessibilityError)] } ?? NSNull()
         ]
+    }
+
+    /// A popup window's `namedElements`, appended after `offset` others: parents shifted, each marked `popup`.
+    static func popupElements(_ listed: [[String: Any]], offset: Int) -> [[String: Any]] {
+        listed.map { entry in
+            var entry = entry
+            entry["popup"] = true
+            if let parent = entry["parent"] as? Int { entry["parent"] = parent + offset }
+            return entry
+        }
     }
 
     /// The plain snapshot's `elements` and `actionableCount`: actionable nodes,

@@ -970,6 +970,35 @@ enum HarnessHands {
         return focusedWindowFrame.insetBy(dx: -popupAdjoinPoints, dy: -popupAdjoinPoints).intersects(frame)
     }
 
+    /// Pure: which of an app's windows are transient popups over its focused window —
+    /// the same rule a vision click lands by, never the focused window itself.
+    static func transientPopupIndices(among windows: [(isFocused: Bool, subrole: String?, frame: CGRect)],
+                                      focusedWindowFrame: CGRect) -> [Int] {
+        windows.indices.filter { index in
+            let window = windows[index]
+            return !window.isFocused && transientPopupOverFocusedWindow(subrole: window.subrole, frame: window.frame,
+                                                                        focusedWindowFrame: focusedWindowFrame)
+        }
+    }
+
+    /// The app's transient popups over `focused` (M02/E12 2026-10-19: Reminders' "Add Date"
+    /// suggestions are their own AXDialog window, so "Tomorrow" was invisible to a name).
+    /// Only this process's windows; empty when the focused frame cannot be read.
+    static func transientPopupWindows(over focused: AXUIElement, processIdentifier: pid_t) -> [AXUIElement] {
+        guard let focusedFrame = liveAppKitFrame(of: focused) else { return [] }
+        let application = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.5)
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return [] }
+        let described = windows.map { window -> (isFocused: Bool, subrole: String?, frame: CGRect) in
+            var subrole: AnyObject?
+            AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subrole)
+            return (CFEqual(window, focused), subrole as? String, liveAppKitFrame(of: window) ?? .zero)
+        }
+        return transientPopupIndices(among: described, focusedWindowFrame: focusedFrame).map { windows[$0] }
+    }
+
     /// The owner's mouse is still within reach of `point` (top-left, CGEvent's origin).
     static func mouseIsNear(topLeft point: CGPoint) -> Bool {
         guard let location = CGEvent(source: nil)?.location else { return false }

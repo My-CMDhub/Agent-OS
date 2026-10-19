@@ -117,6 +117,8 @@ nonisolated enum RealtimeScreenVerbs {
         var pressAncestor: RealtimeScreenPressTarget? = nil
         /// A radio button's, checkbox's or switch's state as the snapshot read it; nil when not read.
         var selected: Bool? = nil
+        /// Listed from the app's transient popup window, not the focused one (`popup` on the wire).
+        var popup = false
 
         /// press_element has something to click (`RealtimeScreenCandidate.clickTarget`).
         var isClickable: Bool {
@@ -195,7 +197,7 @@ nonisolated enum RealtimeScreenVerbs {
                 next = candidate["parent"] as? Int
             }
             let kept = PoolElement(name: name, role: role, subrole: subrole, frame: frame, pressable: pressable, parent: parentIndex,
-                                   pressAncestor: ancestor, selected: element["selected"] as? Bool)
+                                   pressAncestor: ancestor, selected: element["selected"] as? Bool, popup: element["popup"] as? Bool == true)
             // One per name, except two clickable controls apart from each other (scenario
             // B12 2026-10-03: two "Download" buttons offered as one, and the press guessed).
             let sameName = pool.filter { $0.name == name }
@@ -250,7 +252,7 @@ nonisolated enum RealtimeScreenVerbs {
                 RealtimeScreenCandidate(name: element.name, role: element.role, frame: element.frame,
                                         position: positionPhrase(of: element.frame, neighbours: neighbours, screens: display),
                                         subrole: element.subrole, pressable: element.pressable, pressAncestor: element.pressAncestor,
-                                        selected: element.selected)
+                                        selected: element.selected, inPopup: element.popup)
             },
             elementCount: (response["elements"] as? [[String: Any]])?.count ?? 0,
             privacyDroppedCount: hidden,
@@ -390,7 +392,8 @@ nonisolated enum RealtimeScreenVerbs {
             let element = pool[index]
             return RealtimeScreenCandidate(name: element.name, role: element.role, frame: element.frame,
                                            position: positionPhrase(of: element.frame, neighbours: [], screens: display),
-                                           subrole: element.subrole, pressable: element.pressable, pressAncestor: element.pressAncestor)
+                                           subrole: element.subrole, pressable: element.pressable, pressAncestor: element.pressAncestor,
+                                           inPopup: element.popup)
         }
     }
 
@@ -516,6 +519,9 @@ nonisolated struct RealtimeScreenCandidate: Equatable, Sendable {
     /// Without it a read could not say WHICH of Light/Dark/Auto is chosen: Gemini Flash and
     /// gpt-5-mini re-read Appearance to the step cap, Claude answered from the picture (G14, 2026-10-13).
     var selected: Bool? = nil
+    /// From the app's transient popup window: the harness's name verbs read only the focused
+    /// window, so a press goes by sight at its centre (`visionClick`, which re-checks the hit).
+    var inPopup = false
 
     var roleWord: String { RealtimeScreenVerbs.roleWord(role: role, subrole: subrole) }
 

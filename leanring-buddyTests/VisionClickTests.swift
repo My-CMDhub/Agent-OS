@@ -227,6 +227,45 @@ struct VisionClickTests {
                                                               focusedWindowFrame: window))
     }
 
+    /// The walk's window choice for names: only the same app's transient popups, never the
+    /// focused window twice, a second document window, or a popup far away (2026-10-19, M02).
+    @Test func onlyTransientPopupsOverTheFocusedWindowJoinTheNameWalk() {
+        let popup = CGRect(x: 600, y: 300, width: 180, height: 140)
+        let windows: [(isFocused: Bool, subrole: String?, frame: CGRect)] = [
+            (true, "AXStandardWindow", window),                                   // the focused window itself
+            (false, "AXDialog", popup),                                           // Add Date's suggestions
+            (false, "AXStandardWindow", popup),                                   // a second document window
+            (false, "AXUnknown", CGRect(x: 1200, y: 100, width: 180, height: 140)), // far from the window
+            (false, nil, popup),                                                   // subrole unread
+            (false, "AXUnknown", .zero)                                            // frame unread
+        ]
+        #expect(HarnessHands.transientPopupIndices(among: windows, focusedWindowFrame: window) == [1])
+        // Its elements join the one list with parents shifted past the focused window's, marked popup.
+        let shifted = HarnessServer.popupElements([["name": "Suggestions", "parent": NSNull()], ["name": "Tomorrow", "parent": 0]], offset: 5)
+        #expect(shifted[1]["parent"] as? Int == 5 && shifted[0]["parent"] is NSNull && shifted.allSatisfy { $0["popup"] as? Bool == true })
+    }
+
+    /// A popup's row is found by name and pressed by sight at its own centre, its name read back there.
+    @Test func aPopupRowFoundByNameIsPressedBySightAtItsCentre() throws {
+        let frame = { (rect: CGRect) -> [String: Any] in ["x": rect.minX, "y": rect.minY, "w": rect.width, "h": rect.height] }
+        let row = CGRect(x: 620, y: 400, width: 120, height: 20)
+        let response: [String: Any] = ["ok": true, "bundleIdentifier": "com.apple.reminders", "windowFrame": frame(window), "elements": [
+            ["name": "Add Date", "role": "AXTextField", "frame": frame(CGRect(x: 300, y: 500, width: 100, height: 20)), "parent": NSNull()],
+            ["name": "Tomorrow", "role": "AXStaticText", "frame": frame(row), "parent": NSNull(), "popup": true]
+        ]]
+        let found = RealtimeScreenVerbs.liveCandidates(named: "Tomorrow", fromSnapshotResponse: response, screens: [screen])
+        #expect(found.count == 1 && found.first?.inPopup == true)
+        #expect(RealtimeScreenVerbs.liveCandidates(named: "Add Date", fromSnapshotResponse: response, screens: [screen]).first?.inPopup == false)
+        let target = try #require(found.first)
+        let call = RealtimeToolCall(callID: "p", name: "press_element", appName: "com.apple.reminders", elementName: "Tomorrow")
+        let line = try RealtimeOpenAppTool.harnessRequestLine(for: call, expectApp: "com.apple.reminders", screenTarget:
+            RealtimeScreenTarget(candidate: target, point: CGPoint(x: row.midX, y: row.midY), app: "com.apple.reminders", source: .liveName)).get()
+        let request = try #require(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+        #expect(request["verb"] as? String == "visionClick" && request["title"] as? String == "Tomorrow")
+        let point = request["nearPoint"] as? [String: Double]
+        #expect(point?["x"] == Double(row.midX) && point?["y"] == Double(row.midY))
+    }
+
     /// OCR wraps a label over two lines ("Today" above "19/10/2026", E12 2026-10-19): the line break
     /// is a space. Each word must still be read exactly, and the run must still hold the point.
     @Test func aLabelWrappedOverTwoLinesIsOneRunOfWords() {
