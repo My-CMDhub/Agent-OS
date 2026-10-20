@@ -1183,6 +1183,8 @@ final class AgentLoop {
     static func goalText(goal: String, heard: String?, readOnly: Bool = false) -> String {
         var text = "The owner's goal: \(SecretScanner.redact(goal))"
         if let heard, !heard.allSatisfy(\.isWhitespace) { text += "\nThe owner's own words: \(SecretScanner.redact(heard))" }
+        // Siri's shape (2026-10-21): the due is read from the OWNER's words by code, never the goal the model wrote.
+        if let heard, let due = ReminderDue.note(heard: heard) { text += "\n" + SecretScanner.redact(due) }
         if readOnly { text += "\n" + readOnlyNote }
         return text
     }
