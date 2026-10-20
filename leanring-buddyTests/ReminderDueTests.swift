@@ -52,6 +52,7 @@ struct ReminderDueTests {
         let timed = ReminderDue.note(heard: "remind me to call Mom at 5 pm today", now: now, calendar: calendar, locale: locale)
         #expect(timed?.hasPrefix("Owner's due time, parsed from their words: Today 5:00 pm (timed).") == true)
         #expect(timed?.contains("\"at 5 pm today\"") == true)
+        #expect(timed?.contains("type the time \"5:00 pm\" into the reminder's Add Time field with type_text and submit true") == true)
         #expect(ReminderDue.note(heard: "remind me to review it tomorrow", now: now, calendar: calendar, locale: locale)?
             .contains("Tomorrow (all-day, no time)") == true)
         #expect(ReminderDue.note(heard: "remind me to call Mom at 5 today", now: now, calendar: calendar, locale: locale)?

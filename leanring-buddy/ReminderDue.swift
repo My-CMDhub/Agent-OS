@@ -74,7 +74,11 @@ nonisolated struct ReminderDue: Equatable {
             return nil
         case .timed(let date):
             return "Owner's due time, parsed from their words: \(display(date, now: now, calendar: calendar, locale: locale)) (timed). "
-                + title + "; set the date and time in the reminder's own Add Date / Add Time fields (Edit > Mark Due Date As for Today/Tomorrow)."
+                + title + "; set the date with Edit > Mark Due Date As (Today/Tomorrow) or the Add Date field, then type the time "
+                // E12 2026-10-21: set_value on "Add Time" came back adjustNotFound — it is a text field; type + submit
+                // is the measured path (47304cf).
+                + "\"\(clockTime(date, calendar: calendar))\" into the reminder's Add Time field with type_text and submit true "
+                + "(set_value does not apply to it)."
         case .allDay(let date):
             return "Owner's due date, parsed from their words: \(day(date, now: now, calendar: calendar, locale: locale)) (all-day, no time). "
                 + title + "; set only the date in the reminder's own Add Date field (Edit > Mark Due Date As for Today/Tomorrow), and no time."
@@ -86,10 +90,14 @@ nonisolated struct ReminderDue: Equatable {
     }
 
     static func display(_ date: Date, now: Date, calendar: Calendar, locale: Locale = .current) -> String {
+        day(date, now: now, calendar: calendar, locale: locale) + " " + clockTime(date, calendar: calendar)
+    }
+
+    /// "5:00 pm" — the form Reminders' Add Time field takes.
+    static func clockTime(_ date: Date, calendar: Calendar) -> String {
         let clock = calendar.dateComponents([.hour, .minute], from: date)
         let hour = clock.hour ?? 0
-        return day(date, now: now, calendar: calendar, locale: locale)
-            + String(format: " %d:%02d %@", (hour + 11) % 12 + 1, clock.minute ?? 0, hour < 12 ? "am" : "pm")
+        return String(format: "%d:%02d %@", (hour + 11) % 12 + 1, clock.minute ?? 0, hour < 12 ? "am" : "pm")
     }
 
     static func day(_ date: Date, now: Date, calendar: Calendar, locale: Locale) -> String {
