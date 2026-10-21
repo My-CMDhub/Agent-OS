@@ -209,4 +209,10 @@ struct LaunchSuiteSlice4Tests {
         #expect(Suite.shoppingPre(none)[Suite.skipReasonKey] is NSNull)
         #expect(Suite.shoppingVerdict(before: 0, after: held.count, shown: held.shown, items: held.items)["passed"] as? Bool == true)
     }
+
+    @Test func afterFivePmTheHonestReminderAnswerIsOneQuestion() {
+        #expect(GeneralitySuite.pastDueAskedHonestly(outcome: "askOwner", created: 0))
+        #expect(!GeneralitySuite.pastDueAskedHonestly(outcome: "done", created: 1), "a silently rolled or past reminder fails")
+        #expect(!GeneralitySuite.pastDueAskedHonestly(outcome: "askOwner", created: 1), "asked AND created is not the ruling")
+    }
 }

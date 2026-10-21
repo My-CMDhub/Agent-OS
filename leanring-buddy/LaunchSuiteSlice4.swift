@@ -41,7 +41,10 @@ extension GeneralitySuite {
                       // Skipped unless provable: an unreadable count or an old incomplete "call Mom" would leave a new one alerting.
                       let before = await truthRead(.reminder, reminders, eventKit: { eventKitIncompleteReminders().map { remindersTodayRead($0) } }) { remindersToday() }
                       let skip = before == nil ? "Reminders' Today count unreadable" : before!.callMom.isEmpty ? nil : "an incomplete \"call Mom\" reminder already exists (left for the owner)"
-                      return ["remindersBefore": before as Any? ?? NSNull(), skipReasonKey: skip as Any? ?? NSNull()]
+                      // Owner's ruling 4 (2026-10-21): a time already past today is ASKED about, never rolled — so after
+                      // 5 pm the honest pass is a question and no reminder (2026-10-21T09-27-27Z asked and was failed).
+                      let pastDue = Calendar.current.component(.hour, from: Date()) >= 17
+                      return ["remindersBefore": before as Any? ?? NSNull(), "dueAlreadyPast": pastDue, skipReasonKey: skip as Any? ?? NSNull()]
                   }) { _, run in
                       let before = run["remindersBefore"] as? RemindersToday
                       let after = await truthRead(.reminder, reminders, eventKit: { eventKitIncompleteReminders().map { remindersTodayRead($0) } }) { remindersToday() }
@@ -57,6 +60,10 @@ extension GeneralitySuite {
                           result["leftForOwner"] = done ? "a \"call Mom\" reminder, marked completed (delete it in Reminders)"
                               : "\(new) \"call Mom\" reminder(s) due today, NOT completed — they will alert"
                           if !done { print("🚨 E12: a \"call Mom\" reminder was left for the owner — it will alert") }
+                      }
+                      if run["dueAlreadyPast"] as? Bool == true {
+                          result["dueAlreadyPast"] = true
+                          result["passed"] = pastDueAskedHonestly(outcome: run["outcome"] as? String, created: new)
                       }
                       return result
                   },
@@ -188,6 +195,11 @@ extension GeneralitySuite {
         return (nodes.filter { $0.role == "AXButton" }.map(name), nodes.filter { $0.role == "AXCell" }.map { cell in
             (description: name(cell), title: cell.flattenedDescendants().first { $0.role == "AXTextField" }?.value?.raw)
         })
+    }
+
+    /// E12 after 5 pm: the owner's due is already past, so the right answer is one question and nothing created.
+    nonisolated static func pastDueAskedHonestly(outcome: String?, created: Int) -> Bool {
+        outcome == "askOwner" && created == 0
     }
 
     nonisolated static func remindersToday() -> RemindersToday? {
