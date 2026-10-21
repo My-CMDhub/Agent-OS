@@ -45,7 +45,7 @@ nonisolated enum AgentPlan {
         AgentLoopGemini.webLookupName: [["question"]], AgentLoopTools.doneName: [["summary"]],
         SettingsPaneLinks.toolName: [["name"]], RealtimeVoiceVerbs.findFileName: [["name"]],
         RealtimeVoiceVerbs.renameItemName: [["name", "new_name"]], RealtimeVoiceVerbs.moveItemsName: [["names", "to_folder"]],
-        RealtimeVoiceVerbs.setValueName: [["name", "value"]]
+        RealtimeVoiceVerbs.setValueName: [["name", "value"]], RealtimeVoiceVerbs.createReminderName: [["title"]]
     ]
 
     /// Anthropic tool JSON. Each step is a flat object: `tool` plus that
@@ -79,6 +79,8 @@ nonisolated enum AgentPlan {
                 "value": text("set_value: whole numbers, one per part, joined by \":\", for example \"0:10:00\"; a time picker takes \"6:45 AM\"."),
                 "names": ["type": "array", "items": ["type": "string"], "description": "move_items: each item's name as listed."],
                 "to_folder": text("move_items: the folder's path, or a folder's name in the same window."),
+                "title": text("create_reminder: the task only, never a date or time."),
+                "list": text("create_reminder: an existing list's exact name, only when the owner named one."),
                 "query": text("search_web: the words."),
                 "question": text("web_lookup: the question."),
                 "summary": text("done: what was achieved, spoken to the owner."),

@@ -954,7 +954,12 @@ final class RealtimeVoiceConnection {
         let heard = await heardCheck(for: resolvedCall, in: turn)
         // The owner's words, once complete (the check above waited for them).
         let heardWords = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime) != nil ? turn.heardText : nil
-        let call = RealtimeOpenAppTool.droppingUnsaidPointer(resolvedCall, heard: heardWords)
+        var call = RealtimeOpenAppTool.droppingUnsaidPointer(resolvedCall, heard: heardWords)
+        // create_reminder's due is the owner's words, never the model's: always replaced, waited for like the site check's.
+        if call.name == RealtimeVoiceVerbs.createReminderName {
+            let released = turn.lastAudioSentUptime ?? ProcessInfo.processInfo.systemUptime
+            call.words = await turn.waitForHeard(until: released + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds)
+        }
         // open_url: the owner's words must name the site (hands design item 7).
         var siteRefusal: [String: Any]?
         if call.name == RealtimeVoiceVerbs.openURLName, checksSite {

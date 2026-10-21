@@ -148,6 +148,11 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
         let moves = name == RealtimeVoiceVerbs.moveItemsName
         // set_value's `name` is the control's (`elementName`), its app is `app`, its numbers ride in `text`.
         let sets = name == RealtimeVoiceVerbs.setValueName
+        // create_reminder: the title rides in `text`, the list in `elementName`, no app; `words` is never the
+        // model's — `runToolCall` sets it to the owner's words, which the due is parsed from.
+        guard name != RealtimeVoiceVerbs.createReminderName else {
+            return RealtimeToolCall(callID: callID, name: name, appName: nil, elementName: text(arguments?["list"]), text: text(arguments?["title"]))
+        }
         return RealtimeToolCall(callID: callID, name: name,
                                 appName: findsFile || renames || moves ? nil : sets ? text(arguments?["app"]) : text(arguments?["name"]) ?? text(arguments?["app"]),
                                 words: words, path: moves ? (arguments?["names"] as? [Any])?.compactMap { $0 as? String } : path,
@@ -418,6 +423,16 @@ nonisolated enum RealtimeOpenAppTool {
                 return refuse("missingName", "rename_item needs the item's name as listed and the new name")
             }
             return encoded(["verb": "renameItem", "title": item, "text": newName, "expectApp": HarnessGoToFolder.finderBundleIdentifier])
+        }
+        // create_reminder: EventKit, no app in front needed; the due from the owner's words (`words`), never the model's.
+        if call.name == RealtimeVoiceVerbs.createReminderName {
+            guard let title = call.text else { return refuse("missingTitle", "create_reminder needs the task as its title") }
+            guard let heard = call.words, !heard.allSatisfy(\.isWhitespace) else {
+                return refuse("heardUnavailable", "the owner's words were not heard, so no due can be read from them; nothing was created")
+            }
+            var request: [String: Any] = ["verb": "createReminder", "title": title, "text": heard]
+            if let list = call.elementName { request["withinNamed"] = list }
+            return encoded(request)
         }
         // move_items: Finder's own Copy / Move Item Here, only with Finder in front (the harness checks).
         if call.name == RealtimeVoiceVerbs.moveItemsName {

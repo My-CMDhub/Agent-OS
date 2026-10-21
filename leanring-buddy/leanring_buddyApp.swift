@@ -81,6 +81,16 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // The createReminder probe's cleanup: marks "JARVIS " test reminders of one exact title completed
+        // (never the owner's, never deleted), writes the outcome, and quits.
+        if let argument = CommandLine.arguments.first(where: { $0.hasPrefix("--reminder-complete-title=") }) {
+            HarnessCreateReminder.completeTestReminders(titled: String(argument.dropFirst("--reminder-complete-title=".count))) { line in
+                try? line.write(toFile: "/private/tmp/clicky-reminder-complete.txt", atomically: true, encoding: .utf8)
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+            }
+            return
+        }
+
         // Spends API credit: capture -> Claude -> TTS download, five times, then quits.
         if CommandLine.arguments.contains("--voice-latency-probe") {
             Task { @MainActor in

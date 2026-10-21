@@ -63,12 +63,28 @@ nonisolated struct ReminderDue: Equatable {
 
     /// The one line a reminder task's first turn carries; nil when the owner's words name no reminder or give no due.
     /// Reminders is named by the same fixed stem the voice uses to pick the app (`builtInTaskNouns`).
-    static func note(heard: String, now: Date = Date(), calendar: Calendar = .current, locale: Locale = .current) -> String? {
+    /// `structured`: EventKit is granted, so the line points at create_reminder; else the measured UI path.
+    static func note(heard: String, now: Date = Date(), calendar: Calendar = .current, locale: Locale = .current,
+                     structured: Bool = false) -> String? {
         let stems = RealtimeHeardCheck.builtInTaskNouns["Reminders.app"] ?? []
         guard RealtimeVoiceVerbs.foldedTokens(heard).contains(where: { token in stems.contains { token.hasPrefix($0) } }) else { return nil }
         let due = parse(heard, now: now, calendar: calendar)
         let quoted = due.phrase.map { "\"\(heard[$0])\"" } ?? ""
         let title = "Put only the task in the reminder's title, never the date words \(quoted)"
+        if structured {
+            let tool = "Create it with create_reminder (title: the task only, never the date words \(quoted)); "
+                + "local code sets the due from the owner's words and reads it back."
+            switch due.kind {
+            case .none: return nil
+            case .timed(let date):
+                return "Owner's due time, parsed from their words: \(display(date, now: now, calendar: calendar, locale: locale)) (timed). " + tool
+            case .allDay(let date):
+                return "Owner's due date, parsed from their words: \(day(date, now: now, calendar: calendar, locale: locale)) (all-day, no time). " + tool
+            case .ambiguous(let reason):
+                return "The owner's due time is unclear (\(reason), in \(quoted)). Before creating the reminder, ask the owner that one question "
+                    + "with ask_owner; then " + tool.prefix(1).lowercased() + tool.dropFirst()
+            }
+        }
         switch due.kind {
         case .none:
             return nil

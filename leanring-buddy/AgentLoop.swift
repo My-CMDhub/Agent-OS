@@ -1184,7 +1184,7 @@ final class AgentLoop {
         var text = "The owner's goal: \(SecretScanner.redact(goal))"
         if let heard, !heard.allSatisfy(\.isWhitespace) { text += "\nThe owner's own words: \(SecretScanner.redact(heard))" }
         // Siri's shape (2026-10-21): the due is read from the OWNER's words by code, never the goal the model wrote.
-        if let heard, let due = ReminderDue.note(heard: heard) { text += "\n" + SecretScanner.redact(due) }
+        if let heard, let due = ReminderDue.note(heard: heard, structured: HarnessCreateReminder.isAuthorized) { text += "\n" + SecretScanner.redact(due) }
         if readOnly { text += "\n" + readOnlyNote }
         return text
     }
@@ -1254,7 +1254,9 @@ final class AgentLoop {
             guard let typedAt = receipts.lastIndex(where: { $0.ok && $0.typed?.lowercased().contains(wanted) == true }) else {
                 return "no ok type_text typed \"\(name)\", the name the summary says was created"
             }
-            if receipts[typedAt].toolName == RealtimeVoiceVerbs.renameItemName || receipts[typedAt].submitted { continue }
+            // create_reminder re-reads what it wrote from a fresh EventKit store: its ok is the made receipt.
+            if [RealtimeVoiceVerbs.renameItemName, RealtimeVoiceVerbs.createReminderName].contains(receipts[typedAt].toolName)
+                || receipts[typedAt].submitted { continue }
             if receipts[typedAt].awaitsCommit && !Self.committedAfter(typedAt, in: receipts) {
                 return "\"\(name)\" was typed into an entry that saves only when submitted, and it was not submitted, so nothing was "
                     + "created. Type it again with mode replace and submit true, or say only what was done"
@@ -1293,6 +1295,8 @@ final class AgentLoop {
     /// ponytail: a time typed only as message text ("tell Bob 5 pm") is asked about once too; a second done stands.
     static func unsetClockTime(heard: String?, receipts: [Receipt], screen: String) -> String? {
         guard let asked = clockTimes(in: heard ?? "").first else { return nil }
+        // create_reminder set the due from these same words and read it back: no screen holds it to judge by.
+        if receipts.contains(where: { $0.ok && $0.toolName == RealtimeVoiceVerbs.createReminderName }) { return nil }
         let typed = receipts.compactMap { $0.ok ? $0.typed : nil }
         guard !typed.isEmpty else { return nil }
         var rest = folded(screen)
@@ -1412,7 +1416,7 @@ final class AgentLoop {
     }
 
     /// Tools whose ok result carries a name the task gave something (`Receipt.typed`).
-    static let namingTools: Set<String> = [RealtimeVoiceVerbs.typeTextName, RealtimeVoiceVerbs.renameItemName]
+    static let namingTools: Set<String> = [RealtimeVoiceVerbs.typeTextName, RealtimeVoiceVerbs.renameItemName, RealtimeVoiceVerbs.createReminderName]
 
     static let pressTools: Set<String> = [RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName]
     // G16 2026-10-11: an ok open_settings_pane was no receipt for "opened Privacy & Security" (doneUnbacked x2).
@@ -1431,8 +1435,10 @@ final class AgentLoop {
         (["scrolled"], [RealtimeVoiceVerbs.scrollName]),
         // B05BEFEE (2026-10-08) claimed a draft "with the Meet link" it never wrote: draft-style effects need their own kind.
         (["drafted", "pasted"], [RealtimeVoiceVerbs.typeTextName, RealtimeVoiceVerbs.pressMenuName]),
-        (["copied", "attached", "scheduled"], pressTools),
-        (["added", "created"], pressTools.union([RealtimeVoiceVerbs.typeTextName])),
+        (["copied", "attached"], pressTools),
+        // An ok create_reminder was written and read back by identifier (`HarnessCreateReminder`).
+        (["scheduled"], pressTools.union([RealtimeVoiceVerbs.createReminderName])),
+        (["added", "created"], pressTools.union([RealtimeVoiceVerbs.typeTextName, RealtimeVoiceVerbs.createReminderName])),
         // U02 2026-10-13: only a press that resolved to a toggle (`Receipt.pressedRole`).
         (toggleWords, [RealtimeOpenAppTool.toggleReceipt])
     ]

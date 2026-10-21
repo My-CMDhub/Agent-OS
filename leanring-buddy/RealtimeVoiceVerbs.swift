@@ -53,10 +53,12 @@ nonisolated enum RealtimeVoiceVerbs {
     static let setValueName = "set_value"
     /// A local Spotlight lookup by name (`FileFinder`, owner's ruling 2026-10-12): paths only, no harness.
     static let findFileName = "find_file"
+    /// One reminder through EventKit, its due parsed from the owner's words (`HarnessCreateReminder`, 2026-10-21).
+    static let createReminderName = "create_reminder"
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName, searchHelpName,
                                             findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
                                             openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName, goToFolderName,
-                                            findFileName, renameItemName, moveItemsName, setValueName]
+                                            findFileName, renameItemName, moveItemsName, setValueName, createReminderName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
@@ -196,6 +198,15 @@ nonisolated enum RealtimeVoiceVerbs {
                                  Parameter(name: "name", description: "The control's exact name as find_on_screen lists it, for example \"Timer\"."),
                                  Parameter(name: "value", description: "Whole numbers, one per part, joined by \":\", for example \"0:10:00\" or \"75\"; "
                                            + "for a time-of-day picker, the time, for example \"6:45 AM\"; for a level slider, a percent, for example \"30%\".")]),
+        Declaration(name: createReminderName,
+                    description: "The way to create a reminder: writes it straight into Reminders and reads it back, no app window needed. "
+                        + "Give only the task as the title (\"Call Mom\"), never a date or time: the due date and time are read from the "
+                        + "owner's own words by local code, all-day when they named a day with no time. If the result says the due is "
+                        + "unclear, ask the owner that one question with ask_owner, then call create_reminder again. Say the result's "
+                        + "read-back to the owner. Only if it is refused for access, make the reminder in the Reminders app instead.",
+                    parameters: [Parameter(name: "title", description: "The task only, for example \"Call Mom\"; no date or time words."),
+                                 Parameter(name: "list", required: false,
+                                           description: "An existing list's exact name, only when the owner named one; leave it out for the default list.")]),
         Declaration(name: findFileName,
                     description: "Finds files, folders or apps on this Mac by name (Spotlight); returns up to \(FileFinder.maximumPaths) paths. "
                         + "Then go_to_folder a folder's path to look inside it.",
@@ -672,6 +683,8 @@ nonisolated enum RealtimeVoiceVerbs {
             return "Scrolling\(way)\u{2026}"
         case typeTextName:
             return "Typing\u{2026}"
+        case createReminderName:
+            return "Adding a reminder\u{2026}"
         case findFileName:
             return "Looking for \u{2018}\(call.text.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2019} on this Mac\u{2026}"
         case moveItemsName:
