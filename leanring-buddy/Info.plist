@@ -10,6 +10,10 @@
 	<string>Clicky uses your microphone so you can talk to it</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Clicky needs screen recording access to see your screen and help you.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>J.A.R.V.I.S. adds the calendar events you ask for and reads back only the ones it made, to confirm them.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>J.A.R.V.I.S. adds the calendar events you ask for and reads back only the ones it made, to confirm them.</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
 	<string>J.A.R.V.I.S. creates the reminders you ask for and reads back only the ones it made, to confirm them.</string>
 	<key>NSRemindersUsageDescription</key>

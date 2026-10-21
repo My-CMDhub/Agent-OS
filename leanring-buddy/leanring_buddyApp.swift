@@ -91,6 +91,18 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Same for Calendar (owner 2026-10-21): asks once, writes the outcome, quits.
+        if CommandLine.arguments.contains("--calendar-access-request") {
+            let store = EKEventStore()
+            store.requestFullAccessToEvents { granted, error in
+                let status = EKEventStore.authorizationStatus(for: .event).rawValue
+                let line = "granted: \(granted), status: \(status), error: \(error.map { ($0 as NSError).code.description } ?? "none")"
+                try? line.write(toFile: "/private/tmp/clicky-calendar-access.txt", atomically: true, encoding: .utf8)
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+            }
+            return
+        }
+
         // Spends API credit: capture -> Claude -> TTS download, five times, then quits.
         if CommandLine.arguments.contains("--voice-latency-probe") {
             Task { @MainActor in
