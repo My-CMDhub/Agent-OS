@@ -170,4 +170,43 @@ struct LaunchSuiteSlice4Tests {
         #expect(Suite.uninstallVerdict(present: true, calls: [["tool": "press_menu", "ok": true, "target": "File > Move to Bin"]], spoken: honest)["passed"] as? Bool == false)
         #expect(Suite.uninstallVerdict(present: true, calls: [], spoken: "Done, Calculator is uninstalled.")["passed"] as? Bool == false)
     }
+
+    /// EventKit readings come back in the AX rows' measured shapes, so the unchanged verdicts judge them.
+    @Test func eventKitReadingsKeepTheAXShapes() {
+        let calendar = Calendar.current
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 9))!
+        let threePM = calendar.date(from: DateComponents(year: 2026, month: 10, day: 22, hour: 15))!
+        let meeting = Suite.eventDescription(title: "JARVIS test meeting", start: threePM, allDay: false)
+        #expect(Suite.isTestMeeting(meeting, day: Suite.tomorrowDay(now: now)))
+        #expect(Suite.timedEventTitle(meeting) == "JARVIS test meeting")
+        #expect(Suite.timedEventTitle(Suite.eventDescription(title: "Labour Day", start: threePM, allDay: true)) == nil)
+        #expect(!Suite.isTestMeeting(Suite.eventDescription(title: "JARVIS test meeting", start: threePM.addingTimeInterval(1800), allDay: false),
+                                     day: Suite.tomorrowDay(now: now)))
+
+        func due(_ day: Int, _ hour: Int?) -> DateComponents {
+            DateComponents(calendar: calendar, year: 2026, month: 10, day: day, hour: hour, minute: hour == nil ? nil : 0)
+        }
+        let call = Suite.IncompleteReminder(title: "Call Mom", list: "Reminders", due: due(21, 17))
+        let review = Suite.IncompleteReminder(title: "Review big-video.mov", list: "Shopping", due: due(22, nil))
+        let overdue = Suite.IncompleteReminder(title: "Pay rent", list: "Reminders", due: due(20, 9))
+        let undated = Suite.IncompleteReminder(title: "milk", list: "Shopping", due: nil)
+        #expect(Suite.saysFivePM(Suite.reminderDueText(call, now: now)))
+        #expect(Suite.saysTomorrow(Suite.reminderDueText(review, now: now), now: now))
+        #expect(!Suite.saysTomorrow(Suite.reminderDueText(undated, now: now), now: now))
+        let today = Suite.remindersTodayRead([call, review, overdue, undated], now: now)
+        #expect(today.today == 2)
+        #expect(today.callMom == ["Incomplete, Call Mom, Reminders, Today at 5:00 pm"])
+        #expect(Suite.callMomVerdict(before: Suite.remindersTodayRead([overdue], now: now), after: today)["passed"] as? Bool == true)
+        #expect(Suite.matching([call, review, undated], Suite.bigVideoPhrases) == [review])
+
+        // Shopping by its title, whatever list the window shows: leftovers skip, a new pair passes.
+        let eggs = Suite.IncompleteReminder(title: "Eggs", list: "Shopping", due: nil)
+        let held = Suite.shoppingRead([undated, eggs, call], listTitles: ["Reminders", "Shopping"])
+        #expect(held.count == 2 && held.shown == "Shopping" && held.items == ["milk", "Eggs"])
+        #expect(Suite.shoppingSkipReason(shown: held.shown, items: held.items) != nil)
+        let none = Suite.shoppingRead([call], listTitles: ["Reminders"])
+        #expect(none.count == 0 && none.shown == nil)
+        #expect(Suite.shoppingPre(none)[Suite.skipReasonKey] is NSNull)
+        #expect(Suite.shoppingVerdict(before: 0, after: held.count, shown: held.shown, items: held.items)["passed"] as? Bool == true)
+    }
 }

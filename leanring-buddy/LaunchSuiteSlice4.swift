@@ -14,6 +14,7 @@
 
 import AppKit
 import ApplicationServices
+import EventKit
 import Foundation
 
 extension GeneralitySuite {
@@ -38,13 +39,14 @@ extension GeneralitySuite {
         SuiteTask(id: "E12", pattern: "a timed reminder (Reminders)", words: "remind me to call Mom at 5 pm today", apps: [reminders],
                   pre: {
                       // Skipped unless provable: an unreadable count or an old incomplete "call Mom" would leave a new one alerting.
-                      let before = await readLaunchingIfNeeded(reminders) { remindersToday() }
+                      let before = await truthRead(.reminder, reminders, eventKit: { eventKitIncompleteReminders().map { remindersTodayRead($0) } }) { remindersToday() }
                       let skip = before == nil ? "Reminders' Today count unreadable" : before!.callMom.isEmpty ? nil : "an incomplete \"call Mom\" reminder already exists (left for the owner)"
                       return ["remindersBefore": before as Any? ?? NSNull(), skipReasonKey: skip as Any? ?? NSNull()]
                   }) { _, run in
                       let before = run["remindersBefore"] as? RemindersToday
-                      let after = await readLaunchingIfNeeded(reminders) { remindersToday() }
+                      let after = await truthRead(.reminder, reminders, eventKit: { eventKitIncompleteReminders().map { remindersTodayRead($0) } }) { remindersToday() }
                       var result = callMomVerdict(before: before, after: after)
+                      result["truthSource"] = truthSource(.reminder)
                       let new = (after?.callMom.count ?? 0) - (before?.callMom.count ?? 0)
                       if new > 0 {
                           // Provably ours (none before, one now): marked completed so it cannot alert at 5 pm. Never deleted.
@@ -60,11 +62,13 @@ extension GeneralitySuite {
                   },
         SuiteTask(id: "E13", pattern: "read tomorrow's events (Calendar)", words: "what meetings do I have tomorrow?", apps: [calendar],
                   pre: {
-                      let events = await readLaunchingIfNeeded(calendar) { tomorrowEvents() }
-                      return ["tomorrowEvents": events as Any? ?? NSNull(),
+                      let events = await truthRead(.event, calendar, eventKit: { eventKitTomorrowEvents() }) { tomorrowEvents() }
+                      return ["tomorrowEvents": events as Any? ?? NSNull(), "truthSource": truthSource(.event),
                               skipReasonKey: events == nil ? "Calendar did not show tomorrow in a month grid (unreadable truth)" as Any : NSNull()]
                   }) { spoken, run in
-                      meetingsVerdict(spoken: spoken, events: run["tomorrowEvents"] as? [String])
+                      var result = meetingsVerdict(spoken: spoken, events: run["tomorrowEvents"] as? [String])
+                      result["truthSource"] = run["truthSource"] ?? NSNull()
+                      return result
                   },
         SuiteTask(id: "E14", pattern: "read a system value (free space)", words: "how much free space is on my Mac?",
                   apps: [settings, finder]) { spoken, _ in freeSpaceVerdict(spoken: spoken, truthsGB: freeSpaceTruthsGB()) },

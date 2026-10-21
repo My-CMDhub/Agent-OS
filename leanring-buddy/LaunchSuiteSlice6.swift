@@ -12,6 +12,7 @@
 //
 
 import ApplicationServices
+import EventKit
 import Foundation
 
 extension GeneralitySuite {
@@ -21,15 +22,16 @@ extension GeneralitySuite {
                   apps: [reminders, settings],
                   pre: {
                       let battery = batteryPercent(pmset: output("/usr/bin/pmset", ["-g", "batt"]))
-                      let before = await readLaunchingIfNeeded(reminders) { allChargeRows() }
+                      let before = await truthRead(.reminder, reminders, eventKit: { eventKitIncompleteReminders().map { matching($0, chargePhrases).map { reminderRow($0) } } }) { allChargeRows() }
                       return ["batteryBefore": battery as Any? ?? NSNull(), "chargeBefore": before as Any? ?? NSNull(),
                               skipReasonKey: chargeSkipReason(battery: battery, before: before) as Any? ?? NSNull()]
                   }) { spoken, run in
                       let before = run["chargeBefore"] as? [String]
-                      let after = await readLaunchingIfNeeded(reminders) { allChargeRows() }
+                      let after = await truthRead(.reminder, reminders, eventKit: { eventKitIncompleteReminders().map { matching($0, chargePhrases).map { reminderRow($0) } } }) { allChargeRows() }
                       var result = branchVerdict(batteryBefore: run["batteryBefore"] as? Int,
                                                  batteryAfter: batteryPercent(pmset: output("/usr/bin/pmset", ["-g", "batt"])),
                                                  before: before, after: after, spoken: spoken)
+                      result["truthSource"] = truthSource(.reminder)
                       let new = (after?.count ?? 0) - (before?.count ?? 0)
                       if new > 0 {
                           // Provably ours (none before, one now): completed so it cannot alert. Never deleted.

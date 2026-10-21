@@ -11,6 +11,7 @@
 //
 
 import ApplicationServices
+import EventKit
 import Foundation
 
 extension GeneralitySuite {
@@ -28,12 +29,13 @@ extension GeneralitySuite {
         SuiteTask(id: "M02", pattern: "multi-app: find a file -> dated reminder", words: "find the biggest file in my JARVIS-sandbox folder and remind me to review it tomorrow",
                   apps: [finder, reminders], sandbox: [],
                   pre: {
-                      let before = await readLaunchingIfNeeded(reminders) { scheduledBigVideoDue() }
+                      let before = await truthRead(.reminder, reminders, eventKit: { eventKitIncompleteReminders().map { matching($0, bigVideoPhrases).map { reminderDueText($0) } } }) { scheduledBigVideoDue() }
                       return ["bigVideoBefore": before as Any? ?? NSNull(), skipReasonKey: reviewSkipReason(before: before) as Any? ?? NSNull()]
                   }) { _, run in
                       let before = run["bigVideoBefore"] as? [String]
-                      let after = await readLaunchingIfNeeded(reminders) { scheduledBigVideoDue() }
+                      let after = await truthRead(.reminder, reminders, eventKit: { eventKitIncompleteReminders().map { matching($0, bigVideoPhrases).map { reminderDueText($0) } } }) { scheduledBigVideoDue() }
                       var result = reviewVerdict(before: before, after: after)
+                      result["truthSource"] = truthSource(.reminder)
                       let new = (after?.count ?? 0) - (before?.count ?? 0)
                       if new > 0 {
                           // Provably ours (none before, one now): completed so it cannot alert tomorrow. Never deleted.

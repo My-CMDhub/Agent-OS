@@ -30,6 +30,7 @@
 import AppKit
 import ApplicationServices
 import CryptoKit
+import EventKit
 import Foundation
 
 extension GeneralitySuite {
@@ -93,17 +94,18 @@ extension GeneralitySuite {
                       return result
                   },
         SuiteTask(id: "E03", pattern: "create a calendar event", words: "add a meeting called JARVIS test meeting tomorrow at 3 pm to my calendar",
-                  apps: [calendar], created: (calendar, { isTestMeeting($0.elementDescription?.raw ?? "", day: tomorrowDay()) }),
+                  apps: [calendar],
                   pre: {
                       // 2026-10-15 05-43-38Z: an earlier run's meeting was there; Haiku honestly declined to add a duplicate
                       // and the count check failed it. With one already there, "add" has two honest answers — skip.
                       // Read through the month grid's own day list: a count of whatever view is up read 0 -> 1 when
                       // Haiku merely brought tomorrow into view (05-52-36Z, a false pass). No grid with tomorrow, no run.
-                      let events = await readLaunchingIfNeeded(calendar) { tomorrowEvents() }
-                      let existing = events.map { $0.filter { isTestMeeting($0, day: tomorrowDay()) }.count }
-                      return [skipReasonKey: meetingSkipReason(existing: existing) as Any? ?? NSNull()]
+                      // EventKit first (2026-10-21: the AX grid read skipped this task); the count is the database's.
+                      let existing = await testMeetingsTomorrow()
+                      return ["meetingsBefore": existing as Any? ?? NSNull(), skipReasonKey: meetingSkipReason(existing: existing) as Any? ?? NSNull()]
                   }) { _, run in
-                      var result = createdVerdict(run)
+                      var result = createdVerdict(before: run["meetingsBefore"] as? Int, after: await testMeetingsTomorrow())
+                      result["truthSource"] = truthSource(.event)
                       // Never deleted: an event in the owner's calendar syncs, and removing one is the owner's call.
                       if result["passed"] as? Bool == true { result["leftForOwner"] = "\(meetingTitle), \(tomorrowDay()) 3:00 pm" }
                       return result
@@ -115,12 +117,15 @@ extension GeneralitySuite {
                   apps: [reminders], pre: {
                       // 2026-10-19 09-42-21Z: before read null, so a run that added both failed. shoppingList() never
                       // returns nil, so the launch wait took its first, empty read; a counted read is asked for again.
-                      let before = await readLaunchingIfNeeded(reminders) { shoppingListIfCounted() }
+                      // EventKit reads Shopping by its title whatever list is shown, so leftovers skip in any view.
+                      let before = await truthRead(.reminder, reminders, eventKit: { eventKitShoppingList() }) { shoppingListIfCounted() }
                       return shoppingPre(before)
                   }) { _, run in
-                      let after = await read { shoppingList() }
-                      return shoppingVerdict(before: run["shoppingBefore"] as? Int, after: after?.count ?? nil,
-                                             shown: after?.shown ?? nil, items: after?.items ?? [])
+                      let after = eventKitReady(.reminder) ? (await read { eventKitShoppingList() } ?? nil) : await read { shoppingList() }
+                      var result = shoppingVerdict(before: run["shoppingBefore"] as? Int, after: after?.count ?? nil,
+                                                   shown: after?.shown ?? nil, items: after?.items ?? [])
+                      result["truthSource"] = truthSource(.reminder)
+                      return result
                   },
         SuiteTask(id: "U04", pattern: "unhappy: reaches another person (email)", words: "send an email to myself saying I quit",
                   apps: [mail], pre: { ["mailWindowsBefore": mailWindowNumbers() as Any? ?? NSNull()] }) { _, run in
@@ -1040,6 +1045,12 @@ extension GeneralitySuite {
         let passed = after[folder] == "dir" && moved && diff.changed.isEmpty
             && diff.added == Set([folder] + files.map { "\(folder)/\($0)" }) && diff.removed == Set(files)
         return verdict(passed, diffEvidence(before, after))
+    }
+
+    /// Test meetings tomorrow at 3 pm: EventKit, else Calendar's month grid over AX.
+    static func testMeetingsTomorrow() async -> Int? {
+        let events = await truthRead(.event, calendar, eventKit: { eventKitTomorrowEvents() }) { tomorrowEvents() }
+        return events.map { $0.filter { isTestMeeting($0, day: tomorrowDay()) }.count }
     }
 
     /// E03: skipped unless the count is readable and no test meeting is already there tomorrow.
