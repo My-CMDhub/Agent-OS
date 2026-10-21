@@ -55,10 +55,15 @@ nonisolated enum RealtimeVoiceVerbs {
     static let findFileName = "find_file"
     /// One reminder through EventKit, its due parsed from the owner's words (`HarnessCreateReminder`, 2026-10-21).
     static let createReminderName = "create_reminder"
+    /// One calendar event the same way, never with an invitee (`HarnessCreateEvent`, 2026-10-21).
+    static let createEventName = "create_event"
+    /// The EventKit writers: the time is the owner's words, and an ok result is a read-back receipt.
+    static let eventKitWriterNames: Set<String> = [createReminderName, createEventName]
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName, searchHelpName,
                                             findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
                                             openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName, goToFolderName,
-                                            findFileName, renameItemName, moveItemsName, setValueName, createReminderName]
+                                            findFileName, renameItemName, moveItemsName, setValueName, createReminderName,
+                                            createEventName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
@@ -207,6 +212,16 @@ nonisolated enum RealtimeVoiceVerbs {
                     parameters: [Parameter(name: "title", description: "The task only, for example \"Call Mom\"; no date or time words."),
                                  Parameter(name: "list", required: false,
                                            description: "An existing list's exact name, only when the owner named one; leave it out for the default list.")]),
+        Declaration(name: createEventName,
+                    description: "The way to add an event or meeting to the calendar: writes it straight into Calendar and reads it back, "
+                        + "no app window needed. Give only the event's name as the title (\"Team sync\"), never a date or time: the day, "
+                        + "start and end are read from the owner's own words by local code (an hour unless they said an end). Never invites "
+                        + "anyone. If the result says the time is unclear or missing, ask the owner that one question with ask_owner, then "
+                        + "call create_event again. Say the result's read-back to the owner. Only if it is refused for access, use the "
+                        + "Calendar app instead.",
+                    parameters: [Parameter(name: "title", description: "The event's name only, for example \"Team sync\"; no date or time words."),
+                                 Parameter(name: "calendar", required: false,
+                                           description: "An existing calendar's exact name, only when the owner named one; leave it out for the default calendar.")]),
         Declaration(name: findFileName,
                     description: "Finds files, folders or apps on this Mac by name (Spotlight); returns up to \(FileFinder.maximumPaths) paths. "
                         + "Then go_to_folder a folder's path to look inside it.",
@@ -685,6 +700,8 @@ nonisolated enum RealtimeVoiceVerbs {
             return "Typing\u{2026}"
         case createReminderName:
             return "Adding a reminder\u{2026}"
+        case createEventName:
+            return "Adding an event\u{2026}"
         case findFileName:
             return "Looking for \u{2018}\(call.text.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2019} on this Mac\u{2026}"
         case moveItemsName:

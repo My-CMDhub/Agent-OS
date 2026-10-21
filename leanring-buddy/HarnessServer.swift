@@ -191,13 +191,17 @@ enum HarnessVerb: String, CaseIterable {
     /// (`HarnessCreateReminder`, owner's rulings 2026-10-21). Mutating; card-free unless policy asks.
     case createReminder
 
+    /// Calendar: one event through EventKit, the same shape — the model's title, the start parsed from
+    /// the owner's words (`text`), the calendar (`withinNamed`), never an invitee (`HarnessCreateEvent`).
+    case createEvent
+
     /// Whether this verb can change the world. The kill switch stops these and
     /// leaves the read-only pair working, so an operator who tripped it can
     /// still look at the machine and find out why.
     var isMutating: Bool {
         switch self {
         case .ping, .snapshot, .menus, .windows, .look, .status, .highlight: return false
-        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick, .helpSearch, .goToFolder, .renameItem, .moveItems, .adjust, .createReminder: return true
+        case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick, .helpSearch, .goToFolder, .renameItem, .moveItems, .adjust, .createReminder, .createEvent: return true
         }
     }
 
@@ -227,7 +231,7 @@ enum HarnessVerb: String, CaseIterable {
         // `goToFolder` writes into Finder's own Go to Folder field: `goToFolderResponse`.
         // `renameItem` names a listed item and drives Finder's own editor: `renameItemResponse`.
         case .ping, .snapshot, .menu, .menus, .windows, .focus, .look, .launch, .status, .highlight, .scroll, .openURL, .visionClick,
-             .helpSearch, .goToFolder, .renameItem, .moveItems, .adjust, .createReminder: return nil
+             .helpSearch, .goToFolder, .renameItem, .moveItems, .adjust, .createReminder, .createEvent: return nil
         }
     }
 }
@@ -882,7 +886,7 @@ enum HarnessPolicy {
             if let problem = HarnessAdjust.valueProblem(text) { return .failure(.invalidField(field: "text", value: problem)) }
         }
         // createReminder: the task (title), the owner's words the due is parsed from (text), maybe a list (withinNamed).
-        if verb == .createReminder {
+        if verb == .createReminder || verb == .createEvent {
             let title = raw.title ?? ""
             guard !title.allSatisfy(\.isWhitespace) else { return .failure(.missingField("title")) }
             guard !text.allSatisfy(\.isWhitespace) else { return .failure(.missingField("text")) }
@@ -1320,6 +1324,8 @@ enum HarnessObservability {
         "adjustNotFound", "notAdjustable", "adjustValueMismatch",
         // createReminder asking the owner about a due, or without the Reminders grant: answers, not anomalies.
         "reminderDueUnclear", "remindersNotAuthorized", "reminderTitleEmpty",
+        // createEvent the same: a time to ask for, or no Calendar grant.
+        "eventTimeUnclear", "eventTimeMissing", "calendarNotAuthorized", "eventTitleEmpty",
         // Typing aimed at a button: the kernel's non-text refusal, said earlier and better.
         "typeTargetIsControl",
         // `LockScreenGuard` doing its job. Measured 2026-09-13: a probe left
@@ -2193,6 +2199,9 @@ final class HarnessServer {
 
         case .createReminder:
             return createReminderResponse(request, dryRun: dryRun, startedAt: startedAt)
+
+        case .createEvent:
+            return createEventResponse(request, dryRun: dryRun, startedAt: startedAt)
         }
     }
 
@@ -4605,6 +4614,31 @@ final class HarnessServer {
     /// parsed from the owner's words, the app policy for Reminders applies (a `refuse` or `confirm`
     /// there holds), then the write and its fresh-store read-back. Dry run stops before the write.
     private func createReminderResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        eventKitWriteResponse(request, dryRun: dryRun, startedAt: startedAt, appName: "Reminders",
+                              bundle: HarnessCreateReminder.remindersBundleIdentifier,
+                              planned: HarnessCreateReminder.plan(title: request.title, heard: request.text).map { plan in
+            (["title": plan.title, "titleWasCleaned": plan.titleWasCleaned, "due": plan.due.map { $0.hour == nil ? "allDay" : "timed" } ?? "none"],
+             plan.title, { HarnessCreateReminder.create(plan, listName: request.withinNamed) })
+        })
+    }
+
+    /// One calendar event through EventKit (`HarnessCreateEvent`), exactly as `createReminder` goes.
+    private func createEventResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
+        eventKitWriteResponse(request, dryRun: dryRun, startedAt: startedAt, appName: "Calendar",
+                              bundle: HarnessCreateEvent.calendarBundleIdentifier,
+                              planned: HarnessCreateEvent.plan(title: request.title, heard: request.text).map { plan in
+            (["title": plan.title, "titleWasCleaned": plan.titleWasCleaned, "start": ISO8601DateFormatter().string(from: plan.start),
+              "end": ISO8601DateFormatter().string(from: plan.end), "allDay": plan.allDay],
+             plan.title, { HarnessCreateEvent.create(plan, calendarName: request.withinNamed) })
+        })
+    }
+
+    /// The shared shape: plan from the owner's words, the app's policy, dry run, write, fresh read-back.
+    private func eventKitWriteResponse(
+        _ request: HarnessRequest, dryRun: Bool, startedAt: Date, appName: String, bundle: String,
+        planned: Result<(resolved: [String: Any], title: String, write: () -> (report: [String: Any], failure: HarnessCreateReminder.Failure?)),
+                        HarnessCreateReminder.Failure>
+    ) -> [String: Any] {
         var response: [String: Any] = ["dryRun": dryRun]
         func finish(_ outcome: String, kernel: String = "n/a", error: String? = nil, message: String? = nil) -> [String: Any] {
             response["ok"] = error == nil
@@ -4613,27 +4647,25 @@ final class HarnessServer {
             audit(request, dryRun: dryRun, kernel: kernel, outcome: outcome, startedAt: startedAt)
             return response
         }
-        let plan: HarnessCreateReminder.Plan
-        switch HarnessCreateReminder.plan(title: request.title, heard: request.text) {
+        let plan: (resolved: [String: Any], title: String, write: () -> (report: [String: Any], failure: HarnessCreateReminder.Failure?))
+        switch planned {
         case .failure(let failure): return finish(failure.code, error: failure.code, message: failure.message)
-        case .success(let planned): plan = planned
+        case .success(let made): plan = made
         }
-        response["resolved"] = ["title": plan.title, "titleWasCleaned": plan.titleWasCleaned,
-                                "due": plan.due.map { $0.hour == nil ? "allDay" : "timed" } ?? "none"]
-        let bundle = HarnessCreateReminder.remindersBundleIdentifier
-        // Owner's ruling 2 (2026-10-21): card-free. Only the per-app policy may ask or refuse.
+        response["resolved"] = plan.resolved
+        // Owner's ruling 2 (2026-10-21, events the same day): card-free. Only the per-app policy may ask or refuse.
         let decision = applyAppPolicy(to: .allow, bundleIdentifier: bundle, into: &response)
         let described = HarnessPolicy.describe(decision)
-        let gated = gate(decision, request: request, appName: "Reminders", bundleIdentifier: bundle, dryRun: dryRun, into: &response)
+        let gated = gate(decision, request: request, appName: appName, bundleIdentifier: bundle, dryRun: dryRun, into: &response)
         guard gated.executable else {
             return finish(gated.outcome, kernel: described.decision, error: gated.outcome, message: response["message"] == nil ? gated.note : nil)
         }
         guard !dryRun else {
-            response["performed"] = ["status": "skipped", "reason": "dry run — the due was read from the owner's words; nothing was written"]
+            response["performed"] = ["status": "skipped", "reason": "dry run — the time was read from the owner's words; nothing was written"]
             return finish("dryRun", kernel: described.decision)
         }
         phaseTiming.actionStarting()
-        let run = HarnessCreateReminder.create(plan, listName: request.withinNamed)
+        let run = plan.write()
         phaseTiming.actionReturned()
         response["performed"] = run.report
         if let failure = run.failure {
@@ -4643,7 +4675,7 @@ final class HarnessServer {
         }
         response["verification"] = ["status": "confirmed", "evidence": run.report["readBack"] ?? NSNull()]
         response["message"] = "Created and read back: " + ((run.report["spoken"] as? String) ?? plan.title)
-            + ". Say that back to the owner; the due was set from their own words."
+            + ". Say that back to the owner; the time was set from their own words."
         return finish("confirmed", kernel: described.decision)
     }
 

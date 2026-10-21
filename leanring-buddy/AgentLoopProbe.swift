@@ -331,7 +331,7 @@ enum AgentLoopProbe {
             if case .askOwner(let question) = outcome, let answer, !answer.isEmpty {
                 paused = ["question": SecretScanner.redact(question), "step": loop.step, "receipts": loop.receipts.count,
                           "status": loop.statusLine()]
-                outcome = await loop.resume(answer: answer, words: words + " " + answer)
+                outcome = await loop.resume(answer: answer, words: ReminderDue.joined(words, answer: answer))
             }
             finished.value = true
             return outcome

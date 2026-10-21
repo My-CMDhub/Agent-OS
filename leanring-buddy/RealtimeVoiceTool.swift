@@ -107,6 +107,9 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
     /// annotate only: what to draw, and round what.
     var shapes: [RealtimeAnnotation]? = nil
 
+    /// Arguments that would invite someone to an event: never sent (owner's ruling 2026-10-21).
+    static let inviteArguments = ["attendees", "attendee", "invitees", "invitee", "invite", "guests", "participants", "emails"]
+
     /// From a provider's argument object, whichever tool it is.
     static func parsed(callID: String, name: String, arguments: [String: Any]?) -> RealtimeToolCall {
         func text(_ value: Any?) -> String? {
@@ -150,8 +153,12 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
         let sets = name == RealtimeVoiceVerbs.setValueName
         // create_reminder: the title rides in `text`, the list in `elementName`, no app; `words` is never the
         // model's — `runToolCall` sets it to the owner's words, which the due is parsed from.
-        guard name != RealtimeVoiceVerbs.createReminderName else {
-            return RealtimeToolCall(callID: callID, name: name, appName: nil, elementName: text(arguments?["list"]), text: text(arguments?["title"]))
+        // create_event the same, its calendar in `elementName`; an invitee argument rides in `path` only to be refused.
+        guard !RealtimeVoiceVerbs.eventKitWriterNames.contains(name) else {
+            let event = name == RealtimeVoiceVerbs.createEventName
+            let invites = event ? inviteArguments.filter { arguments?[$0] != nil } : []
+            return RealtimeToolCall(callID: callID, name: name, appName: nil, path: invites.isEmpty ? nil : invites,
+                                    elementName: text(arguments?[event ? "calendar" : "list"]), text: text(arguments?["title"]))
         }
         return RealtimeToolCall(callID: callID, name: name,
                                 appName: findsFile || renames || moves ? nil : sets ? text(arguments?["app"]) : text(arguments?["name"]) ?? text(arguments?["app"]),
@@ -425,12 +432,18 @@ nonisolated enum RealtimeOpenAppTool {
             return encoded(["verb": "renameItem", "title": item, "text": newName, "expectApp": HarnessGoToFolder.finderBundleIdentifier])
         }
         // create_reminder: EventKit, no app in front needed; the due from the owner's words (`words`), never the model's.
-        if call.name == RealtimeVoiceVerbs.createReminderName {
-            guard let title = call.text else { return refuse("missingTitle", "create_reminder needs the task as its title") }
-            guard let heard = call.words, !heard.allSatisfy(\.isWhitespace) else {
-                return refuse("heardUnavailable", "the owner's words were not heard, so no due can be read from them; nothing was created")
+        // create_event: the same, into Calendar, and never with an invitee.
+        if RealtimeVoiceVerbs.eventKitWriterNames.contains(call.name) {
+            let event = call.name == RealtimeVoiceVerbs.createEventName
+            if event, let invites = call.path {
+                return refuse("noInvitees", "create_event never invites anyone (\(invites.joined(separator: ", ")) was given); nothing was created. "
+                              + "Call it again without guests; the owner adds people in Calendar")
             }
-            var request: [String: Any] = ["verb": "createReminder", "title": title, "text": heard]
+            guard let title = call.text else { return refuse("missingTitle", "\(call.name) needs \(event ? "the event's name" : "the task") as its title") }
+            guard let heard = call.words, !heard.allSatisfy(\.isWhitespace) else {
+                return refuse("heardUnavailable", "the owner's words were not heard, so no time can be read from them; nothing was created")
+            }
+            var request: [String: Any] = ["verb": event ? "createEvent" : "createReminder", "title": title, "text": heard]
             if let list = call.elementName { request["withinNamed"] = list }
             return encoded(request)
         }

@@ -873,11 +873,11 @@ struct AgentLoopTests {
         let answering = S.askedOwnerAfterPress(asked)
         #expect(answering != nil)
         let answered = S.taskWords(heard: "the general channel", asked: answering, now: 120)
-        #expect(answered.words == "post this in Slack the general channel")
+        #expect(answered.words == "post this in Slack\nthe general channel")
         #expect(answered.root == "post this in Slack")
         #expect(S.askedOwnerAfterPress(answering) == nil, "a second press is not the answer")
         let again = S.AskedOwner(heard: answered.root, uptime: 130)
-        #expect(S.taskWords(heard: "yes", asked: S.askedOwnerAfterPress(again), now: 140).words == "post this in Slack yes")
+        #expect(S.taskWords(heard: "yes", asked: S.askedOwnerAfterPress(again), now: 140).words == "post this in Slack\nyes")
         #expect(S.taskWords(heard: "x", asked: answering, now: 100 + S.askOwnerAnswerWindowSeconds + 1).words == "x")
     }
 

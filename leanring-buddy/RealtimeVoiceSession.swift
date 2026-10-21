@@ -349,7 +349,7 @@ final class RealtimeVoiceSession {
     /// The words a new task is judged by, and the root kept if it asks again.
     nonisolated static func taskWords(heard: String, asked: AskedOwner?, now: TimeInterval) -> (words: String, root: String) {
         guard let asked, now - asked.uptime <= askOwnerAnswerWindowSeconds else { return (heard, heard) }
-        return (asked.heard + " " + heard, asked.heard)
+        return (ReminderDue.joined(asked.heard, answer: heard), asked.heard)
     }
     /// Agent system turns, one after another (OpenAI refuses a second
     /// `response.create` while one is answering).
