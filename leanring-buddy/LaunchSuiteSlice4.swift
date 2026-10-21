@@ -212,12 +212,15 @@ extension GeneralitySuite {
     nonisolated static func completeOnlyCallMom(phrases: [String] = ["call mom"]) -> Bool {
         guard let rows = appNodes(reminders).map({ callMomCells($0, phrases: phrases) }), rows.count == 1,
               let box = rows[0].flattenedDescendants().first(where: { $0.role == "AXCheckBox" && name($0) == "Mark as completed" })?.accessibilityElement,
-              AXUIElementPerformAction(box, kAXPressAction as CFString) == .success else { return false }
+              AXUIElementPerformAction(box, kAXPressAction as CFString) == .success else {
+            return HarnessCreateReminder.completeSoleTestReminder(containing: phrases)
+        }
         for _ in 0..<10 {
             Thread.sleep(forTimeInterval: 0.2)
             if appNodes(reminders).map({ callMomCells($0, phrases: phrases) })?.isEmpty == true { return true }
         }
-        return false
+        // The row still shows: complete it by EventKit (the sole incomplete match), never by a second guess in the UI.
+        return HarnessCreateReminder.completeSoleTestReminder(containing: phrases)
     }
 
     // MARK: E13 — Calendar's tomorrow (measured 2026-10-15, month view)

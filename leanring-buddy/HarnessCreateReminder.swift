@@ -184,15 +184,17 @@ nonisolated enum HarnessCreateReminder {
             : (report, Failure(code: "notObserved", message: "the reminder was saved, but a fresh read differs in: \(failed.joined(separator: ", "))"))
     }
 
-    /// The probe's cleanup (`--reminder-complete-title=`): marks completed the incomplete reminders titled
-    /// EXACTLY `title`, which must start "JARVIS " — a test reminder, never one of the owner's, never deleted.
-    /// Titles are compared in process; nothing is listed out.
-    static func completeTestReminders(titled title: String, done: @escaping (String) -> Void) {
-        guard title.hasPrefix("JARVIS ") else { return done("refused: not a JARVIS test title") }
+    /// Test cleanup (the probe's `--reminder-complete-title=`, the launch suite's): marks completed the
+    /// incomplete reminders whose title `matches` — several only when `allowSeveral` (a "JARVIS " probe's
+    /// leftovers), else ONLY when exactly one matches across every list, so a sole match is the one the
+    /// test just made (the suite proved none before, one after). Never deleted; titles compared in
+    /// process, never listed out.
+    static func completeTestReminders(matching matches: @escaping (String) -> Bool, allowSeveral: Bool, done: @escaping (String) -> Void) {
         guard isAuthorized else { return done("notAuthorized") }
         let store = EKEventStore()
         store.fetchReminders(matching: store.predicateForIncompleteReminders(withDueDateStarting: nil, ending: nil, calendars: nil)) { found in
-            let mine = (found ?? []).filter { $0.title == title }
+            let mine = (found ?? []).filter { matches($0.title ?? "") }
+            guard allowSeveral || mine.count == 1 else { return done("matched \(mine.count), completed 0 (refused: not exactly one)") }
             var saved = 0
             for reminder in mine {
                 reminder.isCompleted = true
@@ -201,5 +203,22 @@ nonisolated enum HarnessCreateReminder {
             withExtendedLifetime(store) {}
             done("matched \(mine.count), completed \(saved)")
         }
+    }
+
+    /// `--reminder-complete-title=`: a "JARVIS " title completes every exact match; any other title only a sole one.
+    static func completeTestReminders(titled title: String, done: @escaping (String) -> Void) {
+        completeTestReminders(matching: { $0 == title }, allowSeveral: title.hasPrefix("JARVIS "), done: done)
+    }
+
+    /// The launch suite's fallback when its AX checkbox press did not complete its reminder (E12/M02/M04
+    /// 2026-10-21, EventKit-made rows: markedCompleted false x3): the sole incomplete reminder holding a phrase.
+    nonisolated static func completeSoleTestReminder(containing phrases: [String]) -> Bool {
+        final class Box: @unchecked Sendable { var line = "" }
+        let box = Box(), semaphore = DispatchSemaphore(value: 0)
+        completeTestReminders(matching: { title in phrases.contains { title.lowercased().contains($0) } }, allowSeveral: false) { line in
+            box.line = line
+            semaphore.signal()
+        }
+        return semaphore.wait(timeout: .now() + 5) == .success && box.line == "matched 1, completed 1"
     }
 }
