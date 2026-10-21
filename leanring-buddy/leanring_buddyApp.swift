@@ -10,6 +10,7 @@
 import AppKit
 import ServiceManagement
 import SwiftUI
+import EventKit
 import Sparkle
 
 @main
@@ -64,6 +65,19 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             }
             try? lines.joined(separator: "\n").write(toFile: "/private/tmp/clicky-folder-access.txt", atomically: true, encoding: .utf8)
             NSApp.terminate(nil)
+            return
+        }
+
+        // Owner 2026-10-21: an app is listed under Privacy > Reminders only after it asks, so this asks once
+        // (the owner clicks Allow on the system prompt), writes the outcome, and quits.
+        if CommandLine.arguments.contains("--reminders-access-request") {
+            let store = EKEventStore()
+            store.requestFullAccessToReminders { granted, error in
+                let status = EKEventStore.authorizationStatus(for: .reminder).rawValue
+                let line = "granted: \(granted), status: \(status), error: \(error.map { ($0 as NSError).code.description } ?? "none")"
+                try? line.write(toFile: "/private/tmp/clicky-reminders-access.txt", atomically: true, encoding: .utf8)
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+            }
             return
         }
 
