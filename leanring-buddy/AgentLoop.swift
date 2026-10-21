@@ -845,7 +845,9 @@ final class AgentLoop {
                     }
                     let challenge = summary.isEmpty ? "the summary is empty"
                         : Self.doneChallenge(summary: summary, evidence: evidence, receipts: receipts, currentStep: step, seenNow: seenNow)
-                    traced(["tool": toolName, "args": args, "ok": challenge == nil, "error": challenge == nil ? NSNull() : "doneUnbacked"])
+                    // The reason is local code's sentence (names quoted from the summary, redacted): why a done was refused.
+                    traced(["tool": toolName, "args": args, "ok": challenge == nil, "error": challenge == nil ? NSNull() : "doneUnbacked",
+                            "challenge": challenge.map(SecretScanner.redact) ?? NSNull()])
                     guard let challenge else { return finish(.done(summary: summary)) }
                     // No turn is left to act on a challenge: the honest end is the cap, with why.
                     if wrappingUp { return finish(.stepCap(left: challenge)) }
@@ -1382,7 +1384,10 @@ final class AgentLoop {
         let items = captures(addedTo)
             .filter { $0.range(of: #"\b(called|named|titled)\b"#, options: [.regularExpression, .caseInsensitive]) == nil }
             .flatMap { $0.components(separatedBy: ",").flatMap { $0.components(separatedBy: " and ") } }
-        let names = (captures(quoted) + captures(bare) + items).map { $0.trimmingCharacters(in: .whitespaces) }
+        // Live 2026-10-21: "I've added "JARVIS answer probe" to your calendar" kept its quotes through `addedTo`,
+        // so the name never matched what create_event made and an honest done was refused twice.
+        let names = (captures(quoted) + captures(bare) + items)
+            .map { $0.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: "\"'\u{201C}\u{201D}\u{2018}\u{2019}"))) }
         return names.filter { !$0.isEmpty }.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
     }
 

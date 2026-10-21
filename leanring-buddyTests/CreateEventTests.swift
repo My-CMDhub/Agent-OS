@@ -87,6 +87,10 @@ struct CreateEventTests {
         let made = AgentLoop.Receipt(step: 1, toolName: RealtimeVoiceVerbs.createEventName, ok: true, error: nil, typed: "JARVIS test meeting")
         #expect(AgentLoop.doneChallenge(summary: "I added a meeting called \"JARVIS test meeting\" to your calendar.", evidence: [1], receipts: [made]) == nil)
         #expect(AgentLoop.doneChallenge(summary: "I scheduled the JARVIS test meeting.", evidence: [1], receipts: [made]) == nil)
+        // Live 2026-10-21: the quotes of an "added "X" to your calendar" name are not part of the name.
+        #expect(AgentLoop.createdNames("I've added \"JARVIS test meeting\" to your calendar for tomorrow at 3:00 pm.") == ["JARVIS test meeting"])
+        #expect(AgentLoop.doneChallenge(summary: "I've added \u{201C}JARVIS test meeting\u{201D} to your calendar for tomorrow at 3:00 pm.",
+                                        evidence: [1], receipts: [made]) == nil)
         let refused = AgentLoop.Receipt(step: 1, toolName: RealtimeVoiceVerbs.createEventName, ok: false, error: "eventTimeMissing")
         #expect(AgentLoop.doneChallenge(summary: "I added the meeting.", evidence: [], receipts: [refused]) != nil)
         #expect(AgentLoop.unsetClockTime(heard: "add a meeting tomorrow at 3 pm", receipts: [made], screen: "Finder") == nil)
