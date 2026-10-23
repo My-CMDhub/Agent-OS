@@ -511,6 +511,8 @@ struct CredentialGuardTests {
         let blind = ScreenSecretGuard.Report(outcome: "withheld", reason: "walkDeadline")
         let blindLine = try #require(RealtimeOpenAppTool.credentialGuardContextLine(secureInput: .off, withheld: blind))
         #expect(blindLine.contains("could not be checked for secrets in time"))
+        // No picture is not blind (owner 2026-10-22): the structure tools still read the screen.
+        #expect(blindLine.contains("find_on_screen") && blindLine.contains("do_task") && !blindLine.contains("say you cannot see"))
         // Blind is not handless (live 2026-10-02: it told the owner to quit LinkedIn himself).
         #expect(blindLine.contains("do not need the screen and still work") && blindLine.contains("close")
                 && blindLine.contains("quit an app") && blindLine.contains("press_menu") && blindLine.contains("open_app")

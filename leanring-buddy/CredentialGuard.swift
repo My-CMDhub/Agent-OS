@@ -374,11 +374,14 @@ nonisolated struct SecureInputState: Equatable, Sendable {
 /// Limit: other apps' windows on the same display are not text-scanned; a
 /// display holding none of the checked app's windows is not sent at all.
 nonisolated enum ScreenSecretGuard {
-    /// ponytail: one fixed 600 ms from the start of a capture, which it runs beside
-    /// (capture ~230-350 ms). Walks measured 2026-09: System Settings ~360 ms,
-    /// Finder 112-786 ms, Mail ~1.8 s - so Mail, and a cold Finder, go out blind.
-    /// Read `walkMs` and `withheld` in secret-guard.log before moving it.
-    static let walkDeadlineSeconds: Double = 0.6
+    /// ponytail: one fixed 1.5 s from the start of a capture, which it runs beside
+    /// (capture ~230-350 ms). It was 600 ms: secret-guard.log to 2026-10-22 had Xcode at
+    /// 521 ms, System Settings 491, Finder 483, and every capture of the owner's
+    /// LinkedIn in Chrome withheld (6 of 6, `walkDeadline`; the feed is 1,378 nodes,
+    /// 64% clipped below the fold). The voice capture starts at key-down and its
+    /// audio is buffered, so the wait mostly hides behind the owner still speaking.
+    /// Mail (~1.8 s) still goes out blind. Read `walkMs` and `withheld` before moving it.
+    static let walkDeadlineSeconds: Double = 1.5
     static let logFileName = "secret-guard.log"
     /// Points added around every blackout, for anti-aliased edges and a caret.
     static let paddingPoints: CGFloat = 2
