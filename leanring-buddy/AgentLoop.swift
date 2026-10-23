@@ -455,6 +455,8 @@ final class AgentLoop {
     private var sameRefusal: (error: String, count: Int)?
     private var lastError: String?
     private var webUsed: [String: Int] = [:]
+    /// The owner denied a card this task: it acts no further, it reads, asks or reports.
+    private var ownerDeniedACard = false
     /// Task time spent before the last pause; the owner's thinking time is not the task's.
     private var activeSeconds: TimeInterval = 0
     private(set) var pausedAsk: PausedAsk?
@@ -949,8 +951,17 @@ final class AgentLoop {
                         call = parsed
                         break
                     }
+                    // A denied card is the owner's no (live 2026-10-23: "turn on my Bluetooth" put the switch on
+                    // a second card after the first was denied, aimed by name, then by position).
+                    if ownerDeniedACard, RealtimeVoiceVerbs.isActingTool(toolName) {
+                        result = RealtimeOpenAppTool.toolResult(for: RealtimeToolRefusal(error: Self.ownerDeniedError,
+                            message: "the owner denied a card in this task, so it takes no further action: tell them what was not done, or ask them"))
+                        call = parsed
+                        break
+                    }
                     let dispatch = await dependencies.execute(parsed, true, observation, remaining())
                     (result, harnessMs, waited, call) = (dispatch.result, dispatch.harnessMilliseconds, dispatch.waitedForConfirmation, parsed)
+                    if result["error"] as? String == "confirmationDenied" { ownerDeniedACard = true }
                     pressedRole = RealtimeOpenAppTool.pressedRole(dispatch.harnessResponse)
                     opensEdit = toolName == RealtimeVoiceVerbs.pressElementName && Self.pressOpensEdit(dispatch.harnessResponse)
                     record(parsed, dispatch)
@@ -1218,6 +1229,8 @@ final class AgentLoop {
         return block
     }
 
+    static let ownerDeniedError = "ownerDenied"
+
     /// nil when the summary may stand; else what it claims without a receipt.
     /// First-person claims only ("I've opened", "Typed it."), each needing an ok
     /// result of its kind this run — summarising a page that says "opened in
@@ -1279,7 +1292,9 @@ final class AgentLoop {
             return "text typed into an entry that saves only when submitted was never submitted, so nothing was added or created. "
                 + "Type it again with mode replace and submit true, or say only what was done"
         }
-        let okSteps = Set(receipts.filter(\.ok).map(\.step))
+        // A card the owner denied backs "it was not done" (live 2026-10-23: citing the denied press
+        // was refused twice and the task ended "failed"); it backs no effect, which needs okTools above.
+        let okSteps = Set(receipts.filter { $0.ok || $0.error == "confirmationDenied" || $0.error == ownerDeniedError }.map(\.step))
         let ranSteps = Set(receipts.map(\.step))
         let unbacked = evidence.filter { !okSteps.contains($0) && !($0 == currentStep && !ranSteps.contains($0)) }
         return unbacked.isEmpty ? nil : "step \(unbacked.map(String.init).joined(separator: ", ")) has no ok result"

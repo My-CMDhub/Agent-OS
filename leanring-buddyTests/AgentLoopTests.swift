@@ -111,6 +111,19 @@ struct AgentLoopTests {
         #expect(assistant?.contains { $0["type"] as? String == "thinking" } == false)
     }
 
+    /// Live 2026-10-23: "turn on my Bluetooth" put the same switch on a second card after a deny.
+    @MainActor @Test func aDeniedCardIsNotAskedAgain() async {
+        let press: [String: Any] = ["app": "System Settings", "name": "Bluetooth"]
+        let script = Script([toolUse("press_element", press), toolUse("press_element", ["app": "System Settings", "x": 0.945, "y": 0.103]),
+                             toolUse("ask_owner", ["question": "Shall I leave Bluetooth off?"])])
+        _ = await loop(script, execute: { _ in dispatch(ok: false, error: "confirmationDenied") }).run(goal: "turn on my Bluetooth")
+        #expect(script.executed.count == 1)
+        // The denied step backs "not done", never "turned on".
+        let denied = [AgentLoop.Receipt(step: 1, toolName: "press_element", ok: false, error: "confirmationDenied")]
+        #expect(AgentLoop.doneChallenge(summary: "You declined the card, so Bluetooth stays off.", evidence: [1], receipts: denied) == nil)
+        #expect(AgentLoop.doneChallenge(summary: "I turned on Bluetooth.", evidence: [1], receipts: denied) != nil)
+    }
+
     @MainActor @Test func stopsAtTheStepCap() async {
         let script = Script([toolUse("scroll", ["direction": "down"])])
         let outcome = await loop(script).run(goal: "keep scrolling")
