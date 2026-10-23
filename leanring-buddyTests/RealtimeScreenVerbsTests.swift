@@ -113,6 +113,19 @@ struct RealtimeScreenVerbsTests {
         #expect(models.candidates.first?.frame == CGRect(x: 20, y: 600, width: 200, height: 24))
     }
 
+    /// Owner 2026-10-22, System Settings > Bluetooth: the switch is named only by its
+    /// AXTitleUIElement, the "Bluetooth" text listed before it. The switch is the offer.
+    @Test func aSwitchNamedByItsLabelIsOfferedInsteadOfTheLabel() {
+        let window = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let pane: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(window), "elements": [
+            element("AXWindow", "Bluetooth", window),
+            element("AXStaticText", "Bluetooth", CGRect(x: 500, y: 60, width: 90, height: 18), actions: [], source: "value"),
+            element("AXCheckBox", "Bluetooth", CGRect(x: 1100, y: 60, width: 40, height: 22), subrole: "AXSwitch", source: "label")
+        ]]
+        let offered = RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: pane, words: "Bluetooth toggle", screens: [window]).candidates
+        #expect(offered.map(\.role) == ["AXCheckBox"])
+    }
+
     // Scenario A4, three runs 2026-10-02: "click sign in" offered the button AND the
     // page sentence "… Sign in to see your feed.", and the voice asked which.
     @Test func anExactlyNamedControlIsNotSecondGuessedByASentenceHoldingItsWords() {
@@ -544,6 +557,13 @@ struct RealtimeScreenVerbsTests {
     @Test func thePromptPressesByNameWhenTheOwnerSaidWhichByOrder() {
         #expect(RealtimeOpenAppTool.systemPrompt.contains("if a result lists several matches, ask which one, unless the owner's words "
             + "already pick one by order (\"the first\", \"the last\"): then press it by that name, and the order picks it."))
+    }
+
+    /// Owner 2026-10-22: "turn off my Bluetooth" -> "I cannot turn Bluetooth off directly", then a pane
+    /// opened for the owner to do it. A request no one tool does goes to the task runner.
+    @Test func thePromptHandsWhatNoToolDoesToTheTaskRunner() {
+        #expect(RealtimeOpenAppTool.systemPrompt.contains("call do_task with the owner's words"))
+        #expect(RealtimeOpenAppTool.systemPrompt.contains("never tell the owner you cannot do something on the mac"))
     }
 
     /// The ordinal reaches the press through resolveScreenTarget's `heard` — the

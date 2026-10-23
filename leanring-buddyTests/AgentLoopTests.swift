@@ -1615,11 +1615,11 @@ struct TaskSessionTests {
 
     @Test func aNegatedOrPresentStateToggleClaimsNothing() {
         for said in ["I couldn't turn off Wi-Fi.", "Wi-Fi was not turned off.", "Wi-Fi is turned off.", "Bluetooth is currently disabled.",
-                     "The page says the feature is disabled.", "I turned to the next page."] {
+                     "Bluetooth is already turned off.", "The page says the feature is disabled.", "I turned to the next page."] {
             #expect(AgentLoop.doneChallenge(summary: said, evidence: [], receipts: receipts(pressedRole: "AXStaticText")) == nil, "\(said)")
         }
         // First person, or "now", is still a change claimed.
-        for said in ["I made sure it is disabled. I disabled it.", "Wi-Fi is now turned off."] {
+        for said in ["I made sure it is disabled. I disabled it.", "Wi-Fi is now turned off.", "I already turned off Bluetooth."] {
             #expect(AgentLoop.doneChallenge(summary: said, evidence: [], receipts: receipts(pressedRole: "AXStaticText")) != nil, "\(said)")
         }
     }

@@ -203,6 +203,13 @@ nonisolated enum RealtimeScreenVerbs {
             let sameName = pool.filter { $0.name == name }
             // And a text input is never folded into a same-named tab or panel (Calendar's "Guests", BCD5ABD3).
             let input = AccessibilityElementNode.textInputRoles.contains(role)
+            // A control named by its label link replaces that label (owner 2026-10-22: "Bluetooth toggle"
+            // offered only the pane's "Bluetooth" text; the AXSwitch it labels came later and was folded away).
+            if kept.isClickable, !sameName.isEmpty, sameName.allSatisfy({ !$0.isClickable }) {
+                pool.removeAll { $0.name == name }
+                pool.append(kept)
+                continue
+            }
             guard sameName.isEmpty || (kept.isClickable && sameName.allSatisfy { $0.isClickable && !$0.frame.intersects(frame) })
                     || (input && !sameName.contains { AccessibilityElementNode.textInputRoles.contains($0.role) }) else { continue }
             pool.append(kept)

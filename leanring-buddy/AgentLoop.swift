@@ -1512,8 +1512,10 @@ final class AgentLoop {
         // "I now selected Delete" passed as one).
         let before = words[max(0, index - 3)..<index]
         if before.contains(where: { RealtimeOpenAppTool.firstPersonSubjects.contains($0) || effectPersons.contains($0) }) { return false }
-        // "Wi-Fi is now turned off" reports a change: "now" is a state for "selected" only.
-        if index > 0, ["is", "are", "currently", "the", "a", "an"].contains(words[index - 1]) || (!toggle && words[index - 1] == "now") {
+        // "Wi-Fi is now turned off" reports a change: "now" is a state for "selected" only. "Already"
+        // is a state (owner 2026-10-22: "turn off my Bluetooth" with it off — "Bluetooth is already
+        // turned off" was refused twice for want of a press that would have turned it ON).
+        if index > 0, ["is", "are", "currently", "already", "the", "a", "an"].contains(words[index - 1]) || (!toggle && words[index - 1] == "now") {
             return true
         }
         // "Bluetooth was switched on and is ready" is a change: the is-after reading is "selected"'s only.
