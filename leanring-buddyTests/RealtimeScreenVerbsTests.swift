@@ -120,9 +120,14 @@ struct RealtimeScreenVerbsTests {
         var pane: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(window),
                                    "elements": [element("AXWindow", "Desktop & Dock", window),
                                                 element("AXCheckBox", "Magnification", CGRect(x: 600, y: 300, width: 40, height: 20))]]
-        pane["namesBelowView"] = ["Default web browser", "Prefer tabs when opening documents", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"]
+        pane["namesBelowView"] = [["name": "Default web browser", "pages": 1], ["name": "Prefer tabs when opening documents", "pages": 1],
+                                  ["name": "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", "pages": 2]]
         let offer = RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: pane, words: "default web browser", screens: [window])
-        #expect(offer.candidates.isEmpty && offer.belowView == ["Default web browser"])
+        #expect(offer.candidates.isEmpty && offer.belowView.map(\.name) == ["Default web browser"] && offer.belowView.map(\.pages) == [1])
+        // Live geometry (2026-10-24): the label 277 pt under a 721 pt view is one page down; 900 pt is two.
+        let view = CGRect(x: 300, y: 100, width: 715, height: 721)
+        #expect(HarnessServer.pagesToShow(CGRect(x: 546, y: 100 - 277 - 18, width: 124, height: 18), below: view) == 1)
+        #expect(HarnessServer.pagesToShow(CGRect(x: 546, y: 100 - 900, width: 124, height: 18), below: view) == 2)
         #expect(RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: pane, words: "magnification", screens: [window]).belowView.isEmpty)
     }
 

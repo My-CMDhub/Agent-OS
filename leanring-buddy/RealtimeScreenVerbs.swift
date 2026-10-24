@@ -337,11 +337,14 @@ nonisolated enum RealtimeScreenVerbs {
     }
 
     /// Names below the view matching `words` the way the visible pool is ranked: plausible, never secret-shaped, up to 3.
-    static func belowViewMatches(response: [String: Any], words: String) -> [String] {
-        let names = ((response["namesBelowView"] as? [String]) ?? [])
-            .filter { UntrustedText($0).isPlausibleControlLabel && $0.count <= documentLengthCharacters && SecretScanner.matches(in: $0).isEmpty }
+    static func belowViewMatches(response: [String: Any], words: String) -> [(name: String, pages: Int)] {
+        let entries: [(name: String, pages: Int)] = ((response["namesBelowView"] as? [[String: Any]]) ?? []).compactMap { entry in
+            guard let name = entry["name"] as? String, UntrustedText(name).isPlausibleControlLabel, name.count <= documentLengthCharacters,
+                  SecretScanner.matches(in: name).isEmpty else { return nil }
+            return (name, max(1, entry["pages"] as? Int ?? 1))
+        }
         var seen = Set<String>()
-        return ranked(names, words: words, limit: 12).map { names[$0] }.filter { seen.insert($0).inserted }.prefix(3).map { $0 }
+        return ranked(entries.map(\.name), words: words, limit: 12).map { entries[$0] }.filter { seen.insert($0.name).inserted }.prefix(3).map { $0 }
     }
 
     /// Indices of `names`, best first, by tier: the query IS the name (4), the
@@ -640,8 +643,14 @@ nonisolated struct RealtimeScreenOffer: Equatable, Sendable {
     let privacyDroppedCount: Int
     /// The walk hit a limit, so a missing control may simply be unread.
     let listingIncomplete: Bool
-    /// Nothing visible matched, but these names below the view do: scroll down (unseen N16 2026-10-24).
-    var belowView: [String] = []
+    /// Nothing visible matched, but these names below the view do, each with the pages to scroll down (unseen N16 2026-10-24).
+    var belowView: [(name: String, pages: Int)] = []
+
+    static func == (lhs: RealtimeScreenOffer, rhs: RealtimeScreenOffer) -> Bool {
+        lhs.candidates == rhs.candidates && lhs.elementCount == rhs.elementCount && lhs.privacyDroppedCount == rhs.privacyDroppedCount
+            && lhs.listingIncomplete == rhs.listingIncomplete && lhs.belowView.map(\.name) == rhs.belowView.map(\.name)
+            && lhs.belowView.map(\.pages) == rhs.belowView.map(\.pages)
+    }
 }
 
 /// One shape `annotate` was asked to draw.
