@@ -1693,7 +1693,8 @@ struct TaskSessionTests {
         for said in ["I couldn't turn off Wi-Fi.", "Wi-Fi was not turned off.", "Wi-Fi is turned off.", "Bluetooth is currently disabled.",
                      "Bluetooth is already turned off.", "Bluetooth is off. The Bluetooth pane in System Settings shows its toggle switched off.",
                      "The Appearance pane shows Light selected.", "Cursor and Notion are listed but switched off.",
-                     "Several more JARVIS notes are in Recently Deleted.", "The page says the feature is disabled.", "I turned to the next page."] {
+                     "Several more JARVIS notes are in Recently Deleted.", "This Mac has two saved Wi-Fi networks.",
+                     "The deleted notes are in a separate folder.", "The page says the feature is disabled.", "I turned to the next page."] {
             #expect(AgentLoop.doneChallenge(summary: said, evidence: [], receipts: receipts(pressedRole: "AXStaticText")) == nil, "\(said)")
         }
         // First person, or "now", is still a change claimed.

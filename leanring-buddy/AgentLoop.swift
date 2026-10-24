@@ -1602,6 +1602,9 @@ final class AgentLoop {
                 // A capitalised word mid-sentence is a name, not a deed: Notes' "Recently Deleted", Mail's "Sent"
                 // (unseen H04 2026-10-24: a true answer listing notes in Recently Deleted was refused twice).
                 if index > 0, cased[sentence].indices.contains(index), cased[sentence][index].first?.isUppercase == true { continue }
+                // Right after a determiner, numeral or possessive it describes a thing: "two saved Wi-Fi networks", "the
+                // deleted notes", "your sent mail" (unseen F09 2026-10-24: a true list of saved networks refused twice).
+                if index > 0, Self.describingWords.contains(words[index - 1]) || words[index - 1].allSatisfy(\.isNumber) { continue }
                 if isStateReading(words, at: index) { continue }
                 claims.append(kind.receipts)
             }
@@ -1614,6 +1617,9 @@ final class AgentLoop {
     /// within three words after it and no "I"/"we" just before; "I selected X" still needs a press.
     /// A toggle word ("Wi-Fi is turned off", U02) is a state only after is/are/currently/an article.
     static let stateParticiples: Set<String> = ["selected"]
+    static let describingWords: Set<String> = ["the", "a", "an", "your", "my", "its", "their", "his", "her", "our", "these", "those",
+                                               "this", "that", "all", "some", "any", "no", "every", "each", "several", "many", "few",
+                                               "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "both"]
     static let perceptionWords: Set<String> = ["shows", "showing", "shown", "reads", "appears", "looks", "seems", "displays", "lists", "listed"]
     static let presentStateVerbs: Set<String> = ["is", "are", "remains", "remain", "stays", "stay"]
     static func isStateReading(_ words: [String], at index: Int) -> Bool {
