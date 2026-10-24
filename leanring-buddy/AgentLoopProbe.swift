@@ -52,7 +52,9 @@ enum AgentLoopProbe {
         }
         if let words = CommandLine.arguments.last(where: { $0.hasPrefix(goalArgument) }).map({ String($0.dropFirst(goalArgument.count)) }),
            !words.isEmpty {
-            results = [await goalRun(words: words, harness: harness, confirmations: confirmations)]
+            // `--agent-route-memory`: this one run keeps and recalls routes, in the probe's own file.
+            results = [await goalRun(words: words, harness: harness, confirmations: confirmations,
+                                     routeMemory: CommandLine.arguments.contains("--agent-route-memory") ? .probe : nil)]
             meta["outcome"] = "ran"
             return
         }
@@ -314,13 +316,15 @@ enum AgentLoopProbe {
     /// denied and counted: a read-only task should raise none. Per run: outcome,
     /// the spoken answer, every call (tool, target, outcome, ms), the
     /// readOnlyTask refusals, model calls and model ms, wall ms, tabs closed.
-    static func goalRun(words: String, harness: HarnessServer, confirmations: HarnessConfirmations) async -> [String: Any] {
+    static func goalRun(words: String, harness: HarnessServer, confirmations: HarnessConfirmations,
+                        routeMemory: AgentRouteMemory? = nil) async -> [String: Any] {
         let harnessAnswer: @Sendable (String) -> String = { line in harness.answer(line: line) }
         let startBundle = CommandLine.arguments.first { $0.hasPrefix("--agent-start-bundle=") }.map { String($0.dropFirst("--agent-start-bundle=".count)) }
         let started = Date()
         let startUptime = ProcessInfo.processInfo.systemUptime
         var narrations = 0
-        let loop = AgentLoop.live(heard: words, startBundle: startBundle, harnessAnswer: harnessAnswer, model: AgentLoopModel()) { _ in narrations += 1 }
+        let loop = AgentLoop.live(heard: words, startBundle: startBundle, harnessAnswer: harnessAnswer, model: AgentLoopModel(),
+                                  routeMemory: routeMemory) { _ in narrations += 1 }
         let finished = FinishedFlag()
         // `--agent-answer=<words>` (2026-10-08): a fixture answer to the task's ask_owner,
         // fed to the SAME task, as the owner's next turn would (`RealtimeVoiceSession.startAgentLoop`).

@@ -222,8 +222,12 @@ final class RealtimeVoiceSession {
     /// listening on key-down, processing on key-up, responding at first audio, idle when the turn ends.
     var onStateChange: ((CompanionVoiceState) -> Void)?
 
-    init(harnessAnswer: @escaping @Sendable (String) -> String) {
+    /// Where tasks keep and recall routes (`AgentRouteMemory`): the app passes the owner's; the scenario runner and probes none.
+    private let routeMemory: AgentRouteMemory?
+
+    init(harnessAnswer: @escaping @Sendable (String) -> String, routeMemory: AgentRouteMemory? = nil) {
         self.harnessAnswer = harnessAnswer
+        self.routeMemory = routeMemory
         // Marks what the last process left mid-task (once per process), then offers the newest still interrupted on disk.
         _ = AgentTaskStore.interruptedAtLaunch
         interruptedOffer = Self.offerable(AgentTaskStore.read().filter { $0.state == .interrupted }, now: Date())
@@ -391,12 +395,13 @@ final class RealtimeVoiceSession {
             loop = paused
         } else if continuing, let interrupted {
             loop = AgentLoop.live(heard: resumedWords ?? heard, startBundle: startBundle, harnessAnswer: harnessAnswer,
-                                  model: agentModel) { [weak self] line in
+                                  model: agentModel, routeMemory: routeMemory) { [weak self] line in
                 self?.enqueueAgentSpeech(line, final: false)
             }
             loop.restore(from: interrupted)
         } else {
-            loop = AgentLoop.live(heard: words, startBundle: startBundle, harnessAnswer: harnessAnswer, model: agentModel) { [weak self] line in
+            loop = AgentLoop.live(heard: words, startBundle: startBundle, harnessAnswer: harnessAnswer, model: agentModel,
+                                  routeMemory: routeMemory) { [weak self] line in
                 self?.enqueueAgentSpeech(line, final: false)
             }
         }

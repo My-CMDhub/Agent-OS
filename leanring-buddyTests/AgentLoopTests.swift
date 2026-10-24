@@ -1406,6 +1406,9 @@ struct AgentLoopReadOnlyTests {
     /// navigating pass, anything that makes, changes or reaches people does not.
     @Test func aReadOnlyTaskJudgesAMenuItemByWhatItDoes() {
         func refused(_ path: [String]) -> Bool { AgentLoop.readOnlyRefusal(["verb": "menu", "path": path], focusedField: { nil }) != nil }
+        // A menu-bar icon only shows its panel (unseen R12/N04 2026-10-24); a path-less menu press is still refused.
+        #expect(AgentLoop.readOnlyRefusal(["verb": "menu", "statusItem": "Sound"], focusedField: { nil }) == nil)
+        #expect(AgentLoop.readOnlyRefusal(["verb": "menu"], focusedField: { nil }) != nil)
         // An allow-list (review of 7973fde): the View, Go, Window and Help menus, and items that only show.
         for path in [["View", "as List"], ["View", "Sort By", "Name"], ["Go", "Downloads"], ["Window", "Minimize"],
                      ["Help", "Search"], ["File", "Get Info"], ["View", "Show Path Bar"], ["View", "Month"],

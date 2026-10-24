@@ -339,7 +339,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager, confirmations: confirmations)
         confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
         let sharedHarness = harnessServer
-        companionManager.realtimeVoiceSession = RealtimeVoiceSession(harnessAnswer: { line in sharedHarness.answer(line: line) })
+        companionManager.realtimeVoiceSession = RealtimeVoiceSession(harnessAnswer: { line in sharedHarness.answer(line: line) },
+                                                                         routeMemory: .shared)
         confirmationCardWindowManager?.replyAudioIsPlaying = { [companionManager] in
             companionManager.realtimeVoiceSession?.isReplyAudioPlaying ?? false
         }

@@ -112,7 +112,7 @@ enum AgentTaskStore {
 
     /// A NEW file, opened at 0600 before a byte is written (`createFile` writes, then sets the
     /// mode), never following a link planted at the name.
-    private nonisolated static func writeNew(_ data: Data, to path: String) -> Bool {
+    nonisolated static func writeNew(_ data: Data, to path: String) -> Bool {
         let descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { return false }
         defer { close(descriptor) }

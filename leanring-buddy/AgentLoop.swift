@@ -371,6 +371,10 @@ final class AgentLoop {
         var checkpoint: (AgentTaskCheckpoint) -> Void = { _ in }
         /// A plan's live precheck (`AgentPlan.livePrecheck`): why it may not run, nil when it may.
         var planPrecheck: ([[String: Any]]) async -> String? = { _ in nil }
+        /// A remembered route for the owner's words (`AgentRouteMemory`), told once at the start; it grants nothing.
+        var routeHint: (String) -> AgentRouteMemory.Hint? = { _ in nil }
+        /// A backed done's route: goal, ok steps' progress lines, steps taken. True when it was kept.
+        var recordRoute: (_ goal: String, _ steps: [String], _ stepCount: Int) -> Bool = { _, _, _ in false }
     }
 
     /// One executed tool, as the run's receipts hold it.
@@ -639,6 +643,12 @@ final class AgentLoop {
                 content.append(["type": "text", "text": Self.goalText(goal: resumedFrom == nil ? goal : "continue the interrupted task described below",
                                                                       heard: heard, readOnly: readOnly)])
                 if let resumedFrom { content.append(["type": "text", "text": Self.resumedNote(resumedFrom)]) }
+                // A resumed task's words are "continue …": no route of another task fits them.
+                if resumedFrom == nil, let hint = dependencies.routeHint(heard ?? goal) {
+                    content.append(["type": "text", "text": hint.text])
+                    dependencies.trace(["kind": "routeHint", "run": runID, "goalHash": goalHash, "score": (hint.score * 100).rounded() / 100,
+                                        "stepsHinted": hint.steps, "uptime": MeasurementLogFile.roundedUptime(dependencies.uptime())])
+                }
             }
             content += Self.observationBlocks(observation, step: step)
             if !artifacts.isEmpty {
@@ -860,7 +870,14 @@ final class AgentLoop {
                             "challenge": challenge.map(SecretScanner.redact) ?? NSNull(),
                             // The refused wording, redacted and capped: unseen R03's guard misfire could not be read from a length.
                             "refusedSummary": challenge == nil ? NSNull() : SecretScanner.redact(String(summary.prefix(300)))])
-                    guard let challenge else { return finish(.done(summary: summary)) }
+                    guard let challenge else {
+                        // Only a backed done keeps its route; counts only in the trace.
+                        if resumedFrom == nil, let steps = Self.routeSteps(receipts), dependencies.recordRoute(heard ?? goal, steps, step) {
+                            dependencies.trace(["kind": "routeRecorded", "run": runID, "goalHash": goalHash, "steps": steps.count,
+                                                "uptime": MeasurementLogFile.roundedUptime(dependencies.uptime())])
+                        }
+                        return finish(.done(summary: summary))
+                    }
                     // No turn is left to act on a challenge: the honest end is the cap, with why.
                     if wrappingUp { return finish(.stepCap(left: challenge)) }
                     if challengedDone { return finish(.failed(reason: "its summary claimed what no result of this task shows")) }
@@ -1597,6 +1614,15 @@ final class AgentLoop {
         return subject > 0 && isNamedThirdParty(cased[subject])
     }
 
+    /// A done task's route (`AgentRouteMemory`): each ok step's progress line, else its plain words — neither
+    /// carries typed text. nil when no screen tool acted or navigated (a web answer has no route).
+    static func routeSteps(_ receipts: [Receipt]) -> [String]? {
+        let ok = receipts.filter(\.ok)
+        guard ok.contains(where: { RealtimeVoiceVerbs.allToolNames.contains($0.toolName) && RealtimeVoiceVerbs.isActingTool($0.toolName)
+            && $0.toolName != RealtimeVoiceVerbs.pointAtName }) else { return nil }
+        return ok.compactMap { $0.progress ?? $0.words }
+    }
+
     /// A few words of what a step did, for narration and a failure's
     /// "got as far as". Names are quoted the notch's way (`captionName`).
     static func progressLine(toolName: String, call: RealtimeToolCall?, result: [String: Any]) -> String? {
@@ -1872,8 +1898,9 @@ extension AgentLoop {
     /// its own site and passed).
     /// `startBundle`: the app in front when the owner asked (key-down); nil
     /// falls back to the first look's app.
+    /// `routeMemory`: where routes are kept and recalled; nil (probes, suites) keeps and recalls none.
     static func live(heard: String, startBundle: String? = nil, harnessAnswer: @escaping @Sendable (String) -> String, model: AgentLoopModel,
-                     narrate: @escaping (String) -> Void) -> AgentLoop {
+                     routeMemory: AgentRouteMemory? = nil, narrate: @escaping (String) -> Void) -> AgentLoop {
         let carry = MarksCarry()
         carry.startBundle = startBundle
         carry.runningAtStart = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
@@ -1912,7 +1939,9 @@ extension AgentLoop {
             planPrecheck: { steps in
                 AgentPlan.livePrecheck(steps, menuOffer: carry.mapOffer, findOffer: carry.marks?.latestMenuOffer, readOnly: carry.readOnly,
                                        screenElements: carry.screenElements)
-            }
+            },
+            routeHint: { words in routeMemory?.hint(for: words) },
+            recordRoute: { goal, steps, stepCount in routeMemory?.record(goal: goal, steps: steps, stepCount: stepCount) ?? false }
         ))
         carry.runID = loop.runID
         carry.onCardOpened = { [weak loop] in loop?.noteCardPending() }
@@ -2246,6 +2275,9 @@ extension AgentLoop {
             guard !names.isEmpty else { return "a press of something with no name cannot be judged" }
             return names.lazy.compactMap(reachingWord).first.map { "pressing an element named with \"\($0)\" reaches people or changes something" }
         case .menu:
+            // A menu-bar icon only shows its panel or menu; a press inside it is judged on its own (unseen R12/N04
+            // 2026-10-24: "what is the volume" and "which networks are nearby" could not open the panel holding the answer).
+            if let item = request["statusItem"] as? String, !item.isEmpty { return nil }
             // Judged by the item's own AX title path (`find_menu_items` offered it), never the model's words.
             guard let path = request["path"] as? [String], let leaf = path.last else { return "a menu press with no path cannot be judged" }
             let shown = path.joined(separator: " > ")
