@@ -2287,6 +2287,8 @@ final class HarnessServer {
             "popupWindowsUnread": popupWindowsUnread,
             // forModel: how many named elements the walk holds below the view — read_page says the page goes on.
             "namedBelowView": request.forModel ? Self.namedBelowView(in: rootNode) : 0,
+            // forModel: their names, for find_on_screen's "below: scroll down" (unseen N16 2026-10-24).
+            "namesBelowView": request.forModel ? Array(Self.namesBelowView(in: rootNode).prefix(300)) : [],
             "thinTree": snapshot.nodeCount < FirstSightWake.thinTreeNodes,
             "firstSightWake": snapshot.firstSightWake.map { ["nodesBefore": $0.nodesBefore, "nodesAfter": $0.nodesAfter,
                                                              "milliseconds": $0.milliseconds,
@@ -2363,17 +2365,20 @@ final class HarnessServer {
     /// Zero HEIGHT counts: Chromium clips a below-the-fold element's frame to the viewport, so
     /// screens 2 and 3 read (47, 900, 630, 0) with the view's bottom at 900 (raw AX, 2026-10-15).
     /// Zero width does not: (0, 0, 0, 0) is the meaningless frame, never a place.
-    static func namedBelowView(in rootNode: AccessibilityElementNode) -> Int {
-        var count = 0
+    static func namedBelowView(in rootNode: AccessibilityElementNode) -> Int { namesBelowView(in: rootNode).count }
+
+    /// The same elements' listed names, in tree order.
+    static func namesBelowView(in rootNode: AccessibilityElementNode) -> [String] {
+        var names: [String] = []
         func visit(_ node: AccessibilityElementNode, clip: CGRect) {
             let frame = node.frameInAppKitCoordinates
-            if node.listedName != nil, frame.width > 0, !clip.isNull, frame.maxY <= clip.minY { count += 1 }
+            if let name = node.listedName, frame.width > 0, !clip.isNull, frame.maxY <= clip.minY { names.append(name.raw) }
             if node.hidesChildrenFromWire { return }
             let scrolls = (node.role == "AXScrollArea" || node.role == "AXWebArea") && frame.width > 0 && frame.height > 0
             for child in node.children { visit(child, clip: scrolls ? clip.intersection(frame) : clip) }
         }
         visit(rootNode, clip: rootNode.frameInAppKitCoordinates)
-        return count
+        return names
     }
 
     /// A toggle's own state — a NUMBER AXValue (a switch's or radio button's 0/1), else AXSelected — or nil

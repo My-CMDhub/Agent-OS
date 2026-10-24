@@ -113,6 +113,19 @@ struct RealtimeScreenVerbsTests {
         #expect(models.candidates.first?.frame == CGRect(x: 20, y: 600, width: 200, height: 24))
     }
 
+    /// Unseen N16 2026-10-24: "Default web browser" sits below the fold of Desktop & Dock; the find said
+    /// nothing and the task gave up. A match below the view is named, so the next step is a scroll.
+    @Test func aMatchBelowTheViewIsNamedWhenNothingVisibleMatches() {
+        let window = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        var pane: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(window),
+                                   "elements": [element("AXWindow", "Desktop & Dock", window),
+                                                element("AXCheckBox", "Magnification", CGRect(x: 600, y: 300, width: 40, height: 20))]]
+        pane["namesBelowView"] = ["Default web browser", "Prefer tabs when opening documents", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"]
+        let offer = RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: pane, words: "default web browser", screens: [window])
+        #expect(offer.candidates.isEmpty && offer.belowView == ["Default web browser"])
+        #expect(RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: pane, words: "magnification", screens: [window]).belowView.isEmpty)
+    }
+
     /// Unseen R12 2026-10-24: "what is the current volume level?" answered "a little under a third"
     /// (it was 35%). A slider's position is offered as a reading.
     @Test func aSlidersLevelIsOfferedAsAPercent() {
