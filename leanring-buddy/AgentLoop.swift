@@ -1579,6 +1579,9 @@ final class AgentLoop {
                    !words[(index + 1)..<min(words.count, index + 5)].contains(where: { $0 == "on" || $0 == "off" }) { continue }
                 if words[max(0, index - 3)..<index].contains(where: { effectNegations.contains($0) || $0.hasSuffix("n't") }) { continue }
                 if hasNamedThirdPartyAgent(words, cased: cased[sentence], at: index) { continue }
+                // A capitalised word mid-sentence is a name, not a deed: Notes' "Recently Deleted", Mail's "Sent"
+                // (unseen H04 2026-10-24: a true answer listing notes in Recently Deleted was refused twice).
+                if index > 0, cased[sentence].indices.contains(index), cased[sentence][index].first?.isUppercase == true { continue }
                 if isStateReading(words, at: index) { continue }
                 claims.append(kind.receipts)
             }
@@ -1591,7 +1594,8 @@ final class AgentLoop {
     /// within three words after it and no "I"/"we" just before; "I selected X" still needs a press.
     /// A toggle word ("Wi-Fi is turned off", U02) is a state only after is/are/currently/an article.
     static let stateParticiples: Set<String> = ["selected"]
-    static let perceptionWords: Set<String> = ["shows", "showing", "shown", "reads", "appears", "looks", "seems", "displays", "lists"]
+    static let perceptionWords: Set<String> = ["shows", "showing", "shown", "reads", "appears", "looks", "seems", "displays", "lists", "listed"]
+    static let presentStateVerbs: Set<String> = ["is", "are", "remains", "remain", "stays", "stay"]
     static func isStateReading(_ words: [String], at index: Int) -> Bool {
         let toggle = toggleWords.contains(words[index])
         guard stateParticiples.contains(words[index]) || toggle else { return false }
@@ -1602,6 +1606,10 @@ final class AgentLoop {
         // What a screen shows is a state: "the pane shows its toggle switched off", "shows Light selected" (unseen R03/A05
         // 2026-10-24, both refused twice). First person, checked above, still claims.
         if words[max(0, index - 5)..<index].contains(where: perceptionWords.contains) { return true }
+        // A present-tense state shared by a list: "Cursor and Notion are listed but switched off" (unseen H13 2026-10-24).
+        // "now" still reports a change ("is now turned off"), and "was" never qualifies.
+        let near = words[max(0, index - 4)..<index]
+        if toggle, near.contains(where: presentStateVerbs.contains), !near.contains("now") { return true }
         // "Wi-Fi is now turned off" reports a change: "now" is a state for "selected" only. "Already"
         // is a state (owner 2026-10-22: "turn off my Bluetooth" with it off — "Bluetooth is already
         // turned off" was refused twice for want of a press that would have turned it ON).
