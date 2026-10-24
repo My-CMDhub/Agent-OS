@@ -270,6 +270,9 @@ struct AgentLoopTests {
         #expect(AgentLoop.doneChallenge(summary: "Done.", evidence: [], receipts: []) != nil)
         #expect(AgentLoop.doneChallenge(summary: "It worked.", evidence: [2],
                                         receipts: [AgentLoop.Receipt(step: 2, toolName: "scroll", ok: false, error: "x")]) != nil)
+        // Unseen X02 2026-10-24: a reading with a stray step number claims nothing to bind.
+        #expect(AgentLoop.doneChallenge(summary: "Next week has no events on your calendar.", evidence: [5],
+                                        receipts: [AgentLoop.Receipt(step: 4, toolName: "read_page", ok: true, error: nil)]) == nil)
     }
 
     /// B5 2026-10-14 (0897DD71): read_page said moreBelow, done summarised screen 1. Asked once; a second done stands.
@@ -1342,7 +1345,9 @@ struct AgentLoopReadOnlyTests {
         }
         for words in ["In Cursor, open a new terminal, then close it",
                       "In Cursor, open the agent panel and ask: what does AgentLoop.swift do? Don't change any files",
-                      "write a LinkedIn post about HeyClicky", "message Farza that I loved the demo", "type hello into the note"] {
+                      "write a LinkedIn post about HeyClicky", "message Farza that I loved the demo", "type hello into the note",
+                      // Unseen X05 2026-10-24: "show" before a thing to display is a change, not a look.
+                      "show seconds in the menu bar clock", "show the battery percentage in the menu bar"] {
             #expect(!AgentLoop.isReadOnlyTask(words: words), "\(words)")
         }
     }

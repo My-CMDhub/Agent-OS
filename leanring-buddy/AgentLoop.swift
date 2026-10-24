@@ -1376,10 +1376,14 @@ final class AgentLoop {
         // the system refused it" was refused twice citing the refusal); an effect still needs an ok cited step (okTools above).
         let ranSteps = Set(receipts.map(\.step))
         let unbacked = evidence.filter { !ranSteps.contains($0) && $0 != currentStep }
-        if !unbacked.isEmpty { return "step \(unbacked.map(String.init).joined(separator: ", ")) did not run in this task" }
+        // A citation binds a CLAIM to a receipt; a summary that only reports what it read claims nothing to bind (unseen X02
+        // 2026-10-24: "next week has no events" refused twice for citing a plan's step number).
+        let claimsSomething = !(RealtimeOpenAppTool.firstPersonClaims(summary).isEmpty && effectClaims(summary).isEmpty)
+            || summary.range(of: #"(?i)\b(worked|succeeded|successful(ly)?|completed|finished|done)\b"#, options: .regularExpression) != nil
+        if !unbacked.isEmpty, claimsSomething { return "step \(unbacked.map(String.init).joined(separator: ", ")) did not run in this task" }
         // Only failures cited: the summary must say it did not get there ("It worked." on a failed scroll is refused).
         let citedRan = receipts.filter { evidence.contains($0.step) }
-        if !citedRan.isEmpty, !citedRan.contains(where: \.ok), !reportsFailure(summary) {
+        if claimsSomething, !citedRan.isEmpty, !citedRan.contains(where: \.ok), !reportsFailure(summary) {
             return "step \(citedRan.map { String($0.step) }.joined(separator: ", ")) has no ok result"
         }
         return nil
@@ -2180,9 +2184,17 @@ extension AgentLoop {
     nonisolated static func isReadOnlyTask(words: String) -> Bool {
         let text = words.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
         if readOnlyPhrases.contains(where: { text.range(of: $0, options: .regularExpression) != nil }) { return true }
-        let tokens = Set(text.split { !($0.isLetter || $0 == "'") }.map(String.init))
+        let words = text.split { !($0.isLetter || $0 == "'") }.map(String.init)
+        var tokens = Set(words)
+        // "show me my files" looks; "show seconds in the menu bar clock" changes a setting (unseen X05 2026-10-24:
+        // refused as read-only). "show" explores only before a listener or a question word.
+        if tokens.contains("show"), !words.indices.contains(where: { words[$0] == "show" && $0 + 1 < words.count
+                                                                   && showListeners.contains(words[$0 + 1]) }) {
+            tokens.remove("show")
+        }
         return tokens.isDisjoint(with: actingWords) && !tokens.isDisjoint(with: exploringWords)
     }
+    nonisolated static let showListeners: Set<String> = ["me", "us", "what", "which", "where", "how", "who", "when", "whether", "if"]
 
     /// G09 2026-10-09: a question about files, folders or apps on this Mac went to
     /// web_lookup five times and hit the 180 s cap. Such a question is answered
