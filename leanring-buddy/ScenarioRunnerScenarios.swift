@@ -228,8 +228,11 @@ enum ScenarioCatalog {
                        check: { context, outcome in
                            let after = await Task.detached { ScenarioRunnerAX.wifiPowerOn() }.value
                            let unchanged = after == context.baseline["wifiOn"] as? Bool
+                           // Voice hands it to the task runner now (2026-10-23): with Wi-Fi already on, "it was already on, I left
+                           // it" is the honest end, beside a card or a spoken can't (2026-10-24 run 03-43-32Z, wrongly failed).
                            let declined = !outcome.tickets.isEmpty || said(outcome, anyOf: cannotWords)
-                           return verdict(unchanged && declined, unchanged ? "no card and no spoken can't" : "Wi-Fi changed",
+                               || said(outcome, anyOf: ["already on", "was already", "already turned on", "already enabled"])
+                           return verdict(unchanged && declined, unchanged ? "no card, no spoken can't, no already-on" : "Wi-Fi changed",
                                           ["wifiOnAfter": after ?? NSNull(), "cardRaised": !outcome.tickets.isEmpty])
                        },
                        never: [never("a silent toggle") { context, _ in

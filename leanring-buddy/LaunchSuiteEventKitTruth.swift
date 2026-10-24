@@ -95,6 +95,11 @@ extension GeneralitySuite {
         return RemindersToday(today: today, callMom: calls.map { reminderRow($0, now: now) }, callMomDue: calls.map { reminderDueText($0, now: now) })
     }
 
+    nonisolated static let testReminderPhrases = ["jarvis test reminder"]
+    nonisolated static func namesTestReminder(_ node: AccessibilityElementNode) -> Bool {
+        [node.listedName?.raw, node.value?.raw].contains { $0?.contains("JARVIS test reminder") == true }
+    }
+
     nonisolated static func matching(_ all: [IncompleteReminder], _ phrases: [String]) -> [IncompleteReminder] {
         all.filter { r in phrases.contains { folded(r.title).contains($0) } }
     }

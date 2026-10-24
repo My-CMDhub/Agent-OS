@@ -27,6 +27,7 @@
 
 import AppKit
 import ApplicationServices
+import EventKit
 import Foundation
 
 @MainActor
@@ -81,9 +82,21 @@ enum GeneralitySuite {
                   },
         SuiteTask(id: "G04", pattern: "create item + text entry", words: "create a new note in Notes titled JARVIS test 1 with the line hello",
                   apps: [notes], created: (notes, { $0.listedName?.raw.contains("JARVIS test 1") == true })) { _, run in createdVerdict(run) },
+        // EventKit truth (generality 2026-10-24: create_reminder wrote it to the default list while the checker counted the
+        // rows Reminders showed, 0 -> 0). Completed when provably this run's (none before, one now); never deleted.
         SuiteTask(id: "G05", pattern: "create item (list app)", words: "create a reminder called JARVIS test reminder",
-                  apps: [reminders], created: (reminders, { node in
-                      [node.listedName?.raw, node.value?.raw].contains { $0?.contains("JARVIS test reminder") == true } })) { _, run in createdVerdict(run) },
+                  apps: [reminders], pre: {
+                      ["testRemindersBefore": await truthRead(.reminder, reminders, eventKit: { eventKitIncompleteReminders().map { matching($0, testReminderPhrases).count } }) {
+                          appNodes(reminders).map { $0.filter(namesTestReminder).count } } as Any? ?? NSNull()]
+                  }) { _, run in
+                      let before = run["testRemindersBefore"] as? Int
+                      let after = await truthRead(.reminder, reminders, eventKit: { eventKitIncompleteReminders().map { matching($0, testReminderPhrases).count } }) {
+                          appNodes(reminders).map { $0.filter(namesTestReminder).count } }
+                      var result = createdVerdict(before: before, after: after)
+                      result["truthSource"] = truthSource(.reminder)
+                      if before == 0, after == 1 { result["markedCompleted"] = await read { completeOnlyCallMom(phrases: testReminderPhrases) } ?? false }
+                      return result
+                  },
         SuiteTask(id: "G06", pattern: "tab / segmented control switch", words: "switch Calendar to the month view",
                   apps: [calendar]) { _, _ in
                       let month = await read { appHas(calendar) { $0.listedName?.raw == "Month" && $0.selected == true } }
