@@ -1439,7 +1439,7 @@ struct AgentLoopReadOnlyTests {
                      ["Help", "Search"], ["File", "Get Info"], ["View", "Show Path Bar"], ["View", "Month"],
                      ["Edit", "Find", "Find…"], ["View", "Arrange By", "Kind"], ["Window", "Bring All to Front"],
                      ["View", "Enter Full Screen"], ["Format", "Font", "Show Fonts"], ["View", "Actual Size"], ["Window", "Zoom"],
-                     ["Navigate", "Go to Line…"], ["Edit", "Search"]] {
+                     ["Navigate", "Go to Line…"], ["Edit", "Search"], ["Google Chrome", "About Google Chrome"]] {
             #expect(!refused(path), "\(path)")
         }
         for path in [["File", "New Folder"], ["File", "Save…"], ["Edit", "Delete"], ["File", "Close Window"], ["Calculator", "Quit Calculator"],

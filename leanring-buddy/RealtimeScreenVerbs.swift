@@ -208,7 +208,9 @@ nonisolated enum RealtimeScreenVerbs {
             let input = AccessibilityElementNode.textInputRoles.contains(role)
             // A control named by its label link replaces that label (owner 2026-10-22: "Bluetooth toggle"
             // offered only the pane's "Bluetooth" text; the AXSwitch it labels came later and was folded away).
-            if kept.isClickable, !sameName.isEmpty, sameName.allSatisfy({ !$0.isClickable }) {
+            // So does a control carrying a reading: Displays' Brightness slider (level 44) lost to its label (unseen F04 2026-10-24).
+            let carriesState = kept.isClickable || kept.levelPercent != nil || kept.selected != nil
+            if carriesState, !sameName.isEmpty, sameName.allSatisfy({ !$0.isClickable && $0.levelPercent == nil && $0.selected == nil }) {
                 pool.removeAll { $0.name == name }
                 pool.append(kept)
                 continue

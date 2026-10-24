@@ -2257,7 +2257,8 @@ extension AgentLoop {
     /// Left Side of Screen" moves the owner's window and is refused.
     nonisolated static let showingMenus: Set<String> = ["view", "go", "window", "help"]
     nonisolated static let showingItemPrefixes: [[String]] = [
-        ["show"], ["hide"], ["view"], ["go", "to"], ["sort"], ["arrange"], ["find"], ["search"], ["get", "info"], ["zoom"],
+        // "About Google Chrome" only shows a version (unseen F11 2026-10-24: refused in "what version of Chrome do I have?").
+        ["about"], ["show"], ["hide"], ["view"], ["go", "to"], ["sort"], ["arrange"], ["find"], ["search"], ["get", "info"], ["zoom"],
         ["enter", "full", "screen"], ["exit", "full", "screen"], ["actual", "size"], ["bigger"], ["smaller"]]
 
     nonisolated static func isShowingMenuItem(_ path: [String]) -> Bool {
