@@ -1383,7 +1383,7 @@ nonisolated enum RealtimeOpenAppTool {
     static let kindClaims: [(phrases: [String], receipts: Set<String>)] = [
         (pressClaimPhrases, [RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName]),
         (pointClaimPhrases, [RealtimeVoiceVerbs.pointAtName, RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName,
-                             RealtimeVoiceVerbs.annotateName]),
+                             RealtimeVoiceVerbs.annotateName, RealtimeVoiceVerbs.pressMenuBarItemName]),
         (["scrolled"], [RealtimeVoiceVerbs.scrollName]),
         (["typed"], [RealtimeVoiceVerbs.typeTextName]),
         (["closed"], [RealtimeVoiceVerbs.closeName]),
@@ -1391,7 +1391,9 @@ nonisolated enum RealtimeOpenAppTool {
         // G16 2026-10-11: an ok open_settings_pane backs "opened" (and go_to_folder).
         (["opened"], [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.openURLName, RealtimeVoiceVerbs.focusAppName,
                       RealtimeVoiceVerbs.pressMenuName, RealtimeVoiceVerbs.pressElementName,
-                      SettingsPaneLinks.toolName, RealtimeVoiceVerbs.goToFolderName]),
+                      SettingsPaneLinks.toolName, RealtimeVoiceVerbs.goToFolderName,
+                      // Launch L03 2026-10-24: "I opened the Wi-Fi panel" after an ok press_menu_bar_item was refused.
+                      RealtimeVoiceVerbs.pressMenuBarItemName]),
         // Launch suite U02 2026-10-13: "turned off" after a press on the Wi-Fi switch's LABEL.
         // Only a press that resolved to a toggle backs it (`okReceiptNames`).
         (["turned off", "turned on", "switched off", "switched on", "toggled", "enabled", "disabled", "muted", "unmuted"], [toggleReceipt])

@@ -375,6 +375,8 @@ final class AgentLoop {
         var routeHint: (String) -> AgentRouteMemory.Hint? = { _ in nil }
         /// A backed done's route: goal, ok steps' progress lines, steps taken. True when it was kept.
         var recordRoute: (_ goal: String, _ steps: [String], _ stepCount: Int) -> Bool = { _, _, _ in false }
+        /// The owner's notes file as one quoted block (`AgentRouteMemory.ownerNotes`); nil for probes and suites.
+        var ownerNotes: () -> String? = { nil }
     }
 
     /// One executed tool, as the run's receipts hold it.
@@ -645,6 +647,11 @@ final class AgentLoop {
                 content.append(["type": "text", "text": Self.goalText(goal: resumedFrom == nil ? goal : "continue the interrupted task described below",
                                                                       heard: heard, readOnly: readOnly)])
                 if let resumedFrom { content.append(["type": "text", "text": Self.resumedNote(resumedFrom)]) }
+                if let notes = dependencies.ownerNotes() {
+                    content.append(["type": "text", "text": notes])
+                    dependencies.trace(["kind": "ownerNotes", "run": runID, "characters": notes.count,
+                                        "uptime": MeasurementLogFile.roundedUptime(dependencies.uptime())])
+                }
                 // A resumed task's words are "continue …": no route of another task fits them.
                 if resumedFrom == nil, let hint = dependencies.routeHint(heard ?? goal) {
                     content.append(["type": "text", "text": hint.text])
@@ -1290,7 +1297,8 @@ final class AgentLoop {
     nonisolated static func reportsFailure(_ summary: String) -> Bool {
         let first = summary.split(whereSeparator: { ".!?".contains($0) }).first.map(String.init)?.lowercased() ?? ""
         return ["couldn't", "could not", "couldn’t", "unable", "wasn't able", "was not able", "did not", "didn't", "didn’t",
-                "can't", "cannot", "can’t", "failed", "no way to", "not able"].contains { first.contains($0) }
+                "can't", "cannot", "can’t", "failed", "no way to", "not able", "declined", "denied", "refused", "blocked",
+                "not done", "no change", "nothing was"].contains { first.contains($0) }
     }
 
     /// A connection that dropped or never formed: worth one retry, unlike an HTTP refusal.
@@ -1364,10 +1372,17 @@ final class AgentLoop {
         }
         // A card the owner denied backs "it was not done" (live 2026-10-23: citing the denied press
         // was refused twice and the task ended "failed"); it backs no effect, which needs okTools above.
-        let okSteps = Set(receipts.filter { $0.ok || $0.error == "confirmationDenied" || $0.error == ownerDeniedError }.map(\.step))
+        // A refused or failed step is real evidence for "it was not done" (launch 2026-10-24: "I did not empty the Trash;
+        // the system refused it" was refused twice citing the refusal); an effect still needs an ok cited step (okTools above).
         let ranSteps = Set(receipts.map(\.step))
-        let unbacked = evidence.filter { !okSteps.contains($0) && !($0 == currentStep && !ranSteps.contains($0)) }
-        return unbacked.isEmpty ? nil : "step \(unbacked.map(String.init).joined(separator: ", ")) has no ok result"
+        let unbacked = evidence.filter { !ranSteps.contains($0) && $0 != currentStep }
+        if !unbacked.isEmpty { return "step \(unbacked.map(String.init).joined(separator: ", ")) did not run in this task" }
+        // Only failures cited: the summary must say it did not get there ("It worked." on a failed scroll is refused).
+        let citedRan = receipts.filter { evidence.contains($0.step) }
+        if !citedRan.isEmpty, !citedRan.contains(where: \.ok), !reportsFailure(summary) {
+            return "step \(citedRan.map { String($0.step) }.joined(separator: ", ")) has no ok result"
+        }
+        return nil
     }
 
     /// The task's last ok read_page said `moreBelow`, and no ok scroll came after it.
@@ -1521,6 +1536,7 @@ final class AgentLoop {
     static let effectWords: [(words: Set<String>, receipts: Set<String>)] = [
         (["posted", "published", "submitted", "sent", "shared", "deleted", "removed", "pressed", "clicked", "tapped", "selected",
           "saved", "uploaded", "purchased", "bought", "ordered", "approved"], pressTools),
+        (["pressed", "clicked"], [RealtimeVoiceVerbs.pressMenuBarItemName]),
         (["typed", "entered", "filled", "written", "wrote"], [RealtimeVoiceVerbs.typeTextName]),
         (["opened", "launched", "loaded", "navigated", "visited"], navigationTools),
         (["closed", "quit"], [RealtimeVoiceVerbs.closeName]),
@@ -1972,7 +1988,8 @@ extension AgentLoop {
                                        screenElements: carry.screenElements)
             },
             routeHint: { words in routeMemory?.hint(for: words) },
-            recordRoute: { goal, steps, stepCount in routeMemory?.record(goal: goal, steps: steps, stepCount: stepCount) ?? false }
+            recordRoute: { goal, steps, stepCount in routeMemory?.record(goal: goal, steps: steps, stepCount: stepCount) ?? false },
+            ownerNotes: { routeMemory?.ownerNotes() }
         ))
         carry.runID = loop.runID
         carry.onCardOpened = { [weak loop] in loop?.noteCardPending() }

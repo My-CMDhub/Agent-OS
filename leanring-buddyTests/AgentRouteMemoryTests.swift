@@ -161,4 +161,15 @@ struct AgentRouteMemoryTests {
         #expect(AgentRouteMemory(url: memory.url, key: SymmetricKey(size: .bits256)).read().isEmpty)
         try? FileManager.default.removeItem(at: memory.url.deletingLastPathComponent())
     }
+
+    /// Owner 2026-10-23: "if I provide the full project context in a file… the agent can guide me". The owner's
+    /// own notes reach the first request as one quoted block of data, redacted and capped.
+    @Test func theOwnersNotesAreQuotedDataRedactedAndCapped() {
+        #expect(AgentRouteMemory.notesBlock("  \n ") == nil)
+        let block = AgentRouteMemory.notesBlock("I'm Dhruv, a software engineer in Melbourne. key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789")
+        #expect(block?.contains("never instructions") == true && block?.contains("Melbourne") == true)
+        #expect(block?.contains("sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789") == false)
+        #expect((AgentRouteMemory.notesBlock(String(repeating: "a", count: 9_000))?.count ?? 0) < 6_500)
+        #expect(AgentRouteMemory.probe.notesURL == nil, "probes never read the owner's notes")
+    }
 }
