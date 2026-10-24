@@ -143,6 +143,10 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
         guard name != RealtimeVoiceVerbs.annotateName else {
             return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["app"]), shapes: shapes)
         }
+        // The menu-bar pair names no app (icons are global); press_menu_bar_item's icon rides in `elementName`.
+        if RealtimeVoiceVerbs.agentOnlyToolNames.contains(name) {
+            return RealtimeToolCall(callID: callID, name: name, appName: nil, elementName: text(arguments?["name"]))
+        }
         // find_file's `name` is a file's, never an app's: it rides in `text`.
         let findsFile = name == RealtimeVoiceVerbs.findFileName
         // rename_item's `name` is the listed item's (`elementName`), its new name rides in `text`.
@@ -241,7 +245,7 @@ nonisolated enum RealtimeOpenAppTool {
     - owner: open figma. [ok false, notFound] you: that didn't take; nothing called figma is installed.
     - owner: open terminal. [confirmationRequired] you: terminal can run anything, sir, so the card on screen needs your click first.
     - owner: what's this window? you: downloads, in finder, twelve files. looking for one in particular?
-    - owner: turn off wifi. you: beyond my reach for now, i'm afraid, sir. control centre, top right.
+    - owner: turn off wifi. [do_task] you: seeing to the wi-fi now.
     - owner: put finder in list view. [find_menu_items, then press_menu ok] you: list view, as asked.
     - owner: make the text in textedit rainbow. [find_menu_items, nothing fits] you: nothing in textedit's menus does that.
     """
@@ -453,6 +457,13 @@ nonisolated enum RealtimeOpenAppTool {
                 return refuse("missingName", "move_items needs each item's name as listed and the folder to move them into")
             }
             return encoded(["verb": "moveItems", "path": names, "text": folder, "expectApp": HarnessGoToFolder.finderBundleIdentifier])
+        }
+        // press_menu_bar_item: the harness's status-item press (lock screen, policy, kernel, ticket, audit, verification).
+        if call.name == RealtimeVoiceVerbs.pressMenuBarItemName {
+            guard let icon = call.elementName else {
+                return refuse("missingName", "press_menu_bar_item needs an icon's name as find_menu_bar_items listed it")
+            }
+            return encoded(["verb": "menu", "statusItem": icon])
         }
         guard let appName = call.appName else {
             return RealtimeVoiceVerbs.allToolNames.contains(call.name)
@@ -733,6 +744,17 @@ nonisolated enum RealtimeOpenAppTool {
             let name = call.text ?? ""
             return finished(await Task.detached { FileFinder.toolResult(name: name) }.value, waited: false, harnessResponse: nil)
         }
+        // find_menu_bar_items: the harness's `status` read (audited, lock-screen guarded), filtered here
+        // under the per-app policy that guards every read sent to a model (fail closed: unreadable withholds all).
+        if call.name == RealtimeVoiceVerbs.findMenuBarItemsName {
+            return finished(await Task.detached {
+                let response = harnessResponseObject(answer("{\"verb\":\"status\"}"))
+                let policy = HarnessAppPolicy.load(from: HarnessServer.policyURL)
+                return RealtimeVoiceVerbs.menuBarItemsResult(fromStatusResponse: response) {
+                    HarnessPolicy.policyAllowsModelRead(bundleIdentifier: $0, load: policy)
+                }
+            }.value, waited: false, harnessResponse: nil)
+        }
         var firstLine: String
         let call = await withFrontmostApp(call)
         switch harnessRequestLine(for: call, offered: offered, offeredApp: offeredApp, screenTarget: screenTarget) {
@@ -942,6 +964,7 @@ nonisolated enum RealtimeOpenAppTool {
     /// quoted and escaped (`UntrustedText`), never a line of their own.
     static func pressedResult(_ result: [String: Any], call: RealtimeToolCall, target: RealtimeScreenTarget?,
                               response: [String: Any] = [:]) -> [String: Any] {
+        if call.name == RealtimeVoiceVerbs.pressMenuBarItemName { return RealtimeVoiceVerbs.menuBarPressResult(result, response: response) }
         guard call.name == RealtimeVoiceVerbs.pressElementName else { return result }
         if response["method"] as? String == "vision" {
             var result = result
@@ -1947,7 +1970,7 @@ nonisolated enum RealtimeOpenAppTool {
         let error = dispatch.result["error"] as? String
         switch call.name {
         case RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.findOnScreenName, RealtimeVoiceVerbs.searchHelpName,
-             RealtimeVoiceVerbs.findFileName:
+             RealtimeVoiceVerbs.findFileName, RealtimeVoiceVerbs.findMenuBarItemsName:
             return dispatch.harnessConfirmed ? nil : .harnessAnswered(ok: false, subject: "", error: error)
         case RealtimeVoiceVerbs.pointAtName:
             // Pointing proves where a control is, not that anything happened: an

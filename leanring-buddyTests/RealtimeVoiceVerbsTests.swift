@@ -521,8 +521,9 @@ struct RealtimeVoiceVerbsTests {
     @Test func everyToolIsDeclaredToBothProviders() {
         let openAINames = RealtimeVoiceVerbs.openAIDeclarations.compactMap { $0["name"] as? String }
         let geminiNames = (RealtimeVoiceVerbs.geminiDeclaration["functionDeclarations"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
-        #expect(Set(openAINames) == RealtimeVoiceVerbs.allToolNames)
-        #expect(Set(geminiNames) == RealtimeVoiceVerbs.allToolNames)
+        // The menu-bar pair is the agent loop's alone (MenuBarItemsTests).
+        #expect(Set(openAINames) == RealtimeVoiceVerbs.allToolNames.subtracting(RealtimeVoiceVerbs.agentOnlyToolNames))
+        #expect(Set(geminiNames) == RealtimeVoiceVerbs.allToolNames.subtracting(RealtimeVoiceVerbs.agentOnlyToolNames))
     }
 
     // MARK: App identity

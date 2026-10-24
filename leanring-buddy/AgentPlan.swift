@@ -46,7 +46,7 @@ nonisolated enum AgentPlan {
         SettingsPaneLinks.toolName: [["name"]], RealtimeVoiceVerbs.findFileName: [["name"]],
         RealtimeVoiceVerbs.renameItemName: [["name", "new_name"]], RealtimeVoiceVerbs.moveItemsName: [["names", "to_folder"]],
         RealtimeVoiceVerbs.setValueName: [["name", "value"]], RealtimeVoiceVerbs.createReminderName: [["title"]],
-        RealtimeVoiceVerbs.createEventName: [["title"]]
+        RealtimeVoiceVerbs.createEventName: [["title"]], RealtimeVoiceVerbs.pressMenuBarItemName: [["name"]]
     ]
 
     /// Anthropic tool JSON. Each step is a flat object: `tool` plus that
@@ -61,7 +61,8 @@ nonisolated enum AgentPlan {
                 "tool": text("The tool this step calls, for example \"press_menu\"."),
                 "app": text("The app, as that tool takes it."),
                 "name": text("open_app / focus_app: the app's name. press_element / point_at / type_text / scroll: the element's exact name. "
-                    + "find_file: the file or folder's name. rename_item: the item's name as listed. set_value: the control's name."),
+                    + "find_file: the file or folder's name. rename_item: the item's name as listed. set_value: the control's name. "
+                    + "press_menu_bar_item: the icon's name as find_menu_bar_items listed it."),
                 "words": text("find_menu_items / find_on_screen / search_help: a few words."),
                 "path": ["type": "array", "items": ["type": "string"], "description": "press_menu: the menu path, split at \" > \"."],
                 "shortcut": text("press_menu: instead of a path, the shortcut an App verbs line shows."),
@@ -162,7 +163,8 @@ nonisolated enum AgentPlan {
     /// Steps that only read: their result is something to see, so a plan stops after one.
     static func isReading(_ tool: String) -> Bool {
         [AgentLoopTools.readPageName, AgentLoopGemini.webLookupName, RealtimeVoiceVerbs.findOnScreenName,
-         RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.searchHelpName, RealtimeVoiceVerbs.findFileName].contains(tool)
+         RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.searchHelpName, RealtimeVoiceVerbs.findFileName,
+         RealtimeVoiceVerbs.findMenuBarItemsName].contains(tool)
     }
 
     static func isActing(_ tool: String) -> Bool {

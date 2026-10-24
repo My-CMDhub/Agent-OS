@@ -124,6 +124,37 @@ struct AgentLoopTests {
         #expect(AgentLoop.doneChallenge(summary: "I turned on Bluetooth.", evidence: [1], receipts: denied) != nil)
     }
 
+    /// Unseen R14/R15 2026-10-24: "which apps open at login" and "when is my next event" asked
+    /// "shall I open it?" from the window in front. Looking is never a question.
+    @Test func thePromptSaysLookingNeedsNoPermission() {
+        #expect(AgentLoop.systemPrompt.contains("never ask_owner whether to"))
+    }
+
+    /// Unseen A03 2026-10-24: "Control Center" and "Control Centre" are one app.
+    @Test func controlCentreIsNamedEitherWay() {
+        #expect(RealtimeVoiceVerbs.sameAppName("Control Centre", "control center"))
+        #expect(!RealtimeVoiceVerbs.sameAppName("Control Centre", "Control"))
+    }
+
+    /// Unseen R08/R10 2026-10-24: a dropped connection ended the task; it is retried once.
+    @MainActor @Test func aDroppedConnectionIsRetriedOnce() async {
+        var calls = 0
+        let script = Script([toolUse("done", ["summary": "Nothing to do.", "evidence": []])])
+        let agent = AgentLoop(dependencies: AgentLoop.Dependencies(
+            model: { _, _ in
+                calls += 1
+                if calls == 1 { throw NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost) }
+                return AgentModelReply(json: script.replies[0], model: "fake", milliseconds: 7)
+            },
+            observe: { AgentObservation(jpeg: nil, frame: nil, look: "noAppInFront", lines: [], bundleIdentifier: nil) },
+            execute: { _, _, _, _ in dispatch(ok: true) }, readPage: { ["ok": true, "text": "page"] },
+            onStep: { _ in }, narrate: { _ in }, trace: { _ in }, uptime: { script.now }, frontBundle: { nil }))
+        let outcome = await agent.run(goal: "do nothing")
+        #expect(calls == 2)
+        #expect(outcome == .done(summary: "Nothing to do."))
+        #expect(!AgentLoop.isTransientNetworkError(NSError(domain: NSURLErrorDomain, code: NSURLErrorBadServerResponse)))
+    }
+
     @MainActor @Test func stopsAtTheStepCap() async {
         let script = Script([toolUse("scroll", ["direction": "down"])])
         let outcome = await loop(script).run(goal: "keep scrolling")
@@ -1427,6 +1458,10 @@ struct AgentLoopReadOnlyTests {
             .compactMap { $0["text"] as? String }.joined()
         #expect(first.contains("read-only"))
         #expect(!AgentLoop.goalText(goal: "x", heard: nil).contains("read-only"))
+        // Unseen R15 2026-10-24: the task did not know the date.
+        let saturday = DateComponents(calendar: .current, year: 2026, month: 10, day: 24, hour: 11, minute: 58).date!
+        #expect(AgentLoop.goalText(goal: "x", heard: nil, now: saturday).contains(AgentLoop.nowLine(saturday)))
+        #expect(AgentLoop.nowLine(saturday).contains("2026"))
     }
 }
 
@@ -1628,11 +1663,13 @@ struct TaskSessionTests {
 
     @Test func aNegatedOrPresentStateToggleClaimsNothing() {
         for said in ["I couldn't turn off Wi-Fi.", "Wi-Fi was not turned off.", "Wi-Fi is turned off.", "Bluetooth is currently disabled.",
-                     "Bluetooth is already turned off.", "The page says the feature is disabled.", "I turned to the next page."] {
+                     "Bluetooth is already turned off.", "Bluetooth is off. The Bluetooth pane in System Settings shows its toggle switched off.",
+                     "The Appearance pane shows Light selected.", "The page says the feature is disabled.", "I turned to the next page."] {
             #expect(AgentLoop.doneChallenge(summary: said, evidence: [], receipts: receipts(pressedRole: "AXStaticText")) == nil, "\(said)")
         }
         // First person, or "now", is still a change claimed.
-        for said in ["I made sure it is disabled. I disabled it.", "Wi-Fi is now turned off.", "I already turned off Bluetooth."] {
+        for said in ["I made sure it is disabled. I disabled it.", "Wi-Fi is now turned off.", "I already turned off Bluetooth.",
+                      "I switched it off and the pane shows it."] {
             #expect(AgentLoop.doneChallenge(summary: said, evidence: [], receipts: receipts(pressedRole: "AXStaticText")) != nil, "\(said)")
         }
     }
