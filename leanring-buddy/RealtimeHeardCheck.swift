@@ -190,6 +190,10 @@ nonisolated enum RealtimeHeardCheck {
         }.map(\.url))
 
         // Word tier: a menu-bar name said in full, or one distinctive word.
+        // A built-in app's own one-word name is never another app's word (owner's ruling R1): "unread emails in Mail"
+        // heard Zoho Mail alone, and the press in Apple's Mail was refused ambiguousApp (unseen H01 2026-10-24).
+        let builtInNouns = Set(names.filter { isCommonWord($0) && $0.url.standardizedFileURL.path.hasPrefix("/System/Applications/") }
+            .flatMap { RealtimeVoiceVerbs.foldedTokens($0.name) })
         var appsByWord: [String: [URL]] = [:]
         for name in names where !isCommonWord(name) {
             let tokens = RealtimeVoiceVerbs.foldedTokens(name.name)
@@ -197,7 +201,7 @@ nonisolated enum RealtimeHeardCheck {
             // Code URL Handler's: ambiguous as a word, and the full name decides.
             if !name.isFileName || tokens.count == 1 { appsByWord[tokens.joined(), default: []].append(name.url) }
             guard tokens.count > 1 else { continue }
-            for token in Set(tokens) where token.count >= 4 && !genericNameWords.contains(token) {
+            for token in Set(tokens) where token.count >= 4 && !genericNameWords.contains(token) && !builtInNouns.contains(token) {
                 appsByWord[token, default: []].append(name.url)
             }
         }

@@ -61,6 +61,15 @@ struct RealtimeHeardCheckTests {
         #expect(!code.apps.map(RealtimeVoiceVerbs.displayName).contains("Xcode"))
     }
 
+    /// Unseen H01 2026-10-24: Zoho Mail is installed beside Apple's Mail. "mail" is a common word, so Mail
+    /// was skipped and the word named Zoho Mail alone; a built-in app's own noun names no other app (R1).
+    @Test func aBuiltInAppsNounIsNoOtherAppsWord() {
+        let withZoho = installed + [app("/System/Applications/Mail.app"), app("/Users/o/Applications/Zoho Mail.app")]
+        let mentioned = RealtimeHeardCheck.appsMentioned(in: "how many unread emails do I have in mail", among: withZoho)
+        #expect(!mentioned.apps.map(RealtimeVoiceVerbs.displayName).contains("Zoho Mail"))
+        #expect(RealtimeHeardCheck.appsMentioned(in: "open zoho mail", among: withZoho).apps.map(RealtimeVoiceVerbs.displayName) == ["Zoho Mail"])
+    }
+
     @Test func soundAlikesMapOnlyInTheAppSlot() {
         for said in ["open a new window in kasa", "Open a new window in Kaza.", "new window in kassa", "open casa"] {
             let result = RealtimeHeardCheck.appsMentioned(in: said, among: installed)
