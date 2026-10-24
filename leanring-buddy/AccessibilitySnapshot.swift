@@ -38,6 +38,15 @@ struct AccessibilityElementNode {
     var fieldLabel: UntrustedText? { title ?? elementDescription ?? placeholder }
 
     static let textInputRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
+    /// Controls whose AXValue is a position on a range (`levelPercent`).
+    static let levelRoles: Set<String> = ["AXSlider", "AXLevelIndicator", "AXProgressIndicator"]
+
+    /// `current` as a whole percent of its range (`HarnessAdjust.range`'s rule: 0...1 when neither bound is published).
+    nonisolated static func percent(_ current: Double, min: Double?, max: Double?) -> Int? {
+        guard current.isFinite, let range = HarnessAdjust.range(min: min, max: max, current: current) else { return nil }
+        return Int(((current - range.lowerBound) / (range.upperBound - range.lowerBound) * 100).rounded())
+    }
+
     /// Controls whose name may live on a separate label element (`labelledBy`).
     static let labelledByRoles: Set<String> = ["AXCheckBox", "AXRadioButton", "AXSlider", "AXPopUpButton"]
     /// Whether the label link is this element's name: ONE rule for the walk
@@ -210,6 +219,9 @@ struct AccessibilityElementNode {
     /// A text input's character COUNT, never its text; nil for every other role,
     /// a secure (or subrole-unreadable) field, and a failed read.
     let valueLength: Int?
+    /// A slider's or level indicator's position as a whole percent of its AXMinValue...AXMaxValue
+    /// (unseen R12 2026-10-24: "a little under a third" for a volume of 35). nil for other roles.
+    let levelPercent: Int?
 
     /// The live cross-process handle. Present only on nodes produced by a real
     /// walk — hand-built nodes in tests leave it nil.
@@ -241,7 +253,8 @@ struct AccessibilityElementNode {
         valueLength: Int? = nil,
         accessibilityElement: AXUIElement? = nil,
         frameReadFailed: Bool = false,
-        childrenReadFailed: Bool = false
+        childrenReadFailed: Bool = false,
+        levelPercent: Int? = nil
     ) {
         self.role = role
         self.subrole = subrole
@@ -259,6 +272,7 @@ struct AccessibilityElementNode {
         self.subroleReadFailed = subroleReadFailed
         self.selected = selected
         self.valueLength = valueLength
+        self.levelPercent = levelPercent
         self.accessibilityElement = accessibilityElement
         self.frameReadFailed = frameReadFailed
         self.childrenReadFailed = childrenReadFailed
@@ -1131,6 +1145,13 @@ enum AccessibilityTreeWalker {
                 selected: $0.rawSelected, selectedError: $0.selectedError)
         }
 
+        // Two extra reads, sliders and level indicators only.
+        let levelPercent = AccessibilityElementNode.levelRoles.contains(role)
+            ? (batched?.rawValue as? NSNumber).flatMap { current in
+                AccessibilityElementNode.percent(current.doubleValue, min: copyNumberAttribute(from: element, attribute: kAXMinValueAttribute),
+                                                 max: copyNumberAttribute(from: element, attribute: kAXMaxValueAttribute))
+              } : nil
+
         // AXFrame is not an SDK constant and not every app publishes it, so fall
         // back to position + size rather than reporting a frameless node.
         let frameReadResult: (frame: CGRect?, didTimeOut: Bool)
@@ -1251,7 +1272,8 @@ enum AccessibilityTreeWalker {
             valueLength: state?.valueLength,
             accessibilityElement: element,
             frameReadFailed: frameReadResult.frame == nil,
-            childrenReadFailed: childReadResult.readFailed
+            childrenReadFailed: childReadResult.readFailed,
+            levelPercent: levelPercent
         )
     }
 
@@ -1361,6 +1383,12 @@ enum AccessibilityTreeWalker {
             return nil
         }
         return stringValue
+    }
+
+    private static func copyNumberAttribute(from element: AXUIElement, attribute: String) -> Double? {
+        var attributeValue: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &attributeValue) == .success else { return nil }
+        return (attributeValue as? NSNumber)?.doubleValue
     }
 
     private static func copyElementAttribute(from element: AXUIElement, attribute: String) -> AXUIElement? {

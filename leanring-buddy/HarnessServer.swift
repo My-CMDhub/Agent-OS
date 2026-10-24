@@ -2344,6 +2344,7 @@ final class HarnessServer {
                 // and a COUNT, never the text; absent when not read, never false / 0.
                 if let selected = node.selected { entry["selected"] = selected }
                 if let valueLength = node.valueLength, !node.mightBeSecure { entry["valueLength"] = valueLength }
+                if let level = node.levelPercent { entry["levelPercent"] = level }
                 listed.append(entry)
                 next = listed.count - 1
             }
@@ -2373,6 +2374,26 @@ final class HarnessServer {
         }
         visit(rootNode, clip: rootNode.frameInAppKitCoordinates)
         return count
+    }
+
+    /// A toggle's own state — a NUMBER AXValue (a switch's or radio button's 0/1), else AXSelected — or nil
+    /// unread. Never a string value: a field's text is not a state. Unseen A05/A08 2026-10-24: Light mode and
+    /// Show Percentage switched and came back notVerified, because the fingerprint diffs names only.
+    nonisolated static func toggleState(_ element: AXUIElement) -> String? {
+        var value: AnyObject?
+        if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success, let number = value as? NSNumber {
+            return "value \(number)"
+        }
+        if AXUIElementCopyAttributeValue(element, kAXSelectedAttribute as CFString, &value) == .success, let number = value as? NSNumber {
+            return "selected \(number)"
+        }
+        return nil
+    }
+
+    /// Moved only when BOTH reads answered and differ: a control the app rebuilt reads nil, never "changed".
+    nonisolated static func toggleMoved(_ element: AXUIElement?, from before: String?) -> Bool {
+        guard let before, let element, let now = toggleState(element) else { return false }
+        return now != before
     }
 
     /// `verification.appeared`: names new since `namesBefore` (the full
@@ -3355,6 +3376,8 @@ final class HarnessServer {
         // a Finder window that went 219 nodes to 99 reported "nothing changed"
         // when only pressable names were diffed.
         let namesBefore = AccessibilityDumpRunner.namedElementFingerprint(in: rootNode)
+        // And the pressed control's own state: a switch or radio button flips with no name moving.
+        let stateBefore = resolvedNode.accessibilityElement.flatMap(Self.toggleState)
 
         var performedOK: Bool
         var keystrokesSawTheText = false
@@ -3369,7 +3392,7 @@ final class HarnessServer {
         case .click:
             // Its own act and look (AXPress or a real click, focus or names as evidence).
             return clickAct(request, node: resolvedNode, rootNode: rootNode, snapshot: snapshot, namesBefore: namesBefore,
-                            kernel: described.decision, dryRun: dryRun, startedAt: startedAt, response: response)
+                            stateBefore: stateBefore, kernel: described.decision, dryRun: dryRun, startedAt: startedAt, response: response)
 
         case .press, .open, .menu:
             guard let element = resolvedNode.accessibilityElement else {
@@ -3671,6 +3694,7 @@ final class HarnessServer {
         let (verification, verifyWalks, confirmingSnapshot) = ActionVerifier.verifyCountingWalks { laterSnapshot in
             guard let laterRoot = laterSnapshot.rootNode else { return false }
             return AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot) != namesBefore
+                || Self.toggleMoved(resolvedNode.accessibilityElement, from: stateBefore)
         }
         // "poll" is the only honest path: this verifier re-walks on a 150 ms
         // timer and subscribes to no AX event.
@@ -3747,7 +3771,7 @@ final class HarnessServer {
     /// (never on a toggle, which a second activation would undo). Each method is
     /// looked at before the next is tried; `method` says which one worked.
     private func clickAct(_ request: HarnessRequest, node: AccessibilityElementNode, rootNode: AccessibilityElementNode,
-                          snapshot: AccessibilityWindowSnapshot, namesBefore: Set<String>, kernel: String,
+                          snapshot: AccessibilityWindowSnapshot, namesBefore: Set<String>, stateBefore: String? = nil, kernel: String,
                           dryRun: Bool, startedAt: Date, response initial: [String: Any]) -> [String: Any] {
         var response = initial
         func finish(_ outcome: String, error: String? = nil, message: String? = nil) -> [String: Any] {
@@ -3782,7 +3806,8 @@ final class HarnessServer {
             let (outcome, used, _) = ActionVerifier.verifyCountingWalks { later in
                 guard let laterRoot = later.rootNode else { return false }
                 seen = HarnessHands.clickEvidence(
-                    fingerprintChanged: AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot) != namesBefore,
+                    fingerprintChanged: AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot) != namesBefore
+                        || Self.toggleMoved(element, from: stateBefore),
                     focusedBefore: focusedBefore,
                     focusedNow: HarnessHands.focusIsOn(element, processIdentifier: processIdentifier))
                 return seen != nil
@@ -4039,8 +4064,9 @@ final class HarnessServer {
         for request: HarnessRequest,
         dryRun: Bool,
         startedAt: Date,
-        into response: inout [String: Any]
-    ) -> (application: NSRunningApplication, bar: AccessibilityMenu.Node)? {
+        into response: inout [String: Any],
+        needsBar: Bool = true
+    ) -> (application: NSRunningApplication, bar: AccessibilityMenu.Node?)? {
 
         func fail(_ code: String, _ message: String) {
             response["ok"] = false
@@ -4078,6 +4104,7 @@ final class HarnessServer {
         response["bundleIdentifier"] = application.bundleIdentifier ?? "unknown"
         response["frontmostSource"] = frontmostRead.source.rawValue
 
+        guard needsBar else { return (application, nil) }
         guard let bar = AccessibilityMenu.menuBarNode(for: application) else {
             fail("noMenuBar", "the application publishes no AXMenuBar")
             return nil
@@ -4116,9 +4143,9 @@ final class HarnessServer {
         var response: [String: Any] = [
             "dryRun": dryRun, "confirmed": request.confirmed, "path": request.path
         ]
-        guard let (application, bar) = menuBar(
+        guard let (application, menuBarNode) = menuBar(
             for: request, dryRun: dryRun, startedAt: startedAt, into: &response
-        ) else { return response }
+        ), let bar = menuBarNode else { return response }
 
         // Only the path is read — six or seven levels, not the 300-item bar.
         let resolveStartedAt = Date()
@@ -4331,9 +4358,9 @@ final class HarnessServer {
     /// nothing — and it is the thing a planner needs before it can plan.
     private func menusResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
         var response: [String: Any] = ["pathPrefix": request.path]
-        guard let (application, bar) = menuBar(
+        guard let (application, menuBarNode) = menuBar(
             for: request, dryRun: dryRun, startedAt: startedAt, into: &response
-        ) else { return response }
+        ), let bar = menuBarNode else { return response }
         if let reason = HarnessPolicy.modelReadRefusal(forModel: request.forModel, bundleIdentifier: application.bundleIdentifier,
                                                        policy: loadedPolicy) {
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: "policyRefused", startedAt: startedAt)
@@ -4407,7 +4434,7 @@ final class HarnessServer {
     /// can press one; topics are app-written text, so quoted.
     private func helpSearchResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
         var response: [String: Any] = ["dryRun": dryRun]
-        guard let (application, bar) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response) else { return response }
+        guard let (application, menuBarNode) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response), let bar = menuBarNode else { return response }
         func finish(_ outcome: String, error: String? = nil, message: String? = nil) -> [String: Any] {
             response["ok"] = error == nil
             if let error { response["error"] = error }
@@ -4457,7 +4484,18 @@ final class HarnessServer {
     /// holds. Dry run resolves the menu item and opens nothing.
     private func goToFolderResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
         var response: [String: Any] = ["dryRun": dryRun]
-        guard let (application, bar) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response) else { return response }
+        // Finder always runs and the folder is the caller's: bring Finder forward rather than refuse
+        // (unseen R09 2026-10-24: "the newest file in my Downloads" was refused frontmostChanged over
+        // Claude, then focus_app Finder was refused as an app the owner never named).
+        let finderID = HarnessGoToFolder.finderBundleIdentifier
+        if !dryRun, AccessibilityTreeWalker.frontmost().application?.bundleIdentifier != finderID,
+           HarnessAppPolicy.verdict(for: finderID, in: loadedPolicy).0 != .refuse,
+           let finder = NSRunningApplication.runningApplications(withBundleIdentifier: finderID).first {
+            response["broughtFinderForward"] = finder.activate()
+            let deadline = Date().addingTimeInterval(2)
+            while AccessibilityTreeWalker.frontmost().application?.bundleIdentifier != finderID, Date() < deadline { usleep(50_000) }
+        }
+        guard let (application, menuBarNode) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response), let bar = menuBarNode else { return response }
         func finish(_ outcome: String, error: String? = nil, message: String? = nil) -> [String: Any] {
             response["ok"] = error == nil
             if let error { response["error"] = error }
@@ -4465,7 +4503,7 @@ final class HarnessServer {
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: outcome, startedAt: startedAt)
             return response
         }
-        guard application.bundleIdentifier == HarnessGoToFolder.finderBundleIdentifier else {
+        guard application.bundleIdentifier == finderID else {
             return finish("notFinder", error: "notFinder",
                           message: "Go to Folder is Finder's; Finder is not the app in front, so nothing was opened. Focus Finder first.")
         }
@@ -4509,7 +4547,7 @@ final class HarnessServer {
     /// stops after those checks.
     private func renameItemResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
         var response: [String: Any] = ["dryRun": dryRun]
-        guard let (application, bar) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response) else { return response }
+        guard let (application, menuBarNode) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response), let bar = menuBarNode else { return response }
         func finish(_ outcome: String, kernel: String = "n/a", error: String? = nil, message: String? = nil) -> [String: Any] {
             response["ok"] = error == nil
             if let error { response["error"] = error }
@@ -4567,7 +4605,8 @@ final class HarnessServer {
     /// run stops after those checks.
     private func adjustResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
         var response: [String: Any] = ["dryRun": dryRun]
-        guard let (application, _) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response) else { return response }
+        // The front app only: Control Centre's Sound slider has no menu bar (unseen A03 2026-10-24, noMenuBar x5).
+        guard let (application, _) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response, needsBar: false) else { return response }
         func finish(_ outcome: String, kernel: String = "n/a", error: String? = nil, message: String? = nil) -> [String: Any] {
             response["ok"] = error == nil
             if let error { response["error"] = error }
@@ -4687,7 +4726,7 @@ final class HarnessServer {
     /// app policy and tickets apply. Dry run stops after those checks.
     private func moveItemsResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
         var response: [String: Any] = ["dryRun": dryRun]
-        guard let (application, bar) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response) else { return response }
+        guard let (application, menuBarNode) = menuBar(for: request, dryRun: dryRun, startedAt: startedAt, into: &response), let bar = menuBarNode else { return response }
         func finish(_ outcome: String, kernel: String = "n/a", error: String? = nil, message: String? = nil) -> [String: Any] {
             response["ok"] = error == nil
             if let error { response["error"] = error }

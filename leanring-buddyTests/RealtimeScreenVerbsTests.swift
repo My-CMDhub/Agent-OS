@@ -113,6 +113,21 @@ struct RealtimeScreenVerbsTests {
         #expect(models.candidates.first?.frame == CGRect(x: 20, y: 600, width: 200, height: 24))
     }
 
+    /// Unseen R12 2026-10-24: "what is the current volume level?" answered "a little under a third"
+    /// (it was 35%). A slider's position is offered as a reading.
+    @Test func aSlidersLevelIsOfferedAsAPercent() {
+        let window = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        var slider = element("AXSlider", "Output volume", CGRect(x: 600, y: 300, width: 300, height: 20), actions: ["AXIncrement"], source: "description")
+        slider["levelPercent"] = 35
+        let pane: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(window),
+                                   "elements": [element("AXWindow", "Sound", window), slider]]
+        let offered = RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: pane, words: "output volume", screens: [window]).candidates
+        #expect(offered.first?.jsonObject["level"] as? String == "35%")
+        #expect(AccessibilityElementNode.percent(0.35, min: nil, max: nil) == 35)
+        #expect(AccessibilityElementNode.percent(70, min: 0, max: 200) == 35)
+        #expect(AccessibilityElementNode.percent(3, min: nil, max: nil) == nil, "no range is guessed outside 0...1")
+    }
+
     /// Owner 2026-10-22, System Settings > Bluetooth: the switch is named only by its
     /// AXTitleUIElement, the "Bluetooth" text listed before it. The switch is the offer.
     @Test func aSwitchNamedByItsLabelIsOfferedInsteadOfTheLabel() {
