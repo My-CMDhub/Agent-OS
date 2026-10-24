@@ -458,6 +458,8 @@ final class AgentLoop {
     private var challengedUnsetTime = false
     /// `editLeftOpen` asked once; a second done after it stands.
     private var challengedOpenEdit = false
+    /// `questionUnread` asked once; a second done after it stands.
+    private var challengedUnanswered = false
     private var sameRefusal: (error: String, count: Int)?
     private var lastError: String?
     private var webUsed: [String: Int] = [:]
@@ -833,6 +835,18 @@ final class AgentLoop {
                                     + "If the task needs the whole page, scroll down and read_page again; if not, call done again."])
                         continue
                     }
+                    // Unseen B1 2026-10-24: "what is my battery's maximum capacity?" ended done on "I opened the Battery pane so
+                    // you can read it; I have not yet read the figure." A question with nothing read is asked once.
+                    if !challengedUnanswered, readOnly, webUsed.isEmpty, !receipts.contains(where: { $0.ok && Self.readingTools.contains($0.toolName) }) {
+                        challengedUnanswered = true
+                        traced(["tool": toolName, "args": args, "ok": false, "error": "questionUnread"])
+                        if !wrappingUp {
+                            answer(["ok": false, "error": "questionUnread",
+                                    "message": "the owner asked a question and this task has read nothing yet. Read the answer (read_page, "
+                                        + "find_on_screen or a web tool) and put it in the summary; if it cannot be found, say so with done."])
+                            continue
+                        }
+                    }
                     // M02 2026-10-19: a press opened a commit-on-confirm field's edit (a date popup's pick lands in it), and
                     // nothing since ended it. By receipts, whatever the wording; asked once, a second done stands.
                     if !challengedOpenEdit, let open = Self.editLeftOpen(receipts) {
@@ -872,7 +886,8 @@ final class AgentLoop {
                             "refusedSummary": challenge == nil ? NSNull() : SecretScanner.redact(String(summary.prefix(300)))])
                     guard let challenge else {
                         // Only a backed done keeps its route; counts only in the trace.
-                        if resumedFrom == nil, let steps = Self.routeSteps(receipts), dependencies.recordRoute(heard ?? goal, steps, step) {
+                        if resumedFrom == nil, !Self.reportsFailure(summary), let steps = Self.routeSteps(receipts),
+                           dependencies.recordRoute(heard ?? goal, steps, step) {
                             dependencies.trace(["kind": "routeRecorded", "run": runID, "goalHash": goalHash, "steps": steps.count,
                                                 "uptime": MeasurementLogFile.roundedUptime(dependencies.uptime())])
                         }
@@ -1269,6 +1284,14 @@ final class AgentLoop {
     }
 
     static let ownerDeniedError = "ownerDenied"
+
+    /// A done that says it did not get there keeps no route (unseen W1 2026-10-24: "I couldn't confirm the default
+    /// browser…" became the hint for the next try). ponytail: words in its first sentence; a stricter judge if one slips.
+    nonisolated static func reportsFailure(_ summary: String) -> Bool {
+        let first = summary.split(whereSeparator: { ".!?".contains($0) }).first.map(String.init)?.lowercased() ?? ""
+        return ["couldn't", "could not", "couldn’t", "unable", "wasn't able", "was not able", "did not", "didn't", "didn’t",
+                "can't", "cannot", "can’t", "failed", "no way to", "not able"].contains { first.contains($0) }
+    }
 
     /// A connection that dropped or never formed: worth one retry, unlike an HTTP refusal.
     nonisolated static func isTransientNetworkError(_ error: Error) -> Bool {

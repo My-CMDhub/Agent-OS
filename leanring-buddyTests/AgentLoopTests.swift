@@ -130,6 +130,26 @@ struct AgentLoopTests {
         #expect(AgentLoop.systemPrompt.contains("never ask_owner whether to"))
     }
 
+    /// Unseen W1 2026-10-24: a done that reports failure keeps no route.
+    @Test func aFailureSummaryIsNoRoute() {
+        #expect(AgentLoop.reportsFailure("I couldn't confirm the default web browser. I checked two panes."))
+        #expect(AgentLoop.reportsFailure("I could not find it."))
+        #expect(!AgentLoop.reportsFailure("Do Not Disturb is now on. It couldn't be easier."))
+    }
+
+    /// Unseen B1 2026-10-24: a question ended done with nothing read; asked once to read the answer.
+    @MainActor @Test func aQuestionWithNothingReadIsAskedOnce() async {
+        let script = Script([toolUse("open_settings_pane", ["name": "Battery"]),
+                             toolUse("done", ["summary": "I opened the Battery pane so you can read it.", "evidence": [1]]),
+                             toolUse("done", ["summary": "I opened the Battery pane so you can read it.", "evidence": [1]])])
+        let agent = loop(script)
+        agent.readOnly = true   // the live wiring judges it from the owner's words (`isReadOnlyTask`)
+        let outcome = await agent.run(goal: "what is my battery's maximum capacity?", heard: "what is my battery's maximum capacity?")
+        #expect(AgentLoop.isReadOnlyTask(words: "what is my battery's maximum capacity?"))
+        #expect(script.traces.contains { $0["error"] as? String == "questionUnread" })
+        #expect(outcome == .done(summary: "I opened the Battery pane so you can read it."))
+    }
+
     /// Unseen A03 2026-10-24: "Control Center" and "Control Centre" are one app.
     @Test func controlCentreIsNamedEitherWay() {
         #expect(RealtimeVoiceVerbs.sameAppName("Control Centre", "control center"))
