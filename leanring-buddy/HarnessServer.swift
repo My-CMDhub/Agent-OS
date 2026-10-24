@@ -2384,10 +2384,13 @@ final class HarnessServer {
         if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success, let number = value as? NSNumber {
             return "value \(number)"
         }
-        if AXUIElementCopyAttributeValue(element, kAXSelectedAttribute as CFString, &value) == .success, let number = value as? NSNumber {
-            return "selected \(number)"
+        switch AXUIElementCopyAttributeValue(element, kAXSelectedAttribute as CFString, &value) {
+        case .success: return (value as? NSNumber).map { "selected \($0)" }
+        // Appearance's Light / Dark / Auto are AXButtons: the chosen one answers AXSelected 1, the
+        // others answer no value at all (2026-10-24), so "none" is unselected — a real answer, unlike a failure.
+        case .noValue, .attributeUnsupported: return "selected 0"
+        default: return nil
         }
-        return nil
     }
 
     /// Moved only when BOTH reads answered and differ: a control the app rebuilt reads nil, never "changed".

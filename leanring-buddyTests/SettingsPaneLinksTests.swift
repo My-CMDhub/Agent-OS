@@ -18,7 +18,16 @@ struct SettingsPaneLinksTests {
                 == "x-apple.systempreferences:com.apple.Lock-Screen-Settings.extension")
         #expect(SettingsPaneLinks.url(forPane: "about")?.absoluteString
                 == "x-apple.systempreferences:com.apple.SystemProfiler.AboutExtension")
-        #expect(SettingsPaneLinks.verified.count == 13)
+        #expect(SettingsPaneLinks.verified.count == 33)
+    }
+
+    /// Unseen N16/A05 2026-10-24: Desktop & Dock and Appearance had no link. A title that holds
+    /// the name, uniquely, is the pane; a word several titles hold is none.
+    @Test func aPaneIsFoundByAPartOfItsTitle() {
+        #expect(SettingsPaneLinks.pane(named: "Siri") == "Apple Intelligence & Siri")
+        #expect(SettingsPaneLinks.pane(named: "Control Center") == "Control Centre")
+        #expect(SettingsPaneLinks.pane(named: "login items") == "Login Items & Extensions")
+        #expect(SettingsPaneLinks.pane(named: "Screen") == nil, "Lock Screen, Screen Saver, Screen Time")
     }
 
     @Test func wifiMatchesHoweverItIsSpelled() {

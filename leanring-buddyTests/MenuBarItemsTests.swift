@@ -49,8 +49,8 @@ struct MenuBarItemsTests {
             Issue.record("a press with no name must be refused"); return
         }
         #expect(refusal.error == "missingName")
-        // A read-only task never presses one: a menu request with no path cannot be judged.
-        #expect(AgentLoop.readOnlyRefusal(request, focusedField: { nil }) != nil)
+        // A read-only task may open one: it only shows a panel, whose presses are judged on their own (unseen R12/N04 2026-10-24).
+        #expect(AgentLoop.readOnlyRefusal(request, focusedField: { nil }) == nil)
     }
 
     @Test func theListingNamesWhatAPressResolvesAndWithholdsWhatItMust() throws {

@@ -25,7 +25,18 @@ nonisolated enum SettingsPaneLinks {
         "Notifications": "com.apple.Notifications-Settings.extension",
         "Privacy & Security": "com.apple.settings.PrivacySecurity.extension",
         "Keyboard": "com.apple.Keyboard-Settings.extension", "Trackpad": "com.apple.Trackpad-Settings.extension",
-        "About": "com.apple.SystemProfiler.AboutExtension"
+        "About": "com.apple.SystemProfiler.AboutExtension",
+        // 20/20 landed live 2026-10-24 by window title (Mouse, with no mouse attached, stayed put; General opened nothing).
+        "Appearance": "com.apple.Appearance-Settings.extension", "Desktop & Dock": "com.apple.Desktop-Settings.extension",
+        "Control Centre": "com.apple.ControlCenter-Settings.extension", "Focus": "com.apple.Focus-Settings.extension",
+        "Login Items & Extensions": "com.apple.LoginItems-Settings.extension", "Software Update": "com.apple.Software-Update-Settings.extension",
+        "Storage": "com.apple.settings.Storage", "Network": "com.apple.Network-Settings.extension",
+        "Accessibility": "com.apple.Accessibility-Settings.extension", "Users & Groups": "com.apple.Users-Groups-Settings.extension",
+        "Date & Time": "com.apple.Date-Time-Settings.extension", "Sharing": "com.apple.Sharing-Settings.extension",
+        "Printers & Scanners": "com.apple.Print-Scan-Settings.extension", "Language & Region": "com.apple.Localization-Settings.extension",
+        "Screen Time": "com.apple.Screen-Time-Settings.extension", "Internet Accounts": "com.apple.Internet-Accounts-Settings.extension",
+        "Spotlight": "com.apple.Spotlight-Settings.extension", "Apple Intelligence & Siri": "com.apple.Siri-Settings.extension",
+        "Touch ID & Password": "com.apple.Touch-ID-Settings.extension", "Family": "com.apple.Family-Settings.extension"
     ]
 
     /// Lowercased, hyphens of any kind (Settings writes U+2011) and spaces dropped: "Wi‑Fi" == "wifi".
@@ -33,9 +44,13 @@ nonisolated enum SettingsPaneLinks {
         String(text.lowercased().unicodeScalars.filter { !"-\u{2010}\u{2011} ".unicodeScalars.contains($0) }.map(Character.init))
     }
 
+    /// Exactly, else the one pane whose title holds the name ("Siri", "Login Items", "Control Center").
     static func pane(named name: String) -> String? {
-        let wanted = key(name.trimmingCharacters(in: .whitespacesAndNewlines))
-        return wanted.isEmpty ? nil : verified.keys.first { key($0) == wanted }
+        let wanted = key(name.trimmingCharacters(in: .whitespacesAndNewlines)).replacingOccurrences(of: "center", with: "centre")
+        guard !wanted.isEmpty else { return nil }
+        if let exact = verified.keys.first(where: { key($0) == wanted }) { return exact }
+        let holding = verified.keys.filter { wanted.count >= 4 && key($0).contains(wanted) }
+        return holding.count == 1 ? holding[0] : nil
     }
 
     static func url(forPane name: String) -> URL? {
@@ -47,12 +62,30 @@ nonisolated enum SettingsPaneLinks {
         key(title) == key(pane) || (pane == "Battery" && title.hasPrefix("Battery \u{2013} "))
     }
 
+    /// System Settings at whatever it shows, for a pane with no verified link; ok once a window is readable.
+    static func openSettingsItself(asked: String?, answer: @escaping @Sendable (String) -> String) async -> [String: Any] {
+        let opened = await MainActor.run { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:")!) }
+        let line = #"{"verb":"windows","app":"System Settings","expectApp":"\#(settingsBundle)"}"#
+        let deadline = Date().addingTimeInterval(5)
+        while opened, Date() < deadline {
+            let response = (try? JSONSerialization.jsonObject(with: Data(answer(line).utf8))) as? [String: Any]
+            if !((response?["windows"] as? [[String: Any]]) ?? []).isEmpty {
+                return ["ok": true, "pane": NSNull(), "verified": "settingsWindow",
+                        "message": "System Settings is open; \(UntrustedText(asked ?? "that pane").forDisplay) has no direct link, so find it "
+                            + "in the sidebar or with the search field at its top. Panes that open directly: "
+                            + verified.keys.sorted().joined(separator: ", ")]
+            }
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+        return ["ok": false, "error": "paneNotVerified", "message": "System Settings did not open within 5 seconds"]
+    }
+
     /// Opens the pane and waits up to 5 s for System Settings to show a window titled for it.
     static func open(paneName: String?, answer: @escaping @Sendable (String) -> String) async -> [String: Any] {
         guard let paneName, let pane = pane(named: paneName), let url = url(forPane: pane) else {
-            return ["ok": false, "error": "paneNotVerified",
-                    "message": "only these System Settings panes open directly: " + verified.keys.sorted().joined(separator: ", ")
-                        + ". For any other, open System Settings with open_app and find it on screen."]
+            // Unseen N16 2026-10-24: "open System Settings with open_app" was then refused appNotNamed, a catch-22.
+            // Opening Settings itself changes nothing: open it here, and the model finds the pane in its sidebar.
+            return await openSettingsItself(asked: paneName, answer: answer)
         }
         let opened = await MainActor.run { NSWorkspace.shared.open(url) }
         guard opened else { return ["ok": false, "error": "openFailed", "message": "macOS did not open the \(pane) pane"] }
