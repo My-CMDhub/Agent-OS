@@ -2151,7 +2151,10 @@ extension AgentLoop {
     /// answer's own `bundleIdentifier`. nil when it was not confirmed. go_to_folder
     /// drives Finder only (`HarnessGoToFolder`) — launch suite E07, live 2026-10-13:
     /// it brought Finder forward and every later Finder step was refused heardUnavailable.
-    nonisolated static func openedBundle(by tool: String, confirmed: Bool, response: [String: Any]?) -> String? {
+    nonisolated static func openedBundle(by tool: String, confirmed: Bool, response: [String: Any]?, error: String? = nil) -> String? {
+        // Unseen J05 2026-10-25: a pane asked for but not seen by its window title still opened System Settings; uncredited,
+        // the task's own Settings window then needed the unnamed-app card. Ownership still checks it was not running before.
+        if tool == SettingsPaneLinks.toolName, error == "notObserved" { return "com.apple.systempreferences" }
         guard confirmed else { return nil }
         if tool == RealtimeVoiceVerbs.goToFolderName { return HarnessGoToFolder.finderBundleIdentifier }
         // press_menu_bar_item: the icon's owner, as the harness resolved it (`summariseStatusItem`).
@@ -2568,7 +2571,8 @@ extension AgentLoop {
                                                                  onConfirmationRequired: carry.onCardOpened,
                                                                  isCurrent: { !Task.isCancelled })
         if let dispatch, let bundle = ownerAllowedUnnamedApp(dispatch) { carry.allowedBundles.insert(bundle) }
-        if let dispatch, let bundle = openedBundle(by: filled.name, confirmed: dispatch.harnessConfirmed, response: dispatch.harnessResponse) {
+        if let dispatch, let bundle = openedBundle(by: filled.name, confirmed: dispatch.harnessConfirmed, response: dispatch.harnessResponse,
+                                                    error: dispatch.result["error"] as? String) {
             switch ownership(afterOpening: filled.name, bundle: bundle, runningAtStart: carry.runningAtStart) {
             case .app: carry.launchedBundles.insert(bundle)
             case .tab:

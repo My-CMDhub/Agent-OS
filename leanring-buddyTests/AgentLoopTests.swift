@@ -955,6 +955,8 @@ struct AgentLoopTests {
         // Launch E11 2026-10-15: a settings pane the task opened is System Settings, the task's own.
         #expect(AgentLoop.openedBundle(by: SettingsPaneLinks.toolName, confirmed: true, response: nil) == "com.apple.systempreferences")
         #expect(AgentLoop.openedBundle(by: SettingsPaneLinks.toolName, confirmed: false, response: nil) == nil)
+        #expect(AgentLoop.openedBundle(by: SettingsPaneLinks.toolName, confirmed: false, response: nil, error: "notObserved") == "com.apple.systempreferences")
+        #expect(AgentLoop.openedBundle(by: SettingsPaneLinks.toolName, confirmed: false, response: nil, error: "openFailed") == nil)
         #expect(AgentLoop.ownership(afterOpening: RealtimeOpenAppTool.name, bundle: finder, runningAtStart: [finder]) == .none)
     }
 
