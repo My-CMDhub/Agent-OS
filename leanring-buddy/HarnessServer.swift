@@ -2970,12 +2970,24 @@ final class HarnessServer {
         }
         // Otherwise the wheel, at the container's own rectangle (or the caller's point inside it).
         if observed == nil {
-            let point = request.nearPoint.flatMap { bounds.contains($0) ? $0 : nil } ?? CGPoint(x: bounds.midX, y: bounds.midY)
-            let topLeft = SyntheticScroller.topLeftCentre(ofAppKitFrame: CGRect(origin: point, size: .zero),
-                                                          primaryDisplayHeightInPoints: CGDisplayBounds(CGMainDisplayID()).height)
-            // A wheel event goes to whatever window is under the point: only ever this app's.
-            let owner = Self.processIdentifier(at: topLeft)
-            guard let processIdentifier = snapshot.application?.processIdentifier, owner == processIdentifier else {
+            let aimed = request.nearPoint.flatMap { bounds.contains($0) ? $0 : nil }
+            let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
+            func topLeftOf(_ point: CGPoint) -> CGPoint {
+                SyntheticScroller.topLeftCentre(ofAppKitFrame: CGRect(origin: point, size: .zero), primaryDisplayHeightInPoints: displayHeight)
+            }
+            // A wheel event goes to whatever window is under the point: only ever this app's. A caller's own point is
+            // the only one tried; otherwise any point of the container this app alone answers for.
+            let targetProcess = snapshot.application?.processIdentifier
+            let tried = aimed.map { [$0] } ?? HarnessScroll.wheelPoints(in: bounds, first: CGPoint(x: bounds.midX, y: bounds.midY))
+            var owner: pid_t?
+            var topLeft = topLeftOf(tried[0])
+            for point in tried {
+                let candidate = topLeftOf(point)
+                let answered = Self.processIdentifier(at: candidate)
+                if owner == nil { owner = answered }
+                if answered != nil, answered == targetProcess { owner = answered; topLeft = candidate; break }
+            }
+            guard let processIdentifier = targetProcess, owner == processIdentifier else {
                 phaseTiming.actionReturned()
                 // Unseen J05/I01 2026-10-25: refused with no word of WHAT covered it, so neither the model nor we could act.
                 let coverer = owner.flatMap { NSRunningApplication(processIdentifier: $0)?.localizedName }

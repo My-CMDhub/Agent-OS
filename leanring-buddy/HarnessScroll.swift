@@ -176,6 +176,17 @@ enum HarnessScroll {
         return (along > 0 && along > otherwise, Array(newlyVisible.prefix(maximumNewlyVisible)))
     }
 
+    /// Where a wheel may go inside `bounds`: the first point first, then a 5x5 grid (10%-90%) nearest the middle first.
+    /// Unseen J05/I01 2026-10-25: a click-through overlay (Wispr Flow, 512x614 at layer 1000 mid-screen) answers the
+    /// hit-test at the centre, so every centred wheel was refused; a point the target app alone owns still scrolls it.
+    /// ponytail: a grid can step over a strip under 16% of the area wide; cut at the coverers' edges if that bites.
+    static func wheelPoints(in bounds: CGRect, first: CGPoint) -> [CGPoint] {
+        let fractions: [CGFloat] = [0.5, 0.3, 0.7, 0.1, 0.9]
+        let grid = fractions.flatMap { fy in fractions.map { fx in
+            CGPoint(x: bounds.minX + fx * bounds.width, y: bounds.minY + fy * bounds.height) } }
+        return [first] + grid.filter { $0 != first }
+    }
+
     /// Wheel steps for `pages` of a container `extent` points long on the scroll axis.
     static func wheelSteps(pages: Double, extent: CGFloat) -> Int {
         let points = CGFloat(pages) * pageFraction * extent

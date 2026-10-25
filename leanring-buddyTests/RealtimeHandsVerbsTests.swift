@@ -120,6 +120,18 @@ struct RealtimeHandsVerbsTests {
         #expect(nudged.moved && nudged.newlyVisible.isEmpty)
     }
 
+    /// Unseen J05 2026-10-25: a click-through overlay over the centre refused every centred wheel. The centre is tried
+    /// first, then other points of the same container, every one inside it, none twice.
+    @Test func aCoveredCentreLeavesOtherPointsOfTheContainerToTry() {
+        let bounds = CGRect(x: 400, y: 100, width: 600, height: 500)
+        let points = HarnessScroll.wheelPoints(in: bounds, first: CGPoint(x: bounds.midX, y: bounds.midY))
+        #expect(points.first == CGPoint(x: 700, y: 350))
+        #expect(points.count == 25)
+        #expect(Set(points.map { "\($0.x),\($0.y)" }).count == 25)
+        #expect(points.allSatisfy { bounds.contains($0) })
+        #expect(points.contains { $0.x < 464 }, "a point left of a 464-976 overlay")
+    }
+
     @Test func wheelStepsCoverMostOfAPage() {
         #expect(HarnessScroll.wheelSteps(pages: 1, extent: 800) == 16)
         #expect(HarnessScroll.wheelSteps(pages: 0.1, extent: 100) == 1)
