@@ -1292,6 +1292,12 @@ final class AgentLoop {
 
     static let ownerDeniedError = "ownerDenied"
 
+    /// The summary with double-quoted spans ("…", “…”) blanked: quoted text is what an app or page wrote. Single quotes are
+    /// kept — they are apostrophes as often as quotes. ponytail: one level, no nesting; a stray quote leaves the rest as is.
+    nonisolated static func withoutQuotedText(_ summary: String) -> String {
+        summary.replacingOccurrences(of: #""[^"\n]{0,300}"|“[^”\n]{0,300}”"#, with: "\"…\"", options: .regularExpression)
+    }
+
     /// Owner's ruling 2026-10-25: a plan's steps share one number, and models count their tool calls instead (launch
     /// L04 2026-10-24: "step 2" of a plan recorded as step 1; a backed answer refused twice). A number no step carries but
     /// that is a position in the run's calls means that call: still ONE receipt, never the whole run.
@@ -1332,7 +1338,10 @@ final class AgentLoop {
         if cited.contains(where: { pressTools.contains($0.toolName) && $0.pressedRole.map(RealtimeOpenAppTool.toggleRoles.contains) == true }) {
             okTools.insert(RealtimeOpenAppTool.toggleReceipt)
         }
-        for receiptsNeeded in RealtimeOpenAppTool.firstPersonClaims(summary) + effectClaims(summary).map(Optional.some) {
+        // What a page says, quoted, is no deed of the task's (unseen H28 2026-10-25: the headline "…barrister sent
+        // 'disgusting' messages…" read as a claim to have sent something, refused twice).
+        let unquoted = Self.withoutQuotedText(summary)
+        for receiptsNeeded in RealtimeOpenAppTool.firstPersonClaims(unquoted) + effectClaims(unquoted).map(Optional.some) {
             if var needed = receiptsNeeded {
                 if needed.contains(RealtimeVoiceVerbs.closeName) { needed.formUnion(pressTools) }
                 if needed == [RealtimeOpenAppTool.toggleReceipt], !okTools.contains(RealtimeOpenAppTool.toggleReceipt) {
@@ -1387,7 +1396,7 @@ final class AgentLoop {
         let unbacked = evidence.filter { !ranSteps.contains($0) && $0 != currentStep }
         // A citation binds a CLAIM to a receipt; a summary that only reports what it read claims nothing to bind (unseen X02
         // 2026-10-24: "next week has no events" refused twice for citing a plan's step number).
-        let claimsSomething = !(RealtimeOpenAppTool.firstPersonClaims(summary).isEmpty && effectClaims(summary).isEmpty)
+        let claimsSomething = !(RealtimeOpenAppTool.firstPersonClaims(unquoted).isEmpty && effectClaims(unquoted).isEmpty)
             || summary.range(of: #"(?i)\b(worked|succeeded|successful(ly)?|completed|finished|done)\b"#, options: .regularExpression) != nil
         if !unbacked.isEmpty, claimsSomething { return "step \(unbacked.map(String.init).joined(separator: ", ")) did not run in this task" }
         // Only failures cited: the summary must say it did not get there ("It worked." on a failed scroll is refused).

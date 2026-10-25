@@ -1716,11 +1716,18 @@ struct TaskSessionTests {
         }
     }
 
+    /// Unseen H28 2026-10-25: a quoted headline holding "sent" is the page's words; outside quotes, "sent" still claims.
+    @Test func quotedTextIsThePagesWordsNotADeed() {
+        #expect(AgentLoop.doneChallenge(summary: "The top headline is \"Barrister sent messages\".", evidence: [], receipts: []) == nil)
+        #expect(AgentLoop.doneChallenge(summary: "I sent the \"weekly report\" email.", evidence: [], receipts: []) != nil)
+    }
+
     @Test func aNegatedOrPresentStateToggleClaimsNothing() {
         for said in ["I couldn't turn off Wi-Fi.", "Wi-Fi was not turned off.", "Wi-Fi is turned off.", "Bluetooth is currently disabled.",
                      "Bluetooth is already turned off.", "Bluetooth is off. The Bluetooth pane in System Settings shows its toggle switched off.",
                      "The Appearance pane shows Light selected.", "Cursor and Notion are listed but switched off.",
                      "Several more JARVIS notes are in Recently Deleted.", "This Mac has two saved Wi-Fi networks.",
+                     "The top headline is \"Barrister sent 'disgusting' messages\", the lead item on the page.",
                      "The deleted notes are in a separate folder.", "The page says the feature is disabled.", "I turned to the next page."] {
             #expect(AgentLoop.doneChallenge(summary: said, evidence: [], receipts: receipts(pressedRole: "AXStaticText")) == nil, "\(said)")
         }
