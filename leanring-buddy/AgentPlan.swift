@@ -164,7 +164,7 @@ nonisolated enum AgentPlan {
     static func isReading(_ tool: String) -> Bool {
         [AgentLoopTools.readPageName, AgentLoopGemini.webLookupName, RealtimeVoiceVerbs.findOnScreenName,
          RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.searchHelpName, RealtimeVoiceVerbs.findFileName,
-         RealtimeVoiceVerbs.findMenuBarItemsName].contains(tool)
+         RealtimeVoiceVerbs.findMenuBarItemsName, RealtimeVoiceVerbs.listOpenAppsName].contains(tool)
     }
 
     static func isActing(_ tool: String) -> Bool {

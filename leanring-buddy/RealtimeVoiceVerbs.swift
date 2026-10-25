@@ -63,13 +63,15 @@ nonisolated enum RealtimeVoiceVerbs {
     /// failed in 11 steps: on macOS 15 Focus lives in Control Centre). The harness's `status` and `menu` + `statusItem`.
     static let findMenuBarItemsName = "find_menu_bar_items"
     static let pressMenuBarItemName = "press_menu_bar_item"
+    /// Running apps and their window counts on this desktop (`OpenApps`, never-taught benchmark 2026-10-25): local, no harness.
+    static let listOpenAppsName = "list_open_apps"
     /// Declared to the agent loop only: the voice hands a multi-step request to do_task.
-    static let agentOnlyToolNames: Set<String> = [findMenuBarItemsName, pressMenuBarItemName]
+    static let agentOnlyToolNames: Set<String> = [findMenuBarItemsName, pressMenuBarItemName, listOpenAppsName]
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName, searchHelpName,
                                             findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
                                             openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName, goToFolderName,
                                             findFileName, renameItemName, moveItemsName, setValueName, createReminderName,
-                                            createEventName, findMenuBarItemsName, pressMenuBarItemName]
+                                            createEventName, findMenuBarItemsName, pressMenuBarItemName, listOpenAppsName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
@@ -337,7 +339,11 @@ nonisolated enum RealtimeVoiceVerbs {
         Declaration(name: pressMenuBarItemName,
                     description: "Presses one menu-bar icon, as find_menu_bar_items named it. A Control Centre icon opens its panel in front: "
                         + "then find_on_screen and press_element act in that panel. Pressing the same icon again closes it.",
-                    parameters: [Parameter(name: "name", description: "The icon's name exactly as find_menu_bar_items listed it.")])
+                    parameters: [Parameter(name: "name", description: "The icon's name exactly as find_menu_bar_items listed it.")]),
+        Declaration(name: listOpenAppsName,
+                    description: "Lists the apps open (running) on this Mac, which one is in front, and how many windows each has on "
+                        + "this desktop. Use it for \"which apps are open\" and \"how many windows does Chrome have\". Changes nothing.",
+                    parameters: [])
     ]
 
     /// The voice model's only planner hand-off. Never offered to the agent loop itself.
@@ -799,6 +805,8 @@ nonisolated enum RealtimeVoiceVerbs {
             return "Renaming \(call.elementName.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2026}"
         case findMenuBarItemsName:
             return "Reading the menu bar\u{2026}"
+        case listOpenAppsName:
+            return "Checking which apps are open\u{2026}"
         case pressMenuBarItemName:
             return "Opening \(call.elementName.map(RealtimeOpenAppTool.captionName) ?? "a menu-bar icon")\u{2026}"
         case goToFolderName:
@@ -822,7 +830,7 @@ nonisolated enum RealtimeVoiceVerbs {
     /// do_task only starts the loop: its "started" is no receipt for "done".
     static func isActingTool(_ toolName: String) -> Bool {
         toolName != findMenuItemsName && toolName != findOnScreenName && toolName != doTaskName && toolName != annotateName
-            && toolName != searchHelpName && toolName != findFileName && toolName != findMenuBarItemsName
+            && toolName != searchHelpName && toolName != findFileName && toolName != findMenuBarItemsName && toolName != listOpenAppsName
     }
 }
 

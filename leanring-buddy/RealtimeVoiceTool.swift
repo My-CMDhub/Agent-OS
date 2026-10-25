@@ -744,6 +744,10 @@ nonisolated enum RealtimeOpenAppTool {
             let name = call.text ?? ""
             return finished(await Task.detached { FileFinder.toolResult(name: name) }.value, waited: false, harnessResponse: nil)
         }
+        // list_open_apps: NSWorkspace plus each app's kAXWindows, in-process; cross-process AX, so off main.
+        if call.name == RealtimeVoiceVerbs.listOpenAppsName {
+            return finished(await Task.detached { OpenApps.toolResult() }.value, waited: false, harnessResponse: nil)
+        }
         // find_menu_bar_items: the harness's `status` read (audited, lock-screen guarded), filtered here
         // under the per-app policy that guards every read sent to a model (fail closed: unreadable withholds all).
         if call.name == RealtimeVoiceVerbs.findMenuBarItemsName {
@@ -1977,7 +1981,7 @@ nonisolated enum RealtimeOpenAppTool {
         let error = dispatch.result["error"] as? String
         switch call.name {
         case RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.findOnScreenName, RealtimeVoiceVerbs.searchHelpName,
-             RealtimeVoiceVerbs.findFileName, RealtimeVoiceVerbs.findMenuBarItemsName:
+             RealtimeVoiceVerbs.findFileName, RealtimeVoiceVerbs.findMenuBarItemsName, RealtimeVoiceVerbs.listOpenAppsName:
             return dispatch.harnessConfirmed ? nil : .harnessAnswered(ok: false, subject: "", error: error)
         case RealtimeVoiceVerbs.pointAtName:
             // Pointing proves where a control is, not that anything happened: an
