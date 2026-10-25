@@ -241,11 +241,14 @@ final class HarnessConfirmations: ObservableObject {
         var isDestructive = false
         /// `Shape.linkURL`, copied at `open`.
         var linkURL: String? = nil
+        /// `Shape.unnamedApp`, copied at `open`.
+        var unnamedApp = false
 
         /// The shape this ticket answers — what `mismatchedField` compares.
         var shape: Shape {
             Shape(verb: verb, bundleIdentifier: bundleIdentifier, rawTarget: rawTarget, text: text, mode: mode,
-                  withinNamed: withinNamed, nearPoint: nearPoint, role: role, thenConfirm: thenConfirm, linkURL: linkURL)
+                  withinNamed: withinNamed, nearPoint: nearPoint, role: role, thenConfirm: thenConfirm, linkURL: linkURL,
+                  unnamedApp: unnamedApp)
         }
 
         var expiresAt: Date { createdAt.addingTimeInterval(HarnessConfirmations.ticketLifetimeInSeconds) }
@@ -266,6 +269,9 @@ final class HarnessConfirmations: ObservableObject {
         /// view (`ActionSafetyKernel.personNotifyingViews`): the ticket binds where
         /// the link goes, so a re-issue on a link to someone else does not match.
         var linkURL: String? = nil
+        /// An agent step in an app the owner's words did not name for the task (`HarnessRequest.unnamedApp`,
+        /// owner's ruling 2026-10-24): the card says so, and its ticket or rule answers only such a request.
+        var unnamedApp: Bool = false
     }
 
     /// The always-visible warning on a profile question. Our words only.
@@ -333,6 +339,8 @@ final class HarnessConfirmations: ObservableObject {
         var role: String? = nil
         /// Absent means false — the same reading a pre-2026-09-14 file gets.
         var thenConfirm: Bool? = nil
+        /// Absent means false: a rule from before 2026-10-25 never answers an unnamed-app card.
+        var unnamedApp: Bool? = nil
     }
 
     static let ticketLifetimeInSeconds: TimeInterval = 60
@@ -407,6 +415,7 @@ final class HarnessConfirmations: ObservableObject {
         if approved.role != shape.role { return "role" }
         if approved.thenConfirm != shape.thenConfirm { return "thenConfirm" }
         if approved.linkURL != shape.linkURL { return "linkURL" }
+        if approved.unnamedApp != shape.unnamedApp { return "unnamedApp" }
         if shape.verb == "type" {
             if approved.text != shape.text { return "text" }
             if approved.mode != shape.mode { return "mode" }
@@ -465,6 +474,7 @@ final class HarnessConfirmations: ObservableObject {
                                                   ?? question(for: shape, app: app))]
         if notifying != nil { lines.append(CardLine(kind: .warning, text: personNotifiedWarning)) }
         if destructive { lines.append(CardLine(kind: .warning, text: destructiveWarning(for: shape))) }
+        if shape.unnamedApp { lines.append(CardLine(kind: .warning, text: unnamedAppWarning(app: app))) }
         if let text = shape.text { lines.append(CardLine(kind: .preview, text: UntrustedText(text).forDisplayInFull)) }
         // The app is in the question, so the where line starts inside it.
         let place = (shape.withinNamed.map { [UntrustedText($0).forDisplayInFull] } ?? []) + [target]
@@ -541,6 +551,11 @@ final class HarnessConfirmations: ObservableObject {
         return "Destructive \u{2014} may not be undoable"
     }
 
+    /// The always-visible line on an unnamed-app card. Our words plus the escaped app name.
+    static func unnamedAppWarning(app: String) -> String {
+        "J.A.R.V.I.S. wants to use \(app), which you did not name for this task"
+    }
+
     /// Our own verb in the header. A verb not named here is shown as itself,
     /// capitalised — it is a `HarnessVerb` raw value, never app-written.
     static func verbTitle(_ verb: String) -> String {
@@ -608,7 +623,7 @@ final class HarnessConfirmations: ObservableObject {
         let shape = Shape(
             verb: rule.verb, bundleIdentifier: rule.bundleIdentifier, rawTarget: rule.target ?? "",
             text: rule.text, mode: rule.mode, withinNamed: rule.withinNamed, nearPoint: rule.nearPoint,
-            role: rule.role, thenConfirm: rule.thenConfirm ?? false
+            role: rule.role, thenConfirm: rule.thenConfirm ?? false, unnamedApp: rule.unnamedApp ?? false
         )
         let lines = cardLines(for: shape, appName: appName)
         let texts = { (kind: CardLine.Kind) in lines.filter { $0.kind == kind }.map(\.text) }
@@ -696,7 +711,7 @@ final class HarnessConfirmations: ObservableObject {
                 verb: rule.verb, bundleIdentifier: rule.bundleIdentifier,
                 rawTarget: target, text: rule.text, mode: rule.mode,
                 withinNamed: rule.withinNamed, nearPoint: rule.nearPoint, role: rule.role,
-                thenConfirm: rule.thenConfirm ?? false
+                thenConfirm: rule.thenConfirm ?? false, unnamedApp: rule.unnamedApp ?? false
             )
             return mismatchedField(approved: approved, shape) == nil
         }
@@ -712,7 +727,7 @@ final class HarnessConfirmations: ObservableObject {
         return ApprovalRule(
             bundleIdentifier: ticket.bundleIdentifier, verb: ticket.verb, target: ticket.rawTarget,
             text: ticket.text, mode: ticket.mode, withinNamed: ticket.withinNamed, nearPoint: ticket.nearPoint,
-            role: ticket.role, thenConfirm: ticket.thenConfirm ? true : nil
+            role: ticket.role, thenConfirm: ticket.thenConfirm ? true : nil, unnamedApp: ticket.unnamedApp ? true : nil
         )
     }
 
@@ -756,6 +771,7 @@ final class HarnessConfirmations: ObservableObject {
         )
         ticket.isDestructive = destructive
         ticket.linkURL = shape.linkURL
+        ticket.unnamedApp = shape.unnamedApp
         tickets.append(ticket)
         // At most 20: evict the oldest answered/expired first, never a pending one.
         while tickets.count > 20,

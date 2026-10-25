@@ -141,6 +141,7 @@ struct ConfirmationCardTests {
         v = full; v.withinNamed = "Bank"; variants["withinNamed"] = v
         v = full; v.thenConfirm = false; variants["thenConfirm"] = v
         v = full; v.linkURL = "https://example.com/b"; variants["linkURL"] = v
+        v = full; v.unnamedApp = true; variants["unnamedApp"] = v
         variants["verb"] = .init(verb: "press", bundleIdentifier: full.bundleIdentifier, rawTarget: full.rawTarget, text: full.text,
                                  mode: full.mode, withinNamed: full.withinNamed, nearPoint: full.nearPoint, role: full.role, thenConfirm: true)
         variants["rawTarget"] = .init(verb: "type", bundleIdentifier: full.bundleIdentifier, rawTarget: "Subject", text: full.text,

@@ -244,7 +244,7 @@ nonisolated enum RealtimeHeardCheck {
     }
 
     /// Whether the owner's words name the call's OWN app by that app's own name
-    /// — for an agent step's `appNotNamed` only, asked after `decide` heard no
+    /// — for an agent step's unnamed-app card only, asked after `decide` heard no
     /// app. Generality suite 2026-10-06: "switch Calendar to the month view" was
     /// refused (a common-word name counts only after open/in/to/launch, and
     /// "switch" is none). No synonym list, never a sound-alike:

@@ -3184,10 +3184,11 @@ private func mailShape(
     verb: String = "type", bundleIdentifier: String? = "com.apple.mail", rawTarget: String = "Body",
     text: String? = "hello", mode: String? = "insert", withinNamed: String? = "Drafts",
     nearPoint: CGPoint? = CGPoint(x: 10, y: 20), role: String? = "AXTextArea", thenConfirm: Bool = true,
-    linkURL: String? = nil
+    linkURL: String? = nil, unnamedApp: Bool = false
 ) -> HarnessConfirmations.Shape {
     .init(verb: verb, bundleIdentifier: bundleIdentifier, rawTarget: rawTarget, text: text, mode: mode,
-          withinNamed: withinNamed, nearPoint: nearPoint, role: role, thenConfirm: thenConfirm, linkURL: linkURL)
+          withinNamed: withinNamed, nearPoint: nearPoint, role: role, thenConfirm: thenConfirm, linkURL: linkURL,
+          unnamedApp: unnamedApp)
 }
 
 @Test func everyFieldAConfirmationBindsIsAFieldThePanelShows() async throws {
@@ -3202,7 +3203,8 @@ private func mailShape(
         "nearPoint": mailShape(nearPoint: CGPoint(x: 10, y: 21)),
         "role": mailShape(role: "AXTextField"),
         "thenConfirm": mailShape(thenConfirm: false),
-        "linkURL": mailShape(linkURL: "https://www.linkedin.com/in/jane-doe/")
+        "linkURL": mailShape(linkURL: "https://www.linkedin.com/in/jane-doe/"),
+        "unnamedApp": mailShape(unnamedApp: true)
     ]
     // A field added to Shape without a variant here fails first — and a variant
     // is only accepted if changing that field alone changes what the owner sees.
@@ -3231,6 +3233,65 @@ private func mailShape(
     #expect(otherReason.reason != ticket.reason)
     #expect(otherReason.reason == HarnessConfirmations.displayedReason("r\u{2028}2"))
     #expect(!otherReason.reason.unicodeScalars.contains("\u{2028}"))
+}
+
+/// Owner's ruling 2026-10-24: an agent step in an app the owner did not name asks on a card.
+/// `unnamedApp` only raises the kernel's word, and the card and its ticket carry it.
+@Test func anUnnamedAppTurnsAnAllowIntoACardAndNeverLowersADecision() async throws {
+    let escalated = HarnessServer.escalatedForUnnamedApp(.allow, unnamedApp: true, appName: "Activity Monitor")
+    #expect(escalated == .requireConfirmation(reason: "the owner's words for this task did not name Activity Monitor"))
+    #expect(HarnessServer.escalatedForUnnamedApp(.allow, unnamedApp: false, appName: "Activity Monitor") == .allow)
+    #expect(HarnessServer.escalatedForUnnamedApp(.refuse(reason: "r"), unnamedApp: true, appName: "X") == .refuse(reason: "r"))
+    // A card keeps its own reason and its destructive flag, and adds this one.
+    guard case .requireConfirmation(let reason, let destructive) = HarnessServer.escalatedForUnnamedApp(
+        .requireConfirmation(reason: "own", destructive: true), unnamedApp: true, appName: "X") else { Issue.record("expected a card"); return }
+    #expect(reason == "own; the owner's words for this task did not name X" && destructive)
+
+    // The wire field reaches the shape on a gated verb; an acting verb that never asks refuses it; a read ignores it.
+    guard case .success(let launch) = HarnessPolicy.decode(line: #"{"verb":"launch","app":"Activity Monitor","unnamedApp":true}"#) else {
+        Issue.record("expected a decoded launch"); return
+    }
+    #expect(launch.unnamedApp && HarnessServer.confirmationShape(for: launch, bundleIdentifier: "com.apple.ActivityMonitor").unnamedApp)
+    guard case .failure(let refused) = HarnessPolicy.decode(line: #"{"verb":"goToFolder","text":"~/Downloads","unnamedApp":true}"#) else {
+        Issue.record("goToFolder never reaches the gate, so it must refuse the flag"); return
+    }
+    #expect(refused == .invalidField(field: "unnamedApp", value: "true"))
+    guard case .success = HarnessPolicy.decode(line: #"{"verb":"snapshot","unnamedApp":true}"#) else { Issue.record("a read ignores it"); return }
+
+    // The card says so, always visible, in the app's escaped name.
+    let shape = HarnessConfirmations.Shape(verb: "launch", bundleIdentifier: "com.apple.ActivityMonitor", rawTarget: "Activity Monitor",
+                                           unnamedApp: true)
+    let warning = HarnessConfirmations.cardLines(for: shape, appName: "Activity Monitor").filter { $0.kind == .warning }.map(\.text)
+    #expect(warning == [#"J.A.R.V.I.S. wants to use "Activity Monitor", which you did not name for this task"#])
+
+    // A ticket for it answers only an unnamed-app request of that app.
+    let confirmations = HarnessConfirmations(rulesStore: temporaryRulesStore())
+    guard case .opened(let ticket) = confirmations.open(shape, appName: "Activity Monitor", reason: "r", destructive: false) else {
+        Issue.record("expected a ticket"); return
+    }
+    var plain = shape
+    plain.unnamedApp = false
+    #expect(HarnessConfirmations.mismatchedField(ticket, plain) == "unnamedApp")
+    let otherApp = HarnessConfirmations.Shape(verb: "launch", bundleIdentifier: "com.apple.Terminal", rawTarget: "Activity Monitor", unnamedApp: true)
+    #expect(HarnessConfirmations.mismatchedField(ticket, otherApp) == "bundleIdentifier")
+
+    // Always: opening is app-wide, so it answers the next unnamed launch of that app; a press rule only its own shape.
+    #expect(HarnessConfirmations.offersAlwaysRule(for: ticket))
+    let launchRule = HarnessConfirmations.rule(for: ticket)
+    #expect(HarnessConfirmations.matchingRule(in: [launchRule], shape) == launchRule)
+    let press = HarnessConfirmations.Shape(verb: "press", bundleIdentifier: "com.apple.ActivityMonitor", rawTarget: "Memory", unnamedApp: true)
+    guard case .opened(let pressTicket) = confirmations.open(press, appName: "Activity Monitor", reason: "r", destructive: false) else {
+        Issue.record("expected a ticket"); return
+    }
+    let pressRule = HarnessConfirmations.rule(for: pressTicket)
+    #expect(pressRule.unnamedApp == true)
+    #expect(HarnessConfirmations.matchingRule(in: [pressRule], press) == pressRule)
+    var namedPress = press
+    namedPress.unnamedApp = false
+    #expect(HarnessConfirmations.matchingRule(in: [pressRule], namedPress) == nil)
+    // A rule from before (no unnamedApp) never answers an unnamed-app card.
+    let oldRule = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.ActivityMonitor", verb: "press", target: "Memory")
+    #expect(HarnessConfirmations.matchingRule(in: [oldRule], press) == nil)
 }
 
 @Test func aQuestionTooLongToShowWholeIsNeverAsked() async throws {

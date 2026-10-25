@@ -1114,7 +1114,7 @@ final class AgentLoop {
     - To read or summarise a page on screen, read all of it: read_page, then scroll down and read_page again, until a scroll reports that nothing new came into view. Summarise only after that, from the whole page.
     - To reach a site on screen, use search_web, then press the result. open_url opens an address only for a site the goal names (this is checked against the goal's words); when pressing a result does not work, open_url with the site's address as shown on screen is the other way in.
     - A result that is refused will be refused again: change the approach, never repeat the same call. notPressable means that element cannot be clicked at all, by name or by position: press a different element, or for a link to a site the goal names, open_url its address as shown on screen.
-    - type_text never presses Enter or sends anything; to submit a form or message, press its button. An entry that saves only on Return (Calendar's quick entry, a new reminder row) is committed by type_text with submit true; never use submit to send. A press that changes or sends something may show the owner a card to approve: the tool waits for their click. If a result says it was refused, denied or expired, do not repeat it; say so with done.
+    - type_text never presses Enter or sends anything; to submit a form or message, press its button. An entry that saves only on Return (Calendar's quick entry, a new reminder row) is committed by type_text with submit true; never use submit to send. A press that changes or sends something, or any step in an app the owner's words did not name, may show the owner a card to approve: the tool waits for their click, so never ask_owner first. If a result says it was refused, denied or expired, do not repeat it; say so with done.
     - When a step creates something to use later (a meeting link, an event, a file), read_page once it shows, so the task records it from the screen; a later step may type it.
     - Never type, read out or ask for a password or other secret. If the goal needs a sign-in or a password, call ask_owner saying it is their turn to sign in.
     - The window in front is only where you start. Opening an app, a settings pane or a folder to look something up changes nothing: just do it, never ask_owner whether to. Ask only when the goal is unclear, two things fit, a sign-in is needed, or the next step changes or sends something the owner did not ask for.
@@ -2031,6 +2031,9 @@ extension AgentLoop {
         var runningAtStart: Set<String> = []
         /// Apps this task launched itself: wholly its own.
         var launchedBundles: Set<String> = []
+        /// Apps the owner allowed on an unnamed-app card (or an Always rule did): the task's own from then on,
+        /// so they are asked once per task. Not launched by it, so never in a checkpoint's `opened`.
+        var allowedBundles: Set<String> = []
         /// Pages this task opened, by their browser tab's identity: its own only while in front.
         var taskTabs: [String: Set<AccessibilityElementKey>] = [:]
         /// The app in front when the owner asked, else at the task's first look (`agentStartBundle`).
@@ -2111,7 +2114,7 @@ extension AgentLoop {
         if tool == RealtimeVoiceVerbs.openURLName { return .tab }
         // Finder always runs, so the folder it showed on the owner's words is the task's.
         if tool == RealtimeVoiceVerbs.goToFolderName { return .app }
-        // Control Centre always runs too: the panel its icon opened is the task's, or every press in it is appNotNamed.
+        // Control Centre always runs too: the panel its icon opened is the task's, or every press in it asks on an unnamed-app card.
         // ponytail: Control Centre only; an app's own status icon never makes that app the task's. Widen per panel owner.
         if tool == RealtimeVoiceVerbs.pressMenuBarItemName { return bundle == controlCentreBundleIdentifier ? .app : .none }
         return runningAtStart.contains(bundle) ? .none : .app
@@ -2132,6 +2135,13 @@ extension AgentLoop {
         if tool == SettingsPaneLinks.toolName { return "com.apple.systempreferences" }
         guard [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName, RealtimeVoiceVerbs.openURLName].contains(tool) else { return nil }
         return response?["bundleIdentifier"] as? String
+    }
+
+    /// The unnamed app a step was allowed to use: the harness lifted its card (`confirmation`, by the owner's
+    /// click or an Always rule), whatever the action then did — the yes was to the app. A Deny or an expired
+    /// card lifts nothing.
+    nonisolated static func ownerAllowedUnnamedApp(_ dispatch: RealtimeToolDispatch) -> String? {
+        dispatch.harnessResponse?["confirmation"] != nil ? dispatch.unnamedAppBundle : nil
     }
 
     /// The app whose affordance map later calls of the same reply are judged by: one a confirmed
@@ -2504,6 +2514,7 @@ extension AgentLoop {
             Dictionary(uniqueKeysWithValues: tabBrowsers.compactMap { bundle in frontTab(of: bundle).map { (bundle, $0) } })
         }.value
         marks.agentOpenedBundles = openedByTask(launched: carry.launchedBundles, taskTabs: carry.taskTabs, frontTabs: frontTabs)
+            .union(carry.allowedBundles)
         // The task's tabs in front now, re-read before each mutating request (`tabGuardedAnswer`).
         let boundTabs = frontTabs.filter { carry.taskTabs[$0.key]?.contains($0.value) == true }
         var answer = boundTabs.isEmpty ? harnessAnswer : tabGuardedAnswer(harnessAnswer, boundTabs: boundTabs, readTab: frontTab(of:))
@@ -2529,6 +2540,7 @@ extension AgentLoop {
                                                                                               max(1, confirmationWaitSeconds)),
                                                                  onConfirmationRequired: carry.onCardOpened,
                                                                  isCurrent: { !Task.isCancelled })
+        if let dispatch, let bundle = ownerAllowedUnnamedApp(dispatch) { carry.allowedBundles.insert(bundle) }
         if let dispatch, let bundle = openedBundle(by: filled.name, confirmed: dispatch.harnessConfirmed, response: dispatch.harnessResponse) {
             switch ownership(afterOpening: filled.name, bundle: bundle, runningAtStart: carry.runningAtStart) {
             case .app: carry.launchedBundles.insert(bundle)

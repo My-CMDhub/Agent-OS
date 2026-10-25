@@ -1074,8 +1074,10 @@ final class RealtimeVoiceConnection {
             }
             dispatch = await RealtimeOpenAppTool.dispatch(call, offered: offered, offeredApp: offeredApp, screenTarget: screenTarget,
                                                           screenshotDisplay: turn.screenshotDisplayFrame,
-                                                          answer: harnessAnswer, confirmationWaitSeconds: confirmationWaitSeconds,
+                                                          answer: heard?.unnamedApp == nil ? harnessAnswer : unnamedAppAnswer(harnessAnswer),
+                                                          confirmationWaitSeconds: confirmationWaitSeconds,
                                                           onConfirmationRequired: onConfirmationRequired)
+            dispatch.unnamedAppBundle = heard?.unnamedApp
             // Unaimed typing met no focused field: name the fields that are there (A9 live 02-30-16Z).
             if call.name == RealtimeVoiceVerbs.typeTextName, call.elementName == nil, call.x == nil, !call.underPointer,
                dispatch.result["error"] as? String == "kernelRefused", (dispatch.result["message"] as? String)?.contains("does not accept text") == true,
@@ -1169,6 +1171,20 @@ final class RealtimeVoiceConnection {
         return callBundle != startBundle && !openedByTask.contains(callBundle)
     }
 
+    /// Such a step is no longer refused here (owner's ruling 2026-10-24: "ask me with a card"): every
+    /// request it sends carries `unnamedApp`, which the harness's `gate` turns from an allow into a card.
+    /// A line it cannot mark is refused, never sent on unmarked — unmarked, the question would be gone.
+    nonisolated static func unnamedAppAnswer(_ answer: @escaping @Sendable (String) -> String) -> @Sendable (String) -> String {
+        { line in
+            guard var request = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return unnamedAppUnreadable }
+            request["unnamedApp"] = true
+            guard let data = try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]) else { return unnamedAppUnreadable }
+            return answer(String(decoding: data, as: UTF8.self))
+        }
+    }
+    nonisolated static let unnamedAppUnreadable = "{\"ok\":false,\"error\":\"unnamedAppUnreadable\",\"message\":\"nothing was done: "
+        + "the owner's words do not name this app, and the request could not be marked to ask them on a card\"}"
+
     /// An agent step proceeds past another app heard, or an unrecognised slot word, when the owner's
     /// words also name the call's own app (`RealtimeHeardCheck.wordsNameTheApp`, transcript only — a page
     /// cannot widen it). Never past ambiguity or an unconfirmed retry.
@@ -1224,7 +1240,7 @@ final class RealtimeVoiceConnection {
     /// that names no app (it is refused as `missingAppName` anyway).
     private static func heardCheck(for call: RealtimeToolCall, in turn: RealtimeTurnMarks) async
         -> (refusal: [String: Any]?, heardApp: String?, decision: RealtimeHeardCheck.Decision, trace: [String: Any], overlapsLabel: Bool?,
-            followUpConfirmed: Bool?, confirmedByYes: Bool)? {
+            followUpConfirmed: Bool?, confirmedByYes: Bool, unnamedApp: String?)? {
         guard RealtimeHeardCheck.appliesTo(toolName: call.name), let appName = call.appName else { return nil }
         // An app filled in from the one in front is a bundle identifier; the words are matched against names.
         let named = await Task.detached { () -> String in
@@ -1260,7 +1276,7 @@ final class RealtimeVoiceConnection {
         let agentOpenedBundles = turn.agentOpenedBundles
         let agentStartBundle = turn.agentStartBundle
         let mayRefuseCall = RealtimeHeardCheck.mayRefuse(toolName: call.name)
-        let (decision, namedAppIsRunning, actsInUnnamedApp, callIsPageApp) = await Task.detached { () -> (RealtimeHeardCheck.Decision, Bool, Bool, Bool) in
+        let (decision, namedAppIsRunning, actsInUnnamedApp, callIsPageApp) = await Task.detached { () -> (RealtimeHeardCheck.Decision, Bool, String?, Bool) in
             var callBundle: String?
             if case .resolved(let bundleIdentifier, _) = RealtimeVoiceVerbs.appIdentity(named: appName) { callBundle = bundleIdentifier }
             let pageApp = RealtimeHeardCheck.isPageApp(callBundle: callBundle, startBundle: agentStartBundle,
@@ -1291,14 +1307,14 @@ final class RealtimeVoiceConnection {
             if isAgentStep, agentStepNamedByOwnersWords(outcome: decision.outcome, wordsNameTheApp: ownWordsNameIt) {
                 var proceeding = RealtimeHeardCheck.Decision(outcome: .match, heardApps: [named], tier: nil)
                 proceeding.heardSlot = decision.heardSlot
-                return (proceeding, true, false, pageApp)
+                return (proceeding, true, nil, pageApp)
             }
             if isAgentStep, decision.outcome == .appNameUnclear,
                agentStepMayActDespiteUnclearWord(callBundle: callBundle, openedByTask: agentOpenedBundles,
                                                  unclearWords: decision.heardSlot, among: RealtimeVoiceVerbs.installedAppNames()) {
                 var proceeding = RealtimeHeardCheck.Decision(outcome: .noAppHeard, heardApps: [], tier: nil)
                 proceeding.heardSlot = decision.heardSlot
-                return (proceeding, true, false, pageApp)
+                return (proceeding, true, nil, pageApp)
             }
             // The same for another app named where to act: a page this task opened is its own
             // (live 2026-10-08: "…then send it on LinkedIn" refused every press in the Meet tab it opened).
@@ -1306,12 +1322,13 @@ final class RealtimeVoiceConnection {
                                                             startBundle: agentStartBundle) {
                 var proceeding = RealtimeHeardCheck.Decision(outcome: .noAppHeard, heardApps: [], tier: nil)
                 proceeding.heardSlot = decision.heardSlot
-                return (proceeding, true, false, pageApp)
+                return (proceeding, true, nil, pageApp)
             }
+            // The bundle, so the harness is asked about it and the task keeps it once the owner allows it.
             let unnamed = isAgentStep && agentStepActsInUnnamedApp(
                 outcome: decision.outcome, mayRefuse: mayRefuseCall, callBundle: callBundle, startBundle: agentStartBundle,
                 openedByTask: agentOpenedBundles,
-                wordsNameTheApp: ownWordsNameIt)
+                wordsNameTheApp: ownWordsNameIt) ? callBundle : nil
             // Only asked when it decides: open_app with no transcript.
             guard decision.outcome == .transcriptMissing, call.name == RealtimeOpenAppTool.name else { return (decision, true, unnamed, pageApp) }
             return (decision, RealtimeVoiceVerbs.isRunning(named: named), unnamed, pageApp)
@@ -1325,11 +1342,8 @@ final class RealtimeVoiceConnection {
                                                                    callIsPageApp: callIsPageApp, named: named) {
             refusal = RealtimeHeardCheck.pageNotAppRefusal(named: named)
         }
-        if refusal == nil, actsInUnnamedApp {
-            refusal = ["ok": false, "status": NSNull(), "error": "appNotNamed", "named": named,
-                       "message": "the owner's words do not name \(UntrustedText(named).forDisplay), the task did not start in it and did not "
-                        + "open it, so nothing was done there. Ask the owner whether to use it."]
-        }
+        // Last, as the refusal it replaces was: every other refusal still answers first.
+        let unnamedApp = refusal == nil ? actsInUnnamedApp : nil
         if refusal != nil { turn.heardRefusals += 1 }
         // The item a press or a point names.
         let isPoint = RealtimeVoiceVerbs.isScreenTargetTool(call.name)
@@ -1340,7 +1354,8 @@ final class RealtimeVoiceConnection {
                 call.name == RealtimeVoiceVerbs.pressMenuName ? RealtimeDecisionTrace.heardOverlapsLabel(heard: transcript, path: call.path) : nil,
                 choosing ? RealtimeDecisionTrace.followUpConfirmed(heard: transcript, path: label.map { [$0] }) : nil,
                 RealtimeOpenAppTool.plainYesConfirms(call: call, heard: transcript, previousSaid: turn.previousTurnSaid,
-                                                     previousMenu: turn.previousTurnMenuOffer, previousScreen: turn.previousTurnScreenOffer))
+                                                     previousMenu: turn.previousTurnMenuOffer, previousScreen: turn.previousTurnScreenOffer),
+                unnamedApp)
     }
 
     /// Context only: OpenAI gets a user image item and no `response.create`;

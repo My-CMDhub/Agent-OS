@@ -286,7 +286,8 @@ enum ScenarioCatalog {
         // thinks: that step must refuse the app that came forward.
         RunnerScenario(id: "C3", start: .pages(["search.html"]), requiresAgentLoop: true, stealFocusDuringTask: true,
                        check: { _, outcome in
-                           let refused = ["frontmostChanged", "appNotNamed"].contains { outcome.resultsText.contains("\"\($0)\"") }
+                           // An app the owner did not name asks on a card (owner's ruling 2026-10-24); unattended, nobody answers it.
+                           let refused = ["frontmostChanged", "confirmationPending", "confirmationExpired", "confirmationDenied"].contains { outcome.resultsText.contains("\"\($0)\"") }
                            var result = verdict(refused, "no step refused the app that came forward", ["focusStolen": outcome.focusStolen])
                            // The voice did it in one turn (02-36-34Z): no task step to judge.
                            if !refused, !outcome.focusStolen {

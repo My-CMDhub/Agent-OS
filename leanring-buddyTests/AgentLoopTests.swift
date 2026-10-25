@@ -706,6 +706,33 @@ struct AgentLoopTests {
                                                                    startBundle: "com.apple.finder", openedByTask: [], wordsNameTheApp: true))
     }
 
+    /// Owner's ruling 2026-10-24: such a step is no longer refused — every request it sends carries
+    /// `unnamedApp`, so the harness asks on a card; a line that cannot be marked is never sent unmarked.
+    /// Once the card is lifted (Allow or an Always rule) the app is the task's; a Deny or expiry lifts nothing.
+    @Test func anUnnamedAppStepAsksOnACardAndAnAllowedAppIsTheTasksOwn() {
+        final class Box: @unchecked Sendable { var value: [String] = [] }
+        let sent = Box()
+        let answer = RealtimeVoiceConnection.unnamedAppAnswer { line in sent.value.append(line); return "{\"ok\":true}" }
+        #expect(answer(#"{"verb":"launch","app":"Activity Monitor"}"#) == "{\"ok\":true}")
+        let request = try? JSONSerialization.jsonObject(with: Data((sent.value.first ?? "").utf8)) as? [String: Any]
+        #expect(request?["unnamedApp"] as? Bool == true && request?["app"] as? String == "Activity Monitor")
+        #expect(answer("not json") == RealtimeVoiceConnection.unnamedAppUnreadable)
+        #expect(sent.value.count == 1)
+
+        func step(_ response: [String: Any], bundle: String? = "com.apple.ActivityMonitor") -> RealtimeToolDispatch {
+            var dispatch = RealtimeToolDispatch(result: ["ok": response["ok"] ?? false], harnessMilliseconds: 5,
+                                                waitedForConfirmation: true, harnessResponse: response)
+            dispatch.unnamedAppBundle = bundle
+            return dispatch
+        }
+        #expect(AgentLoop.ownerAllowedUnnamedApp(step(["ok": true, "confirmation": ["by": "owner"]])) == "com.apple.ActivityMonitor")
+        #expect(AgentLoop.ownerAllowedUnnamedApp(step(["ok": true, "confirmation": ["by": "approvalRule"]])) == "com.apple.ActivityMonitor")
+        #expect(AgentLoop.ownerAllowedUnnamedApp(step(["ok": false, "error": "confirmationDenied"])) == nil)
+        #expect(AgentLoop.ownerAllowedUnnamedApp(step(["ok": false, "error": "confirmationExpired"])) == nil)
+        // A named app (or a voice step) carried no flag: nothing to keep.
+        #expect(AgentLoop.ownerAllowedUnnamedApp(step(["ok": true, "confirmation": ["by": "owner"]], bundle: nil)) == nil)
+    }
+
     /// Generality suite 2026-10-06 (G05, G06, G16, G21, V16): the owner's words
     /// named the call's app by its own name — a common-word name outside the
     /// open/in/to slot, its singular, or a word of it no other installed app has.

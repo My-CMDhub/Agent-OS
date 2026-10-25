@@ -2121,6 +2121,8 @@ nonisolated struct RealtimeToolDispatch {
     var autoFocus: [String: Any]? = nil
     /// press_menu: `RealtimeDecisionTrace.heardOverlapsLabel` — a boolean, never the words.
     var heardOverlapsLabel: Bool? = nil
+    /// An agent step's app the owner's words did not name: its requests carried `unnamedApp` (`runToolCall`).
+    var unnamedAppBundle: String? = nil
 
     var harnessConfirmed: Bool { result["ok"] as? Bool == true }
 }

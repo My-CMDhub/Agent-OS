@@ -97,6 +97,8 @@ struct HarnessRawRequest: Decodable {
     let draftScope: Bool?
     /// See `HarnessRequest.onlyPlainFolder`.
     let onlyPlainFolder: Bool?
+    /// See `HarnessRequest.unnamedApp`.
+    let unnamedApp: Bool?
 }
 
 struct HarnessPoint: Decodable {
@@ -204,6 +206,11 @@ enum HarnessVerb: String, CaseIterable {
         case .press, .select, .type, .open, .menu, .focus, .launch, .scroll, .click, .openURL, .visionClick, .helpSearch, .goToFolder, .renameItem, .moveItems, .adjust, .createReminder, .createEvent: return true
         }
     }
+
+    /// The acting verbs whose handler passes `gate`, so `unnamedApp` can raise them to a card.
+    /// goToFolder and helpSearch act without it and refuse the flag at `decode`.
+    static let gatedForUnnamedApp: Set<HarnessVerb> = [.press, .select, .type, .open, .click, .menu, .focus, .launch, .scroll,
+                                                       .visionClick, .renameItem, .moveItems, .adjust, .openURL, .createReminder, .createEvent]
 
     var elementAction: ElementAction? {
         switch self {
@@ -353,6 +360,10 @@ struct HarnessRequest: Equatable {
     /// open only: a read-only task's open (`AgentLoop.readOnlyGuardedAnswer` sets it) —
     /// anything but a plain Finder folder is refused, never carded. Only ever narrows.
     var onlyPlainFolder: Bool = false
+    /// An agent step in an app the owner's words did not name for the task, that the
+    /// task neither started in nor opened (owner's ruling 2026-10-24): `gate` turns the
+    /// kernel's allow into a card. Only ever adds a question; a read never asks, so it ignores it.
+    var unnamedApp: Bool = false
 }
 
 // MARK: - Pure decision logic
@@ -842,6 +853,10 @@ enum HarnessPolicy {
         if raw.onlyPlainFolder == true, verb != .open {
             return .failure(.invalidField(field: "onlyPlainFolder", value: "true"))
         }
+        // An acting verb that never reaches `gate` could not ask, and running it would lower the question to nothing.
+        if raw.unnamedApp == true, verb.isMutating, !HarnessVerb.gatedForUnnamedApp.contains(verb) {
+            return .failure(.invalidField(field: "unnamedApp", value: "true"))
+        }
 
         var mode = TypeMode.insert
         var text = raw.text ?? ""
@@ -964,7 +979,8 @@ enum HarnessPolicy {
             url: url,
             ownerPointed: raw.ownerPointed ?? false,
             draftScope: raw.draftScope ?? false,
-            onlyPlainFolder: raw.onlyPlainFolder ?? false
+            onlyPlainFolder: raw.onlyPlainFolder ?? false,
+            unnamedApp: raw.unnamedApp ?? false
         ))
     }
 
@@ -2518,10 +2534,12 @@ final class HarnessServer {
         verb: String? = nil,
         into response: inout [String: Any]
     ) -> GateResult {
-        let described = HarnessPolicy.describe(decision)
+        // After the app policy, before any ticket or rule: an unnamed app's allow becomes a card.
+        let judged = Self.escalatedForUnnamedApp(decision, unnamedApp: request.unnamedApp, appName: appName ?? bundleIdentifier)
+        let described = HarnessPolicy.describe(judged)
         let result: GateResult
 
-        switch decision {
+        switch judged {
         case .allow:
             result = GateResult(executable: true, decision: described.decision, outcome: "allowed", note: nil)
 
@@ -2604,7 +2622,8 @@ final class HarnessServer {
                         "withinNamed": (rule.withinNamed ?? NSNull()) as Any,
                         "nearPoint": (rule.nearPoint.map { [$0.x, $0.y] } ?? NSNull()) as Any,
                         "role": (rule.role ?? NSNull()) as Any,
-                        "thenConfirm": rule.thenConfirm ?? false
+                        "thenConfirm": rule.thenConfirm ?? false,
+                        "unnamedApp": rule.unnamedApp ?? false
                     ]
                 } else {
                     let binding = bindingSubject.map { ActionBinding.capture($0, bundleIdentifier: bundleIdentifier) }
@@ -2718,8 +2737,22 @@ final class HarnessServer {
             nearPoint: request.nearPoint,
             role: request.role,
             thenConfirm: request.thenConfirm,
-            linkURL: linkURL
+            linkURL: linkURL,
+            unnamedApp: request.unnamedApp
         )
+    }
+
+    /// Owner's ruling 2026-10-24: "ask me with a card when it's going to interact with an app I didn't
+    /// name before." `unnamedApp` only raises: allow -> a card saying so, a card keeps its own reason and
+    /// destructive flag and adds this one, a refusal stays a refusal.
+    nonisolated static func escalatedForUnnamedApp(_ decision: SafetyDecision, unnamedApp: Bool, appName: String?) -> SafetyDecision {
+        guard unnamedApp else { return decision }
+        let reason = "the owner's words for this task did not name \(appName ?? "this app")"
+        switch decision {
+        case .allow: return .requireConfirmation(reason: reason)
+        case .requireConfirmation(let own, let destructive): return .requireConfirmation(reason: "\(own); \(reason)", destructive: destructive)
+        case .refuse: return decision
+        }
     }
 
     /// What a request acted on, for the audit line and the ticket. Title, else
