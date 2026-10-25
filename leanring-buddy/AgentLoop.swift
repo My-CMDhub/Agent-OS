@@ -1042,7 +1042,15 @@ final class AgentLoop {
                                              "waitedForConfirmation": waited]
                 if !(web is NSNull) { fields["web"] = web }
                 traced(fields)
-                answer(result.merging(["step": step]) { current, _ in current })
+                var shown = result.merging(["step": step]) { current, _ in current }
+                // Unseen H27 2026-10-25: a missing "Date Received" header clicked three times, never its menu twin
+                // (View > Sort By). The second identical refusal says the third ends the task, and where else to go.
+                if !ok, let error, sameRefusal?.error == error, sameRefusal!.count + 1 == Self.maximumSameRefusals - 1 {
+                    shown["repeatedRefusal"] = "refused \(Self.maximumSameRefusals - 1) times in a row; a third ends the task. Change the "
+                        + "route: find_on_screen to see what is there, a menu item from the App verbs (most clicks have a menu twin), "
+                        + "or another way in"
+                }
+                answer(shown)
                 if Self.readingTools.contains(toolName), readInBatch == nil { readInBatch = "this reply's \(toolName)" }
                 if !Self.readingTools.contains(toolName), toolName != RealtimeVoiceVerbs.pointAtName { acted = true }
 

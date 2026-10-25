@@ -175,6 +175,17 @@ struct AgentLoopTests {
         #expect(!AgentLoop.isTransientNetworkError(NSError(domain: NSURLErrorDomain, code: NSURLErrorBadServerResponse)))
     }
 
+    /// Unseen H27 2026-10-25: the second identical refusal names the routes left before the third ends the task.
+    @MainActor @Test func theSecondIdenticalRefusalSaysWhereElseToGo() async {
+        let press: [String: Any] = ["app": "Mail", "name": "Date Received"]
+        let script = Script([toolUse("press_element", press), toolUse("press_element", press), toolUse("press_element", press)])
+        _ = await loop(script, execute: { _ in dispatch(ok: false, error: "elementNotFound") }).run(goal: "oldest email date")
+        let second = (script.bodies.dropFirst(2).first?["messages"] as? [[String: Any]])?.last?["content"] as? [[String: Any]]
+        #expect((second?.first?["content"] as? String)?.contains("menu twin") == true)
+        let first = (script.bodies.dropFirst(1).first?["messages"] as? [[String: Any]])?.last?["content"] as? [[String: Any]]
+        #expect((first?.first?["content"] as? String)?.contains("menu twin") == false)
+    }
+
     @MainActor @Test func stopsAtTheStepCap() async {
         let script = Script([toolUse("scroll", ["direction": "down"])])
         let outcome = await loop(script).run(goal: "keep scrolling")
