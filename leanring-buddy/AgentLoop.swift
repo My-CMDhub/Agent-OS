@@ -988,7 +988,8 @@ final class AgentLoop {
                         record(searchCall, dispatch)
                     }
                 default:
-                    guard RealtimeVoiceVerbs.allToolNames.contains(toolName), toolName != RealtimeVoiceVerbs.doTaskName else {
+                    guard RealtimeVoiceVerbs.allToolNames.contains(toolName), toolName != RealtimeVoiceVerbs.doTaskName,
+                          !RealtimeVoiceVerbs.voiceOnlyToolNames.contains(toolName) else {
                         result = RealtimeOpenAppTool.toolResult(for: RealtimeToolRefusal(error: "unknownTool", message: "there is no tool named \(toolName)"))
                         break
                     }

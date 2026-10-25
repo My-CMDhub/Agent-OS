@@ -27,7 +27,7 @@ nonisolated enum AgentPlan {
     /// What a step may name: the loop's tools, never do_task, ask_owner (a
     /// pause is its own reply) or a plan inside a plan.
     static var stepTools: Set<String> {
-        RealtimeVoiceVerbs.allToolNames.subtracting([RealtimeVoiceVerbs.doTaskName])
+        RealtimeVoiceVerbs.allToolNames.subtracting([RealtimeVoiceVerbs.doTaskName]).subtracting(RealtimeVoiceVerbs.voiceOnlyToolNames)
             .union([AgentLoopTools.readPageName, AgentLoopTools.searchWebName, AgentLoopGemini.webLookupName, AgentLoopTools.doneName])
     }
 

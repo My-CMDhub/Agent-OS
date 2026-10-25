@@ -65,13 +65,19 @@ nonisolated enum RealtimeVoiceVerbs {
     static let pressMenuBarItemName = "press_menu_bar_item"
     /// Running apps and their window counts on this desktop (`OpenApps`, never-taught benchmark 2026-10-25): local, no harness.
     static let listOpenAppsName = "list_open_apps"
+    /// The owner's Claude Code sessions, one line each, from their transcripts (`SessionBriefs`, owner 2026-10-25): local, read-only.
+    static let briefSessionsName = "brief_sessions"
     /// Declared to the agent loop only: the voice hands a multi-step request to do_task.
     static let agentOnlyToolNames: Set<String> = [findMenuBarItemsName, pressMenuBarItemName, listOpenAppsName]
+    /// Declared to the voice model only, never to the agent loop: session text is model text a page may have
+    /// steered, so it is spoken to the owner and never becomes a step's input.
+    static let voiceOnlyToolNames: Set<String> = [briefSessionsName]
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName, searchHelpName,
                                             findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
                                             openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName, goToFolderName,
                                             findFileName, renameItemName, moveItemsName, setValueName, createReminderName,
-                                            createEventName, findMenuBarItemsName, pressMenuBarItemName, listOpenAppsName]
+                                            createEventName, findMenuBarItemsName, pressMenuBarItemName, listOpenAppsName,
+                                            briefSessionsName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
@@ -357,9 +363,17 @@ nonisolated enum RealtimeVoiceVerbs {
             + "Returns at once with status started; progress and the outcome arrive later as system lines.",
         parameters: [Parameter(name: "goal", description: "The owner's whole request, in their words, with any detail they gave.")])
 
-    /// The realtime stacks' list: the shared table plus do_task.
+    /// "brief me": voice only (`voiceOnlyToolNames`).
+    private static let briefSessionsDeclaration = Declaration(
+        name: briefSessionsName,
+        description: "Tells the owner what each of their Claude Code sessions is doing: its title, project, state (working, "
+            + "waiting on you, idle), how long ago, and one line it wrote. Use it for \"brief me\" and \"what are my sessions doing\". "
+            + "Reads only; changes nothing.",
+        parameters: [])
+
+    /// The realtime stacks' list: the shared table plus do_task and the voice-only reads.
     private static func realtimeDeclarations(_ format: RealtimePointFormat, gemini: Bool) -> [Declaration] {
-        declarations(format, gemini: gemini) + [doTaskDeclaration]
+        declarations(format, gemini: gemini) + [doTaskDeclaration, briefSessionsDeclaration]
     }
 
     /// The agent loop's tools as Anthropic Messages API tool JSON: open_app and the
@@ -425,7 +439,9 @@ nonisolated enum RealtimeVoiceVerbs {
     static func geminiDeclaration(pointFormat: RealtimePointFormat) -> [String: Any] {
         let openApp = (RealtimeOpenAppTool.geminiDeclaration["functionDeclarations"] as? [[String: Any]]) ?? []
         return ["functionDeclarations": openApp + realtimeDeclarations(pointFormat, gemini: true).map { declaration in
-            [
+            // No arguments: no `parameters` at all (an OBJECT schema with empty properties is not one Gemini accepts).
+            guard !declaration.parameters.isEmpty else { return ["name": declaration.name, "description": declaration.description] }
+            return [
                 "name": declaration.name, "description": declaration.description,
                 "parameters": [
                     "type": "OBJECT",
@@ -807,6 +823,8 @@ nonisolated enum RealtimeVoiceVerbs {
             return "Reading the menu bar\u{2026}"
         case listOpenAppsName:
             return "Checking which apps are open\u{2026}"
+        case briefSessionsName:
+            return "Checking your sessions\u{2026}"
         case pressMenuBarItemName:
             return "Opening \(call.elementName.map(RealtimeOpenAppTool.captionName) ?? "a menu-bar icon")\u{2026}"
         case goToFolderName:
@@ -831,6 +849,7 @@ nonisolated enum RealtimeVoiceVerbs {
     static func isActingTool(_ toolName: String) -> Bool {
         toolName != findMenuItemsName && toolName != findOnScreenName && toolName != doTaskName && toolName != annotateName
             && toolName != searchHelpName && toolName != findFileName && toolName != findMenuBarItemsName && toolName != listOpenAppsName
+            && toolName != briefSessionsName
     }
 }
 
