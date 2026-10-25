@@ -211,22 +211,25 @@ struct AgentPlanTests {
         #expect(script.executed.count == 1)
     }
 
-    /// Review of e98f476: a plan's steps all share the loop's step number, and
-    /// evidence cites THAT number, never a position in the plan.
-    @MainActor @Test func evidenceCitesTheLoopStepNeverAPlanPosition() async {
+    /// Review of e98f476: a plan's steps all share the loop's step number, and the schema asks for THAT
+    /// number. Owner's ruling 2026-10-25 (launch L04: "step 2" of a plan refused twice): a number no step
+    /// carries but that is a position in the run's calls means that call — still one receipt, never the run.
+    @MainActor @Test func aPlanPositionCitesThatCallNeverTheWholeRun() async {
         let script = PlanScript([planReply([["tool": "press_menu", "app": "Finder", "path": ["View", "as List"]],
                                             ["tool": "press_menu", "app": "Finder", "path": ["Go", "Downloads"]],
-                                            ["tool": "done", "summary": "Pressed the two menu items.", "evidence": [2]]]),
-                                 reply([("done", ["summary": "Pressed the two menu items.", "evidence": [1]])])])
+                                            ["tool": "done", "summary": "Pressed the two menu items.", "evidence": [2]]])])
         let outcome = await planLoop(script).run(goal: "list view then downloads")
         #expect(outcome == .done(summary: "Pressed the two menu items."))
-        let combined = json(results(script)[0])
-        let steps = combined["steps"] as? [[String: Any]] ?? []
-        #expect(steps.allSatisfy { $0["step"] as? Int == 1 }, "every step of the plan carries the loop's step")
-        #expect(steps.allSatisfy { $0["planStep"] == nil }, "no second numbering to cite by mistake")
-        let challenge = steps.last
-        #expect(challenge?["error"] as? String == "doneUnbacked")
-        #expect((challenge?["message"] as? String)?.contains("step 1") == true, "the challenge says which number to cite")
+        #expect(script.bodies.count == 1, "no second model call to correct the number")
+        let press = AgentLoop.Receipt(step: 1, toolName: "press_menu", ok: true, error: nil)
+        let read = AgentLoop.Receipt(step: 1, toolName: "read_page", ok: true, error: nil)
+        #expect(AgentLoop.citedStepOrAction(2, receipts: [press, read]) == 1)
+        #expect(AgentLoop.citedStepOrAction(1, receipts: [press, read]) == 1, "a real step number stays itself")
+        #expect(AgentLoop.citedStepOrAction(5, receipts: [press, read]) == 5, "past the run it binds nothing")
+        // The position binds THAT call: the 2nd call was a read, so it backs no press.
+        let failedPress = AgentLoop.Receipt(step: 1, toolName: "press_element", ok: false, error: "x")
+        let laterRead = AgentLoop.Receipt(step: 2, toolName: "read_page", ok: true, error: nil)
+        #expect(AgentLoop.doneChallenge(summary: "I pressed Save.", evidence: [3], receipts: [failedPress, laterRead, laterRead]) != nil)
         let declared = (AgentPlan.declaration["input_schema"] as? [String: Any]).flatMap { ($0["properties"] as? [String: Any])?["steps"] as? [String: Any] }
         let evidence = ((declared?["items"] as? [String: Any])?["properties"] as? [String: Any])?["evidence"] as? [String: Any]
         #expect((evidence?["description"] as? String)?.contains("never a position in the plan") == true)

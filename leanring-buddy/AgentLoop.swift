@@ -1292,6 +1292,14 @@ final class AgentLoop {
 
     static let ownerDeniedError = "ownerDenied"
 
+    /// Owner's ruling 2026-10-25: a plan's steps share one number, and models count their tool calls instead (launch
+    /// L04 2026-10-24: "step 2" of a plan recorded as step 1; a backed answer refused twice). A number no step carries but
+    /// that is a position in the run's calls means that call: still ONE receipt, never the whole run.
+    nonisolated static func citedStepOrAction(_ cited: Int, receipts: [Receipt]) -> Int {
+        guard !receipts.contains(where: { $0.step == cited }), receipts.indices.contains(cited - 1) else { return cited }
+        return receipts[cited - 1].step
+    }
+
     /// A done that says it did not get there keeps no route (unseen W1 2026-10-24: "I couldn't confirm the default
     /// browser…" became the hint for the next try). ponytail: words in its first sentence; a stricter judge if one slips.
     nonisolated static func reportsFailure(_ summary: String) -> Bool {
@@ -1315,7 +1323,8 @@ final class AgentLoop {
     /// own step when nothing ran there (`currentStep`): R2 980FBC67 cited it and
     /// paid a second model call to drop it. A close done by pressing (a menu's
     /// Close, a panel's kill button) is a close: the same run's second done.
-    static func doneChallenge(summary: String, evidence: [Int], receipts: [Receipt], currentStep: Int? = nil, seenNow: String? = nil) -> String? {
+    static func doneChallenge(summary: String, evidence citedSteps: [Int], receipts: [Receipt], currentStep: Int? = nil, seenNow: String? = nil) -> String? {
+        let evidence = citedSteps.map { citedStepOrAction($0, receipts: receipts) }
         // Backed by the steps it CITES (review of e98f476): an old ok result elsewhere in the run is no receipt.
         let cited = receipts.filter { $0.ok && (evidence.isEmpty || evidence.contains($0.step)) }
         var okTools = Set(cited.map(\.toolName))
