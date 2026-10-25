@@ -784,6 +784,7 @@ struct AgentLoopTests {
         #expect(heard("show my Downloads folder in list view sorted by size", "Finder"))
         #expect(heard("what are my three most recently opened files?", "Finder"))
         #expect(!heard("show my Downloads folder", "Notes"))
+        #expect(heard("what's the last thing I downloaded?", "Finder"))
         // A whole multi-word name anywhere; a one-word name or a distinctive word only right after a cue word.
         #expect(heard("switch Calendar to the month view", "Calendar"))
         #expect(heard("switch to reminders and add milk", "Reminders"))

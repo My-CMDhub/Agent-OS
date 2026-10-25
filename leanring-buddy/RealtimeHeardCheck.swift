@@ -307,8 +307,8 @@ nonisolated enum RealtimeHeardCheck {
         "System Settings.app": ["storage"],
         // Launch E12 2026-10-15: "remind me to call Mom at 5 pm today" — the verb, not the noun.
         "Reminders.app": ["remind"],
-        // Unseen I02 2026-10-25: "show my Downloads folder in list view" carded Finder's View menu.
-        "Finder.app": ["folder", "file"]]
+        // Unseen I02/K07 2026-10-25: "show my Downloads folder in list view", "the last thing I downloaded" carded Finder.
+        "Finder.app": ["folder", "file", "download", "downloaded"]]
 
     /// Built-in one-word app names that are everyday words: they still need a cue word (R1 keeps them out).
     static let ownNameEverydayWords: Set<String> = [
@@ -950,6 +950,7 @@ nonisolated enum RealtimeHeardCheck {
     static func appliesTo(toolName: String) -> Bool {
         RealtimeVoiceVerbs.allToolNames.contains(toolName) && toolName != SettingsPaneLinks.toolName
             && toolName != RealtimeVoiceVerbs.findFileName && toolName != RealtimeVoiceVerbs.briefSessionsName
+            && toolName != RealtimeVoiceVerbs.readCalendarName
     }
 
     /// Whether the check may REFUSE the call. Reads never are (slice 1b: four

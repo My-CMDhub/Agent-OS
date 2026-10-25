@@ -394,7 +394,7 @@ extension GeneralitySuite {
     nonisolated static let toolsThatNeverSend: Set<String> = [
         RealtimeVoiceVerbs.pointAtName, RealtimeVoiceVerbs.annotateName, RealtimeVoiceVerbs.findOnScreenName,
         RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.searchHelpName, RealtimeVoiceVerbs.findFileName,
-        RealtimeVoiceVerbs.listOpenAppsName, AgentLoopTools.readPageName, AgentLoopGemini.webLookupName
+        RealtimeVoiceVerbs.listOpenAppsName, RealtimeVoiceVerbs.readCalendarName, AgentLoopTools.readPageName, AgentLoopGemini.webLookupName
     ]
 
     /// U04: no successful call aimed at Send (a card or refusal stopped each), no Mail window that was

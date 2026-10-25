@@ -956,7 +956,8 @@ final class RealtimeVoiceConnection {
         let heardWords = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime) != nil ? turn.heardText : nil
         var call = RealtimeOpenAppTool.droppingUnsaidPointer(resolvedCall, heard: heardWords)
         // create_reminder's due is the owner's words, never the model's: always replaced, waited for like the site check's.
-        if RealtimeVoiceVerbs.eventKitWriterNames.contains(call.name) {
+        // read_calendar's range is read from the same words, before the model's `when`.
+        if RealtimeVoiceVerbs.eventKitWriterNames.contains(call.name) || call.name == RealtimeVoiceVerbs.readCalendarName {
             let released = turn.lastAudioSentUptime ?? ProcessInfo.processInfo.systemUptime
             call.words = await turn.waitForHeard(until: released + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds)
         }

@@ -46,7 +46,8 @@ nonisolated enum AgentPlan {
         SettingsPaneLinks.toolName: [["name"]], RealtimeVoiceVerbs.findFileName: [["name"]],
         RealtimeVoiceVerbs.renameItemName: [["name", "new_name"]], RealtimeVoiceVerbs.moveItemsName: [["names", "to_folder"]],
         RealtimeVoiceVerbs.setValueName: [["name", "value"]], RealtimeVoiceVerbs.createReminderName: [["title"]],
-        RealtimeVoiceVerbs.createEventName: [["title"]], RealtimeVoiceVerbs.pressMenuBarItemName: [["name"]]
+        RealtimeVoiceVerbs.createEventName: [["title"]], RealtimeVoiceVerbs.pressMenuBarItemName: [["name"]],
+        RealtimeVoiceVerbs.readCalendarName: [["when"]]
     ]
 
     /// Anthropic tool JSON. Each step is a flat object: `tool` plus that
@@ -84,6 +85,7 @@ nonisolated enum AgentPlan {
                 "title": text("create_reminder / create_event: the task or the event's name only, never a date or time."),
                 "calendar": text("create_event: an existing calendar's exact name, only when the owner named one."),
                 "list": text("create_reminder: an existing list's exact name, only when the owner named one."),
+                "when": text("read_calendar: the owner's own day words, for example \"tomorrow\"."),
                 "query": text("search_web: the words."),
                 "question": text("web_lookup: the question."),
                 "summary": text("done: what was achieved, spoken to the owner."),
@@ -164,7 +166,7 @@ nonisolated enum AgentPlan {
     static func isReading(_ tool: String) -> Bool {
         [AgentLoopTools.readPageName, AgentLoopGemini.webLookupName, RealtimeVoiceVerbs.findOnScreenName,
          RealtimeVoiceVerbs.findMenuItemsName, RealtimeVoiceVerbs.searchHelpName, RealtimeVoiceVerbs.findFileName,
-         RealtimeVoiceVerbs.findMenuBarItemsName, RealtimeVoiceVerbs.listOpenAppsName].contains(tool)
+         RealtimeVoiceVerbs.findMenuBarItemsName, RealtimeVoiceVerbs.listOpenAppsName, RealtimeVoiceVerbs.readCalendarName].contains(tool)
     }
 
     static func isActing(_ tool: String) -> Bool {

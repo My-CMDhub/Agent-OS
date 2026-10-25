@@ -67,6 +67,8 @@ nonisolated enum RealtimeVoiceVerbs {
     static let listOpenAppsName = "list_open_apps"
     /// The owner's Claude Code sessions, one line each, from their transcripts (`SessionBriefs`, owner 2026-10-25): local, read-only.
     static let briefSessionsName = "brief_sessions"
+    /// The owner's calendar for a day or range through EventKit, the range read from their words (`CalendarReader`, 2026-10-25).
+    static let readCalendarName = "read_calendar"
     /// Declared to the agent loop only: the voice hands a multi-step request to do_task.
     static let agentOnlyToolNames: Set<String> = [findMenuBarItemsName, pressMenuBarItemName, listOpenAppsName]
     /// Declared to the voice model only, never to the agent loop: session text is model text a page may have
@@ -77,7 +79,7 @@ nonisolated enum RealtimeVoiceVerbs {
                                             openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName, goToFolderName,
                                             findFileName, renameItemName, moveItemsName, setValueName, createReminderName,
                                             createEventName, findMenuBarItemsName, pressMenuBarItemName, listOpenAppsName,
-                                            briefSessionsName]
+                                            briefSessionsName, readCalendarName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
@@ -240,6 +242,13 @@ nonisolated enum RealtimeVoiceVerbs {
                     description: "Finds files, folders or apps on this Mac by name (Spotlight); returns up to \(FileFinder.maximumPaths) paths. "
                         + "Then go_to_folder a folder's path to look inside it.",
                     parameters: [Parameter(name: "name", description: "The name or part of it, never a path, for example \"Heyclicky\".")]),
+        Declaration(name: readCalendarName,
+                    description: "The way to answer what is on the owner's calendar for a day or a range (up to \(CalendarRange.maximumDays) days): "
+                        + "reads the events straight from Calendar, no app window. Local code works out the dates from the owner's own words, "
+                        + "so never work a date out yourself and never open the Calendar app for it. The result's range names the day or days "
+                        + "read; say it with the events, or that nothing is on. Changes nothing.",
+                    parameters: [Parameter(name: "when", description: "The owner's own day words, for example \"tomorrow\", \"this week\", "
+                                            + "\"next Monday\" or \"26 October\"; never a date you worked out.")]),
         Declaration(name: focusAppName,
                     description: "Brings an app that is already running to the front. Use its name as shown in the Dock, for example \"Finder\".",
                     parameters: [Parameter(name: "name", description: "The running app's name, for example \"Finder\".")]),
@@ -823,6 +832,8 @@ nonisolated enum RealtimeVoiceVerbs {
             return "Reading the menu bar\u{2026}"
         case listOpenAppsName:
             return "Checking which apps are open\u{2026}"
+        case readCalendarName:
+            return "Checking your calendar\u{2026}"
         case briefSessionsName:
             return "Checking your sessions\u{2026}"
         case pressMenuBarItemName:
@@ -849,7 +860,7 @@ nonisolated enum RealtimeVoiceVerbs {
     static func isActingTool(_ toolName: String) -> Bool {
         toolName != findMenuItemsName && toolName != findOnScreenName && toolName != doTaskName && toolName != annotateName
             && toolName != searchHelpName && toolName != findFileName && toolName != findMenuBarItemsName && toolName != listOpenAppsName
-            && toolName != briefSessionsName
+            && toolName != briefSessionsName && toolName != readCalendarName
     }
 }
 
