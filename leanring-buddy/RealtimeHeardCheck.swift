@@ -279,7 +279,8 @@ nonisolated enum RealtimeHeardCheck {
         let otherForms = Set(names.filter { path($0.url) != path(url) }.flatMap { RealtimeVoiceVerbs.foldedTokens($0.name) }.flatMap(forms))
         let said = " " + spoken.joined(separator: " ") + " "
         // Owner's ruling R1 (2026-10-06): a built-in app is the default for its own noun.
-        let builtIn = path(url).hasPrefix("/System/Applications/")
+        // Finder lives in CoreServices, not /System/Applications, and is just as built in.
+        let builtIn = path(url).hasPrefix("/System/Applications/") || path(url) == "/System/Library/CoreServices/Finder.app"
         if builtIn, url.lastPathComponent == "System Settings.app", namesASettingsPane(spoken) || saysAPanesOwnName(spoken) { return true }
         if builtIn, let nouns = builtInTaskNouns[url.lastPathComponent], !Set(nouns.flatMap(forms)).isDisjoint(with: Set(spoken)) { return true }
         return own.contains { tokens in
@@ -305,7 +306,9 @@ nonisolated enum RealtimeHeardCheck {
         // Launch E06 2026-10-15: "what's using the most storage on my Mac?" asked before opening Settings.
         "System Settings.app": ["storage"],
         // Launch E12 2026-10-15: "remind me to call Mom at 5 pm today" — the verb, not the noun.
-        "Reminders.app": ["remind"]]
+        "Reminders.app": ["remind"],
+        // Unseen I02 2026-10-25: "show my Downloads folder in list view" carded Finder's View menu.
+        "Finder.app": ["folder", "file"]]
 
     /// Built-in one-word app names that are everyday words: they still need a cue word (R1 keeps them out).
     static let ownNameEverydayWords: Set<String> = [

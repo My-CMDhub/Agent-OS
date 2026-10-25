@@ -762,7 +762,8 @@ struct AgentLoopTests {
                      app("Time Machine", "/System/Applications/Time Machine.app"), app("Messages", "/System/Applications/Messages.app"),
                      app("Music", "/System/Applications/Music.app"), app("Photos", "/System/Applications/Photos.app"),
                      app("Passwords", "/System/Applications/Passwords.app"), app("App Store", "/System/Applications/App Store.app"),
-                     app("Clock", "/System/Applications/Clock.app"), app("Mail", "/System/Applications/Mail.app")]
+                     app("Clock", "/System/Applications/Clock.app"), app("Mail", "/System/Applications/Mail.app"),
+                     app("Finder", "/System/Library/CoreServices/Finder.app")]
         func heard(_ words: String, _ named: String) -> Bool {
             RealtimeHeardCheck.wordsNameTheApp(transcript: words, named: named, among: names)
         }
@@ -777,6 +778,10 @@ struct AgentLoopTests {
         #expect(heard("remind me to call Mom at 5 pm today", "Reminders"))
         #expect(!heard("what's using the most storage on my Mac?", "Finder"))
         #expect(!heard("check my mail later", "Calendar"))
+        // Unseen I02 2026-10-25: "show my Downloads folder" carded Finder's View menu. A folder or file is Finder's noun.
+        #expect(heard("show my Downloads folder in list view sorted by size", "Finder"))
+        #expect(heard("what are my three most recently opened files?", "Finder"))
+        #expect(!heard("show my Downloads folder", "Notes"))
         // A whole multi-word name anywhere; a one-word name or a distinctive word only right after a cue word.
         #expect(heard("switch Calendar to the month view", "Calendar"))
         #expect(heard("switch to reminders and add milk", "Reminders"))
