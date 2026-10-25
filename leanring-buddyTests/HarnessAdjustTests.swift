@@ -197,4 +197,12 @@ struct HarnessAdjustTests {
         #expect((declaration["description"] as? String)?.contains("\"Output volume\" value \"30%\"") == true, "a level goes in as a percent")
         #expect(AgentPlan.requiredArguments["set_value"] == [["name", "value"]])
     }
+
+    /// Unseen H21 2026-10-25: Displays' "Brightness" label and slider share the name; the slider is meant.
+    @Test func theOneAdjustableAmongSameNamedMatchesIsMeant() {
+        #expect(HarnessAdjust.preferringTheOne(["label", "slider"]) { $0 == "slider" } == ["slider"])
+        #expect(HarnessAdjust.preferringTheOne(["slider", "slider"]) { $0 == "slider" } == ["slider", "slider"], "two sliders stay ambiguous")
+        #expect(HarnessAdjust.preferringTheOne(["label", "text"]) { $0 == "slider" } == ["label", "text"])
+        #expect(HarnessAdjust.preferringTheOne(["label"]) { $0 == "slider" } == ["label"])
+    }
 }

@@ -238,6 +238,13 @@ nonisolated enum HarnessAdjust {
 
     /// Resolves `name` in the app's focused window to one adjustable control, or a
     /// group of them, and pairs each with its number from `value`. Reads only.
+    /// `items` narrowed to the single one that `qualifies`, when several match and exactly one qualifies; else unchanged.
+    static func preferringTheOne<T>(_ items: [T], qualifies: (T) -> Bool) -> [T] {
+        guard items.count > 1 else { return items }
+        let qualifying = items.filter(qualifies)
+        return qualifying.count == 1 ? qualifying : items
+    }
+
     static func plan(name: String, value: String, processIdentifier: pid_t) -> Result<Plan, Failure> {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), readTimeoutSeconds)
         let application = AXUIElementCreateApplication(processIdentifier)
@@ -249,8 +256,13 @@ nonisolated enum HarnessAdjust {
                     ?? HarnessRenameItem.element(application, kAXMainWindowAttribute) else {
                 return .failure(Failure(code: "adjustNotFound", message: "the app in front has no window to read; nothing was changed"))
             }
-            let matches = find(under: window) { element in
+            // A label and the slider it names share the name (Displays' Brightness, unseen H21 2026-10-25: ambiguous x5, then
+            // clicks on the track moved it to 24%): the one adjustable control among them is meant.
+            let matches = preferringTheOne(find(under: window) { element in
                 displayName(element) == name || (identifier != nil && HarnessRenameItem.string(element, kAXIdentifierAttribute) == identifier)
+            }) { element in
+                levelRoles.contains(HarnessRenameItem.string(element, kAXRoleAttribute) ?? "") || isAdjustable(actions: actionNames(element))
+                    || isDateTimeControl(element)
             }
             guard matches.count <= 1 else {
                 return .failure(Failure(code: "ambiguous", message: "\(matches.count) elements are named \(UntrustedText(name).forDisplay); nothing was changed"))
