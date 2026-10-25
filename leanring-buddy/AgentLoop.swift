@@ -1264,12 +1264,15 @@ final class AgentLoop {
         return text
     }
 
-    /// "Saturday, 24 October 2026 at 11:58 am": the Mac's own clock, zone and locale.
-    static func nowLine(_ now: Date) -> String {
+    /// "Saturday, 24 October 2026 at 11:58 am (UTC+11:00)": the Mac's own clock, zone and locale. The offset is for
+    /// another city's time (unseen I15 2026-10-25: without it New York came out 2:58 am, really 11:58 pm the day before).
+    static func nowLine(_ now: Date, zone: TimeZone = .current) -> String {
         let formatter = DateFormatter()
+        formatter.timeZone = zone
         formatter.dateStyle = .full
         formatter.timeStyle = .short
-        return formatter.string(from: now)
+        let offset = zone.secondsFromGMT(for: now)
+        return formatter.string(from: now) + String(format: " (UTC%@%02d:%02d)", offset < 0 ? "-" : "+", abs(offset) / 3600, abs(offset) % 3600 / 60)
     }
 
     static let readOnlyNote = "This task is read-only, by the owner's words: look, scroll, follow links, tabs and search results, search, "
@@ -1630,7 +1633,12 @@ final class AgentLoop {
                 if index > 0, cased[sentence].indices.contains(index), cased[sentence][index].first?.isUppercase == true { continue }
                 // Right after a determiner, numeral or possessive it describes a thing: "two saved Wi-Fi networks", "the
                 // deleted notes", "your sent mail" (unseen F09 2026-10-24: a true list of saved networks refused twice).
-                if index > 0, Self.describingWords.contains(words[index - 1]) || words[index - 1].allSatisfy(\.isNumber) { continue }
+                // Adverbs between don't change that: "your three most recently opened files" (unseen I18 2026-10-25).
+                var before = index - 1
+                while before > 0, words[before].hasSuffix("ly") || ["most", "more", "least"].contains(words[before]) { before -= 1 }
+                if before >= 0, Self.describingWords.contains(words[before]) || words[before].allSatisfy(\.isNumber) { continue }
+                // "who sent a link" is that person's deed; J.A.R.V.I.S. says "I" (unseen I14 2026-10-25).
+                if index > 0, words[index - 1] == "who" { continue }
                 if isStateReading(words, at: index) { continue }
                 claims.append(kind.receipts)
             }

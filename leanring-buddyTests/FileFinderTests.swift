@@ -84,6 +84,19 @@ struct FileFinderTests {
         #expect(lengths == lengths.sorted(), "then shorter paths first")
     }
 
+    /// Unseen I10 2026-10-25: `mdfind -name Xcode.app` finds nothing (it matches the display name, "Xcode"), and the
+    /// agent told the owner Xcode was not installed. An ".app" name is asked without it; the exact app still ranks first.
+    @Test func anAppNameIsAskedByItsDisplayName() {
+        var asked: String?
+        let result = FileFinder.toolResult(name: "Xcode.app", run: { name in
+            asked = name
+            return .init(data: output([("/Applications/Journey of pro/xcode.py", "public.python-script"),
+                                       ("/Applications/Xcode.app", "com.apple.application-bundle")]))
+        })
+        #expect(asked == "Xcode")
+        #expect((result["paths"] as? [[String: String]])?.first?["path"] == "/Applications/Xcode.app")
+    }
+
     @Test func nothingFoundIsOkWithNoPathsAndATimeoutIsAFailure() {
         let none = FileFinder.toolResult(name: "zzqx", run: { _ in .init(data: Data()) })
         #expect(none["ok"] as? Bool == true)

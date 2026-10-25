@@ -111,7 +111,9 @@ nonisolated enum FileFinder {
                 message: "find_file needs a file, folder or app name (not a path): this one is \(problem)"))
         }
         let name = name.trimmingCharacters(in: .whitespaces)
-        let output = run(name)
+        // `-name` matches the display name, which hides ".app": "Xcode.app" finds nothing (unseen I10 2026-10-25).
+        let asked = name.lowercased().hasSuffix(".app") && name.count > 4 ? String(name.dropLast(4)) : name
+        let output = run(asked)
         if output.launchFailed {
             return RealtimeOpenAppTool.toolResult(for: RealtimeToolRefusal(error: "findFileUnavailable", message: "Spotlight could not be asked"))
         }

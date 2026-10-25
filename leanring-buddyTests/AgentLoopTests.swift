@@ -1528,6 +1528,8 @@ struct AgentLoopReadOnlyTests {
         let saturday = DateComponents(calendar: .current, year: 2026, month: 10, day: 24, hour: 11, minute: 58).date!
         #expect(AgentLoop.goalText(goal: "x", heard: nil, now: saturday).contains(AgentLoop.nowLine(saturday)))
         #expect(AgentLoop.nowLine(saturday).contains("2026"))
+        #expect(AgentLoop.nowLine(saturday, zone: TimeZone(identifier: "Australia/Sydney")!).hasSuffix("(UTC+11:00)"))
+        #expect(AgentLoop.nowLine(saturday, zone: TimeZone(identifier: "America/St_Johns")!).hasSuffix("(UTC-02:30)"))
     }
 }
 
@@ -1731,6 +1733,16 @@ struct TaskSessionTests {
     @Test func quotedTextIsThePagesWordsNotADeed() {
         #expect(AgentLoop.doneChallenge(summary: "The top headline is \"Barrister sent messages\".", evidence: [], receipts: []) == nil)
         #expect(AgentLoop.doneChallenge(summary: "I sent the \"weekly report\" email.", evidence: [], receipts: []) != nil)
+    }
+
+    /// Unseen I14/I18 2026-10-25: true read-only answers refused twice. "who sent" is someone else's deed, and
+    /// "three most recently opened files" describes files; "I most recently opened it" still claims.
+    @Test func anotherPersonsDeedOrADescribedThingClaimsNothing() {
+        #expect(AgentLoop.doneChallenge(summary: "You have 1 unread conversation. It is from Dhruv Patel, who sent a link yesterday.",
+                                        evidence: [], receipts: []) == nil)
+        #expect(AgentLoop.doneChallenge(summary: "I could not find your three most recently opened files.", evidence: [], receipts: []) == nil)
+        #expect(AgentLoop.doneChallenge(summary: "I most recently opened Finder.", evidence: [], receipts: []) != nil)
+        #expect(AgentLoop.doneChallenge(summary: "Done, and I sent a link.", evidence: [], receipts: []) != nil)
     }
 
     @Test func aNegatedOrPresentStateToggleClaimsNothing() {
