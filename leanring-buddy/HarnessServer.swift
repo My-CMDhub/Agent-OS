@@ -2974,9 +2974,13 @@ final class HarnessServer {
             let topLeft = SyntheticScroller.topLeftCentre(ofAppKitFrame: CGRect(origin: point, size: .zero),
                                                           primaryDisplayHeightInPoints: CGDisplayBounds(CGMainDisplayID()).height)
             // A wheel event goes to whatever window is under the point: only ever this app's.
-            guard let processIdentifier = snapshot.application?.processIdentifier, Self.processIdentifier(at: topLeft) == processIdentifier else {
+            let owner = Self.processIdentifier(at: topLeft)
+            guard let processIdentifier = snapshot.application?.processIdentifier, owner == processIdentifier else {
                 phaseTiming.actionReturned()
-                return fail("wheelTargetObscured", "another window covers that point, or it could not be checked; nothing more was scrolled",
+                // Unseen J05/I01 2026-10-25: refused with no word of WHAT covered it, so neither the model nor we could act.
+                let coverer = owner.flatMap { NSRunningApplication(processIdentifier: $0)?.localizedName }
+                    .flatMap { UntrustedText($0).isPlausibleControlLabel ? "a window of \($0)" : nil }
+                return fail("wheelTargetObscured", "\(coverer ?? "another window") covers that point, or it could not be checked; nothing more was scrolled",
                             kernel: gated.decision)
             }
             let extent = direction.isHorizontal ? bounds.width : bounds.height
