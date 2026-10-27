@@ -153,8 +153,31 @@ nonisolated enum RealtimeHeardCheck {
         return String(keyed)
     }
 
+    /// Before "cursor", these make it the mouse pointer, never the app.
+    static let pointerCursorLeadWords: Set<String> = ["my", "your", "mouse", "a"]
+    /// After "cursor", these make it the app even after a pointer lead ("the cursor code editor").
+    static let cursorAppTailWords: Set<String> = ["app", "application", "editor", "code", "ide"]
+    /// Before "the cursor", these make it the app ("quit the cursor", "in the cursor").
+    static let cursorAppVerbWords: Set<String> = appSlotLeadWords.union(commonNameSlotLeadWords)
+        .union(["quit", "close", "activate", "up", "kill", "show", "hide"])
+
+    /// "cursor" said as the mouse pointer becomes "pointer", which names no app.
+    /// Live 2026-10-26 12:23:13: "Can you see my cursor?" heard Cursor and refused a
+    /// press in Claude (`heardNamedMismatch`). "open Cursor", "in the cursor",
+    /// "quit the cursor" and "this cursor" still name the app.
+    static func withThePointerUnnamed(_ spoken: [String]) -> [String] {
+        spoken.indices.map { index in
+            guard spoken[index] == "cursor", index > 0 else { return spoken[index] }
+            if index + 1 < spoken.count, cursorAppTailWords.contains(spoken[index + 1]) { return spoken[index] }
+            let lead = spoken[index - 1]
+            if pointerCursorLeadWords.contains(lead) { return "pointer" }
+            if lead == "the", index < 2 || !cursorAppVerbWords.contains(spoken[index - 2]) { return "pointer" }
+            return spoken[index]
+        }
+    }
+
     static func appsMentioned(in transcript: String, among names: [RealtimeVoiceVerbs.AppName]) -> HeardApps {
-        let spoken = RealtimeVoiceVerbs.foldedTokens(transcript)
+        let spoken = withThePointerUnnamed(RealtimeVoiceVerbs.foldedTokens(transcript))
         guard !spoken.isEmpty else { return .none }
         func path(_ url: URL) -> String { url.standardizedFileURL.path }
         func distinct(_ urls: [URL]) -> [URL] {

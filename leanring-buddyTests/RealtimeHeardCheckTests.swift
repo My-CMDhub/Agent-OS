@@ -100,6 +100,21 @@ struct RealtimeHeardCheckTests {
         #expect(heard("") == [])
     }
 
+    /// Live 2026-10-26 12:23:13: "Can you see my cursor?" heard Cursor, and a press in Claude was
+    /// refused heardNamedMismatch. The mouse pointer is never the app; the app is still heard by name.
+    @Test func theMouseCursorIsThePointerNeverTheApp() {
+        for said in ["Here is the expanding window you can see here. Can you see my cursor?", "move your cursor there",
+                     "click where the mouse cursor is", "can you see the cursor", "a cursor is blinking", "where is my pointer"] {
+            #expect(heard(said) == [], "\(said)")
+        }
+        #expect(RealtimeHeardCheck.decide(transcript: "Can you see my cursor? press expand", named: "Claude", among: installed).outcome
+            == .noAppHeard)
+        for said in ["open Cursor", "switch to Cursor", "the terminal in Cursor", "quit the cursor", "in the cursor app",
+                     "Open a new window in the Cursor code editor.", "kill the terminal in this cursor", "Cursor"] {
+            #expect(heard(said) == ["Cursor"], "\(said)")
+        }
+    }
+
     @Test func commonWordNamesCountOnlyWhereOnlyAnAppNameFits() {
         #expect(heard("show the preview pane in finder") == ["Finder"])
         #expect(heard("go home") == [])
