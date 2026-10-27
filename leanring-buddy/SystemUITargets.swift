@@ -69,6 +69,14 @@ nonisolated enum SystemUITargets {
             .map { targets[$0] }
     }
 
+    /// Live 2026-10-27: the owner's Dock auto-hides, so its icons sit off-screen and "point at Safari in the Dock" found
+    /// nothing. Said plainly instead of a bare notFound: the owner reveals it, then asks again. Never move the pointer for them.
+    static let hiddenDockNote = "the Dock is set to hide itself, so its icons are off screen now: ask the owner to move the "
+        + "pointer to the bottom edge of the screen to show the Dock, then point again while it is showing"
+
+    /// The Dock's own "Automatically hide and show the Dock" setting.
+    static var dockHides: Bool { UserDefaults(suiteName: dockBundleIdentifier)?.bool(forKey: "autohide") ?? false }
+
     /// A front-app read that found no window (the desktop with nothing open):
     /// the system UI is still worth asking. A policy or lock refusal is not.
     static let noWindowErrors: Set<String> = ["noFocusedWindow", "noRootNode"]

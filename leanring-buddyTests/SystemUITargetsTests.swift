@@ -137,6 +137,10 @@ struct SystemUITargetsTests {
         // Nowhere: today's message.
         let none = RealtimeAnnotate.resolve([shape("Publish")], snapshotResponse: snapshot, screens: [screen], pointer: nil, system: system)
         #expect(none.notDrawn == ["box: nothing visible is called \"Publish\""])
+        // Live 2026-10-27: an autohidden Dock has no on-screen icons; the answer says how to show it, never just "nothing".
+        let hidden = RealtimeAnnotate.resolve([shape("Safari")], snapshotResponse: [:], screens: [screen], pointer: nil, system: [],
+                                              dockHidden: true)
+        #expect(hidden.drawn.isEmpty && hidden.notDrawn.count == 1 && hidden.notDrawn[0].contains("bottom edge"))
     }
 
     @Test func pointAtKeepsTheFrontAppsAnswerAndMarksASystemTarget() async throws {

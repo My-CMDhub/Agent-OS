@@ -722,7 +722,8 @@ nonisolated enum RealtimeAnnotate {
     /// `system`: the Dock and menu bar (`SystemUITargets`), asked only for a name the
     /// window has none of — the front app always wins.
     static func resolve(_ shapes: [RealtimeAnnotation], snapshotResponse: [String: Any], screens: [CGRect],
-                        pointer: RealtimeScreenTarget?, system: [SystemUITargets.Target] = []) -> (drawn: [Drawn], notDrawn: [String]) {
+                        pointer: RealtimeScreenTarget?, system: [SystemUITargets.Target] = [],
+                        dockHidden: Bool = false) -> (drawn: [Drawn], notDrawn: [String]) {
         var drawn: [Drawn] = []
         var notDrawn: [String] = []
         for shape in shapes {
@@ -749,7 +750,8 @@ nonisolated enum RealtimeAnnotate {
                     notDrawn.append("\(shape.shape): \(elsewhere.count) things are called \(UntrustedText(name).forDisplay): "
                         + elsewhere.prefix(5).map(\.described).joined(separator: "; ") + "; ask the owner which one")
                 } else {
-                    notDrawn.append("\(shape.shape): nothing visible is called \(UntrustedText(name).forDisplay)")
+                    notDrawn.append("\(shape.shape): nothing visible is called \(UntrustedText(name).forDisplay)"
+                        + (dockHidden ? "; if it is in the Dock, " + SystemUITargets.hiddenDockNote : ""))
                 }
             default:
                 notDrawn.append("\(shape.shape): \(found.count) visible elements are called \(UntrustedText(name).forDisplay); name one more exactly")

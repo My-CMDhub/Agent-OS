@@ -904,7 +904,8 @@ nonisolated enum RealtimeOpenAppTool {
                     let front = named?.bundleIdentifier
                     system = await Task.detached { SystemUITargets.read(frontApp: front, answer: answer, screens: displays) }.value
                 }
-                let resolved = RealtimeAnnotate.resolve(shapes, snapshotResponse: snapshot, screens: displays, pointer: screenTarget, system: system)
+                let resolved = RealtimeAnnotate.resolve(shapes, snapshotResponse: snapshot, screens: displays, pointer: screenTarget, system: system,
+                                                        dockHidden: SystemUITargets.dockHides)
                 if !resolved.drawn.isEmpty { await MainActor.run { AnnotationOverlay.show(resolved.drawn) } }
                 if !windowRead, !resolved.drawn.isEmpty { result["error"] = NSNull(); result["message"] = NSNull() }
                 result["ok"] = !resolved.drawn.isEmpty
@@ -1382,7 +1383,9 @@ nonisolated enum RealtimeOpenAppTool {
         }
         let targets = await Task.detached { SystemUITargets.read(frontApp: frontApp, answer: answer, screens: screens) }.value
         let matched = SystemUITargets.matches(name, among: targets)
-        guard !matched.isEmpty else { return found }
+        guard !matched.isEmpty else {
+            return SystemUITargets.dockHides ? .failure(RealtimeToolRefusal(error: "dockHidden", message: SystemUITargets.hiddenDockNote)) : found
+        }
         return .success(RealtimeScreenLookup(candidates: matched.map(\.candidate), app: nil, systemUI: true))
     }
 
