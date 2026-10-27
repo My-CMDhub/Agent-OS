@@ -1596,6 +1596,9 @@ final class HarnessServer {
     /// Who lifted a `requireConfirmation` for the request in flight, so every
     /// audit line of that request carries it. Reset per request, like `loadedPolicy`.
     private var currentConfirmedBy: String?
+    /// The app a `menu`/`menus` request read in the BACKGROUND (its `expectApp`), so the
+    /// audit line names the app acted on, not whatever is in front. Reset per request.
+    private var backgroundMenuApplication: String?
     /// The ticket this request already spent. `focus` asks the gate twice (app
     /// policy, then window); the second asking re-matches this ticket's shape
     /// rather than trusting that someone said yes to something.
@@ -2137,6 +2140,7 @@ final class HarnessServer {
         // a policy file that cannot be parsed must never become "allow".
         loadedPolicy = nil
         currentConfirmedBy = nil
+        backgroundMenuApplication = nil
         consumedTicketID = nil
         // `look` is read-only but takes a photograph, and a policy `refuse` is
         // "do not touch this app" — a picture of it counts.
@@ -4125,14 +4129,45 @@ final class HarnessServer {
     // keyed per app. `observe` reads only `walkMilliseconds`, so a different
     // key is the whole fix, and menu timings stay visible in the response.
 
+    /// Which running app a `menu`/`menus` request reads INSTEAD of the frontmost one,
+    /// as an index into `regularApps`; nil keeps the frontmost (and so today's
+    /// `frontmostChanged` refusal). A menu bar hangs off the application element and
+    /// is pressed with the menu closed, so it needs no focus: live 2026-10-26, an
+    /// approved Chrome > Quit was refused four times because Wispr Flow or Clicky's
+    /// own card had come forward. Exactly one regular app must match `expectApp`;
+    /// none or several keeps the frontmost and its refusal.
+    nonisolated static func backgroundMenuApplicationIndex(
+        expectApp: String?,
+        frontmost: (bundleIdentifier: String?, name: String?)?,
+        regularApps: [(bundleIdentifier: String?, name: String?)]
+    ) -> Int? {
+        guard let expectApp else { return nil }
+        if let frontmost, HarnessPolicy.appMatches(expected: expectApp, bundleIdentifier: frontmost.bundleIdentifier, name: frontmost.name) {
+            return nil
+        }
+        let matches = regularApps.indices.filter {
+            HarnessPolicy.appMatches(expected: expectApp, bundleIdentifier: regularApps[$0].bundleIdentifier, name: regularApps[$0].name)
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    /// True once the process is gone. `isTerminated` is refreshed on the main run
+    /// loop; `kill(pid, 0)` asks the kernel directly, so either answers.
+    nonisolated static func hasQuit(_ application: NSRunningApplication) -> Bool {
+        application.isTerminated || (kill(application.processIdentifier, 0) == -1 && errno == ESRCH)
+    }
+
     /// The frontmost app and its menu bar, or nil having already filled in the
-    /// refusal and written the audit line.
+    /// refusal and written the audit line. `inExpectedApp` (menu/menus only) reads
+    /// the `expectApp` app's bar even when it is in the background — see
+    /// `backgroundMenuApplicationIndex`; every other verb acts in the front app.
     private func menuBar(
         for request: HarnessRequest,
         dryRun: Bool,
         startedAt: Date,
         into response: inout [String: Any],
-        needsBar: Bool = true
+        needsBar: Bool = true,
+        inExpectedApp: Bool = false
     ) -> (application: NSRunningApplication, bar: AccessibilityMenu.Node?)? {
 
         func fail(_ code: String, _ message: String) {
@@ -4148,7 +4183,7 @@ final class HarnessServer {
         // guards must come from ONE answer; two sources let a race pass the
         // check against one app and read the menu bar of another.
         let frontmostRead = AccessibilityTreeWalker.frontmost()
-        guard let application = frontmostRead.application else {
+        guard var application = frontmostRead.application else {
             fail("noFrontmostApplication", "nothing is frontmost")
             return nil
         }
@@ -4157,6 +4192,19 @@ final class HarnessServer {
         guard !LockScreenGuard.isLockScreen(application.bundleIdentifier) else {
             fail("screenIsLocked", "the screen is locked — there is no menu bar of the user's to read")
             return nil
+        }
+        // The app the guard below checks IS the app whose bar is read: still one answer.
+        if inExpectedApp {
+            let regularApps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !$0.isTerminated }
+            if let index = Self.backgroundMenuApplicationIndex(
+                expectApp: request.expectApp,
+                frontmost: (application.bundleIdentifier, application.localizedName),
+                regularApps: regularApps.map { ($0.bundleIdentifier, $0.localizedName) }
+            ) {
+                application = regularApps[index]
+                response["inBackground"] = true
+                backgroundMenuApplication = application.bundleIdentifier
+            }
         }
         // Measured 2026-09-11: after a confirmed `focus Finder`, `menu` read
         // Claude Desktop's bar. Checked before one menu item is read.
@@ -4211,7 +4259,7 @@ final class HarnessServer {
             "dryRun": dryRun, "confirmed": request.confirmed, "path": request.path
         ]
         guard let (application, menuBarNode) = menuBar(
-            for: request, dryRun: dryRun, startedAt: startedAt, into: &response
+            for: request, dryRun: dryRun, startedAt: startedAt, into: &response, inExpectedApp: true
         ), let bar = menuBarNode else { return response }
 
         // Only the path is read — six or seven levels, not the 300-item bar.
@@ -4314,7 +4362,10 @@ final class HarnessServer {
         // Edit > Select All change only those, and came back notVerified (2026-10-10).
         let readingBefore = AccessibilityMenu.pressReading(item: element, application: application)
         let windowsBefore = readingBefore.windows
-        let namesBefore = (try? AccessibilityTreeWalker.snapshotFocusedWindow())?
+        // In the background the focused window is ANOTHER app's: its fingerprint
+        // would credit (or blame) this press for whatever that app does.
+        let inBackground = response["inBackground"] as? Bool == true
+        let namesBefore = inBackground ? nil : (try? AccessibilityTreeWalker.snapshotFocusedWindow())?
             .rootNode.map(AccessibilityDumpRunner.namedElementFingerprint)
         response["windowsBefore"] = (windowsBefore ?? NSNull()) as Any
         response["markedBefore"] = (readingBefore.marked ?? NSNull()) as Any
@@ -4348,21 +4399,36 @@ final class HarnessServer {
         var readingAfter = readingBefore
         let windowCountMoved = {
             if cheapEvidence != nil { return true }
+            // A quit's proof is the process gone, not a window or the next app's names.
+            if Self.hasQuit(application) {
+                cheapEvidence = "the application quit"
+                return true
+            }
             readingAfter = AccessibilityMenu.pressReading(item: element, application: application)
             cheapEvidence = ActionVerifier.menuPressEvidence(before: readingBefore, now: readingAfter)
             return cheapEvidence != nil
         }
-        let (verification, verifyWalks) = ActionVerifier.pollCountingWindowsFirst(
-            locate: AccessibilityTreeWalker.focusedWindowTarget,
-            windowCountMoved: windowCountMoved,
-            walk: { try AccessibilityTreeWalker.snapshotFocusedWindow($0) },
-            hadFocusedWindowBefore: namesBefore != nil
-        ) { laterSnapshot in
-            if windowCountMoved() { return true }
-            guard let laterRoot = laterSnapshot.rootNode, let namesBefore else { return false }
-            return AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot) != namesBefore
+        let verification: VerificationOutcome
+        let verifyWalks: Int
+        if inBackground {
+            // Only the pressed app's own readings, no window walk. 5 s, the launch
+            // deadline: a quitting browser may take seconds to exit.
+            let polled = ActionVerifier.poll(walk: windowCountMoved, hadFocusedWindowBefore: false,
+                                             expectation: { $0 }, timeoutInSeconds: 5, pollIntervalInSeconds: 0.15)
+            (verification, verifyWalks) = (polled.outcome, 0)
+        } else {
+            (verification, verifyWalks) = ActionVerifier.pollCountingWindowsFirst(
+                locate: AccessibilityTreeWalker.focusedWindowTarget,
+                windowCountMoved: windowCountMoved,
+                walk: { try AccessibilityTreeWalker.snapshotFocusedWindow($0) },
+                hadFocusedWindowBefore: namesBefore != nil
+            ) { laterSnapshot in
+                if windowCountMoved() { return true }
+                guard let laterRoot = laterSnapshot.rootNode, let namesBefore else { return false }
+                return AccessibilityDumpRunner.namedElementFingerprint(in: laterRoot) != namesBefore
+            }
         }
-        phaseTiming.verified(walks: verifyWalks, path: "poll")
+        phaseTiming.verified(walks: verifyWalks, path: inBackground ? "appReadings" : "poll")
 
         switch verification {
         case .confirmed(let milliseconds):
@@ -4426,7 +4492,7 @@ final class HarnessServer {
     private func menusResponse(_ request: HarnessRequest, dryRun: Bool, startedAt: Date) -> [String: Any] {
         var response: [String: Any] = ["pathPrefix": request.path]
         guard let (application, menuBarNode) = menuBar(
-            for: request, dryRun: dryRun, startedAt: startedAt, into: &response
+            for: request, dryRun: dryRun, startedAt: startedAt, into: &response, inExpectedApp: true
         ), let bar = menuBarNode else { return response }
         if let reason = HarnessPolicy.modelReadRefusal(forModel: request.forModel, bundleIdentifier: application.bundleIdentifier,
                                                        policy: loadedPolicy) {
@@ -6227,7 +6293,7 @@ final class HarnessServer {
         startedAt: Date
     ) {
         audit(request, dryRun: dryRun, kernel: kernel, outcome: outcome, startedAt: startedAt,
-              confirmedBy: currentConfirmedBy, phases: phaseTiming.wireFields)
+              confirmedBy: currentConfirmedBy, phases: phaseTiming.wireFields, app: backgroundMenuApplication)
     }
 
     /// Called off the request queue by `ping`, so it takes the per-request
@@ -6240,7 +6306,8 @@ final class HarnessServer {
         startedAt: Date,
         confirmedBy: String?,
         phases: [String: Any],
-        frontmost knownFrontmost: AccessibilityTreeWalker.FrontmostRead? = nil
+        frontmost knownFrontmost: AccessibilityTreeWalker.FrontmostRead? = nil,
+        app actedApp: String? = nil
     ) {
         let frontmost = knownFrontmost ?? AccessibilityTreeWalker.frontmost()
         appendAudit(HarnessPolicy.auditLine(
@@ -6248,7 +6315,7 @@ final class HarnessServer {
             id: request.id,
             verb: request.verb.rawValue,
             target: Self.auditTarget(for: request),
-            app: frontmost.application?.bundleIdentifier,
+            app: actedApp ?? frontmost.application?.bundleIdentifier,
             session: Self.sessionIdentifier,
             dryRun: dryRun,
             confirmed: request.confirmed,
