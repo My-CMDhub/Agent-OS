@@ -230,6 +230,10 @@ struct AgentPlanTests {
         let failedPress = AgentLoop.Receipt(step: 1, toolName: "press_element", ok: false, error: "x")
         let laterRead = AgentLoop.Receipt(step: 2, toolName: "read_page", ok: true, error: nil)
         #expect(AgentLoop.doneChallenge(summary: "I pressed Save.", evidence: [3], receipts: [failedPress, laterRead, laterRead]) != nil)
+        // Review 2026-10-27: the done's own step is never remapped onto an earlier plan (Compose ok, Send refused).
+        let compose = AgentLoop.Receipt(step: 1, toolName: "press_element", ok: true, error: nil)
+        let send = AgentLoop.Receipt(step: 1, toolName: "press_element", ok: false, error: "confirmationDenied")
+        #expect(AgentLoop.doneChallenge(summary: "I sent it.", evidence: [2], receipts: [compose, send], currentStep: 2) != nil)
         let declared = (AgentPlan.declaration["input_schema"] as? [String: Any]).flatMap { ($0["properties"] as? [String: Any])?["steps"] as? [String: Any] }
         let evidence = ((declared?["items"] as? [String: Any])?["properties"] as? [String: Any])?["evidence"] as? [String: Any]
         #expect((evidence?["description"] as? String)?.contains("never a position in the plan") == true)

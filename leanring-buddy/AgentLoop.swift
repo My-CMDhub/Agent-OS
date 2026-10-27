@@ -724,7 +724,9 @@ final class AgentLoop {
                 line["web"] = webUses.map(\.trace)
                 for use in webUses {
                     webUsed[use.tool, default: 0] += 1
-                    receipts.append(Receipt(step: step, toolName: use.tool, ok: use.error == nil, error: use.error))
+                    var receipt = Receipt(step: step, toolName: use.tool, ok: use.error == nil, error: use.error)
+                    receipt.shown = use.seen
+                    receipts.append(receipt)
                 }
             }
             if remaining() <= 0 {
@@ -1198,6 +1200,8 @@ final class AgentLoop {
         let resultBytes: Int
         let results: Int?
         let error: String?
+        /// Result titles and fetched text, plus the reply's cited text: what a quoted headline may come from. In memory only.
+        var seen: String? = nil
         var trace: [String: Any] {
             ["tool": tool, "host": host ?? NSNull(), "resultBytes": resultBytes, "results": results ?? NSNull(), "error": error ?? NSNull()]
         }
@@ -1205,6 +1209,7 @@ final class AgentLoop {
 
     /// The reply's `server_tool_use` blocks, each with its result block.
     static func webUses(_ content: [[String: Any]]) -> [WebUse] {
+        let cited = content.flatMap { ($0["citations"] as? [[String: Any]]) ?? [] }.compactMap { $0["cited_text"] as? String }
         let results = Dictionary(content.filter { ($0["type"] as? String)?.hasSuffix("_tool_result") == true && $0["type"] as? String != "tool_result" }
             .compactMap { block in (block["tool_use_id"] as? String).map { ($0, block) } }) { first, _ in first }
         return content.filter { $0["type"] as? String == "server_tool_use" }.compactMap { use in
@@ -1215,7 +1220,12 @@ final class AgentLoop {
                 ? ((object?["error_code"] as? String) ?? "error") : nil
             let host = ((use["input"] as? [String: Any])?["url"] as? String).flatMap { URL(string: $0)?.host }.map(SecretScanner.redact)
             let bytes = result.flatMap { try? JSONSerialization.data(withJSONObject: ["c": $0]) }?.count ?? 0
-            return WebUse(tool: tool, host: host, resultBytes: bytes, results: (result as? [Any])?.count, error: error)
+            var use = WebUse(tool: tool, host: host, resultBytes: bytes, results: (result as? [Any])?.count, error: error)
+            let titles = ((result as? [[String: Any]]) ?? []).compactMap { $0["title"] as? String }
+            let fetched = ((object?["content"] as? [String: Any])?["source"] as? [String: Any])?["data"] as? String
+            let seen = titles + [fetched.map { String($0.prefix(50_000)) }].compactMap { $0 } + cited
+            use.seen = seen.isEmpty ? nil : seen.joined(separator: "\n")
+            return use
         }
     }
 
@@ -1308,8 +1318,23 @@ final class AgentLoop {
 
     /// The summary with double-quoted spans ("…", “…”) blanked: quoted text is what an app or page wrote. Single quotes are
     /// kept — they are apostrophes as often as quotes. ponytail: one level, no nesting; a stray quote leaves the rest as is.
-    nonisolated static func withoutQuotedText(_ summary: String) -> String {
-        summary.replacingOccurrences(of: #""[^"\n]{0,300}"|“[^”\n]{0,300}”"#, with: "\"…\"", options: .regularExpression)
+    /// Review of da7c52d (2026-10-27): blanking every quote let `"Message sent to Sam."` pass on its wording alone. A quote
+    /// is the page's words only when this run read them: an ok read's text, a web result, or the screen at done.
+    nonisolated static func withoutQuotedText(_ summary: String, seen: [String]) -> String {
+        func folded(_ text: String) -> String {
+            text.lowercased().components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        }
+        let corpus = seen.map(folded)
+        guard !corpus.isEmpty, let pattern = try? NSRegularExpression(pattern: #""([^"\n]{1,300})"|“([^”\n]{1,300})”"#) else { return summary }
+        var result = summary as NSString
+        for match in pattern.matches(in: summary, range: NSRange(location: 0, length: result.length)).reversed() {
+            let inner = [1, 2].map { match.range(at: $0) }.first { $0.location != NSNotFound }.map { (summary as NSString).substring(with: $0) } ?? ""
+            let wanted = folded(inner).trimmingCharacters(in: .punctuationCharacters)
+            // A one-word quote is found in almost any page ("I “sent” the email"): a quotation is a phrase.
+            guard wanted.split(separator: " ").count >= 2, corpus.contains(where: { $0.contains(wanted) }) else { continue }
+            result = result.replacingCharacters(in: match.range, with: "\"…\"") as NSString
+        }
+        return result as String
     }
 
     /// Owner's ruling 2026-10-25: a plan's steps share one number, and models count their tool calls instead (launch
@@ -1344,7 +1369,8 @@ final class AgentLoop {
     /// paid a second model call to drop it. A close done by pressing (a menu's
     /// Close, a panel's kill button) is a close: the same run's second done.
     static func doneChallenge(summary: String, evidence citedSteps: [Int], receipts: [Receipt], currentStep: Int? = nil, seenNow: String? = nil) -> String? {
-        let evidence = citedSteps.map { citedStepOrAction($0, receipts: receipts) }
+        // The done's own step is never a plan position (review 2026-10-27: citing it remapped to an earlier step's plan).
+        let evidence = citedSteps.map { $0 == currentStep ? $0 : citedStepOrAction($0, receipts: receipts) }
         // Backed by the steps it CITES (review of e98f476): an old ok result elsewhere in the run is no receipt.
         let cited = receipts.filter { $0.ok && (evidence.isEmpty || evidence.contains($0.step)) }
         var okTools = Set(cited.map(\.toolName))
@@ -1354,7 +1380,7 @@ final class AgentLoop {
         }
         // What a page says, quoted, is no deed of the task's (unseen H28 2026-10-25: the headline "…barrister sent
         // 'disgusting' messages…" read as a claim to have sent something, refused twice).
-        let unquoted = Self.withoutQuotedText(summary)
+        let unquoted = Self.withoutQuotedText(summary, seen: receipts.compactMap { $0.ok ? $0.shown : nil } + [seenNow].compactMap { $0 })
         for receiptsNeeded in RealtimeOpenAppTool.firstPersonClaims(unquoted) + effectClaims(unquoted).map(Optional.some) {
             if var needed = receiptsNeeded {
                 if needed.contains(RealtimeVoiceVerbs.closeName) { needed.formUnion(pressTools) }
@@ -1638,7 +1664,7 @@ final class AgentLoop {
                 // deleted notes", "your sent mail" (unseen F09 2026-10-24: a true list of saved networks refused twice).
                 // Adverbs between don't change that: "your three most recently opened files" (unseen I18 2026-10-25).
                 var before = index - 1
-                while before > 0, words[before].hasSuffix("ly") || ["most", "more", "least"].contains(words[before]) { before -= 1 }
+                while before > 0, Self.degreeAdverbs.contains(words[before]) { before -= 1 }
                 if before >= 0, Self.describingWords.contains(words[before]) || words[before].allSatisfy(\.isNumber) { continue }
                 // "who sent a link" is that person's deed; J.A.R.V.I.S. says "I" (unseen I14 2026-10-25).
                 if index > 0, words[index - 1] == "who" { continue }
@@ -1657,6 +1683,8 @@ final class AgentLoop {
     static let describingWords: Set<String> = ["the", "a", "an", "your", "my", "its", "their", "his", "her", "our", "these", "those",
                                                "this", "that", "all", "some", "any", "no", "every", "each", "several", "many", "few",
                                                "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "both"]
+    /// Closed list (review 2026-10-27: an "-ly" test also skipped "reply", "weekly", "July", so "Your reply sent." passed).
+    static let degreeAdverbs: Set<String> = ["most", "more", "least", "recently", "newly", "previously", "last", "first", "already"]
     static let perceptionWords: Set<String> = ["shows", "showing", "shown", "reads", "appears", "looks", "seems", "displays", "lists", "listed"]
     static let presentStateVerbs: Set<String> = ["is", "are", "remains", "remain", "stays", "stay"]
     static func isStateReading(_ words: [String], at index: Int) -> Bool {

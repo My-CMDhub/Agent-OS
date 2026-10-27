@@ -38,6 +38,8 @@ struct ReadCalendarTests {
             ("Monday", Self.day(10, 26), 1),
             ("next Monday", Self.day(11, 2), 1),
             ("next Sunday", Self.day(11, 1), 1),
+            ("this Sunday", Self.day(10, 25), 1),   // said on a Sunday: today (review 2026-10-27)
+            ("on Sunday", Self.day(11, 1), 1),
             ("26 October", Self.day(10, 26), 1),
             ("October 26th, 2027", Self.day(10, 26, 2027), 1),
             ("5 January", Self.day(1, 5, 2027), 1),

@@ -97,6 +97,19 @@ struct SessionBriefsTests {
 
     // MARK: Files
 
+    /// Review 2026-10-27: a card is read only as a plain file; a planted symlink never sends its target anywhere.
+    @Test func aSymlinkedCardIsNeverRead() throws {
+        let root = try temporaryDirectory()
+        let now = Date()
+        let secret = root.appendingPathComponent("secret.txt")
+        try write("private notes", to: secret, modified: now)
+        let id = UUID().uuidString.lowercased()
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("\(id).md"), withDestinationURL: secret)
+        #expect(SessionBriefs.card(for: id, in: root, now: now) == nil)
+        try write("Doing the brief", to: root.appendingPathComponent("plain.md"), modified: now)
+        #expect(SessionBriefs.card(for: "plain", in: root, now: now) == "Doing the brief")
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("session-briefs-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

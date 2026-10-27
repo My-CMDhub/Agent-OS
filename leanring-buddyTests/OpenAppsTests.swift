@@ -48,9 +48,10 @@ struct OpenAppsTests {
         var read = AccessibilityWindows.WindowRead()
         read.windows = [(element, .init(title: nil, subrole: "AXStandardWindow")),
                         (element, .init(title: nil, subrole: "AXStandardWindow", isMinimized: true)),
-                        (element, .init(title: nil, subrole: "AXDialog")),
-                        (element, .init(title: nil, subrole: nil))]
+                        (element, .init(title: nil, subrole: "AXDialog"))]
         #expect(OpenApps.standardWindowCount(read) == 2)
+        read.windows.append((element, .init(title: nil, subrole: nil)))
+        #expect(OpenApps.standardWindowCount(read) == nil, "an unread subrole makes the count unknown, never an undercount")
         #expect(OpenApps.standardWindowCount(AccessibilityWindows.WindowRead()) == 0, "a successful empty read is a real 0")
         #expect(OpenApps.standardWindowCount(.init(windows: [], error: .cannotComplete)) == nil)
     }

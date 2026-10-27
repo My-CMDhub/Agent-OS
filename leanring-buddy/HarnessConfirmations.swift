@@ -704,7 +704,9 @@ final class HarnessConfirmations: ObservableObject {
     static func matchingRule(in rules: [ApprovalRule], _ shape: Shape) -> ApprovalRule? {
         rules.first { rule in
             if appWideRuleVerbs.contains(rule.verb), rule.target == nil {
+                // Review 2026-10-27: an older "Always launch Terminal" must not answer an unnamed-app card for Terminal.
                 return rule.verb == shape.verb && sameBundleIdentifier(rule.bundleIdentifier, shape.bundleIdentifier)
+                    && (rule.unnamedApp ?? false) == shape.unnamedApp
             }
             guard let target = rule.target else { return false }
             let approved = Shape(
@@ -722,7 +724,9 @@ final class HarnessConfirmations: ObservableObject {
     /// whose action is the app.
     static func rule(for ticket: Ticket) -> ApprovalRule {
         if appWideRuleVerbs.contains(ticket.verb) {
-            return ApprovalRule(bundleIdentifier: ticket.bundleIdentifier, verb: ticket.verb, target: nil)
+            var rule = ApprovalRule(bundleIdentifier: ticket.bundleIdentifier, verb: ticket.verb, target: nil)
+            if ticket.unnamedApp { rule.unnamedApp = true }
+            return rule
         }
         return ApprovalRule(
             bundleIdentifier: ticket.bundleIdentifier, verb: ticket.verb, target: ticket.rawTarget,

@@ -3279,6 +3279,11 @@ private func mailShape(
     #expect(HarnessConfirmations.offersAlwaysRule(for: ticket))
     let launchRule = HarnessConfirmations.rule(for: ticket)
     #expect(HarnessConfirmations.matchingRule(in: [launchRule], shape) == launchRule)
+    // Review 2026-10-27: an older app-wide "Always launch" (no unnamedApp) never answers an unnamed-app launch card.
+    #expect(launchRule.unnamedApp == true)
+    let olderLaunchRule = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.ActivityMonitor", verb: "launch", target: nil)
+    #expect(HarnessConfirmations.matchingRule(in: [olderLaunchRule], shape) == nil)
+    #expect(HarnessConfirmations.matchingRule(in: [olderLaunchRule], plain) == olderLaunchRule)
     let press = HarnessConfirmations.Shape(verb: "press", bundleIdentifier: "com.apple.ActivityMonitor", rawTarget: "Memory", unnamedApp: true)
     guard case .opened(let pressTicket) = confirmations.open(press, appName: "Activity Monitor", reason: "r", destructive: false) else {
         Issue.record("expected a ticket"); return

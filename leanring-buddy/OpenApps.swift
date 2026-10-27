@@ -48,7 +48,8 @@ nonisolated enum OpenApps {
     }
 
     static func standardWindowCount(_ read: AccessibilityWindows.WindowRead) -> Int? {
-        guard read.readSucceeded else { return nil }
+        // A window whose subrole did not come back is unknown, not "not a window" (review 2026-10-27: a believable undercount).
+        guard read.readSucceeded, !read.windows.contains(where: { $0.candidate.subrole == nil }) else { return nil }
         // Standard only: Finder's desktop, panels and dialogs are not windows the owner would count.
         return read.windows.filter { $0.candidate.subrole == kAXStandardWindowSubrole as String }.count
     }

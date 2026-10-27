@@ -1741,8 +1741,24 @@ struct TaskSessionTests {
 
     /// Unseen H28 2026-10-25: a quoted headline holding "sent" is the page's words; outside quotes, "sent" still claims.
     @Test func quotedTextIsThePagesWordsNotADeed() {
-        #expect(AgentLoop.doneChallenge(summary: "The top headline is \"Barrister sent messages\".", evidence: [], receipts: []) == nil)
-        #expect(AgentLoop.doneChallenge(summary: "I sent the \"weekly report\" email.", evidence: [], receipts: []) != nil)
+        var read = AgentLoop.Receipt(step: 1, toolName: AgentLoopTools.readPageName, ok: true, error: nil)
+        read.shown = "Top stories\nBarrister sent messages to the court"
+        #expect(AgentLoop.doneChallenge(summary: "The top headline is \"Barrister sent messages\".", evidence: [], receipts: [read]) == nil)
+        #expect(AgentLoop.doneChallenge(summary: "I sent the \"weekly report\" email.", evidence: [], receipts: [read]) != nil)
+        // Review 2026-10-27: a quote the run never read is no page's words; a claim inside it still needs a receipt.
+        #expect(AgentLoop.doneChallenge(summary: "\"Message sent to Sam.\"", evidence: [], receipts: [read]) != nil)
+        #expect(AgentLoop.doneChallenge(summary: "I \u{201C}sent\u{201D} the email.", evidence: [], receipts: [read]) != nil)
+        // A web result title is a read too.
+        var web = AgentLoop.Receipt(step: 1, toolName: "web_search", ok: true, error: nil)
+        web.shown = "Accused barrister sent 'disgusting' messages, court hears"
+        #expect(AgentLoop.doneChallenge(summary: "The lead story is \"Accused barrister sent 'disgusting' messages\".",
+                                        evidence: [], receipts: [web]) == nil)
+    }
+
+    @Test func aNounEndingInLyIsNoAdverb() {
+        #expect(AgentLoop.doneChallenge(summary: "Your reply sent to Sam.", evidence: [], receipts: []) != nil)
+        #expect(AgentLoop.doneChallenge(summary: "The weekly backup deleted.", evidence: [], receipts: []) != nil)
+        #expect(AgentLoop.doneChallenge(summary: "I could not find your three most recently opened files.", evidence: [], receipts: []) == nil)
     }
 
     /// Unseen I14/I18 2026-10-25: true read-only answers refused twice. "who sent" is someone else's deed, and

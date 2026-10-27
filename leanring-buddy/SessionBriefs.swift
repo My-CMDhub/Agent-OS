@@ -281,7 +281,9 @@ nonisolated enum SessionBriefs {
     /// The session's own status card, when written in the last 6 h: at most 600 characters, redacted.
     static func card(for sessionId: String, in directory: URL, now: Date) -> String? {
         let url = directory.appendingPathComponent("\(sessionId).md")
-        guard let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+        // Never through a link (review 2026-10-27: a planted symlink would send any file of the owner's to the voice provider).
+        guard let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .contentModificationDateKey]),
+              values.isSymbolicLink != true, values.isRegularFile == true, let modified = values.contentModificationDate,
               now.timeIntervalSince(modified) < waitingSeconds,
               let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }

@@ -64,7 +64,9 @@ nonisolated enum CalendarRange {
                 }
             } else if let name = group(match, "wd"), let target = weekdays.firstIndex(of: name) {
                 let weekday = calendar.component(.weekday, from: today) - 1
-                var date = day((target - weekday + 7) % 7 == 0 ? 7 : (target - weekday + 7) % 7)
+                // "this Monday" said on a Monday is today (review 2026-10-27); a bare or "on" weekday follows NSDataDetector.
+                let ahead = (target - weekday + 7) % 7
+                var date = day(ahead == 0 && group(match, "wdq") != "this" ? 7 : ahead)
                 if group(match, "wdq") == "next", calendar.isDate(date, equalTo: today, toGranularity: .weekOfYear) { date = day(7, from: date) }
                 days(date, 1)
             } else if let dayText = group(match, "d1") ?? group(match, "d2"), let monthText = group(match, "m1") ?? group(match, "m2"),
