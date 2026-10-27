@@ -101,6 +101,24 @@ struct JarvisNotchTests {
         #expect(JarvisNotchState.noReply.announcement == "No reply. Try again.")
     }
 
+    /// Live 2026-10-26 12:30: the voice service refused three turns and the notch said nothing.
+    @Test func aTurnTheVoiceServiceRefusedSaysSo() {
+        #expect(JarvisNotchReason.plain(forTurnFailure: "openAI:responseFailed:insufficient_quota") == "the voice service is out of quota")
+        #expect(JarvisNotchReason.plain(forTurnFailure: "openAI:responseFailed:rate_limit_exceeded") == "the voice service hit a rate limit")
+        #expect(JarvisNotchReason.plain(forTurnFailure: "openAI:responseFailed:failed") == "the voice service refused it")
+        #expect(JarvisNotchReason.plain(forTurnFailure: "openAI:serverError:-") == "the voice service refused it")
+        #expect(JarvisNotchReason.plain(forTurnFailure: "turnTimeout") == nil)
+        #expect(JarvisNotchReason.plain(forTurnFailure: "openAIRealtime:reaskSendFailed") == nil)
+        for kind in ["openAI:responseFailed:insufficient_quota", "openAI:responseFailed:rate_limit_exceeded", "openAI:responseFailed:x"] {
+            #expect((JarvisNotchReason.plain(forTurnFailure: kind) ?? "").count <= JarvisNotchReason.maximumLength)
+        }
+        for state: JarvisNotchState in [.thinking, .intent(title: "x"), .needsYou, .noReply] {
+            #expect(state.next(on: .turnFailed(reason: "r")) == .didntTake(reason: "r"), "\(state.name)")
+        }
+        // A new press owns the notch.
+        #expect(JarvisNotchState.listening.next(on: .turnFailed(reason: "r")) == nil)
+    }
+
     @Test func theDrawnWitnessJudgesTheWindowServerNotThePanel() {
         func judge(idle: Bool, _ sample: String, onscreen: Bool, alpha: Double = 1, onCursorScreen: Bool = true) -> Bool {
             JarvisNotch.drawnMatchesLogic(stateIsIdle: idle, sample: sample, serverOnscreen: onscreen,

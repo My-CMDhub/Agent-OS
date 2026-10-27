@@ -146,6 +146,11 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .noReply:
             // Only a turn still waiting: a press, an intent or an answer owns the notch.
             return self == .thinking ? .noReply : nil
+        case .turnFailed(let reason):
+            switch self {
+            case .thinking, .intent, .needsYou, .noReply: return .didntTake(reason: reason)
+            default: return nil
+            }
         }
     }
 }
@@ -164,6 +169,8 @@ nonisolated enum JarvisNotchEvent: Equatable, Sendable {
     case holdElapsed
     /// The turn failed or was abandoned.
     case turnEnded
+    /// The voice service refused the turn; `reason` is `JarvisNotchReason.plain(forTurnFailure:)`.
+    case turnFailed(reason: String)
     /// The turn ended with no words and no tool call, or the watchdog gave up on it.
     case noReply
 }
@@ -294,6 +301,19 @@ nonisolated enum JarvisNotchReason {
             if named.count <= maximumLength { return named }
         }
         return code.flatMap { byErrorCode[$0] } ?? fallback
+    }
+
+    /// A turn the voice service refused (`openAI:responseFailed:<code>`,
+    /// `openAI:serverError:<code>`) -> its line; nil for any other failure.
+    /// Live 2026-10-26 12:30: three turns ended with nothing said or shown.
+    static func plain(forTurnFailure kind: String) -> String? {
+        let parts = kind.split(separator: ":", maxSplits: 2).map(String.init)
+        guard parts.count == 3, parts[0] == "openAI", ["responseFailed", "serverError"].contains(parts[1]) else { return nil }
+        switch parts[2] {
+        case "insufficient_quota": return "the voice service is out of quota"
+        case "rate_limit_exceeded": return "the voice service hit a rate limit"
+        default: return "the voice service refused it"
+        }
     }
 }
 

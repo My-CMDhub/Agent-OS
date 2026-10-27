@@ -542,6 +542,43 @@ struct HandsVoiceTests {
         #expect(connection.pendingResponseCreateEventIDs.isEmpty)               // no third ask
     }
 
+    /// Live 2026-10-26 12:30: three turns got `response.done` with nothing in it and ended
+    /// silent. A response the service refused fails the turn with its code, never its message.
+    @Test func aRefusedResponseIsATurnFailureWithItsCode() async throws {
+        func refusal(_ response: [String: Any]) -> String? {
+            RealtimeVoiceConnection.openAIResponseRefusal(response: response).map { "\($0.status):\($0.code ?? "-")" }
+        }
+        #expect(refusal(["status": "failed", "output": [Any](), "status_details": ["type": "failed",
+                         "error": ["type": "insufficient_quota", "code": "insufficient_quota", "message": "You exceeded your quota"]]])
+            == "failed:insufficient_quota")
+        #expect(refusal(["status": "failed", "status_details": ["error": ["type": "server_error"]]]) == "failed:server_error")
+        #expect(refusal(["status": "incomplete", "output": [Any](), "status_details": ["reason": "max_output_tokens"]]) == "incomplete:max_output_tokens")
+        #expect(refusal(["status": "cancelled", "status_details": ["reason": "client_cancelled"]]) == nil, "our own cancel")
+        #expect(refusal(["status": "cancelled", "status_details": ["reason": "turn_detected"]]) == nil, "the owner spoke")
+        #expect(refusal(["status": "completed", "output": [Any]()]) == nil, "completed and empty: the re-ask's case")
+        #expect(refusal(["status": "incomplete", "output": [["type": "message"]]]) == nil, "something was said")
+        #expect(refusal([:]) == nil)
+
+        let connection = RealtimeVoiceConnection(stack: .openAIRealtime, harnessAnswer: { _ in "{}" })
+        let now = ProcessInfo.processInfo.systemUptime
+        try await connection.beginTurn()
+        try await connection.endTurn()
+        let turn = connection.turn
+        connection.handle(["type": "response.created", "response": ["id": "resp_A"]], arrivalUptime: now)
+        connection.handle(["type": "response.done", "response": ["id": "resp_A", "status": "failed", "output": [Any](),
+                                                                 "status_details": ["error": ["code": "rate_limit_exceeded", "message": "slow down"]]]],
+                          arrivalUptime: now + 0.2)
+        do {
+            _ = try await turn.finished.value(timeoutSeconds: 1, timeoutKind: "test")
+            Issue.record("the refused turn finished as a success")
+        } catch {
+            #expect((error as? VoiceBenchFailure)?.kind == "openAI:responseFailed:rate_limit_exceeded")
+        }
+        #expect(turn.eventTrail.contains { $0.hasPrefix("responseFailed:failed:rate_limit_exceeded@") })
+        #expect(!turn.eventTrail.contains { $0.contains("slow down") })
+        #expect(connection.pendingResponseCreateEventIDs.isEmpty, "a refusal is not re-asked")
+    }
+
     // Scenario C5 02-51-12Z: "I have highlighted it for you." with no point and no press
     // tried this turn: the owner looks for a mark that is not there. A point claim with
     // nothing tried is corrected; "Opened it." with nothing tried still is not.

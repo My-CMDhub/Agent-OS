@@ -774,8 +774,10 @@ final class RealtimeVoiceSession {
             print("❌ realtime: turn failed: \(error)")
             // A barge-in already wrote this turn's line and owns the state now.
             guard self.liveTurn === liveTurn, liveTurn != nil else { return }
-            writeLiveTurnLine(errorKind: (error as? VoiceBenchFailure)?.kind ?? VoiceBenchRun.errorKind(for: error, stage: selectedStack.rawValue))
-            JarvisNotch.shared.handle(.turnEnded)
+            let errorKind = (error as? VoiceBenchFailure)?.kind ?? VoiceBenchRun.errorKind(for: error, stage: selectedStack.rawValue)
+            writeLiveTurnLine(errorKind: errorKind)
+            // A refusal by the voice service says so on the notch, never a silent idle.
+            JarvisNotch.shared.handle(JarvisNotchReason.plain(forTurnFailure: errorKind).map { .turnFailed(reason: $0) } ?? .turnEnded)
             onStateChange?(.idle)
             prewarm()
         }

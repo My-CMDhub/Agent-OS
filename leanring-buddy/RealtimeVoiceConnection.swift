@@ -588,7 +588,19 @@ final class RealtimeVoiceConnection {
                 turn.staleCompletionsIgnored += 1
                 return ignoreStale("responseDone", arrivalUptime: arrivalUptime)
             }
+            // Refused with nothing in it (live 2026-10-26 12:30, three silent turns): fail the
+            // turn as an `error` event does, with the status and code only (never the message).
+            if let refusal = Self.openAIResponseRefusal(response: response) {
+                turn.events.append(("responseFailed:\(refusal.status):\(refusal.code ?? "-")", arrivalUptime))
+                let failure = VoiceBenchFailure(kind: "openAI:responseFailed:\(refusal.code ?? refusal.status)")
+                readyWaiter.settle(.failure(failure))
+                turn.finished.settle(.failure(failure))
+                return
+            }
             let empty = Self.openAIFollowUpWasEmpty(response: response, turn: turn, arrivalUptime: arrivalUptime)
+            if !empty, (response?["output"] as? [Any])?.isEmpty == true {
+                turn.events.append(("emptyResponse:" + ((response?["status"] as? String) ?? "-"), arrivalUptime))
+            }
             if empty {
                 turn.events.append(("emptyFollowUp:" + ((response?["status"] as? String) ?? "-"), arrivalUptime))
                 if !turn.emptyFollowUpReasked {
@@ -740,6 +752,19 @@ final class RealtimeVoiceConnection {
                                                    followUpHadAudio: Bool, toolsInFlight: Int) -> Bool {
         guard let output, output.isEmpty, let sent = toolResultSentUptime, arrivalUptime > sent else { return false }
         return !followUpHadAudio && toolsInFlight == 0
+    }
+
+    /// A `response.done` whose status is not "completed" and that carries no output:
+    /// its status and `status_details.error` code (or type, or reason), else nil.
+    /// A cancel of our own or by the owner speaking is not a refusal.
+    nonisolated static func openAIResponseRefusal(response: [String: Any]?) -> (status: String, code: String?)? {
+        guard let status = response?["status"] as? String, status != "completed",
+              (response?["output"] as? [Any])?.isEmpty ?? true else { return nil }
+        let details = response?["status_details"] as? [String: Any]
+        let reason = details?["reason"] as? String
+        if status == "cancelled", ["client_cancelled", "turn_detected"].contains(reason) { return nil }
+        let error = details?["error"] as? [String: Any]
+        return (status, (error?["code"] as? String) ?? (error?["type"] as? String) ?? reason)
     }
 
     private static func openAIFollowUpWasEmpty(response: [String: Any]?, turn: RealtimeTurnMarks, arrivalUptime: TimeInterval) -> Bool {
