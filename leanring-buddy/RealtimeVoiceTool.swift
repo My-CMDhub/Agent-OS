@@ -237,7 +237,7 @@ nonisolated enum RealtimeOpenAppTool {
 
     hands: scroll scrolls the window in front (direction up, down, left or right; amount in pages), at an area named like point_at, or the main area when none is given; its result names what came into view. type_text types text into a field: aim it by the field's name, the words printed in or beside it, such as "search"; a position only for a field with no words; no aim only for a field with keyboard focus; it never presses enter; submit true commits only an entry that saves on Return (a quick-entry box, a new list row), never a message, so say what you typed and let the owner send it; type only text the owner gave or asked for. close closes the tab, the window, or quits the app in front (what tab, window or app); quitting shows the owner a card, and the app may still ask to save.
 
-    screen: you can point at and press what you can see. to point, call point_at; to click, call press_element (it also clicks into a field). aim either by the element's name as printed on screen, which is looked up on the live screen, or by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image), or with underPointer true only when the owner says "this one", "here" or "where my cursor is"; a request that names the thing ("click sign in", "where is the phone number") is aimed by that name, never underPointer. for "where is X", call find_on_screen with X's words, then point_at the element that is X at once and say where it is; when a label such as "Phone:" sits beside its value, point at the value, not the label. if a result lists several matches, ask which one, unless the owner's words already pick one by order ("the first", "the last"): then press it by that name, and the order picks it. a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. to show the owner where things are while you explain, call annotate: a box, circle, arrow, underline or short label round elements by their printed names, or round the owner's pointer; it changes nothing. something you can see that find_on_screen does not list (drawn on a canvas, an icon that is only a picture) is pressed by sight: call press_element with its x and y AND the words printed on it; it is clicked only if those words are read back at that point. never say you can't do something you can see.
+    screen: you can point at and press what you can see. to point, call point_at; to click, call press_element (it also clicks into a field). aim either by the element's name as printed on screen, which is looked up on the live screen, or by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image), or with underPointer true only when the owner says "this one", "here" or "where my cursor is"; a request that names the thing ("click sign in", "where is the phone number") is aimed by that name, never underPointer. for "where is X", call find_on_screen with X's words, then point_at the element that is X at once and say where it is; when a label such as "Phone:" sits beside its value, point at the value, not the label. if a result lists several matches, ask which one, unless the owner's words already pick one by order ("the first", "the last"): then press it by that name, and the order picks it. a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. to show the owner where things are while you explain, call annotate: a box, circle, arrow, underline or short label round elements by their printed names, or round the owner's pointer; it changes nothing. icons in the Dock and items in the menu bar can be pointed at or highlighted by their name even when the desktop is in front. something you can see that find_on_screen does not list (drawn on a canvas, an icon that is only a picture) is pressed by sight: call press_element with its x and y AND the words printed on it; it is clicked only if those words are read back at that point. never say you can't do something you can see.
 
     tasks: when one request needs more than one step (search then open a result, open a page and read or summarise it, fill several fields, write then post), or names two or more actions, or asks you to act and then answer ("and tell me", summarise, find out, which is the cheapest), call do_task once with the owner's whole request as the goal and say only a few words, such as that you are on it; never do the first step yourself and then ask "shall i…?", and never press the first link yourself and report from there: "open the plans page and tell me the cheapest plan" is one do_task. a question to look up on the web (what a site says, the latest commit or news, a price, the cheapest plan) is a do_task too: the task runner answers it from the web without opening a browser; open_url only when the owner asks to see the page. a single step stays with the tools above. when no tool above does the whole request in one call, such as switching a setting on or off (bluetooth, wi-fi, a hotspot, dark mode), changing something inside an app, or anything you have no tool for, call do_task with the owner's words: the task runner finds its own way on the screen. never tell the owner you cannot do something on the mac, and never open a pane for them to do it themselves, unless a tool result refused it. system lines later report the task's progress and its outcome; say each briefly in your own words, and claim only what they say happened. while a task is recent, each owner turn carries a task status line: answer "did you…", "is it done" and "how is it going" from that line alone, and never call do_task to answer them; call do_task again only for an answer to the task's question or a new request.
 
@@ -773,6 +773,16 @@ nonisolated enum RealtimeOpenAppTool {
                 }
             }.value, waited: false, harnessResponse: nil)
         }
+        // point_at of a Dock icon or a menu-bar item (`SystemUITargets`): another process's, so the
+        // harness's highlight (which resolves in the front app) cannot reach it; Clicky's own overlay can.
+        if call.name == RealtimeVoiceVerbs.pointAtName, let screenTarget, screenTarget.source == .systemUI,
+           let candidate = screenTarget.candidate {
+            await MainActor.run {
+                ElementPointer.show(candidate.frame, role: candidate.role, seconds: RealtimeScreenVerbs.pointHoldSeconds, followSpeech: true)
+            }
+            return finished(["ok": true, "status": NSNull(), "error": NSNull(), "message": NSNull(), "verification": NSNull(),
+                             "pointedAt": candidate.described, "where": candidate.position], waited: false, harnessResponse: nil)
+        }
         var firstLine: String
         let call = await withFrontmostApp(call)
         switch harnessRequestLine(for: call, offered: offered, offeredApp: offeredApp, screenTarget: screenTarget) {
@@ -880,11 +890,23 @@ nonisolated enum RealtimeOpenAppTool {
         // elements never leave here. `screenTarget` is the key-down pointer, for underPointer.
         if call.name == RealtimeVoiceVerbs.annotateName {
             var result = toolResult(fromHarnessResponse: response)
-            if response["ok"] as? Bool == true, case .success(let shapes) = RealtimeAnnotate.validated(call.shapes) {
+            // The desktop with no window open still has a Dock and a menu bar (owner 2026-10-27).
+            let windowRead = response["ok"] as? Bool == true
+            if windowRead || SystemUITargets.noWindowErrors.contains(response["error"] as? String ?? ""),
+               case .success(let shapes) = RealtimeAnnotate.validated(call.shapes) {
                 let displays: [CGRect]
                 if let screens { displays = screens } else { displays = await MainActor.run { NSScreen.screens.map(\.frame) } }
-                let resolved = RealtimeAnnotate.resolve(shapes, snapshotResponse: response, screens: displays, pointer: screenTarget)
+                let snapshot = windowRead ? response : [:]
+                // The Dock and the menu bar only for a name the window has none of: the front app wins.
+                var system: [SystemUITargets.Target] = []
+                if shapes.contains(where: { $0.name.map { RealtimeScreenVerbs.liveCandidates(named: $0, fromSnapshotResponse: snapshot,
+                                                                                            screens: displays).isEmpty } ?? false }) {
+                    let front = named?.bundleIdentifier
+                    system = await Task.detached { SystemUITargets.read(frontApp: front, answer: answer, screens: displays) }.value
+                }
+                let resolved = RealtimeAnnotate.resolve(shapes, snapshotResponse: snapshot, screens: displays, pointer: screenTarget, system: system)
                 if !resolved.drawn.isEmpty { await MainActor.run { AnnotationOverlay.show(resolved.drawn) } }
+                if !windowRead, !resolved.drawn.isEmpty { result["error"] = NSNull(); result["message"] = NSNull() }
                 result["ok"] = !resolved.drawn.isEmpty
                 result["drawn"] = resolved.drawn.map(\.described)
                 if !resolved.notDrawn.isEmpty { result["notDrawn"] = resolved.notDrawn }
@@ -1150,7 +1172,7 @@ nonisolated enum RealtimeOpenAppTool {
                 let aimed = found.candidates.count == 1 ? found.candidates : found.candidates.filter { $0.frame.contains(point) }
                 if aimed.count == 1 {
                     return .success(RealtimeScreenTarget(candidate: aimed[0], point: CGPoint(x: aimed[0].frame.midX, y: aimed[0].frame.midY),
-                                                         app: found.app, source: .liveName))
+                                                         app: found.app, source: found.systemUI ? .systemUI : .liveName))
                 }
                 return liveTarget(named: name, found: found,
                                   nothing: call.name == RealtimeVoiceVerbs.typeTextName ? "typed" : isPress ? "pressed" : "pointed at", heard: ordinalWords)
@@ -1247,12 +1269,12 @@ nonisolated enum RealtimeOpenAppTool {
         case 1:
             let candidate = found.candidates[0]
             return .success(RealtimeScreenTarget(candidate: candidate, point: CGPoint(x: candidate.frame.midX, y: candidate.frame.midY),
-                                                 app: found.app, source: .liveName))
+                                                 app: found.app, source: found.systemUI ? .systemUI : .liveName))
         default:
             // Owner ruling 2026-10-03: an ordinal the owner said ("the first draft") picks one.
             if let picked = heardOrdinalPick(found.candidates, heard: heard) {
                 return .success(RealtimeScreenTarget(candidate: picked, point: CGPoint(x: picked.frame.midX, y: picked.frame.midY),
-                                                     app: found.app, source: .heardOrdinal))
+                                                     app: found.app, source: found.systemUI ? .systemUI : .heardOrdinal))
             }
             // Numbered top to bottom (AppKit: higher maxY is higher on screen): C4 live 02-51-12Z
             // listed three "Delete (right side)" and "the first draft" could not be told apart.
@@ -1345,6 +1367,23 @@ nonisolated enum RealtimeOpenAppTool {
                 : RealtimeScreenVerbs.liveCandidates(named: name, fromSnapshotResponse: response, screens: screens,
                                                      screenshotDisplay: screenshotDisplay),
             app: response["bundleIdentifier"] as? String))
+    }
+
+    /// point_at's fallback: a name the front app's window does not have (or no window at all —
+    /// the desktop) is looked up on the Dock and the menu bar. The front app always wins, and a
+    /// policy or lock refusal of the front read stands. Nothing there: the front app's answer.
+    static func withSystemUIFallback(_ found: Result<RealtimeScreenLookup, RealtimeToolRefusal>, named name: String, frontApp: String?,
+                                     answer: @escaping @Sendable (String) -> String,
+                                     screens: [CGRect]) async -> Result<RealtimeScreenLookup, RealtimeToolRefusal> {
+        switch found {
+        case .success(let lookup) where !lookup.candidates.isEmpty: return found
+        case .failure(let refusal) where !SystemUITargets.noWindowErrors.contains(refusal.error): return found
+        default: break
+        }
+        let targets = await Task.detached { SystemUITargets.read(frontApp: frontApp, answer: answer, screens: screens) }.value
+        let matched = SystemUITargets.matches(name, among: targets)
+        guard !matched.isEmpty else { return found }
+        return .success(RealtimeScreenLookup(candidates: matched.map(\.candidate), app: nil, systemUI: true))
     }
 
     /// "What is at this point?" in `app`: the walk first (the harness's forModel
@@ -1819,6 +1858,9 @@ nonisolated enum RealtimeOpenAppTool {
         case vision
         /// press_menu of a path in the app's affordance map (`AffordanceMap`), shown to the model as App verbs.
         case affordanceMap
+        /// point_at of a Dock icon or a menu-bar item: no window of the front app had the name
+        /// (`SystemUITargets`). Pointed at on Clicky's overlay, never through the harness.
+        case systemUI
     }
 
     /// Ask-then-confirm spans turns: the model searches, asks, and the owner

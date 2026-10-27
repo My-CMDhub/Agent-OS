@@ -40,7 +40,10 @@ nonisolated enum RealtimeScreenVerbs {
     /// not role, is the line); this only names it.
     static func roleWord(role: String, subrole: String? = nil) -> String {
         if subrole == "AXTabButton" { return "tab" }
+        if subrole == SystemUITargets.statusItemSubrole { return "menu-bar icon" }
         switch role {
+        case "AXDockItem": return "Dock icon"
+        case "AXMenuBarItem": return "menu"
         case "AXButton", "AXMenuButton": return "button"
         case "AXCheckBox": return "toggle"
         case "AXRadioButton": return "tab"
@@ -635,6 +638,8 @@ nonisolated struct RealtimeScreenTarget: Equatable, Sendable {
 nonisolated struct RealtimeScreenLookup: Equatable, Sendable {
     let candidates: [RealtimeScreenCandidate]
     let app: String?
+    /// Found on the Dock or the menu bar (`SystemUITargets`), not in `app`'s window.
+    var systemUI = false
 }
 
 nonisolated struct RealtimeScreenOffer: Equatable, Sendable {
@@ -714,8 +719,10 @@ nonisolated enum RealtimeAnnotate {
     /// exact then normalised — point_at's live lookup), or the key-down pointer:
     /// its element, else a small square round the point. A name that is not
     /// there, or names two, is not drawn and says why.
+    /// `system`: the Dock and menu bar (`SystemUITargets`), asked only for a name the
+    /// window has none of — the front app always wins.
     static func resolve(_ shapes: [RealtimeAnnotation], snapshotResponse: [String: Any], screens: [CGRect],
-                        pointer: RealtimeScreenTarget?) -> (drawn: [Drawn], notDrawn: [String]) {
+                        pointer: RealtimeScreenTarget?, system: [SystemUITargets.Target] = []) -> (drawn: [Drawn], notDrawn: [String]) {
         var drawn: [Drawn] = []
         var notDrawn: [String] = []
         for shape in shapes {
@@ -734,7 +741,16 @@ nonisolated enum RealtimeAnnotate {
             case 1:
                 drawn.append(Drawn(kind: shape.shape, frame: found[0].frame, label: shape.text, described: "\(shape.shape) round \(found[0].described)"))
             case 0:
-                notDrawn.append("\(shape.shape): nothing visible is called \(UntrustedText(name).forDisplay)")
+                let elsewhere = SystemUITargets.matches(name, among: system)
+                if elsewhere.count == 1 {
+                    drawn.append(Drawn(kind: shape.shape, frame: elsewhere[0].frame, label: shape.text,
+                                       described: "\(shape.shape) round \(elsewhere[0].described)"))
+                } else if elsewhere.count > 1 {
+                    notDrawn.append("\(shape.shape): \(elsewhere.count) things are called \(UntrustedText(name).forDisplay): "
+                        + elsewhere.prefix(5).map(\.described).joined(separator: "; ") + "; ask the owner which one")
+                } else {
+                    notDrawn.append("\(shape.shape): nothing visible is called \(UntrustedText(name).forDisplay)")
+                }
             default:
                 notDrawn.append("\(shape.shape): \(found.count) visible elements are called \(UntrustedText(name).forDisplay); name one more exactly")
             }

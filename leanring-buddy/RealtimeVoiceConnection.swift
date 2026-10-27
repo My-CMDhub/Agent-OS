@@ -1032,8 +1032,11 @@ final class RealtimeVoiceConnection {
                         if case .resolved(let bundle, _) = RealtimeVoiceVerbs.appIdentity(named: appName) { return bundle }
                         return appName
                     }.value
-                    return await RealtimeOpenAppTool.liveLookup(named: name, app: app, answer: harnessAnswer, screens: screens,
-                                                                screenshotDisplay: turn.screenshotDisplayFrame)
+                    let found = await RealtimeOpenAppTool.liveLookup(named: name, app: app, answer: harnessAnswer, screens: screens,
+                                                                     screenshotDisplay: turn.screenshotDisplayFrame)
+                    // Pointing only, never pressing: a name the window lacks may be a Dock icon or a menu-bar item.
+                    guard call.name == RealtimeVoiceVerbs.pointAtName else { return found }
+                    return await RealtimeOpenAppTool.withSystemUIFallback(found, named: name, frontApp: app, answer: harnessAnswer, screens: screens)
                 },
                 lookUpResults: {
                     // The app in front, as the hit test reads it.
