@@ -899,13 +899,14 @@ nonisolated enum RealtimeOpenAppTool {
                 let snapshot = windowRead ? response : [:]
                 // The Dock and the menu bar only for a name the window has none of: the front app wins.
                 var system: [SystemUITargets.Target] = []
+                var hidden: [SystemUITargets.Target] = []
                 if shapes.contains(where: { $0.name.map { RealtimeScreenVerbs.liveCandidates(named: $0, fromSnapshotResponse: snapshot,
                                                                                             screens: displays).isEmpty } ?? false }) {
                     let front = named?.bundleIdentifier
-                    system = await Task.detached { SystemUITargets.read(frontApp: front, answer: answer, screens: displays) }.value
+                    (system, hidden) = await Task.detached { SystemUITargets.readSplit(frontApp: front, answer: answer, screens: displays) }.value
                 }
                 let resolved = RealtimeAnnotate.resolve(shapes, snapshotResponse: snapshot, screens: displays, pointer: screenTarget, system: system,
-                                                        dockHidden: SystemUITargets.dockHides)
+                                                        hidden: hidden)
                 if !resolved.drawn.isEmpty { await MainActor.run { AnnotationOverlay.show(resolved.drawn) } }
                 if !windowRead, !resolved.drawn.isEmpty { result["error"] = NSNull(); result["message"] = NSNull() }
                 result["ok"] = !resolved.drawn.isEmpty
@@ -1381,10 +1382,14 @@ nonisolated enum RealtimeOpenAppTool {
         case .failure(let refusal) where !SystemUITargets.noWindowErrors.contains(refusal.error): return found
         default: break
         }
-        let targets = await Task.detached { SystemUITargets.read(frontApp: frontApp, answer: answer, screens: screens) }.value
-        let matched = SystemUITargets.matches(name, among: targets)
+        let targets = await Task.detached { SystemUITargets.readSplit(frontApp: frontApp, answer: answer, screens: screens) }.value
+        let matched = SystemUITargets.matches(name, among: targets.visible)
         guard !matched.isEmpty else {
-            return SystemUITargets.dockHides ? .failure(RealtimeToolRefusal(error: "dockHidden", message: SystemUITargets.hiddenDockNote)) : found
+            // Found, but off screen (an autohidden Dock, a menu bar under a full-screen app): say where and how to show it.
+            if let off = SystemUITargets.matches(name, among: targets.hidden).first {
+                return .failure(RealtimeToolRefusal(error: "systemUIHidden", message: SystemUITargets.hiddenNote(off.place)))
+            }
+            return found
         }
         return .success(RealtimeScreenLookup(candidates: matched.map(\.candidate), app: nil, systemUI: true))
     }

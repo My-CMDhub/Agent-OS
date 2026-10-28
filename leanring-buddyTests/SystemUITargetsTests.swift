@@ -137,10 +137,38 @@ struct SystemUITargetsTests {
         // Nowhere: today's message.
         let none = RealtimeAnnotate.resolve([shape("Publish")], snapshotResponse: snapshot, screens: [screen], pointer: nil, system: system)
         #expect(none.notDrawn == ["box: nothing visible is called \"Publish\""])
-        // Live 2026-10-27: an autohidden Dock has no on-screen icons; the answer says how to show it, never just "nothing".
-        let hidden = RealtimeAnnotate.resolve([shape("Safari")], snapshotResponse: [:], screens: [screen], pointer: nil, system: [],
-                                              dockHidden: true)
-        #expect(hidden.drawn.isEmpty && hidden.notDrawn.count == 1 && hidden.notDrawn[0].contains("bottom edge"))
+        // Live 2026-10-27/28: an item found only off screen (autohidden Dock, menu bar under a full-screen app) is named with
+        // how to show it; a name found nowhere says nothing about either.
+        let offDock = SystemUITargets.Target(name: "Safari", role: "AXDockItem", subrole: nil, frame: CGRect(x: 700, y: -80, width: 56, height: 56),
+                                             place: .dock, aliases: ["Safari"])
+        let offWifi = SystemUITargets.Target(name: "Wi\u{2011}Fi, connected, 2 bars", role: "AXMenuBarItem", subrole: "AXMenuExtra",
+                                             frame: CGRect(x: 1148, y: 945, width: 22, height: 22), place: .menuBar,
+                                             aliases: ["Wi\u{2011}Fi, connected, 2 bars", "com.apple.menuextra.wifi", "Wi\u{2011}Fi"])
+        let safari = RealtimeAnnotate.resolve([shape("Safari")], snapshotResponse: [:], screens: [screen], pointer: nil, system: [],
+                                              hidden: [offDock, offWifi])
+        #expect(safari.drawn.isEmpty && safari.notDrawn.count == 1 && safari.notDrawn[0].contains("bottom edge"))
+        let wifi = RealtimeAnnotate.resolve([shape("Wi-Fi")], snapshotResponse: [:], screens: [screen], pointer: nil, system: [],
+                                            hidden: [offDock, offWifi])
+        #expect(wifi.notDrawn.count == 1 && wifi.notDrawn[0].contains("top edge") && !wifi.notDrawn[0].contains("Dock"))
+        let nowhere = RealtimeAnnotate.resolve([shape("Publish")], snapshotResponse: [:], screens: [screen], pointer: nil, system: [],
+                                               hidden: [offDock, offWifi])
+        #expect(nowhere.notDrawn == ["box: nothing visible is called \"Publish\""])
+    }
+
+    /// Live D02 2026-10-27: the model named "Wi-Fi icon in the menu bar"; the icon is "Wi‑Fi" (U+2011).
+    @Test func placeWordsAreNotPartOfASystemUIName() {
+        #expect(SystemUITargets.withoutPlaceWords("Wi-Fi icon in the menu bar") == "Wi-Fi")
+        #expect(SystemUITargets.withoutPlaceWords("Safari in the Dock") == "Safari")
+        #expect(SystemUITargets.withoutPlaceWords("Bluetooth menu bar icon") == "Bluetooth")
+        #expect(SystemUITargets.withoutPlaceWords("Icon") == "Icon", "never stripped to nothing")
+        #expect(SystemUITargets.withoutPlaceWords("Icon Composer") == "Icon Composer")
+        let wifi = SystemUITargets.target(name: "Wi\u{2011}Fi", role: "AXMenuBarItem", subrole: "AXMenuExtra",
+                                          frame: CGRect(x: 1200, y: 876, width: 30, height: 24), place: .menuBar,
+                                          screens: [CGRect(x: 0, y: 0, width: 1440, height: 900)])
+        #expect(SystemUITargets.matches("Wi-Fi icon in the menu bar", among: [wifi].compactMap { $0 }).count == 1)
+        // A status icon's description leads with its name (measured: "Wi‑Fi, connected, 2 bars").
+        #expect(SystemUITargets.shortLabel("Wi\u{2011}Fi, connected, 2 bars") == "Wi\u{2011}Fi")
+        #expect(SystemUITargets.shortLabel("Battery") == nil)
     }
 
     @Test func pointAtKeepsTheFrontAppsAnswerAndMarksASystemTarget() async throws {

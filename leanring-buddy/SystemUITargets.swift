@@ -61,6 +61,7 @@ nonisolated enum SystemUITargets {
     /// normalised — the rule annotate and point_at already use in the window
     /// (`RealtimeScreenVerbs.namedMatches`). Each target at most once.
     static func matches(_ name: String, among targets: [Target]) -> [Target] {
+        let name = withoutPlaceWords(name)
         let flat = targets.indices.flatMap { index in targets[index].aliases.map { (index, $0) } }
         var seen = Set<Int>()
         return RealtimeScreenVerbs.namedMatches(name, among: flat.map(\.1))
@@ -69,13 +70,43 @@ nonisolated enum SystemUITargets {
             .map { targets[$0] }
     }
 
-    /// Live 2026-10-27: the owner's Dock auto-hides, so its icons sit off-screen and "point at Safari in the Dock" found
-    /// nothing. Said plainly instead of a bare notFound: the owner reveals it, then asks again. Never move the pointer for them.
-    static let hiddenDockNote = "the Dock is set to hide itself, so its icons are off screen now: ask the owner to move the "
-        + "pointer to the bottom edge of the screen to show the Dock, then point again while it is showing"
+    /// Live 2026-10-27 (D02): the model pointed at "Wi-Fi icon in the menu bar", a description, and the "Wi‑Fi" icon was
+    /// not matched. For system UI only, trailing place words go: "X icon", "X in the Dock", "X menu-bar icon" are X.
+    static func withoutPlaceWords(_ name: String) -> String {
+        var trimmed = name.trimmingCharacters(in: .whitespaces)
+        let tails = [#"\s+(?:in|on|from)\s+(?:the\s+)?(?:dock|menu[\s-]?bar|status bar)$"#, #"\s+(?:menu[\s-]?bar\s+|dock\s+|status\s+)?(?:icon|button|item|extra)$"#]
+        var changed = true
+        while changed {
+            changed = false
+            for tail in tails {
+                let next = trimmed.replacingOccurrences(of: tail, with: "", options: [.regularExpression, .caseInsensitive])
+                if next != trimmed, !next.isEmpty { trimmed = next; changed = true }
+            }
+        }
+        return trimmed
+    }
 
-    /// The Dock's own "Automatically hide and show the Dock" setting.
-    static var dockHides: Bool { UserDefaults(suiteName: dockBundleIdentifier)?.bool(forKey: "autohide") ?? false }
+    /// Live 2026-10-27/28: the owner's Dock auto-hides and the menu bar slides away under a full-screen app, so their
+    /// items publish frames off the screen (status icons at y=945 on a 900-pt display). Drawing there helps no one; the
+    /// answer says where it is and how the owner shows it. Never move the pointer for them.
+    static func hiddenNote(_ place: Place) -> String {
+        switch place {
+        case .dock:
+            return "the Dock is hiding itself, so its icons are off screen now: ask the owner to move the pointer to the "
+                + "bottom edge of the screen to show the Dock, then point again while it is showing"
+        case .menuBar:
+            return "the menu bar is hidden now (the app in front is full screen, or the menu bar hides itself): ask the owner "
+                + "to move the pointer to the top edge of the screen to show it, then point again while it is showing"
+        }
+    }
+
+    /// Every system UI target, split by whether it is on a screen now: the hidden ones are only ever named, never drawn.
+    static func readSplit(frontApp: String?, answer: @Sendable (String) -> String, screens: [CGRect]) -> (visible: [Target], hidden: [Target]) {
+        let everywhere = [CGRect(x: -100_000, y: -100_000, width: 200_000, height: 200_000)]
+        let all = read(frontApp: frontApp, answer: answer, screens: everywhere)
+        let onScreen = { (target: Target) in screens.contains { $0.intersects(target.frame) } }
+        return (all.filter(onScreen), all.filter { !onScreen($0) })
+    }
 
     /// A front-app read that found no window (the desktop with nothing open):
     /// the system UI is still worth asking. A policy or lock refusal is not.
@@ -95,8 +126,15 @@ nonisolated enum SystemUITargets {
             // Spoken as its label or its app ("Wi‑Fi", "Wispr Flow"), listed by find_menu_bar_items as `name`.
             return target(name: names.label ?? names.ownerName ?? names.name, role: AccessibilityMenu.menuBarItemRole,
                           subrole: statusItemSubrole, frame: frame, place: .menuBar, screens: screens,
-                          aliases: [names.name] + [names.ownerName].compactMap { $0 })
+                          aliases: [names.name] + [names.ownerName].compactMap { $0 } + [shortLabel(names.label)].compactMap { $0 })
         }
+    }
+
+    /// "Wi‑Fi, connected, 2 bars" answers to "Wi‑Fi": a status icon's description leads with its name (live 2026-10-28).
+    static func shortLabel(_ label: String?) -> String? {
+        guard let label, let first = label.split(separator: ",").first.map({ $0.trimmingCharacters(in: .whitespaces) }),
+              !first.isEmpty, first != label else { return nil }
+        return first
     }
 
     /// The subrole macOS gives status icons; `roleWord` calls them menu-bar icons.
