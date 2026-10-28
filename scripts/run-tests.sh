@@ -72,7 +72,11 @@ if ioreg -n Root -d1 | grep -q '"CGSSessionScreenIsLocked"=Yes'; then
   echo "  the screen is LOCKED — Xcode can run tests but stalls writing the result bundle; unlock and re-run" >&2
 fi
 if [[ -n "$bundleNow" && "$bundleNow" != "$bundleBefore" && -d "$bundleNow/Staging" ]]; then
-  staged=$(find "$bundleNow/Staging" -name 'Session-*.log' -exec grep -h 'Test run with' {} + 2>/dev/null | tail -1)
+  # Measured 2026-10-27/28 (twice, screen unlocked): the run's verdict was only in StandardOutputAndStandardError.txt.
+  logs=$(find "$bundleNow/Staging" \( -name 'Session-*.log' -o -name 'StandardOutputAndStandardError.txt' \) 2>/dev/null)
+  staged=$(printf '%s\n' "$logs" | while IFS= read -r f; do grep -h 'Test run with' "$f"; done 2>/dev/null | tail -1)
   [[ -n "$staged" ]] && echo "  the unfinalised bundle's own log says: ${staged##*console chunk }" >&2
+  printf '%s\n' "$logs" | while IFS= read -r f; do grep -h '^✘ Test .*failed after' "$f"; done 2>/dev/null | sort -u | head -20 \
+    | sed 's/^/  FAIL (from the log) /' >&2
 fi
 exit 1
