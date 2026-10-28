@@ -2982,14 +2982,21 @@ final class HarnessServer {
             // A wheel event goes to whatever window is under the point: only ever this app's. A caller's own point is
             // the only one tried; otherwise any point of the container this app alone answers for.
             let targetProcess = snapshot.application?.processIdentifier
-            let tried = aimed.map { [$0] } ?? HarnessScroll.wheelPoints(in: bounds, first: CGPoint(x: bounds.midX, y: bounds.midY))
+            // Review 2026-10-27: a grid point of the same app could be its sidebar, so a grid point counts only inside the
+            // scroll area itself; with no scroll area resolved there is no grid, the centre alone.
+            let containerElement = container?.accessibilityElement
+            let centre = CGPoint(x: bounds.midX, y: bounds.midY)
+            let tried = aimed.map { [$0] } ?? (containerElement == nil ? [centre] : HarnessScroll.wheelPoints(in: bounds, first: centre))
             var owner: pid_t?
             var topLeft = topLeftOf(tried[0])
-            for point in tried {
+            for (index, point) in tried.enumerated() {
                 let candidate = topLeftOf(point)
-                let answered = Self.processIdentifier(at: candidate)
+                let hit = Self.element(at: candidate)
+                let answered = hit.flatMap(Self.processIdentifier(of:))
                 if owner == nil { owner = answered }
-                if answered != nil, answered == targetProcess { owner = answered; topLeft = candidate; break }
+                guard answered != nil, answered == targetProcess else { continue }
+                if index > 0, let containerElement, !(hit.map { Self.element($0, isWithin: containerElement) } ?? false) { continue }
+                owner = answered; topLeft = candidate; break
             }
             guard let processIdentifier = targetProcess, owner == processIdentifier else {
                 phaseTiming.actionReturned()
@@ -3031,14 +3038,32 @@ final class HarnessServer {
     }
 
     /// The process owning what is drawn at a global top-left point, or nil.
-    private static func processIdentifier(at topLeftPoint: CGPoint) -> pid_t? {
+    private static func element(at topLeftPoint: CGPoint) -> AXUIElement? {
         let systemWide = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(systemWide, RealtimeScreenHitTest.messagingTimeoutSeconds)
         var element: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(systemWide, Float(topLeftPoint.x), Float(topLeftPoint.y), &element) == .success,
-              let element else { return nil }
+        guard AXUIElementCopyElementAtPosition(systemWide, Float(topLeftPoint.x), Float(topLeftPoint.y), &element) == .success else { return nil }
+        return element
+    }
+
+    private static func processIdentifier(of element: AXUIElement) -> pid_t? {
         var processIdentifier: pid_t = 0
         return AXUIElementGetPid(element, &processIdentifier) == .success ? processIdentifier : nil
+    }
+
+    /// Whether `element` is `ancestor` or under it, by AXParent (CFEqual identity). A failed parent read is "no":
+    /// never a wheel on an unproven point. ponytail: 40 levels covers Chromium's deepest measured chain (38).
+    private static func element(_ element: AXUIElement, isWithin ancestor: AXUIElement) -> Bool {
+        var current: AXUIElement? = element
+        for _ in 0..<40 {
+            guard let node = current else { return false }
+            if CFEqual(node, ancestor) { return true }
+            var parent: AnyObject?
+            guard AXUIElementCopyAttributeValue(node, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
+            current = (parent as! AXUIElement)
+        }
+        return false
     }
 
     /// The voice loop's approximate ring: nothing nameable at the point the
