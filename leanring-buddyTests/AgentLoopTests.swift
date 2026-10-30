@@ -782,11 +782,26 @@ struct AgentLoopTests {
         #expect(heard("remind me to call Mom at 5 pm today", "Reminders"))
         #expect(!heard("what's using the most storage on my Mac?", "Finder"))
         #expect(!heard("check my mail later", "Calendar"))
-        // Unseen I02 2026-10-25: "show my Downloads folder" carded Finder's View menu. A folder or file is Finder's noun.
+        // Owner's ruling 2026-10-30 (replacing I02/K07's bare nouns): a Finder place used as a place names Finder.
         #expect(heard("show my Downloads folder in list view sorted by size", "Finder"))
-        #expect(heard("what are my three most recently opened files?", "Finder"))
+        #expect(heard("what's the biggest file in my Downloads folder?", "Finder"))
+        #expect(heard("how many items are on my Desktop?", "Finder"))
+        #expect(heard("open the scripts folder in Finder", "Finder"))
+        #expect(heard("what are my three most recently opened files in Finder?", "Finder"))
         #expect(!heard("show my Downloads folder", "Notes"))
-        #expect(heard("what's the last thing I downloaded?", "Finder"))
+        // A file/folder/download word alone, a verb, a possessive or another app's place never does (K07, I18 card now).
+        #expect(!heard("summarise the PDF file on this page", "Finder"))
+        #expect(!heard("file this email under Receipts", "Finder"))
+        #expect(!heard("move it to the Archive folder in Mail", "Finder"))
+        #expect(!heard("move it to the Documents folder in Mail", "Finder"))
+        #expect(!heard("open Chrome's downloads", "Finder"))
+        #expect(!heard("what's the last thing I downloaded?", "Finder"))
+        #expect(!heard("what are my three most recently opened files?", "Finder"))
+        #expect(!heard("go to the home page", "Finder"))
+        #expect(!heard("move this email to the trash", "Finder"))
+        // The Settings "desktop" rule is untouched: the wallpaper names System Settings, not Finder.
+        #expect(heard("change my desktop wallpaper", "System Settings"))
+        #expect(!heard("change my desktop wallpaper", "Finder"))
         // A whole multi-word name anywhere; a one-word name or a distinctive word only right after a cue word.
         #expect(heard("switch Calendar to the month view", "Calendar"))
         #expect(heard("switch to reminders and add milk", "Reminders"))

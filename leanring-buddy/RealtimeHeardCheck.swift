@@ -306,6 +306,11 @@ nonisolated enum RealtimeHeardCheck {
         let builtIn = path(url).hasPrefix("/System/Applications/") || path(url) == "/System/Library/CoreServices/Finder.app"
         if builtIn, url.lastPathComponent == "System Settings.app", namesASettingsPane(spoken) || saysAPanesOwnName(spoken) { return true }
         if builtIn, let nouns = builtInTaskNouns[url.lastPathComponent], !Set(nouns.flatMap(forms)).isDisjoint(with: Set(spoken)) { return true }
+        if builtIn, url.lastPathComponent == "Finder.app" {
+            let others = names.filter { path($0.url) != path(url) }.map { RealtimeVoiceVerbs.foldedTokens($0.name) }.filter { !$0.isEmpty }
+            let anotherAppCued = others.contains { $0.count == 1 ? !forms($0[0]).isDisjoint(with: cued) : said.contains(" " + $0.joined(separator: " ") + " ") }
+            if !anotherAppCued, namesAFinderPlace(spoken) { return true }
+        }
         return own.contains { tokens in
             if tokens.count == 1 {
                 if builtIn, !ownNameEverydayWords.contains(tokens[0]), !forms(tokens[0]).isDisjoint(with: Set(spoken)) { return true }
@@ -329,9 +334,30 @@ nonisolated enum RealtimeHeardCheck {
         // Launch E06 2026-10-15: "what's using the most storage on my Mac?" asked before opening Settings.
         "System Settings.app": ["storage"],
         // Launch E12 2026-10-15: "remind me to call Mom at 5 pm today" — the verb, not the noun.
-        "Reminders.app": ["remind"],
-        // Unseen I02/K07 2026-10-25: "show my Downloads folder in list view", "the last thing I downloaded" carded Finder.
-        "Finder.app": ["folder", "file", "download", "downloaded"]]
+        "Reminders.app": ["remind"]]
+
+    /// Owner's ruling 2026-10-30 (security review of fdf1075): "folder"/"file"/"download" alone named Finder, so
+    /// "summarise the PDF file on this page" or "file this email" let a page steer Finder with no card. Finder is
+    /// named only by one of its places USED AS A PLACE: "my Downloads folder", "on my Desktop", "files in Documents".
+    /// Never a bare or possessive mention ("Chrome's downloads", "my desktop wallpaper"), never beside a web word,
+    /// and the caller drops it when another app is named after a cue word ("the Documents folder in Mail").
+    /// Everyday or mailbox-like places (home, music, trash…) count only before "folder": "go to the home page",
+    /// "move this email to the trash". ponytail: hand lists; a place said another way ("my download folder") cards.
+    static func namesAFinderPlace(_ spoken: [String]) -> Bool {
+        guard spoken.allSatisfy({ !webPlaceWords.contains($0) }) else { return false }
+        return spoken.indices.contains { index in
+            let word = spoken[index]
+            if index + 1 < spoken.count, ["folder", "folders"].contains(spoken[index + 1]),
+               finderPlaceWords.contains(word) || finderFolderOnlyPlaceWords.contains(word) { return true }
+            guard finderPlaceWords.contains(word) else { return false }
+            let before = spoken[..<index].suffix(2)
+            return before.last.map(finderPlaceLeadWords.contains) == true
+                || (before.count == 2 && ["my", "the"].contains(before.last!) && finderPlaceLeadWords.contains(before.first!))
+        }
+    }
+    static let finderPlaceWords: Set<String> = ["downloads", "desktop", "documents", "applications", "recents", "icloud"]
+    static let finderFolderOnlyPlaceWords: Set<String> = ["home", "pictures", "movies", "music", "trash", "bin"]
+    static let finderPlaceLeadWords: Set<String> = ["in", "on", "to", "from", "into", "onto", "inside"]
 
     /// Built-in one-word app names that are everyday words: they still need a cue word (R1 keeps them out).
     static let ownNameEverydayWords: Set<String> = [
