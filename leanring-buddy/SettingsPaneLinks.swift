@@ -19,7 +19,7 @@ nonisolated enum SettingsPaneLinks {
     /// Pane name (as its window is titled) -> extension id. 13/13 landed live 2026-10-10.
     static let verified: [String: String] = [
         "Wi-Fi": "com.apple.wifi-settings-extension", "Bluetooth": "com.apple.BluetoothSettings",
-        "Lock Screen": "com.apple.Lock-Screen-Settings.extension", "Screen Saver": "com.apple.ScreenSaver-Settings.extension",
+        "Lock Screen": "com.apple.Lock-Screen-Settings.extension", "Screen Saver": "com.apple.Wallpaper-Settings.extension",
         "Displays": "com.apple.Displays-Settings.extension", "Battery": "com.apple.Battery-Settings.extension",
         "Sound": "com.apple.Sound-Settings.extension", "Wallpaper": "com.apple.Wallpaper-Settings.extension",
         "Notifications": "com.apple.Notifications-Settings.extension",
@@ -60,7 +60,12 @@ nonisolated enum SettingsPaneLinks {
     /// The pane's window title, exactly; Battery's also carries its charge state after " – ".
     static func titleMatches(_ title: String, pane: String) -> Bool {
         key(title) == key(pane) || (pane == "Battery" && title.hasPrefix("Battery \u{2013} "))
+            || renamedOn27[pane].map { key(title) == key($0) } == true
     }
+
+    /// macOS 27 (toolchain review 2026-10-30): Control Centre's pane is titled "Menu Bar", and screen savers moved into
+    /// Wallpaper (the Screen Saver extension is gone, so its link opens Wallpaper).
+    static let renamedOn27: [String: String] = ["Control Centre": "Menu Bar", "Screen Saver": "Wallpaper"]
 
     /// System Settings at whatever it shows, for a pane with no verified link; ok once a window is readable.
     static func openSettingsItself(asked: String?, answer: @escaping @Sendable (String) -> String) async -> [String: Any] {
@@ -68,7 +73,10 @@ nonisolated enum SettingsPaneLinks {
         let line = #"{"verb":"windows","app":"System Settings","expectApp":"\#(settingsBundle)"}"#
         let deadline = Date().addingTimeInterval(5)
         while opened, Date() < deadline {
-            let response = (try? JSONSerialization.jsonObject(with: Data(answer(line).utf8))) as? [String: Any]
+            // `answer` blocks on the harness queue: never on main (toolchain review 2026-10-30 — under Swift 6.4's
+            // approachable concurrency this async func ran on its @MainActor caller and could deadlock with the queue).
+            let answered = await Task.detached { answer(line) }.value
+            let response = (try? JSONSerialization.jsonObject(with: Data(answered.utf8))) as? [String: Any]
             if !((response?["windows"] as? [[String: Any]]) ?? []).isEmpty {
                 return ["ok": true, "pane": NSNull(), "verified": "settingsWindow",
                         "message": "System Settings is open; \(UntrustedText(asked ?? "that pane").forDisplay) has no direct link, so find it "
@@ -93,7 +101,10 @@ nonisolated enum SettingsPaneLinks {
         let deadline = Date().addingTimeInterval(5)
         var titles: [String] = []
         while Date() < deadline {
-            let response = (try? JSONSerialization.jsonObject(with: Data(answer(line).utf8))) as? [String: Any]
+            // `answer` blocks on the harness queue: never on main (toolchain review 2026-10-30 — under Swift 6.4's
+            // approachable concurrency this async func ran on its @MainActor caller and could deadlock with the queue).
+            let answered = await Task.detached { answer(line) }.value
+            let response = (try? JSONSerialization.jsonObject(with: Data(answered.utf8))) as? [String: Any]
             titles = ((response?["windows"] as? [[String: Any]]) ?? []).compactMap { $0["title"] as? String }
             if titles.contains(where: { titleMatches($0, pane: pane) }) {
                 return ["ok": true, "pane": pane, "verified": "windowTitle"]

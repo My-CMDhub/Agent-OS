@@ -26,6 +26,10 @@ struct SettingsPaneLinksTests {
     @Test func aPaneIsFoundByAPartOfItsTitle() {
         #expect(SettingsPaneLinks.pane(named: "Siri") == "Apple Intelligence & Siri")
         #expect(SettingsPaneLinks.pane(named: "Control Center") == "Control Centre")
+        // macOS 27: the pane opens titled "Menu Bar"; Screen Saver lives in Wallpaper.
+        #expect(SettingsPaneLinks.titleMatches("Menu Bar", pane: "Control Centre"))
+        #expect(SettingsPaneLinks.titleMatches("Wallpaper", pane: "Screen Saver"))
+        #expect(!SettingsPaneLinks.titleMatches("Menu Bar", pane: "Wallpaper"))
         #expect(SettingsPaneLinks.pane(named: "login items") == "Login Items & Extensions")
         #expect(SettingsPaneLinks.pane(named: "Screen") == nil, "Lock Screen, Screen Saver, Screen Time")
     }
