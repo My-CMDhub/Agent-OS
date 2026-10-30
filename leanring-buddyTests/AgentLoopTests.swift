@@ -429,7 +429,8 @@ struct AgentLoopTests {
             execute: { call, _, _, _ in script.executed.append(call); return dispatch(ok: true) },
             readPage: { [:] },
             trace: { script.traces.append($0) }))
-        let outcome = await agent.run(goal: "post it")
+        // Swift Testing 6.4 marks a test cancelled when ITS task is: the press cancels the loop's own task (2026-10-30).
+        let outcome = await Task { await agent.run(goal: "post it") }.value
         #expect(outcome == .cancelled)
         #expect(script.executed.isEmpty)
         #expect(agent.step == 1)
@@ -667,7 +668,8 @@ struct AgentLoopTests {
             },
             observe: { AgentObservation() }, execute: { _, _, _, _ in dispatch(ok: true) }, readPage: { [:] },
             trace: { traces.traces.append($0) }))
-        #expect(await agent.run(goal: "x") == .cancelled)
+        // Swift Testing 6.4 marks a test cancelled when ITS task is: cancel the loop's own task (2026-10-30).
+        #expect(await Task { await agent.run(goal: "x") }.value == .cancelled)
         #expect(traces.traces.last?["outcome"] as? String == "cancelled")
     }
 
