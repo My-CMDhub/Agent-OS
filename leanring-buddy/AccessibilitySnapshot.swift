@@ -906,7 +906,7 @@ enum AccessibilityTreeWalker {
               ).insetBy(dx: -windowRect.width, dy: -windowRect.height)
 
         let walkStartedAt = Date()
-        let rootNode = buildNode(
+        let rootNode = onDeepStack { buildNode(
             from: windowElement,
             depth: 0,
             primaryDisplayHeightInPoints: primaryDisplayHeightInPoints,
@@ -924,7 +924,7 @@ enum AccessibilityTreeWalker {
             duplicateElementsSkipped: &duplicateElementsSkipped,
             nodesReadWithoutBatch: &nodesReadWithoutBatch,
             valueReadErrors: &valueReadErrors
-        )
+        ) }
         let walkDurationInSeconds = Date().timeIntervalSince(walkStartedAt)
 
         // The tree is a live system, not a frozen image. On a slow app the walk
@@ -1064,6 +1064,39 @@ enum AccessibilityTreeWalker {
         }
 
         return read
+    }
+
+    /// Live 2026-10-30 (macOS 27, Swift 6.4 debug build): the walk crashed "Thread stack size exceeded" 43 levels down.
+    /// `requestQueue.sync` runs its block on the CALLING thread, and the caller was a Swift async pool thread with a small
+    /// stack. The recursion now always runs on its own thread with a 16 MB stack, whoever calls it; the caller waits.
+    static let walkStackBytes = 16 << 20
+
+    /// Holds the body only while the walk thread runs it: the thread TAKES it, so nothing still references it when
+    /// `withoutActuallyEscaping` ends (live 2026-10-30: a Thread kept its block, and Swift trapped "non-escaping closure
+    /// has escaped").
+    private final class DeepStackSlot<Value>: @unchecked Sendable {
+        var body: (() -> Value)?
+        var value: Value?
+    }
+
+    static func onDeepStack<Result>(_ body: () -> Result) -> Result {
+        let slot = DeepStackSlot<Result>()
+        let finished = DispatchSemaphore(value: 0)
+        withoutActuallyEscaping(body) { escapable in
+            slot.body = escapable
+            let thread = Thread {
+                do {
+                    let run = slot.body
+                    slot.body = nil
+                    slot.value = run?()
+                }
+                finished.signal()
+            }
+            thread.stackSize = walkStackBytes
+            thread.start()
+            finished.wait()
+        }
+        return slot.value!
     }
 
     private static func buildNode(
