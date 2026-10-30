@@ -257,6 +257,92 @@ enum EscalationLadder {
         return nil
     }
 
+    // MARK: - The bare desktop (pure)
+
+    /// Whether `look` may photograph the desktop (wallpaper, desktop icons,
+    /// Dock, menu bar) instead of refusing `applicationNotCapturable`.
+    ///
+    /// Owner's ruling 2026-10-30, "desktop screenshots: yes", and nothing wider:
+    /// Finder in front, and NO ordinary window of ANY app on screen — window-server
+    /// layer 0, alpha > 0, non-zero size — Finder's own included, Clicky's
+    /// excepted. Any such window refuses; it never falls back to filtering.
+    /// What the picture then draws is `desktopWindowsToDraw`, never "everything".
+    /// Fail closed: a window whose layer or owner does not read counts.
+    /// `windowList`: `CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements])`.
+    static func isBareDesktop(frontBundleIdentifier: String?, windowList: [[String: Any]], ownPID: pid_t) -> Bool {
+        guard frontBundleIdentifier == "com.apple.finder" else { return false }
+        return !windowList.contains { window in
+            let owner = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+            guard owner != ownPID else { return false }
+            if (window[kCGWindowAlpha as String] as? NSNumber).map({ $0.doubleValue <= 0 }) == true { return false }
+            if let size = (window[kCGWindowBounds as String] as? [String: Any])
+                .flatMap({ CGRect(dictionaryRepresentation: $0 as CFDictionary) }), size.width <= 0 || size.height <= 0 {
+                return false
+            }
+            return (window[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0 == 0 || owner == nil
+        }
+    }
+
+    /// `isBareDesktop` against the window server now, and never while locked
+    /// (re-read here, not trusted from the request's start). A session or window
+    /// list that does not read, or reads empty (there is always a menu bar), is
+    /// not a bare desktop.
+    static func isBareDesktopNow(frontBundleIdentifier: String?) -> Bool {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+              session["CGSSessionScreenIsLocked"] as? Bool != true else { return false }
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]], !list.isEmpty else { return false }
+        return isBareDesktop(frontBundleIdentifier: frontBundleIdentifier, windowList: list,
+                             ownPID: ProcessInfo.processInfo.processIdentifier)
+    }
+
+    /// One window as the desktop capture sees it (from `SCShareableContent.windows`).
+    /// `frame`: CG global, top-left origin, like `CGDisplayBounds`.
+    struct DesktopWindowRecord {
+        var ownerBundle: String?
+        var ownerPID: pid_t?
+        var layer: Int
+        var frame: CGRect
+        var isOnScreen: Bool
+    }
+
+    /// Menu bar and status items sit in this strip at the top of the display
+    /// (measured 2026-10-30: the menu bar window 1440x30); a panel they open is taller.
+    static let menuBarStripHeight: CGFloat = 50
+
+    /// The ONLY windows a desktop capture draws (security review 2026-10-30: a
+    /// filter that excluded only Clicky drew Stickies, hotkey terminals,
+    /// clipboard panels, picture-in-picture, desktop widgets and any window born
+    /// after the check). An include list by owner and layer, so a window not
+    /// named here — or created later — is simply not in the picture:
+    /// the wallpaper (WallpaperAgent, or the Dock before Sonoma, below layer 0),
+    /// Finder's desktop icons, the Dock (layer 20), and the menu bar and status
+    /// items (24/25, inside the menu-bar strip). Never Clicky, a password
+    /// manager, or an app whose policy is `refuse`. Measured 2026-10-30
+    /// (window list only): wallpaper `com.apple.wallpaper.agent` at -2147483625,
+    /// desktop icons Finder at -2147483603, desktop widgets
+    /// `com.apple.notificationcenterui` at -2147483601 (left out), menu bar
+    /// Window Server (no bundle) at 24.
+    static func desktopWindowsToDraw(_ windows: [DesktopWindowRecord], displayBounds: CGRect, ownPID: pid_t,
+                                     isRefused: (String) -> Bool) -> [Int] {
+        let iconLevel = Int(CGWindowLevelForKey(.desktopIconWindow))
+        let dockLevel = Int(CGWindowLevelForKey(.dockWindow))
+        let menuLevels = [Int(CGWindowLevelForKey(.mainMenuWindow)), Int(CGWindowLevelForKey(.statusWindow))]
+        return windows.indices.filter { index in
+            let window = windows[index]
+            let bundle = window.ownerBundle.flatMap { $0.isEmpty ? nil : $0 }
+            guard window.isOnScreen, window.ownerPID != ownPID, window.frame.width > 0, window.frame.height > 0,
+                  !CredentialGuard.isPasswordManager(bundle), !(bundle.map(isRefused) ?? false) else { return false }
+            let wallpaper = (bundle == "com.apple.wallpaper.agent" || bundle == "com.apple.dock") && window.layer < 0
+            let desktopIcons = bundle == "com.apple.finder" && window.layer == iconLevel
+            let dock = bundle == "com.apple.dock" && window.layer == dockLevel
+            let menuBar = menuLevels.contains(window.layer)
+                && window.frame.minY >= displayBounds.minY - 1
+                && window.frame.maxY <= displayBounds.minY + menuBarStripHeight
+            return wallpaper || desktopIcons || dock || menuBar
+        }
+    }
+
     // MARK: - Candidates (pure)
 
     /// Every node whose published name equals `title`, and whose role matches
@@ -425,7 +511,11 @@ enum EscalationLadder {
         on display: DisplayInfo,
         processIdentifier: pid_t,
         /// Secrets the inspection found, blacked out before encoding (`ScreenSecretGuard`).
-        redactions: [ScreenSecretGuard.Redaction] = []
+        redactions: [ScreenSecretGuard.Redaction] = [],
+        /// The desktop tier only (`isBareDesktop`): `desktopWindowsToDraw`, nothing else.
+        wholeDisplay: Bool = false,
+        /// App policy for the desktop tier: a `refuse`d app's windows are left out.
+        isRefused: @escaping @Sendable (String) -> Bool = { _ in false }
     ) async throws -> CaptureOutcome {
         let startedAt = Date()
 
@@ -454,16 +544,33 @@ enum EscalationLadder {
             throw CaptureFailure.regionOffScreen
         }
 
-        // By process ID, never bundle identifier: two instances of one app share
-        // a bundle ID, and only one of them had its windows walked.
-        guard let targetApplication = content.applications.first(where: {
-            $0.processID == processIdentifier
-        }) else {
-            throw CaptureFailure.applicationNotListed(processIdentifier)
+        let filter: SCContentFilter
+        if wholeDisplay {
+            // Owner's ruling 2026-10-30: the bare desktop only, and of it only the
+            // windows `desktopWindowsToDraw` names, from this capture's own list.
+            let drawn = desktopWindowsToDraw(
+                content.windows.map { window in
+                    DesktopWindowRecord(ownerBundle: window.owningApplication?.bundleIdentifier,
+                                        ownerPID: window.owningApplication?.processID, layer: window.windowLayer,
+                                        frame: window.frame, isOnScreen: window.isOnScreen)
+                },
+                displayBounds: CGDisplayBounds(display.displayID),
+                ownPID: ProcessInfo.processInfo.processIdentifier, isRefused: isRefused
+            )
+            guard !drawn.isEmpty else { throw CaptureFailure.captureFailed("no desktop window to draw") }
+            filter = SCContentFilter(display: scDisplay, including: drawn.map { content.windows[$0] })
+        } else {
+            // By process ID, never bundle identifier: two instances of one app share
+            // a bundle ID, and only one of them had its windows walked.
+            guard let targetApplication = content.applications.first(where: {
+                $0.processID == processIdentifier
+            }) else {
+                throw CaptureFailure.applicationNotListed(processIdentifier)
+            }
+            filter = SCContentFilter(
+                display: scDisplay, including: [targetApplication], exceptingWindows: []
+            )
         }
-        let filter = SCContentFilter(
-            display: scDisplay, including: [targetApplication], exceptingWindows: []
-        )
 
         let configuration = SCStreamConfiguration()
         // The crop, done by the capture. `sourceRect` is CG display-relative;
@@ -536,7 +643,9 @@ enum EscalationLadder {
         region: CGRect,
         on display: DisplayInfo,
         processIdentifier: pid_t,
-        redactions: [ScreenSecretGuard.Redaction] = []
+        redactions: [ScreenSecretGuard.Redaction] = [],
+        wholeDisplay: Bool = false,
+        isRefused: @escaping @Sendable (String) -> Bool = { _ in false }
     ) -> Result<CaptureOutcome, Error> {
         let box = OutcomeBox()
         let semaphore = DispatchSemaphore(value: 0)
@@ -544,7 +653,8 @@ enum EscalationLadder {
         Task.detached {
             do {
                 box.result = .success(try await captureRegion(
-                    region, on: display, processIdentifier: processIdentifier, redactions: redactions
+                    region, on: display, processIdentifier: processIdentifier, redactions: redactions,
+                    wholeDisplay: wholeDisplay, isRefused: isRefused
                 ))
             } catch {
                 box.result = .failure(error)

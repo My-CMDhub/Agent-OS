@@ -287,6 +287,8 @@ nonisolated struct AgentObservation {
     var frame: CGRect?
     /// "attached", or why not (handOver, policyRefused, captureFailed…).
     var look: String = "notTaken"
+    /// The image is the bare desktop (look's `tier: desktop`), not a window.
+    var desktop = false
     /// The app in front, from structure, quoted.
     var lines: [String] = []
     /// That app's bundle (never shown to the model).
@@ -1169,10 +1171,15 @@ final class AgentLoop {
         // Generality suite 2026-10-06: a task asked from the desktop had its first look
         // refused applicationNotCapturable (Finder, no window) 50 times and started blind.
         // The capture guard stands; the model is told what that refusal means.
-        let picture = observation.jpeg != nil ? "The screenshot above is the window in front now."
+        // Owner's ruling 2026-10-30: the bare desktop is photographed whole (`tier: desktop`).
+        let picture = observation.jpeg != nil && observation.desktop
+            ? "The screenshot above is the desktop, with its Dock and menu bar: no app window is open. Aim by position in it "
+                + "works, and a Dock icon or menu-bar item can be pointed at by its name."
+            : observation.jpeg != nil ? "The screenshot above is the window in front now."
             : observation.look == "applicationNotCapturable"
-            ? "No screenshot this step: the app in front has no window on screen — the desktop is in front, so there is nothing of it "
-                + "to see. Its menu bar still works (find_menu_items); or open or focus the app the task needs."
+            ? "No screenshot this step: the app in front has no window on screen — the desktop is in front, and it is photographed "
+                + "only when no app window is open anywhere on screen. Its menu bar still works (find_menu_items); or open or focus "
+                + "the app the task needs."
             : "No screenshot this step (\(observation.look)): never guess what is on screen; find_on_screen and read_page still read names."
         blocks.append(["type": "text", "text": (["Step \(step)."] + observation.lines + [picture]).joined(separator: " ")])
         return blocks
@@ -2550,6 +2557,7 @@ extension AgentLoop {
                 observation.jpeg = jpeg
                 observation.frame = RealtimeScreenVerbs.frame(response["region"])
                 observation.look = "attached"
+                observation.desktop = response["tier"] as? String == "desktop"
             case .unavailable(let error):
                 observation.look = error
             }

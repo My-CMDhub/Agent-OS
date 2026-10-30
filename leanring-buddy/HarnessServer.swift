@@ -5578,7 +5578,8 @@ final class HarnessServer {
         let candidates: [AccessibilityElementNode]
         /// The one application a capture may photograph, and whose windows the
         /// secure-field check walks first. Nil when none could be named — and
-        /// then nothing is photographed, never the whole display instead.
+        /// then nothing is photographed, never the whole display instead (the
+        /// bare desktop, `isBareDesktop`, still needs Finder named here).
         let application: NSRunningApplication?
     }
 
@@ -5765,7 +5766,9 @@ final class HarnessServer {
     /// acting verbs (where it hangs under `escalation`).
     private func escalationPayload(
         plan: EscalationPlan,
-        capture: Bool
+        capture: Bool,
+        /// `look` only, when `isBareDesktop` held while planning; re-decided before the shutter.
+        desktop: Bool = false
     ) -> (payload: [String: Any], errorCode: String?) {
         var payload: [String: Any] = [
             "tier": plan.tier.rawValue,
@@ -5848,11 +5851,21 @@ final class HarnessServer {
 
         // Safe to photograph, and nothing to photograph: refuse before the
         // shutter rather than return `ok: true` and a blank image.
-        guard inspection.containsDrawableWindow else {
+        // Owner's ruling 2026-10-30: except the bare desktop — Finder's desktop was
+        // inspected above, the lock and window list are read again after that walk,
+        // and the capture draws only `desktopWindowsToDraw`, so a window born later
+        // is not in the picture.
+        let desktopTier = desktop && !inspection.containsDrawableWindow
+            && EscalationLadder.isBareDesktopNow(
+                frontBundleIdentifier: AccessibilityTreeWalker.focusedApplication()?.bundleIdentifier
+            )
+        guard inspection.containsDrawableWindow || desktopTier else {
             payload["message"] = "none of this app's windows in the region is a real window (Finder's desktop "
-                + "draws nothing in a one-app capture), so the image would be blank"
+                + "draws nothing in a one-app capture), so the image would be blank; the whole desktop is "
+                + "photographed only with Finder in front and no app window on screen"
             return (payload, "applicationNotCapturable")
         }
+        if desktopTier { payload["tier"] = "desktop" }
 
         // Secrets in the inspected windows' text are blacked out of the photograph;
         // one that cannot be located refuses it (`ScreenSecretGuard`, fail closed).
@@ -5875,7 +5888,9 @@ final class HarnessServer {
         switch EscalationLadder.captureSynchronously(
             region: plan.region, on: display,
             processIdentifier: application.processIdentifier,
-            redactions: secrets.redactions
+            redactions: secrets.redactions,
+            wholeDisplay: desktopTier,
+            isRefused: { [policy = loadedPolicy] in HarnessAppPolicy.verdict(for: $0, in: policy).0 == .refuse }
         ) {
         case .failure(let error):
             payload["message"] = String(describing: error)
@@ -6003,7 +6018,7 @@ final class HarnessServer {
             dryRun: dryRun, startedAt: startedAt
         ) { return response.merging(refusal) { _, new in new } }
 
-        guard let plan = escalationPlan(
+        guard var plan = escalationPlan(
             forcedTier: request.tier, title: request.title, role: request.role, rootNode: rootNode,
             application: application
         ) else {
@@ -6015,7 +6030,24 @@ final class HarnessServer {
             )
         }
 
-        let result = escalationPayload(plan: plan, capture: true)
+        // Owner's ruling 2026-10-30: the bare desktop (Finder in front, no app
+        // window on screen) is photographed (wallpaper, icons, Dock, menu bar) on the pointer's display, where a
+        // one-app capture is blank. `look` only; every guard below still runs.
+        var desktop = false
+        // An element crop never becomes a display shot (security review 2026-10-30).
+        if request.tier != .element,
+           EscalationLadder.isBareDesktopNow(frontBundleIdentifier: application?.bundleIdentifier),
+           let display = Self.fallbackDisplayFrame(forWindowFrame: nil, among: EscalationLadder.displays()) {
+            desktop = true
+            plan = EscalationPlan(
+                tier: .display,
+                reason: "Finder is in front with no app window on screen: the desktop, Dock and menu bar of the pointer's display",
+                region: display, resolver: plan.resolver,
+                candidates: Self.regionCandidates(in: rootNode, region: display), application: application
+            )
+        }
+
+        let result = escalationPayload(plan: plan, capture: true, desktop: desktop)
         for (key, value) in result.payload { response[key] = value }
         response["ok"] = result.errorCode == nil
         if let code = result.errorCode { response["error"] = code }
