@@ -137,10 +137,14 @@ enum HarnessPaste {
     /// `NSPasteboard.AccessBehavior` raw value (nil before macOS 15.4). `.default`
     /// (0) is what an app that never raised an alert reads, so it passes only
     /// while the pasteboard-privacy preview is off; `.alwaysAllow` (2) always.
-    static func pasteboardReadAllowed(behaviorRawValue: Int?, privacyPreviewOn: Bool) -> Bool {
+    /// From macOS 26 the privacy preview is simply on (toolchain review 2026-10-30: the SDK says the general pasteboard
+    /// asks on programmatic access by default), so `.default` would raise a system alert or read nothing, and the
+    /// restore would then wipe the owner's clipboard. Only `.alwaysAllow` passes there.
+    static func pasteboardReadAllowed(behaviorRawValue: Int?, privacyPreviewOn: Bool,
+                                      osMajorVersion: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion) -> Bool {
         switch behaviorRawValue {
         case nil, 2: return true
-        case 0: return !privacyPreviewOn
+        case 0: return !privacyPreviewOn && osMajorVersion < 26
         default: return false
         }
     }

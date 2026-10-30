@@ -204,7 +204,10 @@ struct HarnessPasteTests {
     @Test func theClipboardIsReadOnlyWhereTheSystemAllowsIt() {
         #expect(HarnessPaste.pasteboardReadAllowed(behaviorRawValue: nil, privacyPreviewOn: false))
         #expect(HarnessPaste.pasteboardReadAllowed(behaviorRawValue: 2, privacyPreviewOn: true))
-        #expect(HarnessPaste.pasteboardReadAllowed(behaviorRawValue: 0, privacyPreviewOn: false))
+        #expect(HarnessPaste.pasteboardReadAllowed(behaviorRawValue: 0, privacyPreviewOn: false, osMajorVersion: 15))
+        // macOS 26+: the default asks, so only Always allow (2) may read and restore the owner's clipboard.
+        #expect(!HarnessPaste.pasteboardReadAllowed(behaviorRawValue: 0, privacyPreviewOn: false, osMajorVersion: 27))
+        #expect(HarnessPaste.pasteboardReadAllowed(behaviorRawValue: 2, privacyPreviewOn: false, osMajorVersion: 27))
         #expect(!HarnessPaste.pasteboardReadAllowed(behaviorRawValue: 0, privacyPreviewOn: true))
         #expect(!HarnessPaste.pasteboardReadAllowed(behaviorRawValue: 1, privacyPreviewOn: false))
         #expect(!HarnessPaste.pasteboardReadAllowed(behaviorRawValue: 3, privacyPreviewOn: false))
