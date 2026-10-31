@@ -130,7 +130,7 @@ struct ConfirmationPromptView: View {
                 row: placementTracker.rowPlacements[ticket.id], window: placementTracker.windowPlacement,
                 button: placementTracker.buttonPlacements[Self.buttonFrameKey(ticket.id, button)], nowUptime: nowUptime
             ),
-            // Both panels host the SwiftUI tree as the window's content view, so
+            // Both panels' SwiftUI tree fills the window's content view from its origin, so
             // `.global` frames and this height share one space.
             hostContentHeight: placementTracker.hostWindow?.contentView?.bounds.height,
             pressedButtonFrame: placementTracker.buttonFrames[Self.buttonFrameKey(ticket.id, button)],

@@ -302,6 +302,19 @@ final class ConfirmationCardWindowManager {
         // The panel's frame is ours (top-anchored at the notch), never the
         // content's: an AppKit resize would keep the bottom edge and slide rows.
         hostingView.sizingOptions = []
+        // ...and never SwiftUI's either. On macOS 27, in an App-lifecycle app, a
+        // hosting view that IS its window's contentView resizes that window to its
+        // root's animated size on every window layout (`animatesWindowRootSize`,
+        // which `sizingOptions` does not switch off). With `place` setting the frame
+        // inside an animation, that bridge grew the card 1 pt per layout pass
+        // (247 -> 257 pt in 170 ms, every resize asking for another pass) until
+        // AppKit threw "more Update Constraints in Window passes than there are
+        // views in the window" and Clicky quit (2026-10-31). A plain container
+        // as contentView leaves the window's frame to `place` alone.
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: model.geometry.panelWidth, height: 200))
+        hostingView.frame = container.bounds
+        hostingView.autoresizingMask = [.width, .height]
+        container.addSubview(hostingView)
 
         let cardPanel = ConfirmationCardPanel(
             contentRect: NSRect(x: 0, y: 0, width: model.geometry.panelWidth, height: 200),
@@ -325,7 +338,7 @@ final class ConfirmationCardWindowManager {
         // the whole transparent panel, not the growing card.
         cardPanel.hasShadow = false
         cardPanel.animationBehavior = .none
-        cardPanel.contentView = hostingView
+        cardPanel.contentView = container
         return cardPanel
     }
 }
