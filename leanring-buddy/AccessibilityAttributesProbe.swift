@@ -30,6 +30,13 @@ enum AccessibilityAttributesProbe {
         var names: CFArray?
         let namesError = AXUIElementCopyAttributeNames(root, &names)
         lines.append("app attributes (\(namesError.rawValue)): \((names as? [String] ?? []).joined(separator: ", "))")
+        // `--ax-attributes-role=AXSlider`: every element of that role in the app's windows, with ALL its attributes' values.
+        if let role = CommandLine.arguments.first(where: { $0.hasPrefix("--ax-attributes-role=") }).map({ String($0.dropFirst("--ax-attributes-role=".count)) }) {
+            var windows: AnyObject?
+            AXUIElementCopyAttributeValue(root, "AXWindows" as CFString, &windows)
+            for window in (windows as? [AXUIElement]) ?? [] { dumpRole(role, in: window, depth: 0, into: &lines) }
+            return
+        }
         for attribute in ["AXChildren", "AXExtrasMenuBar", "AXMenuBar", "AXWindows"] {
             var value: AnyObject?
             let error = AXUIElementCopyAttributeValue(root, attribute as CFString, &value)
@@ -40,6 +47,29 @@ enum AccessibilityAttributesProbe {
             else { elements = (value as? [AXUIElement]) ?? [] }
             for element in elements { describe(element, depth: 1, into: &lines) }
         }
+    }
+
+    private static func dumpRole(_ role: String, in element: AXUIElement, depth: Int, into lines: inout [String]) {
+        guard depth < 40 else { return }
+        var roleValue: AnyObject?
+        AXUIElementCopyAttributeValue(element, "AXRole" as CFString, &roleValue)
+        if roleValue as? String == role {
+            var names: CFArray?
+            AXUIElementCopyAttributeNames(element, &names)
+            lines.append("== \(role)")
+            for name in (names as? [String]) ?? [] {
+                var value: AnyObject?
+                let error = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+                let shown: String
+                if let value, CFGetTypeID(value) == AXUIElementGetTypeID() { shown = "<element>" }
+                else if let value, let array = value as? [AnyObject] { shown = "<array \(array.count)>" }
+                else { shown = value.map { "\(type(of: $0)) \(String(describing: $0).prefix(80))" } ?? "nil" }
+                lines.append("  \(name) [\(error.rawValue)] \(shown)")
+            }
+        }
+        var children: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, "AXChildren" as CFString, &children) == .success else { return }
+        for child in (children as? [AXUIElement]) ?? [] { dumpRole(role, in: child, depth: depth + 1, into: &lines) }
     }
 
     private static func describe(_ element: AXUIElement, depth: Int, into lines: inout [String]) {

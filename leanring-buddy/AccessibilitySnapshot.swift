@@ -42,6 +42,15 @@ struct AccessibilityElementNode {
     static let levelRoles: Set<String> = ["AXSlider", "AXLevelIndicator", "AXProgressIndicator"]
 
     /// `current` as a whole percent of its range (`HarnessAdjust.range`'s rule: 0...1 when neither bound is published).
+    /// Where a slider's thumb sits along its track, 0...100, from two AX frames in the same (top-left) space; nil when the
+    /// shapes cannot be a thumb on that track. Vertical sliders grow upwards.
+    nonisolated static func thumbPercent(slider: CGRect, thumb: CGRect, vertical: Bool) -> Int? {
+        let track = vertical ? slider.height - thumb.height : slider.width - thumb.width
+        guard track > 0, slider.insetBy(dx: -1, dy: -1).contains(thumb) else { return nil }
+        let travelled = vertical ? slider.maxY - thumb.maxY : thumb.minX - slider.minX
+        return Int((min(max(travelled / track, 0), 1) * 100).rounded())
+    }
+
     nonisolated static func percent(_ current: Double, min: Double?, max: Double?) -> Int? {
         guard current.isFinite, let range = HarnessAdjust.range(min: min, max: max, current: current) else { return nil }
         return Int(((current - range.lowerBound) / (range.upperBound - range.lowerBound) * 100).rounded())
@@ -1179,11 +1188,27 @@ enum AccessibilityTreeWalker {
         }
 
         // Two extra reads, sliders and level indicators only.
-        let levelPercent = AccessibilityElementNode.levelRoles.contains(role)
+        var levelPercent = AccessibilityElementNode.levelRoles.contains(role)
             ? (batched?.rawValue as? NSNumber).flatMap { current in
                 AccessibilityElementNode.percent(current.doubleValue, min: copyNumberAttribute(from: element, attribute: kAXMinValueAttribute),
                                                  max: copyNumberAttribute(from: element, attribute: kAXMaxValueAttribute))
               } : nil
+        // macOS 27 (2026-10-31): System Settings' Brightness slider publishes no AXValue and no min/max; its thumb, a child
+        // AXValueIndicator, still has a frame, and the thumb's place along the track IS the level (measured 78.5 of 178 pt = 44%).
+        if levelPercent == nil, role == "AXSlider", let sliderFrame = AccessibilityTreeWalker.copyFrame(from: element).frame {
+            var kids: AnyObject?
+            if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &kids) == .success,
+               let thumb = (kids as? [AXUIElement])?.first(where: { kid in
+                   var kidRole: AnyObject?
+                   return AXUIElementCopyAttributeValue(kid, kAXRoleAttribute as CFString, &kidRole) == .success && kidRole as? String == "AXValueIndicator"
+               }),
+               let thumbFrame = AccessibilityTreeWalker.copyFrame(from: thumb).frame {
+                var orientation: AnyObject?
+                AXUIElementCopyAttributeValue(element, kAXOrientationAttribute as CFString, &orientation)
+                levelPercent = AccessibilityElementNode.thumbPercent(slider: sliderFrame, thumb: thumbFrame,
+                                                                     vertical: orientation as? String == kAXVerticalOrientationValue)
+            }
+        }
 
         // AXFrame is not an SDK constant and not every app publishes it, so fall
         // back to position + size rather than reporting a frameless node.
