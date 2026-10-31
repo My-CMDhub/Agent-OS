@@ -108,8 +108,9 @@ struct DesktopCaptureTests {
         observation.desktop = true
         let text = AgentLoop.observationBlocks(observation, step: 1).compactMap { $0["text"] as? String }.joined()
         #expect(text.contains("the desktop, with its Dock and menu bar") && text.contains("Aim by position"))
+        // Owner's ruling 2026-10-31 (was "the window in front"): every step's picture is the whole screen.
         observation.desktop = false
         #expect(AgentLoop.observationBlocks(observation, step: 1).compactMap { $0["text"] as? String }.joined()
-            .contains("the window in front"))
+            .contains("the whole screen"))
     }
 }
