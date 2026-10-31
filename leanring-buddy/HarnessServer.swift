@@ -105,12 +105,22 @@ struct HarnessRawRequest: Decodable {
     let to: HarnessPoint?
     /// key only: "cmd+shift+d", "escape", "shift+tab", "return" (`HarnessKeys.parse`).
     let keys: String?
+    /// look tier screen only: zoom into this part of the display (AppKit global points).
+    let region: HarnessRect?
 }
 
 struct HarnessPoint: Decodable {
     let x: Double
     let y: Double
     var cgPoint: CGPoint { CGPoint(x: x, y: y) }
+}
+
+struct HarnessRect: Decodable {
+    let x: Double
+    let y: Double
+    let w: Double
+    let h: Double
+    var cgRect: CGRect { CGRect(x: x, y: y, width: w, height: h) }
 }
 
 enum HarnessVerb: String, CaseIterable {
@@ -387,6 +397,8 @@ struct HarnessRequest: Equatable {
     var to: CGPoint? = nil
     /// key only.
     var keys: KeyChord? = nil
+    /// look tier screen only: the part of the display to capture at 2 px per point (the agent's zoom).
+    var lookRegion: CGRect? = nil
 }
 
 // MARK: - Pure decision logic
@@ -898,6 +910,16 @@ enum HarnessPolicy {
         } else if let stray = raw.action ?? (raw.to != nil ? "to" : nil) {
             return .failure(.invalidField(field: raw.action != nil ? "action" : "to", value: stray))
         }
+        // A zoom: a finite, non-empty part of the screen, on `look` tier `screen` only.
+        var lookRegion: CGRect?
+        if let requested = raw.region {
+            let rect = requested.cgRect
+            guard verb == .look, tier == .screen else { return .failure(.invalidField(field: "region", value: "only look tier screen zooms")) }
+            guard [rect.minX, rect.minY, rect.width, rect.height].allSatisfy(\.isFinite), rect.width >= 1, rect.height >= 1 else {
+                return .failure(.invalidField(field: "region", value: "not a rectangle on the screen"))
+            }
+            lookRegion = rect
+        }
         var keys: KeyChord?
         if verb == .key {
             guard let requested = raw.keys, !requested.isEmpty else { return .failure(.missingField("keys")) }
@@ -1042,7 +1064,8 @@ enum HarnessPolicy {
             unnamedApp: raw.unnamedApp ?? false,
             pointerAction: pointerAction,
             to: to,
-            keys: keys
+            keys: keys,
+            lookRegion: lookRegion
         ))
     }
 
@@ -6668,7 +6691,9 @@ final class HarnessServer {
     /// `look` with `"tier": "screen"` — the whole display, for the universal hand (owner's ruling 2026-10-31).
     ///
     /// Wire format:
-    ///   request   {"verb":"look","tier":"screen"}  (+ `expectApp`, `id`)
+    ///   request   {"verb":"look","tier":"screen"}  (+ `expectApp`, `id`; `region` {x,y,w,h} AppKit points: a zoom —
+    ///             the display holding its centre, captured at 2 px per point and cropped to it; the response's `region`
+    ///             is then that crop, `pointsPerPixel` 0.5, and `regionNotOnScreen` refuses a region off every display)
     ///   response  ok, tier "screen", imagePath (a JPEG on disk), imageBytes, imagePixels {w,h},
     ///             region {x,y,w,h}: the display in AppKit global points; pointsPerPixel 1 — image pixel
     ///             (px, py), top-left origin, is the AppKit point (region.x + px, region.y + region.h - py),
@@ -6709,16 +6734,20 @@ final class HarnessServer {
                 windowFrame = HarnessHands.liveAppKitFrame(of: window as! AXUIElement)
             }
         }
-        guard let index = CompanionScreenCaptureUtility.harnessDisplayIndex(
-            focusedWindowFrame: windowFrame, displays: displays.map(\.appKitFrame),
-            mainIndex: displays.firstIndex { $0.displayID == CGMainDisplayID() })
-        else { return fail("captureFailed", "no display is available to photograph") }
+        // A zoom (`region`): the display holding its centre, captured at 2 px per point and cropped to it below.
+        let zoom = request.lookRegion
+        guard let index = zoom.map({ region in displays.firstIndex { $0.appKitFrame.contains(CGPoint(x: region.midX, y: region.midY)) } })
+                ?? CompanionScreenCaptureUtility.harnessDisplayIndex(
+                    focusedWindowFrame: windowFrame, displays: displays.map(\.appKitFrame),
+                    mainIndex: displays.firstIndex { $0.displayID == CGMainDisplayID() })
+        else { return fail(zoom == nil ? "captureFailed" : "regionNotOnScreen",
+                           zoom == nil ? "no display is available to photograph" : "the region's centre is on no display") }
         let display = displays[index]
 
         let policy = loadedPolicy
         let shot: CompanionScreenCaptureUtility.HarnessShot
         switch EscalationLadder.blocking({
-            try await CompanionScreenCaptureUtility.captureHarnessDisplay(display, pixelsPerPoint: 1) {
+            try await CompanionScreenCaptureUtility.captureHarnessDisplay(display, pixelsPerPoint: zoom == nil ? 1 : 2) {
                 HarnessAppPolicy.verdict(for: $0, in: policy).0 == .refuse
             }
         }) {
@@ -6736,7 +6765,21 @@ final class HarnessServer {
             return fail("withheld", "the front app's text could not be checked for secrets (\(shot.report.reason ?? "unknown")), "
                 + "so the screen was not photographed for the model")
         }
-        guard let jpeg = NSBitmapImageRep(cgImage: shot.image).representation(using: .jpeg, properties: [.compressionFactor: 0.92]),
+        // The zoom's crop of the same guarded picture: nothing is photographed that the whole-display look would not show.
+        var image = shot.image
+        var region = display.appKitFrame
+        if let zoom {
+            let wanted = zoom.intersection(display.appKitFrame)
+            guard !wanted.isNull, wanted.width >= 1, wanted.height >= 1,
+                  let pixels = CredentialGuard.imagePixelRect(forAppKitRect: wanted, displayFrame: display.appKitFrame,
+                                                              imageSize: CGSize(width: image.width, height: image.height))?.integral,
+                  let cropped = image.cropping(to: pixels) else {
+                return fail("regionNotOnScreen", "the region is not on the display that was photographed")
+            }
+            image = cropped
+            region = wanted
+        }
+        guard let jpeg = NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.92]),
               let url = EscalationLadder.writeImage(jpeg) else {
             return fail("captureFailed", "the image could not be encoded or written to \(EscalationLadder.imageDirectory.path)")
         }
@@ -6744,13 +6787,13 @@ final class HarnessServer {
         response["tier"] = "screen"
         response["imagePath"] = url.path
         response["imageBytes"] = jpeg.count
-        response["imagePixels"] = ["w": shot.image.width, "h": shot.image.height]
-        Self.attachFrame(display.appKitFrame, to: &response, key: "region")
-        response["pointsPerPixel"] = shot.image.width > 0 ? display.appKitFrame.width / CGFloat(shot.image.width) : 0
+        response["imagePixels"] = ["w": image.width, "h": image.height]
+        Self.attachFrame(region, to: &response, key: "region")
+        response["pointsPerPixel"] = image.width > 0 ? region.width / CGFloat(image.width) : 0
         response["displayID"] = Int(display.displayID)
         response["captureMilliseconds"] = shot.milliseconds
         response["estimatedVisualTokens"] = AccessibilityDumpRunner.estimatedVisualTokens(
-            width: shot.image.width, height: shot.image.height, usesHighResolutionTier: false)
+            width: image.width, height: image.height, usesHighResolutionTier: false)
         audit(request, dryRun: dryRun, kernel: "n/a", outcome: "ok", startedAt: startedAt)
         return response
     }
