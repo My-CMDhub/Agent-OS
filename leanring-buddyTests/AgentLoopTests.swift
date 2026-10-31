@@ -1794,12 +1794,15 @@ struct TaskSessionTests {
                      "The Appearance pane shows Light selected.", "Cursor and Notion are listed but switched off.",
                      "Several more JARVIS notes are in Recently Deleted.", "This Mac has two saved Wi-Fi networks.",
                      "The top headline is \"Barrister sent 'disgusting' messages\", the lead item on the page.",
-                     "The deleted notes are in a separate folder.", "The page says the feature is disabled.", "I turned to the next page."] {
+                     "The deleted notes are in a separate folder.", "The page says the feature is disabled.", "I turned to the next page.",
+                     // Unseen M02 2026-10-31: the perception verb ten words before the toggle word.
+                     "No, Night Shift is not turned on. In Displays settings, its panel shows Schedule set to Off and Turn on until tomorrow switched off."] {
             #expect(AgentLoop.doneChallenge(summary: said, evidence: [], receipts: receipts(pressedRole: "AXStaticText")) == nil, "\(said)")
         }
         // First person, or "now", is still a change claimed.
         for said in ["I made sure it is disabled. I disabled it.", "Wi-Fi is now turned off.", "I already turned off Bluetooth.",
-                      "I switched it off and the pane shows it.", "Wi-Fi was switched off."] {
+                      "I switched it off and the pane shows it.", "Wi-Fi was switched off.",
+                      "The pane shows that JARVIS switched it off.", "The panel shows that I later switched it off."] {
             #expect(AgentLoop.doneChallenge(summary: said, evidence: [], receipts: receipts(pressedRole: "AXStaticText")) != nil, "\(said)")
         }
     }
