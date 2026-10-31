@@ -10,6 +10,7 @@
 //  question, answered by the window list, never by the verb.
 //
 
+import ApplicationServices
 import CoreGraphics
 import Foundation
 import Testing
@@ -228,7 +229,9 @@ struct UniversalHandsTests {
         // A key never goes into a password being typed.
         let typing = SecureInputState(isOn: true, holderPID: 1, holderName: "Safari", holderIsFrontmost: true)
         #expect(HarnessPolicy.handOverRefusal(verb: .key, secureInput: typing) != nil)
-        #expect(HarnessPolicy.handOverRefusal(verb: .pointer, secureInput: typing) == nil)
+        // A position is not a name: while a password is typed, nothing is clicked by position.
+        #expect(HarnessPolicy.handOverRefusal(verb: .pointer, secureInput: typing)?.contains("by position") == true)
+        #expect(HarnessPolicy.handOverRefusal(verb: .pointer, secureInput: .off) == nil)
     }
 
     // MARK: Keys
@@ -278,27 +281,174 @@ struct UniversalHandsTests {
         #expect(try route("down") == .post)
         #expect(try route("shift+tab") == .post)
         #expect(try route("space") == .space)
+        // Shift-Space presses a focused button too (security review 2026-10-31).
+        #expect(try route("shift+space") == .space)
         #expect(try route("return") == .returnKey)
         #expect(try route("enter") == .returnKey)
         guard case .ask = try route("cmd+k") else { Issue.record("an unknown shortcut did not ask"); return }
         guard case .ask = try route("ctrl+down") else { Issue.record("a modified arrow did not ask"); return }
         guard case .ask = try route("x") else { Issue.record("a bare letter did not ask"); return }
         guard case .ask = try route("delete") else { Issue.record("delete did not ask"); return }
-
-        // Return is judged by what it presses.
-        func returning(_ button: String?, text: Bool = false, app: String = "com.apple.TextEdit") -> SafetyDecision {
-            HarnessKeys.returnDecision(defaultButtonTitle: button, focusIsTextInput: text, bundleIdentifier: app,
-                                       visibleBounds: screen, draftScope: false)
+        // An unmatched shortcut is asked ONCE: no "Always" for a key whose effect is unknown.
+        guard case .requireConfirmation(_, true)? = HarnessKeys.unmatchedDecision(try route("cmd+k")) else {
+            Issue.record("an unmatched shortcut offered Always"); return
         }
-        #expect(returning("OK") == .allow)
-        #expect(returning(nil) == .allow)
-        guard case .requireConfirmation(_, true) = returning("Delete") else { Issue.record("Return on a Delete button did not ask"); return }
-        guard case .refuse = returning("Erase") else { Issue.record("Return on Erase was not refused"); return }
-        // From a text field Return submits: a sending app asks, once.
-        guard case .requireConfirmation(_, true) = returning(nil, text: true, app: "net.whatsapp.WhatsApp") else {
+        // Command/Option-Delete (Move to Bin, the hidden Empty Bin alternate) is never posted blind.
+        for keys in ["cmd+delete", "opt+shift+cmd+delete", "opt+forwarddelete", "cmd+forwarddelete"] {
+            guard case .refuse? = HarnessKeys.unmatchedDecision(try route(keys)) else { Issue.record("\(keys) was not refused"); continue }
+        }
+        guard case .requireConfirmation(_, true)? = HarnessKeys.unmatchedDecision(try route("ctrl+delete")) else {
+            Issue.record("ctrl+delete did not ask"); return
+        }
+        #expect(HarnessKeys.unmatchedDecision(.post) == nil && HarnessKeys.unmatchedDecision(.space) == nil)
+    }
+
+    /// Security review 2026-10-31: a web page publishes no AXDefaultButton, so tab-tab-Return on "Delete
+    /// account" went out unjudged. Return and Space now judge what they press; a failed read asks.
+    @Test func returnAndSpaceAreJudgedByWhatTheyPress() {
+        typealias Focus = HarnessKeys.FocusRead
+        func returning(_ button: HarnessKeys.DefaultButtonRead = .none, focus: Focus = .none,
+                       app: String = "com.apple.TextEdit") -> SafetyDecision {
+            HarnessKeys.returnDecision(defaultButton: button, focus: focus, bundleIdentifier: app, visibleBounds: screen, draftScope: false)
+        }
+        // The window's default button.
+        #expect(returning(.button(name: "OK")) == .allow)
+        guard case .requireConfirmation(_, true) = returning(.button(name: "Delete")) else { Issue.record("Return on Delete did not ask"); return }
+        guard case .refuse = returning(.button(name: "Erase")) else { Issue.record("Return on Erase was not refused"); return }
+        guard case .requireConfirmation = returning(.button(name: nil)) else { Issue.record("an unnamed default button was not asked"); return }
+        // A default button that could not be read is never "none".
+        guard case .requireConfirmation = returning(.unreadable) else { Issue.record("an unreadable default button was not asked"); return }
+        // No default button: the focused control is what Return presses.
+        guard case .requireConfirmation(_, true) = returning(focus: .element(role: "AXButton", name: "Delete account")) else {
+            Issue.record("Return on a focused Delete account button did not ask"); return
+        }
+        guard case .refuse = returning(focus: .element(role: "AXLink", name: "Buy now"), app: "com.google.Chrome") else {
+            Issue.record("Return on a focused Buy now link was not refused"); return
+        }
+        #expect(returning(focus: .element(role: "AXButton", name: "Continue")) == .allow)
+        guard case .requireConfirmation = returning(focus: .element(role: "AXButton", name: nil)) else {
+            Issue.record("an unnamed focused button was not asked"); return
+        }
+        guard case .requireConfirmation = returning(focus: .unreadable) else { Issue.record("an unreadable focus was not asked"); return }
+        // Nothing pressable focused: navigation.
+        #expect(returning() == .allow)
+        #expect(returning(focus: .element(role: "AXRow", name: "notes.txt")) == .allow)
+        // From a text field Return submits: a sending app asks, once; a browser page asks too.
+        guard case .requireConfirmation(_, true) = returning(focus: .element(role: "AXTextArea", name: nil), app: "net.whatsapp.WhatsApp") else {
             Issue.record("Return in a chat composer did not ask"); return
         }
-        #expect(returning(nil, text: true, app: "com.apple.Notes") == .allow)
+        guard case .requireConfirmation = returning(focus: .element(role: "AXWebArea", name: nil), app: "com.google.Chrome") else {
+            Issue.record("Return on a page did not ask"); return
+        }
+        #expect(returning(focus: .element(role: "AXTextField", name: "Search"), app: "com.apple.Notes") == .allow)
+        // Space presses the focused control the same way.
+        func spacing(_ focus: Focus) -> SafetyDecision? {
+            HarnessKeys.pressDecision(focus, bundleIdentifier: "com.google.Chrome", visibleBounds: screen, draftScope: false)
+        }
+        guard case .requireConfirmation(_, true)? = spacing(.element(role: "AXButton", name: "Delete account")) else {
+            Issue.record("Space on Delete account did not ask"); return
+        }
+        guard case .requireConfirmation? = spacing(.unreadable) else { Issue.record("Space on an unreadable focus was not asked"); return }
+        #expect(spacing(.element(role: "AXTextField", name: "Name")) == nil)
+        #expect(spacing(.none) == nil)
+        // What the ticket binds names what is pressed.
+        let enter = KeyChord(key: "return")
+        #expect(HarnessKeys.judgement(enter, route: .returnKey, defaultButton: .none, focus: .element(role: "AXButton", name: "Delete account"))
+                == ("focused control", "\u{21A9} \u{2014} presses \u{201C}Delete account\u{201D}"))
+        #expect(HarnessKeys.judgement(enter, route: .returnKey, defaultButton: .button(name: "Save"), focus: .none).judged == "default button")
+        #expect(HarnessKeys.judgement(enter, route: .returnKey, defaultButton: .none, focus: .element(role: "AXTextArea", name: nil)).judged == "submit")
+        #expect(HarnessKeys.judgement(KeyChord(key: "space"), route: .space, defaultButton: .none, focus: .unreadable).judged == "unreadable focus")
+        // The last-moment identity check.
+        #expect(HarnessKeys.sameElement(nil, nil))
+        #expect(HarnessKeys.sameElement(AXUIElementCreateApplication(1), AXUIElementCreateApplication(1)))
+        #expect(!HarnessKeys.sameElement(AXUIElementCreateApplication(1), nil))
+        #expect(!HarnessKeys.sameElement(AXUIElementCreateApplication(1), AXUIElementCreateApplication(2)))
+    }
+
+    // MARK: Security review 2026-10-31 — pointer
+
+    @Test func theBinIsAskedAboutLikeTheTrash() {
+        #expect(ActionSafetyKernel.confirmPhrase(in: "Bin") == "bin")
+        #expect(ActionSafetyKernel.confirmPhrase(in: "Combine All Windows") == nil)
+        for name in ["Bin", "Trash"] {
+            guard case .requireConfirmation(_, true) = decide(.drag, names: [name], role: "AXDockItem") else {
+                Issue.record("a drop on \(name) did not ask"); continue
+            }
+        }
+        #expect(decide(names: ["Combine"]) == .allow)
+    }
+
+    @Test func whatADockItemOpensIsJudgedLikeOpenAndLaunch() {
+        typealias Item = HarnessPointer.DockItem
+        let app = Item(role: "AXDockItem", subrole: "AXApplicationDockItem", url: URL(fileURLWithPath: "/Applications/Safari.app"))
+        func dock(_ item: Item, _ bundle: String? = nil, action: PointerAction = .click, drop: Bool = false) -> SafetyDecision {
+            HarnessPointer.dockDecision(action: action, isDropEnd: drop, item: item, appBundleIdentifier: bundle)
+        }
+        // "Click Safari in the Dock" just works; Terminal and Passwords ask, as `launch` asks.
+        #expect(dock(app, "com.apple.Safari") == .allow)
+        for code in ["com.apple.Terminal", "com.apple.Passwords", "com.apple.ScriptEditor2"] {
+            guard case .requireConfirmation = dock(app, code) else { Issue.record("launching \(code) from the Dock did not ask"); continue }
+        }
+        guard case .requireConfirmation = dock(app, nil) else { Issue.record("an unreadable app did not ask"); return }
+        // A file, link or stack opens what it holds; a stack's own file item too.
+        for subrole in ["AXDocumentDockItem", "AXURLDockItem", "AXFolderDockItem"] {
+            guard case .requireConfirmation = dock(Item(role: "AXDockItem", subrole: subrole)) else { Issue.record("\(subrole) did not ask"); continue }
+        }
+        guard case .requireConfirmation = dock(Item(role: "AXButton", url: URL(fileURLWithPath: "/Users/o/Downloads/setup.pkg"))) else {
+            Issue.record("a stack's file did not ask"); return
+        }
+        guard case .requireConfirmation = dock(Item(readFailed: true)) else { Issue.record("an unreadable Dock item did not ask"); return }
+        // A drop onto an app opens the file with it; onto a folder it is a move.
+        guard case .requireConfirmation = dock(app, "com.apple.Safari", action: .drag, drop: true) else { Issue.record("a drop on an app did not ask"); return }
+        #expect(dock(Item(role: "AXDockItem", subrole: "AXFolderDockItem"), action: .drag, drop: true) == .allow)
+        // A right-click shows the item's menu; a hover does nothing; the Trash and a minimised window open nothing to run.
+        #expect(dock(app, "com.apple.Terminal", action: .rightClick) == .allow)
+        #expect(dock(app, "com.apple.Terminal", action: .move) == .allow)
+        #expect(dock(Item(role: "AXDockItem", subrole: "AXMinimizedWindowDockItem")) == .allow)
+    }
+
+    @Test func aDropOntoAirDropIsPublishing() {
+        guard case .requireConfirmation(_, true) = HarnessPointer.airDropDecision(isDropEnd: true, names: ["AirDrop"], windowTitle: nil) else {
+            Issue.record("a drop on the AirDrop sidebar item did not ask"); return
+        }
+        guard case .requireConfirmation(_, true) = HarnessPointer.airDropDecision(isDropEnd: true, names: ["Jane's iPhone"], windowTitle: "AirDrop") else {
+            Issue.record("a drop in the AirDrop window did not ask"); return
+        }
+        #expect(HarnessPointer.airDropDecision(isDropEnd: false, names: ["AirDrop"], windowTitle: nil) == .allow)
+        #expect(HarnessPointer.airDropDecision(isDropEnd: true, names: ["Airdropped photos"], windowTitle: "Downloads") == .allow)
+    }
+
+    @Test func anUnnamedTargetIsNeverAlwaysAllowed() {
+        let ask = SafetyDecision.requireConfirmation(reason: "app policy requires confirmation for com.example")
+        #expect(HarnessPointer.onceOnlyWhenUnnamed(ask, everyEndNamed: false) == .requireConfirmation(reason: "app policy requires confirmation for com.example", destructive: true))
+        #expect(HarnessPointer.onceOnlyWhenUnnamed(ask, everyEndNamed: true) == ask)
+        #expect(HarnessPointer.onceOnlyWhenUnnamed(.allow, everyEndNamed: false) == .allow)
+        #expect(HarnessPointer.onceOnlyWhenUnnamed(.refuse(reason: "r"), everyEndNamed: false) == .refuse(reason: "r"))
+    }
+
+    @Test func theLastMomentAndTheDropAreCheckedAgainstWhatWasJudged() {
+        let judged = HarnessPointer.WindowAtPoint(number: 17, ownerPID: 669, ownerBundle: nil, ownerName: "Window Server", layer: 24, bounds: .zero)
+        func at(_ number: Int, _ pid: pid_t) -> HarnessPointer.WindowAtPoint {
+            HarnessPointer.WindowAtPoint(number: number, ownerPID: pid, ownerBundle: nil, ownerName: nil, layer: 0, bounds: .zero)
+        }
+        #expect(HarnessPointer.sameWindow(judged: judged, now: at(17, 669)))
+        // A banner or sheet arriving is another window, or another owner.
+        #expect(!HarnessPointer.sameWindow(judged: judged, now: at(18, 669)))
+        #expect(!HarnessPointer.sameWindow(judged: judged, now: at(17, 70)))
+        #expect(!HarnessPointer.sameWindow(judged: judged, now: nil))
+        // A window the server would not describe is matched by its owner.
+        #expect(HarnessPointer.sameWindow(judged: at(0, 70), now: at(0, 70)))
+        // The drop: the same app, and the same AX name when there was one.
+        let trash = RealtimeScreenCandidate(name: "Bin", role: "AXDockItem", frame: .zero, position: "")
+        let photos = RealtimeScreenCandidate(name: "Photos", role: "AXDockItem", frame: .zero, position: "")
+        #expect(HarnessPointer.dropStillMatches(judgedName: "Bin", judgedBundle: "com.apple.dock", now: .element(trash, app: "com.apple.dock"),
+                                                nowBundle: "com.apple.dock"))
+        #expect(!HarnessPointer.dropStillMatches(judgedName: "Bin", judgedBundle: "com.apple.dock", now: .element(photos, app: "com.apple.dock"),
+                                                 nowBundle: "com.apple.dock"))
+        #expect(HarnessPointer.dropStillMatches(judgedName: nil, judgedBundle: "com.apple.finder", now: .nothing, nowBundle: "com.apple.finder"))
+        #expect(!HarnessPointer.dropStillMatches(judgedName: nil, judgedBundle: "com.apple.finder", now: .nothing, nowBundle: "com.apple.mail"))
+        #expect(!HarnessPointer.dropStillMatches(judgedName: nil, judgedBundle: "com.apple.finder", now: .refused(error: "secureField"),
+                                                 nowBundle: "com.apple.finder"))
     }
 
     // MARK: Evidence

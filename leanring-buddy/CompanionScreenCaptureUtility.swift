@@ -44,7 +44,7 @@ enum CompanionScreenCaptureUtility {
         // Detached: AX is cross-process IPC and never runs on main.
         let inspection = Task.detached { await ScreenSecretGuard.inspectWithinDeadline(isRefused: isRefused) }
 
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
 
         guard !content.displays.isEmpty else {
             throw NSError(domain: "CompanionScreenCapture", code: -1,
@@ -144,6 +144,10 @@ enum CompanionScreenCaptureUtility {
     /// 2026-10-31): Clicky (by process and by bundle), every password manager, and every app
     /// the harness policy refuses. By APPLICATION, never by window: a window such an app opens
     /// after this list was read is still not in the picture, where a window list would miss it.
+    /// The list comes from `SCShareableContent` with OFF-screen windows too (security review
+    /// 2026-10-31): on-screen only, an excluded app with nothing on screen yet was not listed, so
+    /// a window it opened before the shutter was photographed. ponytail: an app with no window at
+    /// all is still not listed; ScreenCaptureKit offers no other handle to exclude it by.
     nonisolated static func applicationsLeftOut(_ applications: [(bundleIdentifier: String?, processID: pid_t)], ownPID: pid_t,
                                                 ownBundleIdentifier: String?, isRefused: (String?) -> Bool) -> [Int] {
         applications.indices.filter { index in
@@ -197,7 +201,7 @@ enum CompanionScreenCaptureUtility {
         let startedAt = Date()
         try ScreenSecretGuard.refuseWhileSecureInput(SecureInputState.current())
         let inspection = Task.detached { await ScreenSecretGuard.inspectWithinDeadline(isRefused: isRefused) }
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let scDisplay = content.displays.first(where: { $0.displayID == display.displayID }) else {
             throw NSError(domain: "CompanionScreenCapture", code: -1, userInfo: [NSLocalizedDescriptionKey: "that display is not available for capture"])
         }
@@ -233,7 +237,7 @@ enum CompanionScreenCaptureUtility {
     /// overlay nor the pointer we just moved counts as a change.
     nonisolated static func greyCrop(_ region: CGRect, of display: EscalationLadder.DisplayInfo,
                                      isRefused: @escaping @Sendable (String?) -> Bool) async throws -> [UInt8] {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let scDisplay = content.displays.first(where: { $0.displayID == display.displayID }) else { return [] }
         let image = try await captureImage(of: scDisplay, excluding: excludedApplications(in: content, isRefused: isRefused),
                                            displayFrame: display.appKitFrame, pixelsPerPoint: 1, crop: region, showsCursor: false)

@@ -269,7 +269,7 @@ struct HandsReviewTests {
         }
         #expect(HarnessVerb.allCases.filter { $0.rawValue.lowercased().contains("key") } == [.key])
         guard case .requireConfirmation(_, true) = HarnessKeys.returnDecision(
-            defaultButtonTitle: nil, focusIsTextInput: true, bundleIdentifier: "net.whatsapp.WhatsApp",
+            defaultButton: .none, focus: .element(role: "AXTextArea", name: nil), bundleIdentifier: "net.whatsapp.WhatsApp",
             visibleBounds: CGRect(x: 0, y: 0, width: 1440, height: 900), draftScope: false) else {
             Issue.record("Return in a chat composer did not ask"); return
         }

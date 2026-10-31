@@ -1190,7 +1190,14 @@ enum HarnessPolicy {
     /// box's contents) go on. nil when the verb may proceed.
     static func handOverRefusal(verb: HarnessVerb, secureInput: SecureInputState) -> String? {
         guard secureInput.isOn, verb == .type || verb == .look || verb == .helpSearch || verb == .goToFolder
-                || verb == .renameItem || verb == .key else { return nil }
+                || verb == .renameItem || verb == .key || verb == .pointer else { return nil }
+        // `pointer` acts by position, unjudged by any name it could read while a password is typed
+        // (security review 2026-10-31): a click there could land in the password form itself.
+        if verb == .pointer {
+            let holder = secureInput.holderName.map { " in \(UntrustedText($0).forDisplay)" } ?? ""
+            return "secure typing is on\(holder) — a password is the owner's to type, so nothing is clicked, dragged or "
+                + "scrolled by position until it is off; naming a control still works"
+        }
         return handOverMessage(secureInput)
     }
 
@@ -1384,7 +1391,7 @@ enum HarnessObservability {
         // pointer / key / look screen answers: a point off every display, a layout that moved under a
         // hover, a shortcut two menu items own, a screen the guard could not check. Clicky, a password
         // manager, a password box and a point nothing owns stay OUT: worth twenty requests of context.
-        "pointNotOnScreen", "targetChanged", "ambiguousShortcut", "withheld",
+        "pointNotOnScreen", "targetChanged", "ambiguousShortcut", "withheld", "menuListingIncomplete",
         // An insert that would have typed over the owner's selection.
         "selectionNotEmpty",
         // The per-app policy refusing a capture is the file doing its job.
@@ -4284,6 +4291,9 @@ final class HarnessServer {
             var withheldReason: String?
             var ocrFrame: CGRect?
             var unreadable = false
+            /// A Dock element at the point (`HarnessPointer.dockItem`) and, for an application item, its app.
+            var dock: HarnessPointer.DockItem?
+            var dockApp: String?
             var actingBundle: String? { hitBundle ?? window.ownerBundle }
         }
         var ends: [End] = []
@@ -4312,6 +4322,12 @@ final class HarnessServer {
                 return fail(refusal.code, refusal.message)
             }
             var end = End(point: requested, display: display, window: window, candidate: hit.candidate, hitBundle: hitBundle)
+            // What a Dock item opens or launches is judged as `open` / `launch` would judge it.
+            if end.actingBundle == "com.apple.dock" {
+                let item = HarnessPointer.dockItem(at: requested, primaryDisplayHeight: primaryHeight)
+                end.dock = item
+                if item.subrole == "AXApplicationDockItem" { end.dockApp = item.url.flatMap { Bundle(url: $0)?.bundleIdentifier } }
+            }
             if let candidate = hit.candidate {
                 end.source = "ax"
                 end.reportedName = candidate.name
@@ -4372,14 +4388,19 @@ final class HarnessServer {
         if ends.count > 1 { response["dropTarget"] = describe(ends[1]) }
 
         // The kernel on every end's words; a capture that could not be taken is a question, not an allow.
-        let decisions = ends.map { end -> SafetyDecision in
+        let decisions = ends.enumerated().map { index, end -> SafetyDecision in
             if end.unreadable, action.judgesWords {
                 return .requireConfirmation(reason: "what is drawn at (\(Int(end.point.x)), \(Int(end.point.y))) could not be read, so it is asked")
             }
             let frame = end.candidate?.frame ?? end.ocrFrame ?? CGRect(x: end.point.x, y: end.point.y, width: 1, height: 1)
-            return HarnessPointer.decision(action: action, names: end.names, label: end.point == point ? request.label : nil,
-                                           role: end.candidate?.role, subrole: end.candidate?.subrole, frame: frame,
-                                           visibleBounds: everyDisplay, ownerBundle: end.actingBundle, draftScope: request.draftScope)
+            let isDropEnd = index == 1
+            return HarnessPointer.strongest([
+                HarnessPointer.decision(action: action, names: end.names, label: index == 0 ? request.label : nil,
+                                        role: end.candidate?.role, subrole: end.candidate?.subrole, frame: frame,
+                                        visibleBounds: everyDisplay, ownerBundle: end.actingBundle, draftScope: request.draftScope),
+                end.dock.map { HarnessPointer.dockDecision(action: action, isDropEnd: isDropEnd, item: $0, appBundleIdentifier: end.dockApp) } ?? .allow,
+                HarnessPointer.airDropDecision(isDropEnd: isDropEnd, names: end.names, windowTitle: end.window.title)
+            ])
         }
         let acting = ends[0]
         backgroundMenuApplication = acting.actingBundle   // the audit line names the app acted on, not the front one
@@ -4388,6 +4409,8 @@ final class HarnessServer {
             composed = HarnessPointer.strongest([composed, HarnessAppPolicy.compose(
                 policy: HarnessAppPolicy.verdict(for: ends[1].actingBundle, in: loadedPolicy).0, bundleIdentifier: ends[1].actingBundle, kernel: composed)])
         }
+        // A target nothing named binds only its point and app: Allow once, never "Always" (security review 2026-10-31).
+        composed = HarnessPointer.onceOnlyWhenUnnamed(composed, everyEndNamed: ends.allSatisfy { $0.reportedName != nil })
         // What a ticket binds besides verb, app and point: the words read at each end, the drop point, the label.
         // Only REPORTED words: what was read from a withheld picture is judged above and goes nowhere, card included.
         request.title = HarnessPointer.cardTarget(action: action, from: acting.reportedName,
@@ -4437,8 +4460,14 @@ final class HarnessServer {
             }
         }
         let before = grey()
-        // At the last moment: nothing that must not be clicked has come over either point.
-        for target in [aim] + (dropAim.map { [$0] } ?? []) {
+        // At the last moment: no password being typed, nothing that must not be clicked over either point,
+        // and each point still in the very window (number and owner) it was judged in — a banner or a sheet
+        // that arrived since is another window (security review 2026-10-31). Named or not.
+        let secureInput = secureInputRead()
+        guard !secureInput.isOn else {
+            return fail("handOver", HarnessPolicy.handOverRefusal(verb: .pointer, secureInput: secureInput), kernel: gated.decision)
+        }
+        for (target, end) in zip([aim] + (dropAim.map { [$0] } ?? []), ends) {
             let now = HarnessPointer.windowAt(target)
                 ?? HarnessPointer.axOwner(at: target, primaryDisplayHeight: primaryHeight).map(HarnessPointer.unlistedWindow)
             if let refusal = HarnessPointer.refusal(locked: HarnessPointer.screenIsLocked, onDisplay: true,
@@ -4446,15 +4475,35 @@ final class HarnessServer {
                                                     hitApp: nil, ownPID: getpid(), ownBundle: Bundle.main.bundleIdentifier, isRefused: isRefused) {
                 return fail(refusal.code == "pointUnreadable" ? "targetChanged" : refusal.code, refusal.message, kernel: gated.decision)
             }
+            guard HarnessPointer.sameWindow(judged: end.window, now: now) else {
+                return fail("targetChanged", "another window is now at (\(Int(target.x)), \(Int(target.y))) than the one judged; nothing was done",
+                            kernel: gated.decision)
+            }
         }
         phaseTiming.actionStarting()
         let scroll = request.scrollDirection.map {
             ($0, HarnessPointer.wheelSteps(pages: request.scrollPages, display: acting.display.appKitFrame, horizontal: $0.isHorizontal))
         }
-        let sent = HarnessPointer.perform(action, at: topLeftAim,
-                                          to: dropAim.map { HarnessPointer.topLeft($0, primaryDisplayHeight: primaryHeight) }, scroll: scroll)
+        // A drop is re-judged with the button down over it: the same app, and the same AX name if it had one.
+        let dropStillValid: (() -> Bool)? = dropAim.map { dropPoint in {
+            let drop = ends[1]
+            let now = RealtimeScreenHitTest.hit(atAppKitPoint: dropPoint, primaryDisplayHeight: primaryHeight, screens: screens)
+            var nowBundle: String?
+            if case .element(_, let app) = now { nowBundle = app }
+            if case .nothing = now { nowBundle = HarnessPointer.axOwner(at: dropPoint, primaryDisplayHeight: primaryHeight)?.bundle }
+            return HarnessPointer.dropStillMatches(judgedName: drop.candidate?.name, judgedBundle: drop.actingBundle, now: now, nowBundle: nowBundle)
+        } }
+        let performedOutcome = HarnessPointer.perform(action, at: topLeftAim,
+                                                      to: dropAim.map { HarnessPointer.topLeft($0, primaryDisplayHeight: primaryHeight) },
+                                                      scroll: scroll, dropStillValid: dropStillValid)
         phaseTiming.actionReturned()
-        guard sent else { return fail("eventCreationFailed", "the event could not be created; nothing was done", kernel: gated.decision) }
+        switch performedOutcome {
+        case .sent: break
+        case .eventFailed: return fail("eventCreationFailed", "the event could not be created; nothing was done", kernel: gated.decision)
+        case .dropAborted:
+            return fail("targetChanged", "with the item held over the drop point, it no longer showed what was judged there; the drag was "
+                + "carried back and cancelled, nothing was dropped", kernel: gated.decision)
+        }
         var performed: [String: Any] = ["status": "sent", "aimedAt": Self.pointJSON(aim).point, "aimedAtElementCentre": aim != point]
         if let dropAim { performed["toAimedAt"] = Self.pointJSON(dropAim).point }
         response["performed"] = performed
@@ -4561,11 +4610,20 @@ final class HarnessServer {
         }
 
         // A shortcut is a menu item's first: pressed through the guarded `menu` path, judged and verified as menus are.
-        if HarnessKeys.asksMenus(chord), let bar = AccessibilityMenu.menuBarNode(for: application) {
+        if HarnessKeys.asksMenus(chord) {
+            // A menu bar that does not read, or a listing that stopped early, may hide the item that owns
+            // the shortcut: never a reason to post it blind (security review 2026-10-31).
+            guard let bar = AccessibilityMenu.menuBarNode(for: application) else {
+                return fail("menuListingIncomplete", "the app's menu bar could not be read, so what \(chord.display) does is unknown; nothing was pressed")
+            }
             let listing = AccessibilityMenu.list(from: bar, pathSoFar: [], children: AccessibilityMenu.liveChildren,
                                                  deadline: Date().addingTimeInterval(AccessibilityMenu.listingTimeLimitInSeconds))
             response["menuMilliseconds"] = listing.milliseconds
-            if !listing.stopReasons.isEmpty { response["menuListingStoppedBy"] = listing.stopReasons }
+            guard listing.stopReasons.isEmpty else {
+                response["menuListingStoppedBy"] = listing.stopReasons
+                return fail("menuListingIncomplete", "the menu listing stopped early (\(listing.stopReasons.joined(separator: ", "))), so the item "
+                    + "that owns \(chord.display) may be unlisted; nothing was pressed")
+            }
             switch HarnessKeys.menuMatch(chord, in: listing.items) {
             case .one(let path):
                 var menuRequest = request
@@ -4586,38 +4644,37 @@ final class HarnessServer {
             }
         }
 
-        // No menu item owns it: posted — navigation freely, Return / Space judged by what they press, anything else asks.
+        // No menu item owns it: posted — navigation freely, Return / Space judged by what they press,
+        // Command/Option-Delete refused, anything else asked once.
         let everyDisplay = EscalationLadder.displays().map(\.appKitFrame).reduce(CGRect.null) { $0.union($1) }
-        var decision: SafetyDecision = .allow
+        let route = HarnessKeys.unmatched(chord)
+        var decision = HarnessKeys.unmatchedDecision(route) ?? .allow
         var judged = "navigation"
         var target = chord.display
-        switch HarnessKeys.unmatched(chord) {
+        // What Return / Space was judged to press, re-read at the last moment.
+        var judgedFocus: AXUIElement?
+        var judgedDefaultButton: HarnessKeys.DefaultButtonRead?
+        switch route {
         case .post:
             break
-        case .space:
-            if let focused = HarnessHands.focusedElement(processIdentifier: processIdentifier),
-               let role = Self.copyAttribute(focused, kAXRoleAttribute) as? String,
-               HarnessHands.activeRoles.contains(role), !AccessibilityElementNode.textInputRoles.contains(role),
-               let name = (Self.copyAttribute(focused, kAXTitleAttribute) as? String) ?? (Self.copyAttribute(focused, kAXDescriptionAttribute) as? String),
-               !name.isEmpty {
-                judged = "focused control"
-                target = "\(chord.display) \u{2014} presses \u{201C}\(name)\u{201D}"
-                decision = HarnessPointer.decision(action: .click, names: [name], label: nil, role: role, subrole: nil, frame: everyDisplay,
-                                                   visibleBounds: everyDisplay, ownerBundle: application.bundleIdentifier, draftScope: request.draftScope)
+        case .space, .returnKey:
+            let focus = HarnessKeys.focusRead(processIdentifier: processIdentifier)
+            judgedFocus = focus.element
+            var button = HarnessKeys.DefaultButtonRead.none
+            if route == .returnKey {
+                button = HarnessKeys.defaultButtonRead(processIdentifier: processIdentifier)
+                judgedDefaultButton = button
+                decision = HarnessKeys.returnDecision(defaultButton: button, focus: focus.read, bundleIdentifier: application.bundleIdentifier,
+                                                      visibleBounds: everyDisplay, draftScope: request.draftScope)
+            } else {
+                decision = HarnessKeys.pressDecision(focus.read, bundleIdentifier: application.bundleIdentifier, visibleBounds: everyDisplay,
+                                                     draftScope: request.draftScope) ?? .allow
             }
-        case .returnKey:
-            let button = HarnessKeys.defaultButtonTitle(processIdentifier: processIdentifier)
-            let role = HarnessKeys.focusedRole(processIdentifier: processIdentifier)
-            let inText = role.map { AccessibilityElementNode.textInputRoles.contains($0) || $0 == "AXWebArea" } ?? false
-            judged = button != nil ? "default button" : inText ? "submit" : "navigation"
-            if let button { target = "\(chord.display) \u{2014} presses \u{201C}\(button)\u{201D}" }
-            else if inText { target = "\(chord.display) \u{2014} submits the focused field" }
-            decision = HarnessKeys.returnDecision(defaultButtonTitle: button, focusIsTextInput: inText,
-                                                  bundleIdentifier: application.bundleIdentifier, visibleBounds: everyDisplay,
-                                                  draftScope: request.draftScope)
-        case .ask(let reason):
+            (judged, target) = HarnessKeys.judgement(chord, route: route, defaultButton: button, focus: focus.read)
+        case .ask:
             judged = "unmatched shortcut"
-            decision = .requireConfirmation(reason: reason)
+        case .refuse:
+            judged = "deleting shortcut"
         }
         response["judged"] = judged
         request.title = target
@@ -4633,15 +4690,24 @@ final class HarnessServer {
             return response
         }
 
-        // At the last moment: still this app in front, still no password being typed.
         let windowsBefore = HarnessPointer.onScreenWindows()
         let focusBefore = HarnessHands.focusedElement(processIdentifier: processIdentifier)
-        guard HarnessHands.targetIsFrontmost(processIdentifier) else {
-            return fail(HarnessHands.frontmostChangedRefusal.code, HarnessHands.frontmostChangedRefusal.message, kernel: gated.decision)
-        }
+        // At the last moment, nearest the post: no password being typed, still this app in front, and
+        // still the control (or default button) the decision was about.
         let secureInput = secureInputRead()
         guard !secureInput.isOn, !HarnessHands.focusedMightBeSecure(processIdentifier: processIdentifier) else {
             return fail("handOver", HarnessPolicy.handOverMessage(secureInput), kernel: gated.decision)
+        }
+        guard HarnessHands.targetIsFrontmost(processIdentifier) else {
+            return fail(HarnessHands.frontmostChangedRefusal.code, HarnessHands.frontmostChangedRefusal.message, kernel: gated.decision)
+        }
+        if route == .space || route == .returnKey {
+            let focusNow = HarnessKeys.focusRead(processIdentifier: processIdentifier).element
+            let buttonNow = judgedDefaultButton == nil ? nil : HarnessKeys.defaultButtonRead(processIdentifier: processIdentifier)
+            guard HarnessKeys.sameElement(judgedFocus, focusNow), buttonNow == judgedDefaultButton else {
+                return fail("targetChanged", "the focus or default button moved after it was judged, so the key would press something else; nothing was pressed",
+                            kernel: gated.decision)
+            }
         }
         phaseTiming.actionStarting()
         let sent = HarnessKeys.post(chord)

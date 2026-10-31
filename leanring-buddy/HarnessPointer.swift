@@ -47,6 +47,16 @@ enum HarnessPointer {
         let ownerName: String?
         let layer: Int
         let bounds: CGRect
+        /// `kCGWindowName` (readable with Screen Recording): "AirDrop" for Finder's AirDrop window.
+        var title: String? = nil
+    }
+
+    /// The window at the point is still the one judged (security review 2026-10-31: a banner or a
+    /// sheet arriving between the check and the click is another window, or another owner). A window
+    /// the server would not describe (number 0) is matched by its owner alone.
+    static func sameWindow(judged: WindowAtPoint, now: WindowAtPoint?) -> Bool {
+        guard let now, now.ownerPID == judged.ownerPID else { return false }
+        return judged.number == 0 || now.number == judged.number
     }
 
     /// Same constants `EscalationLadder.desktopWindowsToDraw` draws the desktop by:
@@ -144,6 +154,67 @@ enum HarnessPointer {
         return strongest(decisions)
     }
 
+    /// A Dock element as read at the point: its role, subrole and AXURL. `readFailed`: one of
+    /// them failed to read (an absent attribute is not a failure).
+    struct DockItem: Equatable {
+        var role: String? = nil
+        var subrole: String? = nil
+        var url: URL? = nil
+        var readFailed = false
+    }
+
+    /// What a Dock element opens, judged like `open` and `launch` (security review 2026-10-31): an
+    /// application item is `ActionSafetyKernel.evaluateLaunch`'s answer for its app (Terminal and
+    /// Passwords ask, Safari does not — the owner wants "click Safari in the Dock" to just work); a
+    /// file, URL or stack item opens what it holds, and opening always asks; a drop onto an application
+    /// opens the dropped item with it. A read that failed asks. `appBundleIdentifier`: the
+    /// application item's own, resolved from its AXURL by the caller.
+    static func dockDecision(action: PointerAction, isDropEnd: Bool, item: DockItem, appBundleIdentifier: String?) -> SafetyDecision {
+        if item.readFailed {
+            return .requireConfirmation(reason: "what this Dock item opens could not be read, so it is asked")
+        }
+        let isApplication = item.subrole == "AXApplicationDockItem"
+        if isDropEnd {
+            return isApplication ? .requireConfirmation(reason: "dropping onto an application in the Dock opens the item with it") : .allow
+        }
+        guard action == .click || action == .doubleClick else { return .allow }
+        if isApplication {
+            guard let appBundleIdentifier else {
+                return .requireConfirmation(reason: "which application this Dock item launches could not be read, so it is asked")
+            }
+            return ActionSafetyKernel.evaluateLaunch(bundleIdentifier: appBundleIdentifier)
+        }
+        if ["AXDocumentDockItem", "AXURLDockItem", "AXFolderDockItem"].contains(item.subrole ?? "")
+            || (item.role != "AXDockItem" && item.url != nil) {
+            return .requireConfirmation(reason: "a Dock file, link or stack item opens what it holds, and opening always asks")
+        }
+        return .allow
+    }
+
+    /// A drop onto an AirDrop destination sends the item to another person: publishing, asked once.
+    static func airDropDecision(isDropEnd: Bool, names: [String], windowTitle: String?) -> SafetyDecision {
+        guard isDropEnd else { return .allow }
+        let said = (names + [windowTitle ?? ""]).map { " " + $0.lowercased().split { !$0.isLetter }.joined(separator: " ") + " " }
+        guard said.contains(where: { $0.contains(" airdrop ") || $0.contains(" air drop ") }) else { return .allow }
+        return .requireConfirmation(reason: "dropping onto AirDrop sends the item to someone else", destructive: true)
+    }
+
+    /// A target nothing at the point named (no AX name, no reported OCR words) binds only its point
+    /// and app, and the card's only description is the model's label: Allow once, never "Always".
+    static func onceOnlyWhenUnnamed(_ decision: SafetyDecision, everyEndNamed: Bool) -> SafetyDecision {
+        guard !everyEndNamed, case .requireConfirmation(let reason, false) = decision else { return decision }
+        return .requireConfirmation(reason: reason, destructive: true)
+    }
+
+    /// Before the drop: the point still shows what the drop end was judged as — the same app, and the
+    /// same AX name when it had one — or the drag is put back (a magnifying Dock slides a neighbour
+    /// under the point; a sheet arrives). A refused hit (a password box, Clicky) never matches.
+    static func dropStillMatches(judgedName: String?, judgedBundle: String?, now: RealtimeScreenHit, nowBundle: String?) -> Bool {
+        if case .refused = now { return false }
+        guard nowBundle == judgedBundle else { return false }
+        return judgedName == nil || now.name == judgedName
+    }
+
     /// The most cautious of several decisions: refuse > ask (destructive first) > allow.
     static func strongest(_ decisions: [SafetyDecision]) -> SafetyDecision {
         func rank(_ decision: SafetyDecision) -> Int {
@@ -223,14 +294,54 @@ enum HarnessPointer {
     /// The window a mouse-down at the point would hit (click-through windows such as our
     /// own overlay are skipped by the window server), with its owner. nil when none reads.
     static func windowAt(_ point: CGPoint) -> WindowAtPoint? {
-        let ask = { NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) }
-        let number = Thread.isMainThread ? ask() : DispatchQueue.main.sync(execute: ask)
+        // One main-thread read: the window number, and whether it is one of OUR windows — AppKit's own list,
+        // authoritative and no IPC (security review 2026-10-31), whatever the window server says of it.
+        let ask = { () -> (number: Int, ours: Bool) in
+            let number = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0)
+            return (number, number > 0 && NSApp.windows.contains { $0.windowNumber == number })
+        }
+        let (number, ours) = Thread.isMainThread ? ask() : DispatchQueue.main.sync(execute: ask)
+        if ours {
+            return WindowAtPoint(number: number, ownerPID: getpid(), ownerBundle: Bundle.main.bundleIdentifier, ownerName: "Clicky",
+                                 layer: 0, bounds: .zero)
+        }
         guard number > 0, let info = (CGWindowListCopyWindowInfo(.optionIncludingWindow, CGWindowID(number)) as? [[String: Any]])?.first,
               let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value else { return nil }
         let bounds = (info[kCGWindowBounds as String] as? [String: Any]).flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) } ?? .zero
         return WindowAtPoint(number: number, ownerPID: pid, ownerBundle: NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
                              ownerName: info[kCGWindowOwnerName as String] as? String,
-                             layer: (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0, bounds: bounds)
+                             layer: (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0, bounds: bounds,
+                             title: info[kCGWindowName as String] as? String)
+    }
+
+    /// The Dock element at a point (or its AXDockItem, up to three parents), read for `dockDecision`.
+    static func dockItem(at point: CGPoint, primaryDisplayHeight: CGFloat) -> DockItem {
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, RealtimeScreenHitTest.messagingTimeoutSeconds)
+        let topLeft = topLeft(point, primaryDisplayHeight: primaryDisplayHeight)
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(systemWide, Float(topLeft.x), Float(topLeft.y), &hit) == .success, var element = hit else {
+            return DockItem(readFailed: true)
+        }
+        func read(_ element: AXUIElement, _ attribute: String) -> (value: AnyObject?, failed: Bool) {
+            AXUIElementSetMessagingTimeout(element, RealtimeScreenHitTest.messagingTimeoutSeconds)
+            var value: AnyObject?
+            let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+            return (value, error != .success && error != .noValue && error != .attributeUnsupported)
+        }
+        // The hit or its AXDockItem up to three parents; a stack's own file item (no AXDockItem above it) stays the hit.
+        var current = element
+        for _ in 0...3 {
+            if read(current, kAXRoleAttribute).value as? String == "AXDockItem" { element = current; break }
+            guard let parent = read(current, kAXParentAttribute).value, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            current = parent as! AXUIElement
+        }
+        let role = read(element, kAXRoleAttribute)
+        let subrole = read(element, kAXSubroleAttribute)
+        let url = read(element, kAXURLAttribute)
+        return DockItem(role: role.value as? String, subrole: subrole.value as? String,
+                        url: (url.value as? URL) ?? (url.value as? String).flatMap(URL.init(string:)),
+                        readFailed: role.failed || subrole.failed || url.failed)
     }
 
     /// A point whose window the window server will not describe (live 2026-10-31: Clicky's own
@@ -289,47 +400,72 @@ enum HarnessPointer {
         return true
     }
 
-    /// The action's events at `from` (and `to` for a drag). False when an event could not be created.
-    static func perform(_ action: PointerAction, at from: CGPoint, to: CGPoint?, scroll: (direction: ScrollDirection, steps: Int)?) -> Bool {
-        guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
+    enum Performed: Equatable {
+        case sent
+        case eventFailed
+        /// The drop point no longer showed what was judged; the drag was carried back and cancelled.
+        case dropAborted
+    }
+
+    /// The action's events at `from` (and `to` for a drag). `dropStillValid` is asked with the button
+    /// still down over `to`: false carries the drag back to `from`, cancels it with Escape, and
+    /// releases there — nothing is dropped where it was not judged.
+    static func perform(_ action: PointerAction, at from: CGPoint, to: CGPoint?, scroll: (direction: ScrollDirection, steps: Int)?,
+                        dropStillValid: (() -> Bool)? = nil) -> Performed {
+        func sent(_ posted: Bool) -> Performed { posted ? .sent : .eventFailed }
+        guard let source = CGEventSource(stateID: .hidSystemState) else { return .eventFailed }
         func pause(_ seconds: Double) { Thread.sleep(forTimeInterval: seconds) }
         switch action {
         case .move:
-            return HarnessHands.postMouseMove(atTopLeft: from)
+            return sent(HarnessHands.postMouseMove(atTopLeft: from))
         case .click:
-            return HarnessHands.postClick(atTopLeft: from)
+            return sent(HarnessHands.postClick(atTopLeft: from))
         case .rightClick:
-            guard post(.rightMouseDown, at: from, button: .right, source: source) else { return false }
+            guard post(.rightMouseDown, at: from, button: .right, source: source) else { return .eventFailed }
             pause(0.03)
-            return post(.rightMouseUp, at: from, button: .right, source: source)
+            return sent(post(.rightMouseUp, at: from, button: .right, source: source))
         case .doubleClick:
             for state in [Int64(1), 2] {
-                guard post(.leftMouseDown, at: from, button: .left, clickState: state, source: source) else { return false }
+                guard post(.leftMouseDown, at: from, button: .left, clickState: state, source: source) else { return .eventFailed }
                 pause(0.03)
-                guard post(.leftMouseUp, at: from, button: .left, clickState: state, source: source) else { return false }
+                guard post(.leftMouseUp, at: from, button: .left, clickState: state, source: source) else { return .eventFailed }
                 pause(0.06)
             }
-            return true
+            return .sent
         case .drag:
-            guard let to else { return false }
-            guard post(.leftMouseDown, at: from, button: .left, source: source) else { return false }
+            guard let to else { return .eventFailed }
+            guard post(.leftMouseDown, at: from, button: .left, source: source) else { return .eventFailed }
             // Finder starts a drag only after the button has been down a moment and moved a few points.
             pause(0.15)
             let steps = 12
             for step in 1...steps {
                 let t = CGFloat(step) / CGFloat(steps)
                 guard post(.leftMouseDragged, at: CGPoint(x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t),
-                           button: .left, source: source) else { return false }
+                           button: .left, source: source) else {
+                    _ = post(.leftMouseUp, at: from, button: .left, source: source)
+                    return .eventFailed
+                }
                 pause(0.025)
             }
             // A drop target highlights on hover before it accepts.
             pause(0.2)
-            return post(.leftMouseUp, at: to, button: .left, source: source)
+            if let dropStillValid, !dropStillValid() {
+                for step in 1...6 {
+                    let t = CGFloat(step) / 6
+                    _ = post(.leftMouseDragged, at: CGPoint(x: to.x + (from.x - to.x) * t, y: to.y + (from.y - to.y) * t), button: .left, source: source)
+                    pause(0.025)
+                }
+                HarnessKeys.post(KeyChord(key: "escape"))
+                pause(0.05)
+                _ = post(.leftMouseUp, at: from, button: .left, source: source)
+                return .dropAborted
+            }
+            return sent(post(.leftMouseUp, at: to, button: .left, source: source))
         case .scroll:
-            guard let scroll else { return false }
+            guard let scroll else { return .eventFailed }
             HarnessHands.postMouseMove(atTopLeft: from)
-            return SyntheticScroller.scroll(atTopLeftPoint: from, wheelDelta: scroll.direction.pageDirection.syntheticWheelDelta,
-                                            steps: scroll.steps, horizontal: scroll.direction.isHorizontal)
+            return sent(SyntheticScroller.scroll(atTopLeftPoint: from, wheelDelta: scroll.direction.pageDirection.syntheticWheelDelta,
+                                                 steps: scroll.steps, horizontal: scroll.direction.isHorizontal))
         }
     }
 }

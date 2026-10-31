@@ -140,33 +140,96 @@ enum HarnessKeys {
     enum Unmatched: Equatable {
         /// Posted with no card: a navigation key, alone or with Shift.
         case post
-        /// Return/Enter: judged as the window's default button, or as a submit from a text field.
+        /// Return/Enter: judged as what it presses (`returnDecision`).
         case returnKey
-        /// Space: posted, but a focused named button is judged first — Space presses it.
+        /// Space, alone or with Shift: judged as a press of the focused control (`pressDecision`).
         case space
-        /// Anything else asks (owner: an unknown shortcut may do anything).
+        /// Asked, Allow once only (`destructive`): an unknown shortcut may do anything, and a
+        /// menu item publishing its shortcut as a glyph or virtual key is invisible to the match.
         case ask(reason: String)
+        /// Never posted: a human presses this one.
+        case refuse(reason: String)
     }
 
     static func unmatched(_ chord: KeyChord) -> Unmatched {
-        if chord.key == "space", chord.isPlain { return .space }
+        if chord.key == "space", !chord.hasShortcutModifier { return .space }
         if navigationKeys.contains(chord.key), !chord.hasShortcutModifier { return .post }
         if chord.key == "return" || chord.key == "enter", chord.isPlain { return .returnKey }
+        // Command or Option with Delete deletes (Finder's ⌘⌫ Move to Bin) or empties the bin (⌥⇧⌘⌫, a hidden
+        // alternate a listing does not show): unmatched, it is never posted blind (security review 2026-10-31).
+        if chord.key == "delete" || chord.key == "forwarddelete", chord.command || chord.option {
+            return .refuse(reason: "\(chord.display) deletes in most apps (Empty Bin is \u{2325}\u{21E7}\u{2318}\u{232B}) and no menu item owning it was found — a human presses this one")
+        }
         return .ask(reason: "\(chord.display) is not a shortcut of any menu item in this app, so what it does is unknown")
     }
 
-    /// Return with the focus where it is: the default button's press when the window
-    /// has one (its title through the kernel, as a press of it); a submit from a text
-    /// field (`gatingSubmit`, the rule `type` + AXConfirm follows: a sending app asks);
-    /// otherwise nothing a card protects.
-    static func returnDecision(defaultButtonTitle: String?, focusIsTextInput: Bool, bundleIdentifier: String?,
+    /// The decision for an unmatched chord that is not posted freely: asked once (never "Always"), or refused.
+    static func unmatchedDecision(_ route: Unmatched) -> SafetyDecision? {
+        switch route {
+        case .ask(let reason): return .requireConfirmation(reason: reason, destructive: true)
+        case .refuse(let reason): return .refuse(reason: reason)
+        case .post, .returnKey, .space: return nil
+        }
+    }
+
+    /// A read of the focused element, for what Return or Space presses. Never its value.
+    /// `unreadable` is a failed read — never "nothing focused" (read failures are never absence).
+    enum FocusRead: Equatable {
+        case none
+        case unreadable
+        case element(role: String, name: String?)
+    }
+
+    /// A read of the focused window's `AXDefaultButton`, failure kept apart from absence.
+    enum DefaultButtonRead: Equatable {
+        case none
+        case unreadable
+        case button(name: String?)
+    }
+
+    /// What a key pressing the focused element decides: a control Return or Space presses is
+    /// judged by its name exactly as a click on it is (`HarnessPointer.decision`); unnamed, or a
+    /// failed read, it is asked — what it presses is unknown. nil: not a control (nothing to judge).
+    /// Security review 2026-10-31: a web page publishes no AXDefaultButton, so tab-tab-Return on
+    /// "Delete account" went out unjudged.
+    static func pressDecision(_ focus: FocusRead, bundleIdentifier: String?, visibleBounds: CGRect, draftScope: Bool) -> SafetyDecision? {
+        switch focus {
+        case .none:
+            return nil
+        case .unreadable:
+            return .requireConfirmation(reason: "the focused element could not be read, so what the key presses is unknown")
+        case .element(let role, let name):
+            guard HarnessHands.activeRoles.contains(role), !AccessibilityElementNode.textInputRoles.contains(role) else { return nil }
+            guard let name, !name.isEmpty else {
+                return .requireConfirmation(reason: "the focused \(role) has no name, so what the key presses is unknown")
+            }
+            return HarnessPointer.decision(action: .click, names: [name], label: nil, role: role, subrole: nil, frame: visibleBounds,
+                                           visibleBounds: visibleBounds, ownerBundle: bundleIdentifier, draftScope: draftScope)
+        }
+    }
+
+    /// Return with the focus where it is: the window's default button's press (its name through the
+    /// kernel; unnamed or unreadable, asked); else a submit from a text field (`gatingSubmit`, the
+    /// rule `type` + AXConfirm follows: a sending app asks); else the focused control's press
+    /// (`pressDecision`); else nothing a card protects.
+    static func returnDecision(defaultButton: DefaultButtonRead, focus: FocusRead, bundleIdentifier: String?,
                                visibleBounds: CGRect, draftScope: Bool) -> SafetyDecision {
-        if let title = defaultButtonTitle {
-            return HarnessPointer.decision(action: .click, names: [title], label: nil, role: "AXButton", subrole: nil,
+        switch defaultButton {
+        case .unreadable:
+            return .requireConfirmation(reason: "the window's default button could not be read, so what Return presses is unknown")
+        case .button(let name?) where !name.isEmpty:
+            return HarnessPointer.decision(action: .click, names: [name], label: nil, role: "AXButton", subrole: nil,
                                            frame: visibleBounds, visibleBounds: visibleBounds, ownerBundle: bundleIdentifier,
                                            draftScope: draftScope)
+        case .button:
+            return .requireConfirmation(reason: "the window's default button has no name, so what Return presses is unknown")
+        case .none:
+            break
         }
-        return focusIsTextInput ? ActionSafetyKernel.gatingSubmit(.allow, thenConfirm: true, bundleIdentifier: bundleIdentifier) : .allow
+        if case .element(let role, _) = focus, AccessibilityElementNode.textInputRoles.contains(role) || role == "AXWebArea" {
+            return ActionSafetyKernel.gatingSubmit(.allow, thenConfirm: true, bundleIdentifier: bundleIdentifier)
+        }
+        return pressDecision(focus, bundleIdentifier: bundleIdentifier, visibleBounds: visibleBounds, draftScope: draftScope) ?? .allow
     }
 
     // MARK: Live
@@ -192,24 +255,82 @@ enum HarnessKeys {
         return true
     }
 
-    /// The focused window's `AXDefaultButton` title, read live; nil when there is none.
-    static func defaultButtonTitle(processIdentifier: pid_t) -> String? {
-        let application = AXUIElementCreateApplication(processIdentifier)
-        AXUIElementSetMessagingTimeout(application, 0.5)
-        guard let window = HarnessServer.copyAttribute(application, kAXFocusedWindowAttribute),
-              CFGetTypeID(window) == AXUIElementGetTypeID(),
-              let button = HarnessServer.copyAttribute(window as! AXUIElement, kAXDefaultButtonAttribute),
-              CFGetTypeID(button) == AXUIElementGetTypeID() else { return nil }
-        let element = button as! AXUIElement
-        let name = (HarnessServer.copyAttribute(element, kAXTitleAttribute) as? String)
-            ?? (HarnessServer.copyAttribute(element, kAXDescriptionAttribute) as? String)
-        // A default button with no name still presses something: judged as "an unnamed default button".
-        return name?.isEmpty == false ? name : "an unnamed default button"
+    /// What the response's `judged` says and what a ticket binds (`title`) for Return / Space.
+    static func judgement(_ chord: KeyChord, route: Unmatched, defaultButton: DefaultButtonRead, focus: FocusRead) -> (judged: String, target: String) {
+        if route == .returnKey {
+            switch defaultButton {
+            case .button(let name): return ("default button", "\(chord.display) \u{2014} presses \u{201C}\(name ?? "an unnamed default button")\u{201D}")
+            case .unreadable: return ("unreadable default button", chord.display)
+            case .none: break
+            }
+        }
+        switch focus {
+        case .unreadable:
+            return ("unreadable focus", chord.display)
+        case .element(let role, _) where route == .returnKey
+            && (AccessibilityElementNode.textInputRoles.contains(role) || role == "AXWebArea"):
+            return ("submit", "\(chord.display) \u{2014} submits the focused field")
+        case .element(let role, let name) where HarnessHands.activeRoles.contains(role) && !AccessibilityElementNode.textInputRoles.contains(role):
+            return ("focused control", "\(chord.display) \u{2014} presses \u{201C}\(name ?? "an unnamed \(role)")\u{201D}")
+        default:
+            return ("navigation", chord.display)
+        }
     }
 
-    /// The focused element's role, read live (never its value).
-    static func focusedRole(processIdentifier: pid_t) -> String? {
-        HarnessHands.focusedElement(processIdentifier: processIdentifier)
-            .flatMap { HarnessServer.copyAttribute($0, kAXRoleAttribute) as? String }
+    /// The same element (or both none) by identity, the way a ticket's binding compares.
+    static func sameElement(_ a: AXUIElement?, _ b: AXUIElement?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (a?, b?): return CFEqual(a, b)
+        default: return false
+        }
+    }
+
+    /// One attribute: its value, or whether it is ABSENT (no value / unsupported) — any other error is neither.
+    private static func read(_ element: AXUIElement, _ attribute: String) -> (value: AnyObject?, absent: Bool) {
+        var value: AnyObject?
+        let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        if error == .success { return (value, false) }
+        return (nil, error == .noValue || error == .attributeUnsupported)
+    }
+
+    private static func element(_ value: AnyObject?) -> AXUIElement? {
+        guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    /// A control's name as the walk names it, never its value: title, description, label link.
+    static func controlName(_ element: AXUIElement) -> String? {
+        [HarnessServer.copyAttribute(element, kAXTitleAttribute) as? String,
+         HarnessServer.copyAttribute(element, kAXDescriptionAttribute) as? String,
+         AccessibilityTreeWalker.copyLabelLinkText(from: element)].compactMap { $0 }.first { !$0.isEmpty }
+    }
+
+    /// The focused window's `AXDefaultButton`, read live.
+    static func defaultButtonRead(processIdentifier: pid_t) -> DefaultButtonRead {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.5)
+        let window = read(application, kAXFocusedWindowAttribute)
+        if window.absent { return .none }
+        guard let windowElement = element(window.value) else { return .unreadable }
+        AXUIElementSetMessagingTimeout(windowElement, 0.5)
+        let button = read(windowElement, kAXDefaultButtonAttribute)
+        if button.absent { return .none }
+        guard let buttonElement = element(button.value) else { return .unreadable }
+        return .button(name: controlName(buttonElement))
+    }
+
+    /// The focused element and what it is, read live: the element too, so the last moment before the
+    /// key is posted can check it is still the one judged.
+    static func focusRead(processIdentifier: pid_t) -> (read: FocusRead, element: AXUIElement?) {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.5)
+        let focused = read(application, kAXFocusedUIElementAttribute)
+        if focused.absent { return (.none, nil) }
+        guard let focusedElement = element(focused.value) else { return (.unreadable, nil) }
+        AXUIElementSetMessagingTimeout(focusedElement, 0.5)
+        guard let role = read(focusedElement, kAXRoleAttribute).value as? String else { return (.unreadable, focusedElement) }
+        return (.element(role: role, name: controlName(focusedElement)), focusedElement)
     }
 }
+

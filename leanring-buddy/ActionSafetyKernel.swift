@@ -330,8 +330,9 @@ enum ActionSafetyKernel {
     static let confirmTitlePhrases = [
         // Publishing: the owner's words in front of other people.
         "post", "publish", "share", "submit", "reply", "comment", "repost", "retweet", "tweet", "reshare",
-        // Destructive words the substring list above does not reach.
-        "deletion", "removal", "discard", "unsubscribe", "sign out", "leave", "deactivate", "uninstall", "revoke",
+        // Destructive words the substring list above does not reach. "bin" is the en-AU/en-GB Trash (the Dock's
+        // "Bin", a drop onto which deletes - security review 2026-10-31); whole-word, so "Combine" is not it.
+        "deletion", "removal", "discard", "unsubscribe", "sign out", "leave", "deactivate", "uninstall", "revoke", "bin",
         "disconnect", "cancel subscription",
         // "Don’t Save" throws unsaved work away (U04 2026-10-13: pressed with no card on Mail's
         // save sheet). Split on non-letters, so it is "don t save" for either apostrophe.
