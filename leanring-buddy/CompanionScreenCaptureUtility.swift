@@ -39,9 +39,10 @@ enum CompanionScreenCaptureUtility {
     /// display holding none of its windows is not sent.
     static func captureAllScreensAsJPEG() async throws -> [CompanionScreenCapture] {
         try ScreenSecretGuard.refuseWhileSecureInput(SecureInputState.current())
+        let isRefused = try policyRefuses()
         // Started first, so the walk runs beside the capture, not in front of it.
         // Detached: AX is cross-process IPC and never runs on main.
-        let inspection = Task.detached { await ScreenSecretGuard.inspectWithinDeadline() }
+        let inspection = Task.detached { await ScreenSecretGuard.inspectWithinDeadline(isRefused: isRefused) }
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
 
@@ -52,11 +53,11 @@ enum CompanionScreenCaptureUtility {
 
         let mouseLocation = NSEvent.mouseLocation
 
-        // Our own overlays and panels, and every password manager's windows, are
-        // never in the picture.
+        // Our own overlays and panels, every password manager and every app the harness
+        // policy refuses are never in the picture — left out by APPLICATION.
+        let leftOutApplications = excludedApplications(in: content, isRefused: isRefused)
         let leftOut = windowsLeftOut(owners: content.windows.map { $0.owningApplication?.bundleIdentifier },
                                      ownBundleIdentifier: appBundleIdentifier)
-        let excludedWindows = (leftOut.own + leftOut.passwordManagers).map { content.windows[$0] }
         let secretGuard = SecretGuardInput(inspection: inspection, excludedWindowCount: leftOut.passwordManagers.count)
         // A display the guard did not check is skipped; if every one is, this says why.
         var displayWithheld: ScreenSecretGuard.Withheld?
@@ -83,7 +84,7 @@ enum CompanionScreenCaptureUtility {
                     displayIndex: focusedDisplayIndex,
                     totalDisplayCount: content.displays.count,
                     displayLookup: nsScreenByDisplayID,
-                    excludingWindows: excludedWindows,
+                    excludingApplications: leftOutApplications,
                     secretGuard: secretGuard,
                     mouseLocation: mouseLocation,
                     labelMode: .focused
@@ -118,7 +119,7 @@ enum CompanionScreenCaptureUtility {
                     displayIndex: displayIndex,
                     totalDisplayCount: sortedDisplays.count,
                     displayLookup: nsScreenByDisplayID,
-                    excludingWindows: excludedWindows,
+                    excludingApplications: leftOutApplications,
                     secretGuard: secretGuard,
                     mouseLocation: mouseLocation,
                     labelMode: .fallback
@@ -137,6 +138,135 @@ enum CompanionScreenCaptureUtility {
         }
 
         return capturedScreens
+    }
+
+    /// Indices of the applications every whole-display capture leaves out (owner's ruling
+    /// 2026-10-31): Clicky (by process and by bundle), every password manager, and every app
+    /// the harness policy refuses. By APPLICATION, never by window: a window such an app opens
+    /// after this list was read is still not in the picture, where a window list would miss it.
+    nonisolated static func applicationsLeftOut(_ applications: [(bundleIdentifier: String?, processID: pid_t)], ownPID: pid_t,
+                                                ownBundleIdentifier: String?, isRefused: (String?) -> Bool) -> [Int] {
+        applications.indices.filter { index in
+            let bundle = applications[index].bundleIdentifier.flatMap { $0.isEmpty ? nil : $0 }
+            return applications[index].processID == ownPID || (ownBundleIdentifier != nil && bundle == ownBundleIdentifier)
+                || CredentialGuard.isPasswordManager(bundle) || isRefused(bundle)
+        }
+    }
+
+    nonisolated static func excludedApplications(in content: SCShareableContent, isRefused: (String?) -> Bool) -> [SCRunningApplication] {
+        applicationsLeftOut(content.applications.map { ($0.bundleIdentifier, $0.processID) }, ownPID: getpid(),
+                            ownBundleIdentifier: Bundle.main.bundleIdentifier, isRefused: isRefused)
+            .map { content.applications[$0] }
+    }
+
+    /// The harness policy's `refuse` as a capture exclusion. A policy file that does not
+    /// parse fails closed, as every harness verb does: nothing is photographed.
+    nonisolated static func policyRefuses() throws -> @Sendable (String?) -> Bool {
+        switch HarnessAppPolicy.load(from: HarnessServer.policyURL) {
+        case .missing: return { _ in false }
+        case .loaded(let policy, _): return { HarnessAppPolicy.verdict(for: $0, in: policy).0 == .refuse }
+        case .unreadable:
+            let report = ScreenSecretGuard.Report(outcome: "withheld", reason: "policyUnreadable")
+            ScreenSecretGuard.log(report)
+            throw ScreenSecretGuard.Withheld(report: report)
+        }
+    }
+
+    // MARK: The harness's whole display (`look` tier `screen`, `pointer`)
+
+    /// One display as the harness captured it. `image` is the GUARDED picture (the front
+    /// app's secrets blacked out) when `withheld` is false. When the guard withheld it,
+    /// `image` is the raw capture and must never leave this process: `pointer` still
+    /// reads the words at its point from it to JUDGE them locally, and reports none.
+    struct HarnessShot: @unchecked Sendable {
+        let image: CGImage
+        /// AppKit, the whole display.
+        let displayFrame: CGRect
+        let report: ScreenSecretGuard.Report
+        let withheld: Bool
+        let excludedBundleIdentifiers: [String]
+        let milliseconds: Int
+    }
+
+    /// The voice screenshot's path for ONE display the caller chose: the same exclusions
+    /// (`applicationsLeftOut`, by application), the same front-app inspection and
+    /// `ScreenSecretGuard.guarded`, at `pixelsPerPoint` (1 for `look`: a 1440x900 display is a
+    /// 1440x900 image, so an image pixel IS a point). Throws `Withheld` while secure input is on.
+    nonisolated static func captureHarnessDisplay(_ display: EscalationLadder.DisplayInfo, pixelsPerPoint: CGFloat,
+                                                  isRefused: @escaping @Sendable (String?) -> Bool) async throws -> HarnessShot {
+        let startedAt = Date()
+        try ScreenSecretGuard.refuseWhileSecureInput(SecureInputState.current())
+        let inspection = Task.detached { await ScreenSecretGuard.inspectWithinDeadline(isRefused: isRefused) }
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let scDisplay = content.displays.first(where: { $0.displayID == display.displayID }) else {
+            throw NSError(domain: "CompanionScreenCapture", code: -1, userInfo: [NSLocalizedDescriptionKey: "that display is not available for capture"])
+        }
+        let excluded = excludedApplications(in: content, isRefused: isRefused)
+        let leftOut = windowsLeftOut(owners: content.windows.map { $0.owningApplication?.bundleIdentifier },
+                                     ownBundleIdentifier: Bundle.main.bundleIdentifier)
+        let image = try await captureImage(of: scDisplay, excluding: excluded, displayFrame: display.appKitFrame,
+                                           pixelsPerPoint: pixelsPerPoint)
+        let checked = await inspection.value
+        let shot = { (image: CGImage, report: ScreenSecretGuard.Report, withheld: Bool) in
+            HarnessShot(image: image, displayFrame: display.appKitFrame, report: report, withheld: withheld,
+                        excludedBundleIdentifiers: excluded.map(\.bundleIdentifier).filter { !$0.isEmpty }.sorted(),
+                        milliseconds: Int(Date().timeIntervalSince(startedAt) * 1000))
+        }
+        do {
+            let (safe, report) = try ScreenSecretGuard.guarded(image, displayFrame: display.appKitFrame, inspection: checked,
+                                                               excludedWindowCount: leftOut.passwordManagers.count)
+            return shot(safe, report, false)
+        } catch let withheld as ScreenSecretGuard.Withheld {
+            return shot(image, withheld.report, true)
+        }
+    }
+
+    /// Which display `look` tier `screen` photographs: the one holding most of the focused
+    /// window, else the main display.
+    nonisolated static func harnessDisplayIndex(focusedWindowFrame: CGRect?, displays: [CGRect], mainIndex: Int?) -> Int? {
+        focusedWindowFrame.flatMap { bestDisplayIndex(for: $0, among: displays) } ?? mainIndex ?? (displays.isEmpty ? nil : 0)
+    }
+
+    /// A small crop of a display, for `pointer`'s before/after pixel comparison ONLY: it
+    /// never leaves the process (a 96-pixel grey thumbnail is all that is kept), so it is not
+    /// guarded — but it leaves out the same applications, and the cursor, so neither our
+    /// overlay nor the pointer we just moved counts as a change.
+    nonisolated static func greyCrop(_ region: CGRect, of display: EscalationLadder.DisplayInfo,
+                                     isRefused: @escaping @Sendable (String?) -> Bool) async throws -> [UInt8] {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let scDisplay = content.displays.first(where: { $0.displayID == display.displayID }) else { return [] }
+        let image = try await captureImage(of: scDisplay, excluding: excludedApplications(in: content, isRefused: isRefused),
+                                           displayFrame: display.appKitFrame, pixelsPerPoint: 1, crop: region, showsCursor: false)
+        guard let jpeg = NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.9]) else { return [] }
+        return ScreenOCR.greyThumbnail(jpeg: jpeg)
+    }
+
+    /// The one capture call every whole-display path shares. `crop` is AppKit global, inside the display.
+    nonisolated private static func captureImage(of display: SCDisplay, excluding applications: [SCRunningApplication],
+                                                 displayFrame: CGRect, pixelsPerPoint: CGFloat?, crop: CGRect? = nil,
+                                                 showsCursor: Bool = true) async throws -> CGImage {
+        let filter = SCContentFilter(display: display, excludingApplications: applications, exceptingWindows: [])
+        let configuration = SCStreamConfiguration()
+        configuration.showsCursor = showsCursor
+        let region = crop ?? displayFrame
+        if let crop { configuration.sourceRect = EscalationLadder.sourceRect(forAppKitRect: crop, onDisplayWithAppKitFrame: displayFrame) }
+        if let pixelsPerPoint {
+            let size = EscalationLadder.pixelSize(forRegion: region, backingScaleFactor: pixelsPerPoint)
+            configuration.width = size.width
+            configuration.height = size.height
+        } else {
+            // The voice screenshot's size: 1920 on the long edge.
+            let maxDimension = 1920
+            let aspectRatio = CGFloat(display.width) / CGFloat(display.height)
+            if display.width >= display.height {
+                configuration.width = maxDimension
+                configuration.height = Int(CGFloat(maxDimension) / aspectRatio)
+            } else {
+                configuration.height = maxDimension
+                configuration.width = Int(CGFloat(maxDimension) * aspectRatio)
+            }
+        }
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
     }
 
     /// Indices of the windows left out of every capture: ours, and password managers'.
@@ -195,7 +325,7 @@ enum CompanionScreenCaptureUtility {
         displayIndex: Int,
         totalDisplayCount: Int,
         displayLookup: [CGDirectDisplayID: NSScreen],
-        excludingWindows: [SCWindow],
+        excludingApplications: [SCRunningApplication],
         secretGuard: SecretGuardInput,
         mouseLocation: CGPoint,
         labelMode: CaptureLabelMode
@@ -205,23 +335,8 @@ enum CompanionScreenCaptureUtility {
                       width: CGFloat(display.width), height: CGFloat(display.height))
         let isCursorScreen = displayFrame.contains(mouseLocation)
 
-        let filter = SCContentFilter(display: display, excludingWindows: excludingWindows)
-
-        let configuration = SCStreamConfiguration()
-        let maxDimension = 1920
-        let aspectRatio = CGFloat(display.width) / CGFloat(display.height)
-        if display.width >= display.height {
-            configuration.width = maxDimension
-            configuration.height = Int(CGFloat(maxDimension) / aspectRatio)
-        } else {
-            configuration.height = maxDimension
-            configuration.width = Int(CGFloat(maxDimension) * aspectRatio)
-        }
-
-        let capturedImage = try await SCScreenshotManager.captureImage(
-            contentFilter: filter,
-            configuration: configuration
-        )
+        let capturedImage = try await captureImage(of: display, excluding: excludingApplications,
+                                                   displayFrame: displayFrame, pixelsPerPoint: nil)
         // Before encoding: blacked out, or withheld (throws) — never sent unchecked.
         guard let (jpegData, secretGuardReport) = try modelReadyJPEG(
             capturedImage, displayFrame: displayFrame, inspection: await secretGuard.inspection.value,
@@ -251,8 +366,8 @@ enum CompanionScreenCaptureUtility {
             displayWidthInPoints: Int(displayFrame.width),
             displayHeightInPoints: Int(displayFrame.height),
             displayFrame: displayFrame,
-            screenshotWidthInPixels: configuration.width,
-            screenshotHeightInPixels: configuration.height,
+            screenshotWidthInPixels: capturedImage.width,
+            screenshotHeightInPixels: capturedImage.height,
             secretGuard: secretGuardReport
         )
     }

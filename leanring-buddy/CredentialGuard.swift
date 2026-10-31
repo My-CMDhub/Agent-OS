@@ -651,19 +651,23 @@ nonisolated enum ScreenSecretGuard {
     /// web app's last window closed on a Space holding nothing else, and two
     /// captures withheld `displayNotScanned` with appSource `frontmost`.
     /// nil (withhold) when there is no app in front or nothing behind it.
+    /// `isRefused`: the harness policy's `refuse` — such an app is left out of the capture too
+    /// (owner's ruling 2026-10-31), so the window behind it is what must be checked.
     static func appToCheck(frontmost: (pid: pid_t, bundleIdentifier: String?)?, windowList: [[String: Any]],
                            ownPID: pid_t, bundleForPID: (pid_t) -> String?,
-                           frontmostShowsNoWindow: Bool = false) -> (pid: pid_t, source: String)? {
+                           frontmostShowsNoWindow: Bool = false,
+                           isRefused: (String?) -> Bool = { _ in false }) -> (pid: pid_t, source: String)? {
         guard let frontmost else { return nil }
         let source = frontmost.pid == ownPID ? "behindOwnApp"
             : CredentialGuard.isPasswordManager(frontmost.bundleIdentifier) ? "behindPasswordManager"
+            : isRefused(frontmost.bundleIdentifier) ? "behindRefusedApp"
             : frontmostShowsNoWindow ? "frontmostHasNoWindowHere" : nil
         guard let source else { return (frontmost.pid, "frontmost") }
         func owner(atLayer layer: Int) -> pid_t? {
             windowList.lazy
                 .filter { ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == layer }
                 .compactMap { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value }
-                .first { $0 != ownPID && $0 != frontmost.pid && !CredentialGuard.isPasswordManager(bundleForPID($0)) }
+                .first { $0 != ownPID && $0 != frontmost.pid && !CredentialGuard.isPasswordManager(bundleForPID($0)) && !isRefused(bundleForPID($0)) }
         }
         let behind = owner(atLayer: 0) ?? owner(atLayer: Int(CGWindowLevelForKey(.desktopIconWindow)))
         return behind.map { ($0, source) }
@@ -675,7 +679,7 @@ nonisolated enum ScreenSecretGuard {
     /// Blocking cross-process walk of every window of the app the picture shows
     /// (`appToCheck`), main window first, inside one shared deadline. Call off
     /// main: `inspectWithinDeadline` gives it a thread of its own.
-    static func inspectFrontmostApp(timeLimitSeconds: Double) -> Inspection {
+    static func inspectFrontmostApp(timeLimitSeconds: Double, isRefused: (String?) -> Bool = { _ in false }) -> Inspection {
         let startedAt = Date()
         var inspection = Inspection()
         func finished() -> Inspection {
@@ -693,7 +697,7 @@ nonisolated enum ScreenSecretGuard {
             as? [[String: Any]] ?? []
         let bundleForPID = { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }
         guard var choice = appToCheck(frontmost: front.map { ($0.processIdentifier, $0.bundleIdentifier) },
-                                      windowList: windowList, ownPID: getpid(), bundleForPID: bundleForPID),
+                                      windowList: windowList, ownPID: getpid(), bundleForPID: bundleForPID, isRefused: isRefused),
               var application = NSRunningApplication(processIdentifier: choice.pid) else {
             inspection.failure = "noAppToCheck"
             return finished()
@@ -702,7 +706,7 @@ nonisolated enum ScreenSecretGuard {
         // kAXWindows is Space-scoped: none here means the picture shows other apps' windows.
         if choice.source == "frontmost", read.readSucceeded, read.windows.allSatisfy(\.candidate.isMinimized),
            let behind = appToCheck(frontmost: (choice.pid, application.bundleIdentifier), windowList: windowList,
-                                   ownPID: getpid(), bundleForPID: bundleForPID, frontmostShowsNoWindow: true),
+                                   ownPID: getpid(), bundleForPID: bundleForPID, frontmostShowsNoWindow: true, isRefused: isRefused),
            let behindApplication = NSRunningApplication(processIdentifier: behind.pid) {
             choice = behind
             application = behindApplication
@@ -737,9 +741,9 @@ nonisolated enum ScreenSecretGuard {
     }
 
     /// The walk on its own thread, or nil once `walkDeadlineSeconds` pass.
-    static func inspectWithinDeadline() async -> Inspection? {
+    static func inspectWithinDeadline(isRefused: @escaping @Sendable (String?) -> Bool = { _ in false }) async -> Inspection? {
         await RealtimeVoiceSession.value(within: walkDeadlineSeconds) {
-            inspectFrontmostApp(timeLimitSeconds: walkDeadlineSeconds)
+            inspectFrontmostApp(timeLimitSeconds: walkDeadlineSeconds, isRefused: isRefused)
         }
     }
 
