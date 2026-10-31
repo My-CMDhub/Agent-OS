@@ -286,6 +286,11 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        if let target = CommandLine.arguments.first(where: { $0.hasPrefix("--ax-attributes-probe=") }) {
+            AccessibilityAttributesProbe.run(bundleIdentifier: String(target.dropFirst("--ax-attributes-probe=".count)))
+            return
+        }
+
         if CommandLine.arguments.contains("--ax-probe") {
             Task { await AccessibilityDumpRunner.runProbe() }
             return
