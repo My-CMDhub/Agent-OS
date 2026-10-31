@@ -254,8 +254,9 @@ struct HandsReviewTests {
 
     /// 2026-10-06: in a chat app Return SENDS. The voice tool refused a line break,
     /// but the harness's own `type` took one from any socket caller and wrote it by
-    /// AX. Now no caller's text carries a control character, and no verb or tool
-    /// presses a key — Return can only come from the owner's own hands.
+    /// AX. Now no caller's text carries a control character. Owner's ruling 2026-10-31
+    /// added ONE verb that presses keys, `key` — and its Return from a text field is
+    /// judged as a submit (`gatingSubmit`), so in a chat app it still asks.
     @Test func noTypingPathCarriesReturnAndNoVerbPressesAKey() {
         // A line break decodes only to be pasted (gate below); every other control character is refused.
         for text in ["a\u{2028}b", "tab\there", "hello\r\t"] {
@@ -266,7 +267,12 @@ struct HandsReviewTests {
         guard case .success = HarnessPolicy.decode(line: #"{"verb":"type","target":"focused","text":"JARVIS test draft"}"#) else {
             Issue.record("one plain line was refused"); return
         }
-        #expect(HarnessVerb.allCases.allSatisfy { !$0.rawValue.lowercased().contains("key") })
+        #expect(HarnessVerb.allCases.filter { $0.rawValue.lowercased().contains("key") } == [.key])
+        guard case .requireConfirmation(_, true) = HarnessKeys.returnDecision(
+            defaultButtonTitle: nil, focusIsTextInput: true, bundleIdentifier: "net.whatsapp.WhatsApp",
+            visibleBounds: CGRect(x: 0, y: 0, width: 1440, height: 900), draftScope: false) else {
+            Issue.record("Return in a chat composer did not ask"); return
+        }
         #expect(RealtimeVoiceVerbs.allToolNames.allSatisfy { !$0.contains("key") && !$0.contains("return") && !$0.contains("enter") })
         // Return sends in a chat composer: a line break there is refused by the paste gate.
         #expect(HarnessPaste.gateRefusal(bundleIdentifier: "net.whatsapp.WhatsApp", role: "AXTextArea", mode: .insert, secureInputOn: false,

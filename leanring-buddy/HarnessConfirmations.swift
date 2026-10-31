@@ -528,7 +528,8 @@ final class HarnessConfirmations: ObservableObject {
         case "renameItem": phrase = "Rename an item"
         case "moveItems": phrase = "Move items"
         case "adjust": phrase = "Set a control"
-        default: phrase = verbTitle(shape.verb)
+        case "key": phrase = "Press a keyboard shortcut"
+        default: phrase = pointerActionWords(shape.verb).map { "\($0.phrase) on the screen" } ?? verbTitle(shape.verb)
         }
         if shape.thenConfirm { phrase += " and submit it" }
         return "\(phrase) in \(app)?"
@@ -591,7 +592,24 @@ final class HarnessConfirmations: ObservableObject {
         case "renameItem": return "Renames \(target) in \(app) to the name above"
         case "moveItems": return "Moves \(target) in \(app) into the folder above"
         case "adjust": return "Steps \(target) in \(app) to the value above"
-        default: return "\(verbTitle(shape.verb)) \(target) in \(app)"
+        case "key": return "Presses \(target) in \(app)"
+        default:
+            if let words = pointerActionWords(shape.verb) { return "\(words.effect) \(target) in \(app), aimed by position" }
+            return "\(verbTitle(shape.verb)) \(target) in \(app)"
+        }
+    }
+
+    /// `pointer`'s shape verb is "pointer.<action>" (`HarnessServer.pointerResponse`), so a
+    /// ticket for a click never answers a drag at the same point. Our words for each.
+    static func pointerActionWords(_ verb: String) -> (phrase: String, effect: String)? {
+        guard verb.hasPrefix("pointer."), let action = PointerAction(rawValue: String(verb.dropFirst("pointer.".count))) else { return nil }
+        switch action {
+        case .click: return ("Click", "Clicks")
+        case .doubleClick: return ("Double-click", "Double-clicks")
+        case .rightClick: return ("Right-click", "Right-clicks")
+        case .move: return ("Move the pointer", "Moves the pointer over")
+        case .drag: return ("Drag", "Drags")
+        case .scroll: return ("Scroll", "Scrolls at")
         }
     }
 

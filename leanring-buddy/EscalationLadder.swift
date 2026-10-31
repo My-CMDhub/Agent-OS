@@ -43,6 +43,10 @@ enum EscalationLadder {
         case element
         case window
         case display
+        /// `look` only: the whole display holding the front window (else the main one), every
+        /// app on it but Clicky, password managers and policy-refused apps (owner's ruling
+        /// 2026-10-31) — through the voice screenshot's guard, not this file's one-app capture.
+        case screen
     }
 
     /// How much context to keep around a candidate's own frame. A button
@@ -664,6 +668,25 @@ enum EscalationLadder {
 
         guard semaphore.wait(timeout: .now() + captureDeadlineInSeconds) == .success,
               let result = box.result else {
+            return .failure(CaptureFailure.timedOut)
+        }
+        return result
+    }
+
+    private final class ResultBox<T>: @unchecked Sendable {
+        var result: Result<T, Error>?
+    }
+
+    /// `captureSynchronously`'s wait for any async capture: a detached task, a semaphore,
+    /// and the same 10 s bound, so a capture that never returns is `timedOut`, not a hang.
+    static func blocking<T>(_ work: @escaping @Sendable () async throws -> T) -> Result<T, Error> {
+        let box = ResultBox<T>()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached {
+            do { box.result = .success(try await work()) } catch { box.result = .failure(error) }
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + captureDeadlineInSeconds) == .success, let result = box.result else {
             return .failure(CaptureFailure.timedOut)
         }
         return result
