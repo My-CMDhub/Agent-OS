@@ -77,6 +77,16 @@ struct AffordanceMapTests {
         #expect(lines.first == "View > Item 0")
     }
 
+    /// Generality G07, macOS 27 (2026-10-31): the agent typed into the help window instead of calling search_help.
+    @Test func aHelpMenuInTheVerbsSaysToSearchItWithSearchHelp() throws {
+        let withHelp = try #require(AffordanceMap(menusResponse: ["ok": true, "items": [item(["View", "Scientific"]), item(["Help", "Calculator Help"])]],
+                                                  bundleIdentifier: "b", version: "1", pid: 1, builtUptime: 0))
+        #expect(withHelp.block(appName: "Calculator", readOnly: false).contains("search_help"))
+        let without = try #require(AffordanceMap(menusResponse: ["ok": true, "items": [item(["View", "Scientific"])]],
+                                                 bundleIdentifier: "b", version: "1", pid: 1, builtUptime: 0))
+        #expect(!without.block(appName: "Calculator", readOnly: false).contains("search_help"))
+    }
+
     @Test func aShortcutResolvesToTheOneItemThatOwnsIt() throws {
         let map = try #require(AffordanceMap(menusResponse: finderMenus, bundleIdentifier: "com.apple.finder", version: "1", pid: 1, builtUptime: 0))
         let offer = map.offer(readOnly: false)

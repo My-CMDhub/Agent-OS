@@ -224,6 +224,9 @@ nonisolated struct AffordanceMap: Sendable {
         return (lastActingCallAt ?? -.infinity) < previousAt
     }
 
+    static let helpSearchHint = "To search this app's Help (a command or a topic), call search_help with the words; never type into "
+        + "a help window's search field. "
+
     /// The "App verbs" block, once per app per task (again after a rebuild); landmarks every step.
     func block(appName: String?, readOnly: Bool) -> String {
         let lines = menuLines(readOnly: readOnly)
@@ -232,6 +235,9 @@ nonisolated struct AffordanceMap: Sendable {
             + "(steps split at \" > \"), or press_menu with shortcut presses the item that owns it; no find_menu_items needed. "
             + (readOnly ? "Only items this read-only task may press are listed. " : "")
             + (listingIncomplete ? "The listing stopped early: an item not here may still exist. " : "")
+            // Generality G07 on macOS 27 (2026-10-31, twice): the agent pressed Help > Calculator Help and typed into the
+            // Tips window's search, which runs nothing, though search_help returned topics. Said where the Help menu is seen.
+            + (lines.contains { $0.hasPrefix("Help") } ? Self.helpSearchHint : "")
             + "\n" + lines.joined(separator: "\n")
     }
 
