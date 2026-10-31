@@ -1555,8 +1555,8 @@ struct AgentLoopReadOnlyTests {
         let saturday = DateComponents(calendar: .current, year: 2026, month: 10, day: 24, hour: 11, minute: 58).date!
         #expect(AgentLoop.goalText(goal: "x", heard: nil, now: saturday).contains(AgentLoop.nowLine(saturday)))
         #expect(AgentLoop.nowLine(saturday).contains("2026"))
-        #expect(AgentLoop.nowLine(saturday, zone: TimeZone(identifier: "Australia/Sydney")!).hasSuffix("(UTC+11:00)"))
-        #expect(AgentLoop.nowLine(saturday, zone: TimeZone(identifier: "America/St_Johns")!).hasSuffix("(UTC-02:30)"))
+        #expect(AgentLoop.nowLine(saturday, zone: TimeZone(identifier: "Australia/Sydney")!).hasSuffix("(UTC+11:00, Australia/Sydney)"))
+        #expect(AgentLoop.nowLine(saturday, zone: TimeZone(identifier: "America/St_Johns")!).hasSuffix("(UTC-02:30, America/St_Johns)"))
     }
 }
 

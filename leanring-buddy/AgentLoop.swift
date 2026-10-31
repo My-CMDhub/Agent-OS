@@ -1292,7 +1292,9 @@ final class AgentLoop {
         formatter.dateStyle = .full
         formatter.timeStyle = .short
         let offset = zone.secondsFromGMT(for: now)
-        return formatter.string(from: now) + String(format: " (UTC%@%02d:%02d)", offset < 0 ? "-" : "+", abs(offset) / 3600, abs(offset) % 3600 / 60)
+        // Unseen M07 2026-10-31: "what time zone is this Mac set to?" answered only "UTC+11:00"; the zone's name is the answer.
+        return formatter.string(from: now) + String(format: " (UTC%@%02d:%02d, ", offset < 0 ? "-" : "+", abs(offset) / 3600, abs(offset) % 3600 / 60)
+            + zone.identifier + ")"
     }
 
     static let readOnlyNote = "This task is read-only, by the owner's words: look, scroll, follow links, tabs and search results, search, "
