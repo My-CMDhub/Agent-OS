@@ -106,6 +106,16 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
     var goal: String? = nil
     /// annotate only: what to draw, and round what.
     var shapes: [RealtimeAnnotation]? = nil
+    /// The universal hand (owner's ruling 2026-10-31): the harness's `pointer` action this call must take —
+    /// press_element's `double` / `right` flags ("doubleClick", "rightClick"), drag_item's "drag", and the
+    /// agent's computer actions ("click", "move", "scroll" too). Set: the point is acted on as it is, never
+    /// through the AX name path. nil: press_element by name presses through AX first.
+    var pointerAction: String? = nil
+    /// drag_item only: where it is dropped — a name, or a position in the same units as `x`/`y` / `point`.
+    var toName: String? = nil
+    var toX: Double? = nil
+    var toY: Double? = nil
+    var toPoint: [Double]? = nil
 
     /// Arguments that would invite someone to an event: never sent (owner's ruling 2026-10-21).
     static let inviteArguments = ["attendees", "attendee", "invitees", "invitee", "invite", "guests", "participants", "emails"]
@@ -126,19 +136,38 @@ nonisolated struct RealtimeToolCall: Equatable, Sendable {
             func number(_ value: Any?) -> Double? { (value as? NSNumber)?.doubleValue ?? (value as? String).flatMap(Double.init) }
             // The text to type is kept exactly as sent (a leading space may be meant); empty is none.
             let typed = (arguments?["text"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["app"]), elementName: text(arguments?["name"]),
-                                    x: number(arguments?["x"]), y: number(arguments?["y"]),
-                                    underPointer: (arguments?["underPointer"] as? Bool) ?? false,
-                                    open: name == RealtimeVoiceVerbs.pressElementName && (arguments?["open"] as? Bool) == true,
-                                    direction: text(arguments?["direction"]), amount: number(arguments?["amount"]),
-                                    text: typed, mode: text(arguments?["mode"]),
-                                    submit: name == RealtimeVoiceVerbs.typeTextName && (arguments?["submit"] as? Bool) == true,
-                                    point: (arguments?["point"] as? [Any])?.compactMap(number))
+            var call = RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["app"]), elementName: text(arguments?["name"]),
+                                        x: number(arguments?["x"]), y: number(arguments?["y"]),
+                                        underPointer: (arguments?["underPointer"] as? Bool) ?? false,
+                                        open: name == RealtimeVoiceVerbs.pressElementName && (arguments?["open"] as? Bool) == true,
+                                        direction: text(arguments?["direction"]), amount: number(arguments?["amount"]),
+                                        text: typed, mode: text(arguments?["mode"]),
+                                        submit: name == RealtimeVoiceVerbs.typeTextName && (arguments?["submit"] as? Bool) == true,
+                                        point: (arguments?["point"] as? [Any])?.compactMap(number))
+            // press_element's flags; a double right-click is not a thing, so right wins.
+            if name == RealtimeVoiceVerbs.pressElementName {
+                if (arguments?["double"] as? Bool) == true { call.pointerAction = PointerAction.doubleClick.rawValue }
+                if (arguments?["right"] as? Bool) == true { call.pointerAction = PointerAction.rightClick.rawValue }
+            }
+            if name == RealtimeVoiceVerbs.dragItemName {
+                call.pointerAction = PointerAction.drag.rawValue
+                call.toName = text(arguments?["to_name"])
+                call.toX = number(arguments?["to_x"])
+                call.toY = number(arguments?["to_y"])
+                call.toPoint = (arguments?["to_point"] as? [Any])?.compactMap(number)
+            }
+            return call
+        }
+        // press_keys: the keys ride in `shortcut` (as press_menu's do), the app is `app`.
+        if name == RealtimeVoiceVerbs.pressKeysName {
+            return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["app"]), shortcut: text(arguments?["keys"]))
         }
         // annotate: each shape as sent; `RealtimeAnnotate.validated` judges them. Its app is `app` only.
         let shapes = (arguments?["shapes"] as? [[String: Any]])?.map { shape in
-            RealtimeAnnotation(shape: (shape["shape"] as? String) ?? "", name: text(shape["name"]),
-                               underPointer: (shape["underPointer"] as? Bool) ?? false, text: shape["text"] as? String)
+            func number(_ value: Any?) -> Double? { (value as? NSNumber)?.doubleValue ?? (value as? String).flatMap(Double.init) }
+            return RealtimeAnnotation(shape: (shape["shape"] as? String) ?? "", name: text(shape["name"]),
+                                      underPointer: (shape["underPointer"] as? Bool) ?? false, text: shape["text"] as? String,
+                                      x: number(shape["x"]), y: number(shape["y"]), point: (shape["point"] as? [Any])?.compactMap(number))
         }
         guard name != RealtimeVoiceVerbs.annotateName else {
             return RealtimeToolCall(callID: callID, name: name, appName: text(arguments?["app"]), shapes: shapes)
@@ -237,7 +266,7 @@ nonisolated enum RealtimeOpenAppTool {
 
     hands: scroll scrolls the window in front (direction up, down, left or right; amount in pages), at an area named like point_at, or the main area when none is given; its result names what came into view. type_text types text into a field: aim it by the field's name, the words printed in or beside it, such as "search"; a position only for a field with no words; no aim only for a field with keyboard focus; it never presses enter; submit true commits only an entry that saves on Return (a quick-entry box, a new list row), never a message, so say what you typed and let the owner send it; type only text the owner gave or asked for. close closes the tab, the window, or quits the app in front (what tab, window or app); quitting shows the owner a card, and the app may still ask to save.
 
-    screen: you can point at and press what you can see. to point, call point_at; to click, call press_element (it also clicks into a field). aim either by the element's name as printed on screen, which is looked up on the live screen, or by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image), or with underPointer true only when the owner says "this one", "here" or "where my cursor is"; a request that names the thing ("click sign in", "where is the phone number") is aimed by that name, never underPointer. for "where is X", call find_on_screen with X's words, then point_at the element that is X at once and say where it is; when a label such as "Phone:" sits beside its value, point at the value, not the label. if a result lists several matches, ask which one, unless the owner's words already pick one by order ("the first", "the last"): then press it by that name, and the order picks it. a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. to show the owner where things are while you explain, call annotate: a box, circle, arrow, underline or short label round elements by their printed names, or round the owner's pointer; it changes nothing. icons in the Dock and items in the menu bar can be pointed at or highlighted by their name even when the desktop is in front. something you can see that find_on_screen does not list (drawn on a canvas, an icon that is only a picture) is pressed by sight: call press_element with its x and y AND the words printed on it; it is clicked only if those words are read back at that point. never say you can't do something you can see.
+    screen: you can point at and press anything you can see, anywhere on the screen: a window, the Dock, the menu bar and its icons, the desktop. to point, call point_at; to click, call press_element (it also clicks into a field; double true double-clicks, right true right-clicks); to drag one thing onto another, drag_item; for a keyboard shortcut or a key such as escape, press_keys. aim by the element's name when find_on_screen lists it or it is printed on screen, which is looked up on the live screen; otherwise by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image); never invent a name. use underPointer true only when the owner says "this one", "here" or "where my cursor is"; a request that names the thing ("click sign in", "where is the phone number") is aimed by that name, never underPointer. for "where is X", call find_on_screen with X's words, then point_at the element that is X at once and say where it is; when a label such as "Phone:" sits beside its value, point at the value, not the label. if a result lists several matches, ask which one, unless the owner's words already pick one by order ("the first", "the last"): then press it by that name, and the order picks it. a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. to show the owner where things are while you explain, call annotate: a box, circle, arrow, underline or short label round elements by their printed names, or round the owner's pointer; it changes nothing. icons in the Dock and the menu bar can be pointed at, highlighted or pressed by their name or their position whatever app is in front (find_on_screen with app "Dock" or "menu bar" lists their names). something you can see that has no name (an icon that is only a picture, something drawn) is aimed by its position. when the owner asks what is under their pointer and the system line about their pointer names nothing, say what the screenshot shows at that position; the close-up sent before it is centred on the pointer. never say you can't do something you can see.
 
     tasks: when one request needs more than one step (search then open a result, open a page and read or summarise it, fill several fields, write then post), or names two or more actions, or asks you to act and then answer ("and tell me", summarise, find out, which is the cheapest), call do_task once with the owner's whole request as the goal and say only a few words, such as that you are on it; never do the first step yourself and then ask "shall i…?", and never press the first link yourself and report from there: "open the plans page and tell me the cheapest plan" is one do_task. a question to look up on the web (what a site says, the latest commit or news, a price, the cheapest plan) is a do_task too: the task runner answers it from the web without opening a browser; open_url only when the owner asks to see the page. a single step stays with the tools above. when no tool above does the whole request in one call, such as switching a setting on or off (bluetooth, wi-fi, a hotspot, dark mode), changing something inside an app, or anything you have no tool for, call do_task with the owner's words: the task runner finds its own way on the screen. never tell the owner you cannot do something on the mac, and never open a pane for them to do it themselves, unless a tool result refused it. system lines later report the task's progress and its outcome; say each briefly in your own words, and claim only what they say happened. while a task is recent, each owner turn carries a task status line: answer "did you…", "is it done" and "how is it going" from that line alone, and never call do_task to answer them; call do_task again only for an answer to the task's question or a new request.
 
@@ -255,15 +284,15 @@ nonisolated enum RealtimeOpenAppTool {
     - owner: make the text in textedit rainbow. [find_menu_items, nothing fits] you: nothing in textedit's menus does that.
     """
 
-    static let fractionsPositionWording = "or by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image)"
+    static let fractionsPositionWording = "by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image)"
 
     /// The prompt for a pointing format (`RealtimePointFormat`): only the
     /// position sentence differs, and it says what the schema says.
     static func systemPrompt(pointFormat: RealtimePointFormat, stack: VoiceStackChoice) -> String {
         guard pointFormat == .native else { return systemPrompt }
         let wording = stack == .geminiLive
-            ? "or by the element's position in the screenshot as a point [y, x], each normalized from 0 to 1000 (0,0 is the top-left of the image)"
-            : "or by the element's position in the screenshot as x and y in pixels of that image (0,0 is its top-left; its size is given in a system line)"
+            ? "by the element's position in the screenshot as a point [y, x], each normalized from 0 to 1000 (0,0 is the top-left of the image)"
+            : "by the element's position in the screenshot as x and y in pixels of that image (0,0 is its top-left; its size is given in a system line)"
         return systemPrompt.replacingOccurrences(of: fractionsPositionWording, with: wording)
     }
 
@@ -411,7 +440,8 @@ nonisolated enum RealtimeOpenAppTool {
                                    expectApp: String? = nil,
                                    offered: [RealtimeMenuCandidate]? = nil,
                                    offeredApp: String? = nil,
-                                   screenTarget: RealtimeScreenTarget? = nil) -> Result<String, RealtimeToolRefusal> {
+                                   screenTarget: RealtimeScreenTarget? = nil,
+                                   dropTarget: RealtimeScreenTarget? = nil) -> Result<String, RealtimeToolRefusal> {
         func refuse(_ error: String, _ message: String) -> Result<String, RealtimeToolRefusal> {
             .failure(RealtimeToolRefusal(error: error, message: message))
         }
@@ -513,9 +543,24 @@ nonisolated enum RealtimeOpenAppTool {
             // The find_on_screen read (policy, forModel); `dispatch` resolves and draws.
             if case .failure(let refusal) = RealtimeAnnotate.validated(call.shapes) { return .failure(refusal) }
             request = ["verb": "snapshot", "expectApp": expectApp ?? appName, "forModel": true]
+        case RealtimeVoiceVerbs.pressKeysName:
+            guard let keys = call.shortcut else { return refuse("missingKeys", "press_keys needs the keys, for example \"cmd+s\" or \"escape\"") }
+            guard HarnessKeys.parse(keys) != nil else {
+                return refuse("invalidKeys", "\(UntrustedText(keys).forDisplay) is not a key the hands know: modifiers cmd, shift, opt, ctrl joined by + "
+                    + "to ONE key (a letter, digit or punctuation, return, enter, tab, space, escape, delete, forwarddelete, up, down, left, "
+                    + "right, pageup, pagedown, home, end, f1-f12). Nothing was pressed")
+            }
+            request = ["verb": "key", "keys": keys, "expectApp": expectApp ?? appName]
         case RealtimeVoiceVerbs.scrollName:
             guard let direction = call.direction.flatMap(ScrollDirection.init(rawValue:)) else {
                 return refuse("invalidDirection", "scroll needs a direction: up, down, left or right")
+            }
+            // The universal hand's wheel, at a point anywhere on the screen (the agent's computer scroll).
+            if call.pointerAction == PointerAction.scroll.rawValue, let screenTarget {
+                request = pointerRequest(.scroll, at: screenTarget.point, label: nil)
+                request["direction"] = direction.rawValue
+                request["amount"] = min(max(call.amount ?? 1, 0.1), HarnessScroll.maximumPages)
+                break
             }
             request = ["verb": "scroll", "direction": direction.rawValue, "amount": min(max(call.amount ?? 1, 0.1), HarnessScroll.maximumPages),
                        "expectApp": expectApp ?? appName]
@@ -580,8 +625,21 @@ nonisolated enum RealtimeOpenAppTool {
             }
             // The menu listing first; `dispatch` picks the app's own close item and presses it.
             request = ["verb": "menus", "expectApp": expectApp ?? appName]
-        case RealtimeVoiceVerbs.pointAtName, RealtimeVoiceVerbs.pressElementName:
-            let isPress = call.name == RealtimeVoiceVerbs.pressElementName
+        case RealtimeVoiceVerbs.pointAtName, RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.dragItemName:
+            let isPress = call.name != RealtimeVoiceVerbs.pointAtName
+            // The universal hand (owner's ruling 2026-10-31): a point anywhere on the screen, judged by the harness
+            // by what is THERE (`pointer`), when AX's name path cannot reach it or the caller asked for the pointer.
+            if let screenTarget, !(isPress && call.open), let action = pointerRoute(for: call, target: screenTarget, expectApp: expectApp) {
+                var to: CGPoint?
+                if action == .drag {
+                    guard let dropTarget else {
+                        return refuse("missingDropTarget", "drag_item needs where to drop it: to_name, or its position; nothing was dragged")
+                    }
+                    to = dropTarget.point
+                }
+                request = pointerRequest(action, at: screenTarget.point, to: to, label: call.elementName ?? screenTarget.candidate?.name)
+                break
+            }
             // Aimed only in the app the target came from; a ring names nothing, so it needs none.
             guard let screenTarget,
                   expectApp == nil || screenTarget.app == expectApp || (screenTarget.candidate == nil && screenTarget.app == nil) else {
@@ -600,14 +658,7 @@ nonisolated enum RealtimeOpenAppTool {
                 break
             }
             guard let target = screenTarget.candidate else {
-                // By sight (`visionClick`): words the harness must read back at the point, or
-                // the owner's own pointer ("click this one") with nothing AX can name under it.
-                if isPress, (screenTarget.source == .vision && call.elementName != nil) || screenTarget.source == .underPointer {
-                    request = ["verb": "visionClick", "nearPoint": nearPoint, "expectApp": expectApp ?? appName]
-                    if let name = call.elementName { request["title"] = name }
-                    if screenTarget.source == .underPointer { request["ownerPointed"] = true }
-                    break
-                }
+                // A press with no AX name there went to the pointer above; only a point is left.
                 if isPress { return refuse("nothingAtPoint", "nothing that can be pressed is at that position; nothing was pressed") }
                 request = ["verb": "highlight", "target": "point", "pointer": true, "nearPoint": nearPoint, "speechHold": true,
                            "seconds": RealtimeScreenVerbs.pointHoldSeconds, "expectApp": expectApp ?? appName]
@@ -650,6 +701,43 @@ nonisolated enum RealtimeOpenAppTool {
             return .failure(RealtimeToolRefusal(error: "requestEncodingFailed", message: "the request could not be encoded"))
         }
         return .success(String(decoding: data, as: UTF8.self))
+    }
+
+    /// drag_item's drop end as a call of its own, aimed by `to_name` or the `to_` position; resolved like the start.
+    static func dropCall(_ call: RealtimeToolCall) -> RealtimeToolCall {
+        var drop = call
+        (drop.elementName, drop.x, drop.y, drop.point) = (call.toName, call.toX, call.toY, call.toPoint)
+        (drop.toName, drop.toX, drop.toY, drop.toPoint, drop.underPointer) = (nil, nil, nil, nil, false)
+        // A drop's position is the point itself (the harness judges what is there); a name still resolves.
+        drop.pointerAction = PointerAction.drag.rawValue
+        return drop
+    }
+
+    /// Where a position came from, for the pointer: this turn's screenshot, the owner's pointer, or a live
+    /// read of the Dock and the menu bar. A find's offer of another app's element is never one (`notOffered`).
+    static let pointerSources: Set<OfferSource> = [.screenshotPoint, .vision, .underPointer, .systemUI]
+
+    /// The `pointer` action a screen call takes at its target, or nil for the AX name path (owner's ruling
+    /// 2026-10-31: app API, then AX names, then pixels). The caller's own action always; a drag always;
+    /// press_element with nothing AX names at the point, or an element of ANOTHER app at a position or on
+    /// the Dock / menu bar — the harness's name verbs read only the app in front.
+    static func pointerRoute(for call: RealtimeToolCall, target: RealtimeScreenTarget, expectApp: String?) -> PointerAction? {
+        if call.name == RealtimeVoiceVerbs.dragItemName { return .drag }
+        if let explicit = call.pointerAction.flatMap(PointerAction.init(rawValue:)) { return explicit }
+        guard call.name == RealtimeVoiceVerbs.pressElementName, !call.open else { return nil }
+        guard let candidate = target.candidate else { return .click }
+        guard !candidate.inPopup, pointerSources.contains(target.source) else { return nil }
+        return target.app == nil || (expectApp != nil && target.app != expectApp) ? .click : nil
+    }
+
+    /// A `pointer` request at AppKit points. The label is the model's (or AX's) words for the target: shown
+    /// on a card and word-checked by the kernel, so only a plausible one goes (the harness refuses the rest).
+    static func pointerRequest(_ action: PointerAction, at point: CGPoint, to: CGPoint? = nil, label: String?) -> [String: Any] {
+        var request: [String: Any] = ["verb": "pointer", "action": action.rawValue,
+                                      "nearPoint": ["x": Double(point.x.rounded()), "y": Double(point.y.rounded())]]
+        if let to { request["to"] = ["x": Double(to.x.rounded()), "y": Double(to.y.rounded())] }
+        if let label, UntrustedText(label).isPlausibleControlLabel { request["label"] = label }
+        return request
     }
 
     static func harnessResponseObject(_ responseLine: String) -> [String: Any] {
@@ -721,6 +809,7 @@ nonisolated enum RealtimeOpenAppTool {
         offered: [RealtimeMenuCandidate]? = nil,
         offeredApp: String? = nil,
         screenTarget: RealtimeScreenTarget? = nil,
+        dropTarget: RealtimeScreenTarget? = nil,
         screens: [CGRect]? = nil,
         screenshotDisplay: CGRect? = nil,
         answer: @escaping @Sendable (String) -> String,
@@ -773,19 +862,37 @@ nonisolated enum RealtimeOpenAppTool {
                 }
             }.value, waited: false, harnessResponse: nil)
         }
-        // point_at of a Dock icon or a menu-bar item (`SystemUITargets`): another process's, so the
-        // harness's highlight (which resolves in the front app) cannot reach it; Clicky's own overlay can.
-        if call.name == RealtimeVoiceVerbs.pointAtName, let screenTarget, screenTarget.source == .systemUI,
-           let candidate = screenTarget.candidate {
+        // point_at of a Dock icon or a menu-bar item (`SystemUITargets`), or of another app's element at a position:
+        // another process's, so the harness's highlight (which resolves in the front app) cannot reach it; Clicky's
+        // own overlay can.
+        func pointedLocally(_ candidate: RealtimeScreenCandidate) async -> RealtimeToolDispatch {
             await MainActor.run {
                 ElementPointer.show(candidate.frame, role: candidate.role, seconds: RealtimeScreenVerbs.pointHoldSeconds, followSpeech: true)
             }
             return finished(["ok": true, "status": NSNull(), "error": NSNull(), "message": NSNull(), "verification": NSNull(),
                              "pointedAt": candidate.described, "where": candidate.position], waited: false, harnessResponse: nil)
         }
+        if call.name == RealtimeVoiceVerbs.pointAtName, call.pointerAction == nil, let screenTarget, screenTarget.source == .systemUI,
+           let candidate = screenTarget.candidate {
+            return await pointedLocally(candidate)
+        }
+        // find_on_screen in "Dock" / "menu bar" / "Control Centre" while another app is in front: the window read would be
+        // appMismatch (and could auto-focus the Dock); those surfaces publish their items, read them there instead.
+        // An open Control Centre panel in front is a window like any other, and reads as one.
+        if call.name == RealtimeVoiceVerbs.findOnScreenName, let appName = call.appName, SystemUITargets.namesSurface(appName) {
+            let front = await Task.detached { AccessibilityTreeWalker.focusedApplication()?.bundleIdentifier }.value
+            let panelInFront = front == AgentLoop.controlCentreBundleIdentifier && RealtimeVoiceVerbs.foldedTokens(appName).joined().hasPrefix("control")
+            if !panelInFront {
+                let displays: [CGRect]
+                if let screens { displays = screens } else { displays = await MainActor.run { NSScreen.screens.map(\.frame) } }
+                let found = await Task.detached { SystemUITargets.readSplit(frontApp: front, answer: answer, screens: displays) }.value
+                return finished(SystemUITargets.findResult(words: call.words ?? "", visible: found.visible, hidden: found.hidden),
+                                waited: false, harnessResponse: nil)
+            }
+        }
         var firstLine: String
         let call = await withFrontmostApp(call)
-        switch harnessRequestLine(for: call, offered: offered, offeredApp: offeredApp, screenTarget: screenTarget) {
+        switch harnessRequestLine(for: call, offered: offered, offeredApp: offeredApp, screenTarget: screenTarget, dropTarget: dropTarget) {
         case .success(let line): firstLine = line
         case .failure(let refusal): return finished(toolResult(for: refusal), waited: false, harnessResponse: nil)
         }
@@ -797,8 +904,14 @@ nonisolated enum RealtimeOpenAppTool {
             let identity = await Task.detached { RealtimeVoiceVerbs.appIdentity(named: appName) }.value
             var resolvedLine: Result<String, RealtimeToolRefusal>?
             if case .resolved(let bundleIdentifier, _) = identity {
+                // Another app's element at a screenshot position (a Dock icon, a menu-bar icon): pointed at on the overlay.
+                if call.name == RealtimeVoiceVerbs.pointAtName, call.pointerAction == nil, let screenTarget, let candidate = screenTarget.candidate,
+                   screenTarget.source == .screenshotPoint || screenTarget.source == .underPointer,
+                   screenTarget.app != bundleIdentifier {
+                    return await pointedLocally(candidate)
+                }
                 resolvedLine = harnessRequestLine(for: call, expectApp: bundleIdentifier, offered: offered, offeredApp: offeredApp,
-                                                  screenTarget: screenTarget)
+                                                  screenTarget: screenTarget, dropTarget: dropTarget)
             }
             guard case .resolved(let bundleIdentifier, let name) = identity, case .success(let line)? = resolvedLine else {
                 // Resolved but refused: notOffered, the offer being another app's.
@@ -906,7 +1019,7 @@ nonisolated enum RealtimeOpenAppTool {
                     (system, hidden) = await Task.detached { SystemUITargets.readSplit(frontApp: front, answer: answer, screens: displays) }.value
                 }
                 let resolved = RealtimeAnnotate.resolve(shapes, snapshotResponse: snapshot, screens: displays, pointer: screenTarget, system: system,
-                                                        hidden: hidden)
+                                                        hidden: hidden, screenshotDisplay: screenshotDisplay)
                 if !resolved.drawn.isEmpty { await MainActor.run { AnnotationOverlay.show(resolved.drawn) } }
                 if !windowRead, !resolved.drawn.isEmpty { result["error"] = NSNull(); result["message"] = NSNull() }
                 result["ok"] = !resolved.drawn.isEmpty
@@ -968,7 +1081,8 @@ nonisolated enum RealtimeOpenAppTool {
         }
         // A point says WHAT it pointed at and where the pointer went, and names a
         // control that is gone as that — not as "no app by that name".
-        if call.name == RealtimeVoiceVerbs.pointAtName {
+        let sentPointer = harnessResponseObject(firstLine)["verb"] as? String == HarnessVerb.pointer.rawValue
+        if call.name == RealtimeVoiceVerbs.pointAtName, !sentPointer {
             var aimed = response
             // A position or the owner's pointer whose element the walk cannot
             // name: the ring goes to the point instead, said to be approximate.
@@ -985,14 +1099,18 @@ nonisolated enum RealtimeOpenAppTool {
             if aimed["approximate"] as? Bool == true { result["approximate"] = true }
             return checked(finished(result, waited: false, harnessResponse: aimed))
         }
+        // A pointer's ok is POSTED: the result says what was at the point and whether anything changed (`pointerResult`).
+        func shaped(_ response: [String: Any]) -> [String: Any] {
+            let result = toolResult(fromHarnessResponse: response)
+            if sentPointer { return pointerResult(result, response: response) }
+            return RealtimeHandsVerbs.result(pressedResult(result, call: call, target: screenTarget, response: response),
+                                             call: call, target: screenTarget, response: response)
+        }
         guard response["error"] as? String == "confirmationRequired", let ticket = response["ticket"] as? String,
               case .success(let ticketLine) = harnessRequestLine(for: call, ticket: ticket, expectApp: named?.bundleIdentifier,
                                                                     offered: offered, offeredApp: offeredApp,
-                                                                    screenTarget: screenTarget) else {
-            return checked(finished(RealtimeHandsVerbs.result(pressedResult(toolResult(fromHarnessResponse: response), call: call, target: screenTarget,
-                                                                            response: response),
-                                                              call: call, target: screenTarget, response: response),
-                                    waited: false, harnessResponse: response))
+                                                                    screenTarget: screenTarget, dropTarget: dropTarget) else {
+            return checked(finished(shaped(response), waited: false, harnessResponse: response))
         }
         await onConfirmationRequired?()
         let deadline = startedUptime + confirmationWaitSeconds
@@ -1000,10 +1118,7 @@ nonisolated enum RealtimeOpenAppTool {
             try? await Task.sleep(for: .milliseconds(pollMilliseconds))
             response = harnessResponseObject(await Task.detached { answer(ticketLine) }.value)
         } while response["error"] as? String == "confirmationPending" && ProcessInfo.processInfo.systemUptime < deadline
-        return checked(finished(RealtimeHandsVerbs.result(pressedResult(toolResult(fromHarnessResponse: response), call: call, target: screenTarget,
-                                                                            response: response),
-                                                          call: call, target: screenTarget, response: response),
-                                waited: true, harnessResponse: response))
+        return checked(finished(shaped(response), waited: true, harnessResponse: response))
     }
 
     /// press_element's result says WHAT was pressed; the rest is the harness's.
@@ -1031,6 +1146,54 @@ nonisolated enum RealtimeOpenAppTool {
             : (clicked?.described ?? candidate.described)
         if result["error"] as? String == "notFound" { result["error"] = "elementNotFound" }
         return result
+    }
+
+    /// A `pointer` answer as the model reads it. The harness's ok means the events were POSTED, not that they
+    /// worked (slice A's contract): a press, drag or wheel stands as ok only when its own witnesses saw a change
+    /// (a window came or went, the pixels round the point changed, the front app changed); otherwise it is
+    /// `notVerified`. A hover changes nothing by design and stands on being posted. What was at each end is
+    /// said from the harness's own read there — app-written names quoted and escaped.
+    static func pointerResult(_ result: [String: Any], response: [String: Any]) -> [String: Any] {
+        var result = result
+        if let target = response["target"] as? [String: Any] { result["target"] = pointerTargetDescription(target) }
+        if let drop = response["dropTarget"] as? [String: Any] { result["dropTarget"] = pointerTargetDescription(drop) }
+        guard result["ok"] as? Bool == true else { return result }
+        let verification = response["verification"] as? [String: Any]
+        let changed = verification?["status"] as? String == "changed"
+        result["evidence"] = verification?["evidence"] ?? NSNull()
+        let action = response["action"] as? String ?? "click"
+        if action == PointerAction.move.rawValue {
+            result["verification"] = changed ? "changed" : "noChangeSeen"
+            let under = (response["performed"] as? [String: Any])?["underPointerAfter"] as? [String: Any]
+            result["underPointerNow"] = under.flatMap { entry in (entry["name"] as? String).map { name in
+                "\(RealtimeScreenVerbs.roleWord(role: entry["role"] as? String ?? "")) \(UntrustedText(name).forDisplay)" } } ?? NSNull()
+            return result
+        }
+        guard changed else {
+            result["ok"] = false
+            result["error"] = "notVerified"
+            result["verification"] = "notObserved"
+            result["message"] = "the \(action) was sent, and nothing that can be seen changed: no window appeared or went, the pixels round "
+                + "the point stayed the same and the app in front stayed. Look at the screen again before repeating it"
+            return result
+        }
+        result["verification"] = "confirmed"
+        return result
+    }
+
+    /// "menu-bar icon \"Battery\" of Control Centre, in the menu bar" — what the harness read at a point.
+    static func pointerTargetDescription(_ target: [String: Any]) -> String {
+        let role = (target["role"] as? String).map { RealtimeScreenVerbs.roleWord(role: $0, subrole: target["subrole"] as? String) }
+        var text: String
+        if let name = target["name"] as? String {
+            text = "\(role ?? "something") \(UntrustedText(name).forDisplay)"
+        } else {
+            text = target["source"] as? String == "ocr" ? "words drawn there" : "something AX gives no name"
+        }
+        if let app = target["app"] as? String { text += " of \(UntrustedText(app).forDisplay)" }
+        let places = ["menuBar": "in the menu bar", "dock": "in the Dock", "desktop": "on the desktop", "window": "in a window"]
+        if let place = places[target["surface"] as? String ?? ""] { text += ", \(place)" }
+        return text
     }
 
     /// point_at's result: ok, what was actually pointed at ("group \"Models\""),
@@ -1109,6 +1272,7 @@ nonisolated enum RealtimeOpenAppTool {
         }
         // A press, and typing, need an element there; a point or a scroll can be approximate.
         let isPress = call.name == RealtimeVoiceVerbs.pressElementName || call.name == RealtimeVoiceVerbs.typeTextName
+            || call.name == RealtimeVoiceVerbs.dragItemName
         // "Click the first result" (A8: Gemini's aim pressed Shopping, a system dialog, or
         // nothing): the owner's ordinal before "result" picks from the page's results,
         // whatever the model aimed at. No results, or no such place: the model's aim stands.
@@ -1154,6 +1318,11 @@ nonisolated enum RealtimeOpenAppTool {
                     + "words of its title), then call this again with the name it returns.")
             }
             guard let point = inRange else { break positioned }
+            // The caller asked for the universal hand at this point (`pointerAction`): it is acted on as it is, and the
+            // harness's `pointer` reads and judges what is there itself — no snap to a name here.
+            if call.pointerAction != nil, call.elementName == nil {
+                return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .vision))
+            }
             if let name = call.elementName, let offer = chosen.offer, let source = chosen.source {
                 let named = offer.elements.filter { $0.name == name }
                 // Several of that name: the point decides only by lying inside exactly one, never "nearest" (B12).
@@ -1194,7 +1363,7 @@ nonisolated enum RealtimeOpenAppTool {
                 && !RealtimeScreenVerbs.textInputRoles.contains(candidate.role) && candidate.role != "AXStaticText":
                 return refuse("noFieldAtPoint", "no text field is at that position; nothing was typed. " + typeByNameAdvice)
             // AX names something there it cannot press (a canvas inside a labelled group): the
-            // named press goes by sight at the model's own point (`visionClick`).
+            // named press goes to the pointer at the model's own point.
             case .element(let candidate, _) where call.name == RealtimeVoiceVerbs.pressElementName && call.elementName != nil
                 && !candidate.axCanPress:
                 return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .vision))
@@ -1211,18 +1380,10 @@ nonisolated enum RealtimeOpenAppTool {
                 if call.name == RealtimeVoiceVerbs.typeTextName {
                     return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .screenshotPoint))
                 }
-                // Nothing AX can name: the last rung is sight — only for a name, which the words
-                // read at the point must match (`visionClick`). A bare position names nothing to read.
-                if call.name == RealtimeVoiceVerbs.pressElementName, call.elementName != nil {
-                    return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .vision))
-                }
-                if isPress {
-                    // Scenario run 2026-10-18T20-45-38Z B6 "post it", B12 "click download": "if it is drawn there with words on
-                    // it" was read as a question for the owner ("please tell me what they are"); the owner had already named it.
-                    return refuse("nothingAtPoint", "nothing that can be pressed is at that position; nothing was pressed. Do not ask the "
-                        + "owner what it says: call find_on_screen now with the words they used for it, then press_element with the name "
-                        + "it returns.")
-                }
+                // Nothing AX can name (a menu-bar glyph, an icon, something drawn): the last rung is the
+                // pointer at that point (owner's ruling 2026-10-31), judged by the harness by what is there —
+                // the words OCR reads, or nothing readable.
+                if isPress { return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .vision)) }
                 return .success(RealtimeScreenTarget(candidate: nil, point: point, app: nil, source: .screenshotPoint))
             }
         }
@@ -1446,7 +1607,8 @@ nonisolated enum RealtimeOpenAppTool {
 
     /// Each kind of claim, and the tools whose ok result is its receipt.
     static let kindClaims: [(phrases: [String], receipts: Set<String>)] = [
-        (pressClaimPhrases, [RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName]),
+        (pressClaimPhrases, [RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName, RealtimeVoiceVerbs.pressKeysName]),
+        (["dragged", "dropped"], [RealtimeVoiceVerbs.dragItemName]),
         (pointClaimPhrases, [RealtimeVoiceVerbs.pointAtName, RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressMenuName,
                              RealtimeVoiceVerbs.annotateName, RealtimeVoiceVerbs.pressMenuBarItemName]),
         (["scrolled"], [RealtimeVoiceVerbs.scrollName]),

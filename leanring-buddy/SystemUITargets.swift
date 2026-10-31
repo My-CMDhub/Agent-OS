@@ -108,6 +108,36 @@ nonisolated enum SystemUITargets {
         return (all.filter(onScreen), all.filter { !onScreen($0) })
     }
 
+    /// find_on_screen asked about the Dock or the menu bar by name while another app is in front (owner's live test
+    /// 2026-10-31: `app: "Dock"` came back appMismatch, `app: "Control Centre"` appNotInstalled). Words only, so a
+    /// running app called "Dock" never matches by accident: the surface's own words.
+    static func namesSurface(_ appName: String) -> Bool {
+        ["dock", "menubar", "statusbar", "menubaricons", "menuextras", "systemuiserver", "controlcentre", "controlcenter"]
+            .contains(RealtimeVoiceVerbs.foldedTokens(appName).joined())
+    }
+
+    /// find_on_screen's answer from the Dock and the menu bar: the targets whose names share a word with `words`
+    /// (all of them when none does), at most `maximumScreenCandidates`, each as find_on_screen lists one.
+    static func findResult(words: String, visible: [Target], hidden: [Target]) -> [String: Any] {
+        let wanted = Set(RealtimeVoiceVerbs.foldedTokens(withoutPlaceWords(words))).subtracting(RealtimeVoiceVerbs.ignoredQueryWords)
+        func shares(_ target: Target) -> Bool {
+            target.aliases.contains { alias in RealtimeVoiceVerbs.foldedTokens(alias).contains { word in
+                wanted.contains { RealtimeVoiceVerbs.tokensMatch(word, $0) } } }
+        }
+        let matching = visible.filter(shares)
+        let listed = (matching.isEmpty ? visible : matching).prefix(RealtimeScreenVerbs.maximumScreenCandidates)
+        var result: [String: Any] = [
+            "ok": true, "status": NSNull(), "error": NSNull(), "message": NSNull(), "verification": NSNull(),
+            "candidates": listed.map { ["name": $0.name, "kind": RealtimeScreenVerbs.roleWord(role: $0.role, subrole: $0.subrole),
+                                        "where": $0.place.rawValue] },
+            "note": (matching.isEmpty ? "nothing there shares a word with that; this is all that is named. " : "")
+                + "These are on the Dock and the menu bar, not in a window: point_at, press_element or annotate one by its name. "
+                + "Anything visible that is not listed (an icon with no name) is aimed by its position in the screenshot."
+        ]
+        if let off = hidden.first(where: shares) { result["hidden"] = hiddenNote(off.place) }
+        return result
+    }
+
     /// A front-app read that found no window (the desktop with nothing open):
     /// the system UI is still worth asking. A policy or lock refusal is not.
     static let noWindowErrors: Set<String> = ["noFocusedWindow", "noRootNode"]

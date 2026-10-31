@@ -672,6 +672,12 @@ nonisolated struct RealtimeAnnotation: Equatable, Sendable {
     let name: String?
     let underPointer: Bool
     let text: String?
+    /// A position in the screenshot instead of a name (owner's ruling 2026-10-31: an icon with no name can be
+    /// boxed): x, y as the call's own, or Gemini's native [y, x] point. Fractions once `RealtimePointFormat` ran.
+    var x: Double? = nil
+    var y: Double? = nil
+    var point: [Double]? = nil
+    var hasPosition: Bool { (x != nil && y != nil) || point?.count == 2 }
 }
 
 /// `annotate` (owner 2026-10-05: "draw something meaningful while explaining"):
@@ -708,8 +714,9 @@ nonisolated enum RealtimeAnnotate {
             guard kinds.contains(shape.shape) else {
                 return refuse("invalidShape", "shape is one of \(kinds.joined(separator: ", ")); nothing was drawn")
             }
-            guard shape.name != nil || shape.underPointer else {
-                return refuse("missingTarget", "each shape needs the element's name as printed on screen, or underPointer; nothing was drawn")
+            guard shape.name != nil || shape.underPointer || shape.hasPosition else {
+                return refuse("missingTarget", "each shape needs the element's name as printed on screen, its position in the screenshot, "
+                    + "or underPointer; nothing was drawn")
             }
             if shape.shape == "label", shape.text == nil {
                 return refuse("invalidLabel", "a label shape needs its text; nothing was drawn")
@@ -727,12 +734,27 @@ nonisolated enum RealtimeAnnotate {
     /// there, or names two, is not drawn and says why.
     /// `system`: the Dock and menu bar (`SystemUITargets`), asked only for a name the
     /// window has none of — the front app always wins.
+    /// `screenshotDisplay`: what a shape's position (fractions) is a point in; a position draws a square round
+    /// that point, anywhere on the screen — used when the shape has no name, or its name is not found.
     static func resolve(_ shapes: [RealtimeAnnotation], snapshotResponse: [String: Any], screens: [CGRect],
                         pointer: RealtimeScreenTarget?, system: [SystemUITargets.Target] = [],
-                        hidden: [SystemUITargets.Target] = []) -> (drawn: [Drawn], notDrawn: [String]) {
+                        hidden: [SystemUITargets.Target] = [], screenshotDisplay: CGRect? = nil) -> (drawn: [Drawn], notDrawn: [String]) {
         var drawn: [Drawn] = []
         var notDrawn: [String] = []
+        func atPosition(_ shape: RealtimeAnnotation) -> Bool {
+            guard shape.hasPosition else { return false }
+            guard let display = screenshotDisplay, let x = shape.x, let y = shape.y,
+                  let point = RealtimeScreenVerbs.screenshotPoint(x: x, y: y, display: display) else {
+                notDrawn.append("\(shape.shape): its position is not a point in this turn's screenshot (x and y are fractions from 0 to 1)")
+                return true
+            }
+            let side = ElementPointer.approximateSidePoints
+            drawn.append(Drawn(kind: shape.shape, frame: CGRect(x: point.x - side / 2, y: point.y - side / 2, width: side, height: side),
+                               label: shape.text, described: "\(shape.shape) round the position given"))
+            return true
+        }
         for shape in shapes {
+            if shape.name == nil, !shape.underPointer, atPosition(shape) { continue }
             if shape.underPointer {
                 guard let pointer else { notDrawn.append("\(shape.shape): nothing was read under the owner's pointer"); continue }
                 let side = ElementPointer.approximateSidePoints
@@ -755,6 +777,8 @@ nonisolated enum RealtimeAnnotate {
                 } else if elsewhere.count > 1 {
                     notDrawn.append("\(shape.shape): \(elsewhere.count) things are called \(UntrustedText(name).forDisplay): "
                         + elsewhere.prefix(5).map(\.described).joined(separator: "; ") + "; ask the owner which one")
+                } else if atPosition(shape) {
+                    continue
                 } else {
                     notDrawn.append("\(shape.shape): nothing visible is called \(UntrustedText(name).forDisplay)"
                         + (SystemUITargets.matches(name, among: hidden).first.map { "; " + SystemUITargets.hiddenNote($0.place) } ?? ""))

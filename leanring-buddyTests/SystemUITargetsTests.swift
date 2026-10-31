@@ -188,10 +188,12 @@ struct SystemUITargetsTests {
         let target = try RealtimeOpenAppTool.liveTarget(named: "Safari", found: RealtimeScreenLookup(candidates: [dockSafari.candidate], app: nil,
                                                                                                     systemUI: true), nothing: "pointed at").get()
         #expect(target.source == .systemUI && target.candidate?.frame == dockSafari.frame)
-        // And a press can never be aimed there: its request is refused, not sent.
-        let press = RealtimeOpenAppTool.harnessRequestLine(for: RealtimeToolCall(callID: "p", name: RealtimeVoiceVerbs.pressElementName,
-                                                                                 appName: "com.apple.finder", elementName: "Safari"),
-                                                           expectApp: "com.apple.finder", screenTarget: target)
-        if case .success = press { Issue.record("a press was aimed at the Dock") }
+        // Owner's ruling 2026-10-31 (was: a press there is refused): a press found on the Dock goes to the harness's
+        // `pointer` at the icon's centre, which judges the Dock item as launch / open would — never the in-window click.
+        let press = try RealtimeOpenAppTool.harnessRequestLine(for: RealtimeToolCall(callID: "p", name: RealtimeVoiceVerbs.pressElementName,
+                                                                                     appName: "com.apple.finder", elementName: "Safari"),
+                                                               expectApp: "com.apple.finder", screenTarget: target).get()
+        let request = try #require(try JSONSerialization.jsonObject(with: Data(press.utf8)) as? [String: Any])
+        #expect(request["verb"] as? String == "pointer" && request["action"] as? String == "click")
     }
 }

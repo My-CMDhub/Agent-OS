@@ -426,17 +426,16 @@ struct RealtimeScreenVerbsTests {
         #expect(named.candidate == models)
     }
 
-    @Test func nothingAtThePositionPointsApproximatelyButNeverPresses() async throws {
+    /// Owner's ruling 2026-10-31 changed the press half (was nothingAtPoint): nothing AX names at the position is
+    /// pressed by the universal hand at that point, which judges what is drawn there.
+    @Test func nothingAtThePositionPointsApproximatelyAndPressesByPointer() async throws {
         let point = RealtimeToolCall(callID: "a", name: "point_at", appName: "Cursor", x: 0.5, y: 0.5)
         let approximate = try await resolve(point, display: screen).get()
         #expect(approximate.candidate == nil)
         #expect(approximate.point == CGPoint(x: 720, y: 450))
         let press = RealtimeToolCall(callID: "b", name: "press_element", appName: "Cursor", x: 0.5, y: 0.5)
-        if case .failure(let refusal) = await resolve(press, display: screen) {
-            #expect(refusal.error == "nothingAtPoint")
-            // B6/B12 2026-10-18: the old wording sent the voice to ask the owner what the button said.
-            #expect(refusal.message.contains("find_on_screen") && refusal.message.contains("Do not ask the owner"))
-        } else { Issue.record("pressed nothing") }
+        let pressed = try await resolve(press, display: screen).get()
+        #expect(pressed.candidate == nil && pressed.source == .vision && pressed.point == CGPoint(x: 720, y: 450))
         // A password box or Clicky itself under the point: refused for both.
         if case .failure(let refusal) = await resolve(point, display: screen, hit: { _ in .refused(error: "secureField") }) {
             #expect(refusal.error == "secureField")
@@ -787,7 +786,8 @@ struct RealtimeScreenVerbsTests {
         // Approximate: a ring at the point, never a press.
         let ring = object(try line("point_at", target(nil, CGPoint(x: 720, y: 450), source: .screenshotPoint)).get())
         #expect(ring["target"] as? String == "point")
-        #expect(error(line("press_element", target(nil, CGPoint(x: 720, y: 450), source: .screenshotPoint))) == "nothingAtPoint")
+        // Owner's ruling 2026-10-31 (was nothingAtPoint): a press with nothing AX names there is the pointer's, at the point.
+        #expect(object(try line("press_element", target(nil, CGPoint(x: 720, y: 450), source: .screenshotPoint)).get())["verb"] as? String == "pointer")
     }
 
     /// A label with no action of its own is pressed through the element that

@@ -47,7 +47,8 @@ nonisolated enum AgentPlan {
         RealtimeVoiceVerbs.renameItemName: [["name", "new_name"]], RealtimeVoiceVerbs.moveItemsName: [["names", "to_folder"]],
         RealtimeVoiceVerbs.setValueName: [["name", "value"]], RealtimeVoiceVerbs.createReminderName: [["title"]],
         RealtimeVoiceVerbs.createEventName: [["title"]], RealtimeVoiceVerbs.pressMenuBarItemName: [["name"]],
-        RealtimeVoiceVerbs.readCalendarName: [["when"]]
+        RealtimeVoiceVerbs.readCalendarName: [["when"]], RealtimeVoiceVerbs.pressKeysName: [["keys"]],
+        RealtimeVoiceVerbs.dragItemName: [["to_name"], ["to_x", "to_y"], ["to_point"]]
     ]
 
     /// Anthropic tool JSON. Each step is a flat object: `tool` plus that
@@ -67,6 +68,8 @@ nonisolated enum AgentPlan {
                 "words": text("find_menu_items / find_on_screen / search_help: a few words."),
                 "path": ["type": "array", "items": ["type": "string"], "description": "press_menu: the menu path, split at \" > \"."],
                 "shortcut": text("press_menu: instead of a path, the shortcut an App verbs line shows."),
+                "keys": text("press_keys: the shortcut or key, for example \"cmd+s\" or \"escape\"."),
+                "to_name": text("drag_item: where to drop it, by the name find_on_screen lists."),
                 "x": number("Step 1 only: across the screenshot, 0 to 1."),
                 "y": number("Step 1 only: down the screenshot, 0 to 1."),
                 "text": text("type_text: exactly the text to type."),

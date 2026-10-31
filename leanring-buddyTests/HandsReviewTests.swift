@@ -273,7 +273,10 @@ struct HandsReviewTests {
             visibleBounds: CGRect(x: 0, y: 0, width: 1440, height: 900), draftScope: false) else {
             Issue.record("Return in a chat composer did not ask"); return
         }
-        #expect(RealtimeVoiceVerbs.allToolNames.allSatisfy { !$0.contains("key") && !$0.contains("return") && !$0.contains("enter") })
+        // Owner's ruling 2026-10-31 (slice B): ONE voice tool presses keys, press_keys, and only through the harness's `key`
+        // (`RealtimeOpenAppTool.harnessRequestLine`), whose Return is judged above. No other tool names a key.
+        #expect(RealtimeVoiceVerbs.allToolNames.filter { $0.contains("key") || $0.contains("return") || $0.contains("enter") }
+                == [RealtimeVoiceVerbs.pressKeysName])
         // Return sends in a chat composer: a line break there is refused by the paste gate.
         #expect(HarnessPaste.gateRefusal(bundleIdentifier: "net.whatsapp.WhatsApp", role: "AXTextArea", mode: .insert, secureInputOn: false,
                                          focusedMightBeSecure: false, focusIsOnTarget: true)?.code == "lineBreakNeedsDocumentEditor")

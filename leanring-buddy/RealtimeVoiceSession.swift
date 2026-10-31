@@ -733,13 +733,22 @@ final class RealtimeVoiceSession {
                     try? await connection.sendContextText(RealtimeOpenAppTool.screenshotSizeContextLine(pixels: screenshotPixelSize))
                 }
                 // Where, in the tools' own space; what AX names there; the words under it.
-                guard connection.turn === marks, let pointer = RealtimeOpenAppTool.keyDownPointerTarget(hit: pointerHit, mouse: mouse) else { return }
-                marks.keyDownPointer = pointer
-                let appName = pointer.app.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first?.localizedName }
+                guard connection.turn === marks else { return }
                 let position = screenshotDisplayFrame.flatMap {
                     RealtimeOpenAppTool.pointerPosition(mouse: mouse, display: $0, format: connection.pointFormat, stack: connection.stack,
                                                         pixels: screenshotPixelSize)
                 }
+                // Over a password box, Clicky or a refused app: no name and no aim, but where it is still goes (owner
+                // 2026-10-31: "name what is under my pointer" is answered from the screenshot at that position).
+                guard let pointer = RealtimeOpenAppTool.keyDownPointerTarget(hit: pointerHit, mouse: mouse) else {
+                    if let line = RealtimeOpenAppTool.ownerPointerContextLine(candidate: nil, appName: nil, position: position,
+                                                                              wordsUnderPointer: nil, closeUpSent: false) {
+                        try? await connection.sendContextText(line)
+                    }
+                    return
+                }
+                marks.keyDownPointer = pointer
+                let appName = pointer.app.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first?.localizedName }
                 if let line = RealtimeOpenAppTool.ownerPointerContextLine(candidate: pointer.candidate, appName: appName, position: position,
                                                                           wordsUnderPointer: closeUp?.wordsUnderPointer, closeUpSent: closeUp != nil) {
                     try? await connection.sendContextText(line)

@@ -244,6 +244,17 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         // The vision click, the owner-pointer close-up, OCR pointer snapping and
         // annotate, live on the canvas mimic page in a Chrome window it opens
         // and closes by identity; cards denied. Refuses --harness-dry-run.
+        // One voice press_element by a screenshot position through the voice turn's own path, then the
+        // same press again; the window list is the witness, cards denied (VoiceHandsProbe).
+        if CommandLine.arguments.contains("--voice-hands-probe") {
+            confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
+            Task { @MainActor in
+                await VoiceHandsProbe.run(harness: self.harnessServer, confirmations: self.confirmations)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         if CommandLine.arguments.contains("--vision-probe") {
             confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
             Task { @MainActor in

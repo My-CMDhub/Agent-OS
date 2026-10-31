@@ -69,6 +69,9 @@ nonisolated enum RealtimeVoiceVerbs {
     static let briefSessionsName = "brief_sessions"
     /// The owner's calendar for a day or range through EventKit, the range read from their words (`CalendarReader`, 2026-10-25).
     static let readCalendarName = "read_calendar"
+    /// The universal hand's drag and keys (owner's ruling 2026-10-31): the harness's `pointer` drag and `key`.
+    static let dragItemName = "drag_item"
+    static let pressKeysName = "press_keys"
     /// Declared to the agent loop only: the voice hands a multi-step request to do_task.
     static let agentOnlyToolNames: Set<String> = [findMenuBarItemsName, pressMenuBarItemName, listOpenAppsName]
     /// Declared to the voice model only, never to the agent loop: session text is model text a page may have
@@ -79,7 +82,7 @@ nonisolated enum RealtimeVoiceVerbs {
                                             openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName, goToFolderName,
                                             findFileName, renameItemName, moveItemsName, setValueName, createReminderName,
                                             createEventName, findMenuBarItemsName, pressMenuBarItemName, listOpenAppsName,
-                                            briefSessionsName, readCalendarName]
+                                            briefSessionsName, readCalendarName, dragItemName, pressKeysName]
 
     /// Read-only: they look or point and change nothing in any app, so they skip
     /// the heard-vs-named check (live 2026-09-30: four turns lost to "settings"
@@ -89,7 +92,7 @@ nonisolated enum RealtimeVoiceVerbs {
 
     /// The tools that aim at an element on screen, by name, position or pointer.
     static func isScreenTargetTool(_ toolName: String) -> Bool {
-        toolName == pointAtName || toolName == pressElementName
+        toolName == pointAtName || toolName == pressElementName || toolName == dragItemName
     }
 
     /// Tools that take an element's name, a screenshot position or the
@@ -101,7 +104,8 @@ nonisolated enum RealtimeVoiceVerbs {
 
     /// Tools whose app may be omitted: the app in front is meant.
     static func takesFrontmostApp(_ toolName: String) -> Bool {
-        readOnlyToolNames.contains(toolName) || [pressElementName, scrollName, typeTextName, closeName, setValueName].contains(toolName)
+        readOnlyToolNames.contains(toolName) || [pressElementName, scrollName, typeTextName, closeName, setValueName, dragItemName,
+                                                 pressKeysName].contains(toolName)
     }
 
     /// Enough to hold every View-menu toggle of a native app and short enough
@@ -139,30 +143,30 @@ nonisolated enum RealtimeVoiceVerbs {
                                      description: "Only when the owner says \"this one\", \"here\" or \"where my cursor is\": true for the "
                                         + "element under their mouse pointer. Otherwise leave it out and aim by name; it is refused unless they said so. "
                                         + "A request that names the thing (\"click sign in\", \"where is the phone number\") is never underPointer.")
+        return [name] + positionOnly(format, gemini: gemini) + [underPointer]
+    }
+
+    /// The position alone, in the format's units; `prefix` names a second one (drag_item's "to_").
+    private static func positionOnly(_ format: RealtimePointFormat, gemini: Bool, prefix: String = "") -> [Parameter] {
+        let whereIt = prefix.isEmpty ? "Where it is" : "Where to drop it"
         switch (format, gemini) {
         case (.fractions, _):
-            return [name,
-                    Parameter(name: "x", kind: .number, required: false,
-                              description: "Where it is in the screenshot you were given this turn, across, as a fraction from 0 (left edge) to 1 (right edge)."),
-                    Parameter(name: "y", kind: .number, required: false,
-                              description: "Where it is in that screenshot, down, as a fraction from 0 (top edge) to 1 (bottom edge)."),
-                    underPointer]
+            return [Parameter(name: prefix + "x", kind: .number, required: false,
+                              description: whereIt + " in the screenshot you were given this turn, across, as a fraction from 0 (left edge) to 1 (right edge)."),
+                    Parameter(name: prefix + "y", kind: .number, required: false,
+                              description: whereIt + " in that screenshot, down, as a fraction from 0 (top edge) to 1 (bottom edge).")]
         case (.native, true):
             // Gemini's trained pointing format: a [y, x] point normalised to 0-1000.
-            return [name,
-                    Parameter(name: "point", kind: .numberList, required: false,
-                              description: "Where it is in the screenshot you were given this turn, as [y, x], each normalized to 0-1000 "
-                                + "(0,0 is the top-left of the image, 1000,1000 the bottom-right)."),
-                    underPointer]
+            return [Parameter(name: prefix + "point", kind: .numberList, required: false,
+                              description: whereIt + " in the screenshot you were given this turn, as [y, x], each normalized to 0-1000 "
+                                + "(0,0 is the top-left of the image, 1000,1000 the bottom-right).")]
         case (.native, false):
             // OpenAI's: pixels of the image it was shown.
-            return [name,
-                    Parameter(name: "x", kind: .number, required: false,
-                              description: "Where it is in the screenshot you were given this turn, across, in pixels from its left edge "
+            return [Parameter(name: prefix + "x", kind: .number, required: false,
+                              description: whereIt + " in the screenshot you were given this turn, across, in pixels from its left edge "
                                 + "(its size in pixels is given in a system line)."),
-                    Parameter(name: "y", kind: .number, required: false,
-                              description: "Where it is in that screenshot, down, in pixels from its top edge."),
-                    underPointer]
+                    Parameter(name: prefix + "y", kind: .number, required: false,
+                              description: whereIt + " in that screenshot, down, in pixels from its top edge.")]
         }
     }
 
@@ -277,19 +281,37 @@ nonisolated enum RealtimeVoiceVerbs {
                         Parameter(name: "words", description: "A few words for the element, as printed on screen, for example \"models\".")
                     ]),
         Declaration(name: pointAtName,
-                    description: "Moves the on-screen pointer to one element and highlights it, so the owner can see it. Changes nothing. Give its "
-                        + "name as find_on_screen returned it, OR its position in the screenshot as x and y fractions, OR underPointer. The result "
-                        + "says what was actually pointed at and where; say that. If it says approximate, say it is approximate.",
+                    description: "Moves the on-screen pointer to one thing anywhere on the screen (a window, the Dock, the menu bar, the desktop) "
+                        + "and highlights it, so the owner can see it. Changes nothing. Give its name as find_on_screen returned it, OR its "
+                        + "position in the screenshot, OR underPointer; never invent a name. The result says what was actually pointed at and "
+                        + "where; say that. If it says approximate, say it is approximate.",
                     parameters: [appInFront] + positionParameters),
         Declaration(name: pressElementName,
-                    description: "Presses (clicks) one element in the window of the app in front. Aim it exactly as point_at: a name find_on_screen "
-                        + "returned, OR x and y fractions of the screenshot, OR underPointer. Safety checks run first; a destructive press shows the "
-                        + "owner a card to approve, and some things are refused. The result says what was pressed and whether it was verified. "
-                        + "Something visible that find_on_screen does not list (drawn on a canvas, a picture-only icon) is pressed by sight: give "
-                        + "its x and y AND the words printed on it; it is clicked only where those words are read back.",
+                    description: "Presses (clicks) one thing anywhere on the screen: a button, link or row in a window, a Dock icon, a menu-bar "
+                        + "icon, a desktop item. Aim it as point_at: the name find_on_screen lists for it, OR, when nothing lists it (an icon "
+                        + "with no name, something drawn), its position in the screenshot, OR underPointer; never invent a name. Safety checks "
+                        + "run first; a destructive press shows the owner a card to approve, and some things are refused. The result says what "
+                        + "was pressed and whether anything changed.",
                     parameters: [appInFront] + positionParameters
                         + [Parameter(name: "open", kind: .flag, required: false,
-                                     description: "true to open the item instead of clicking it: opens a folder in Finder; files and apps ask the owner first.")]),
+                                     description: "true to open the item instead of clicking it: opens a folder in Finder; files and apps ask the owner first."),
+                           Parameter(name: "double", kind: .flag, required: false, description: "true to double-click it."),
+                           Parameter(name: "right", kind: .flag, required: false,
+                                     description: "true to right-click it (its context menu opens; then press an item of that menu).")]),
+        Declaration(name: dragItemName,
+                    description: "Drags one thing onto another with the mouse: a file onto a folder, an icon to a new place. Each end is a name "
+                        + "find_on_screen lists or a position in the screenshot; never invent a name. Safety checks judge both ends; dropping "
+                        + "onto something destructive (the Trash) asks the owner first. The result says what was at each end and what changed.",
+                    parameters: [appInFront] + positionParameters.filter { $0.name != "underPointer" }
+                        + [Parameter(name: "to_name", required: false, description: "Where to drop it: the name find_on_screen lists for it.")]
+                        + positionOnly(format, gemini: gemini, prefix: "to_")),
+        Declaration(name: pressKeysName,
+                    description: "Presses a keyboard shortcut or one key in the app in front, for example \"cmd+shift+n\", \"escape\", "
+                        + "\"return\", \"down\", \"page down\". A shortcut that belongs to a menu item presses that item; arrow, tab, escape, "
+                        + "page and space keys are pressed as keys; any other shortcut asks the owner first. Never types text: use type_text.",
+                    parameters: [appInFront,
+                                 Parameter(name: "keys", description: "The keys joined by +, modifiers first: cmd, shift, opt, ctrl, then one key, "
+                                           + "for example \"cmd+s\" or \"escape\".")]),
         Declaration(name: scrollName,
                     description: "Scrolls the window of the app in front, as a trackpad would. Aim it at an area by a name find_on_screen "
                         + "returned, x and y fractions of the screenshot, or underPointer; leave them out for the window's main area. The "
@@ -324,13 +346,15 @@ nonisolated enum RealtimeVoiceVerbs {
                                            description: "The browser, for example \"Google Chrome\". Leave it out for the default browser.")]),
         Declaration(name: annotateName,
                     description: "Draws on the owner's screen, while you explain, to show where things are: a box, circle, arrow, "
-                        + "underline or short label round elements of the window in front, each named exactly as point_at names it (as "
-                        + "printed on screen), or round the owner's pointer. Changes nothing in any app; the drawing clears after a few "
+                        + "underline or short label round things anywhere on the screen, each named exactly as point_at names it (as "
+                        + "printed on screen), or at its position in the screenshot when it has no name (an icon), or round the owner's "
+                        + "pointer. Changes nothing in any app; the drawing clears after a few "
                         + "seconds or at the owner's next press. At most \(RealtimeAnnotate.maximumShapes) shapes. The result says what was drawn.",
                     parameters: [appInFront,
                                  Parameter(name: "shapes", kind: .objectList([
                                     Parameter(name: "shape", description: "What to draw.", options: RealtimeAnnotate.kinds),
                                     Parameter(name: "name", required: false, description: "The element's name exactly as printed on screen."),
+                                 ] + positionOnly(format, gemini: gemini) + [
                                     Parameter(name: "underPointer", kind: .flag, required: false,
                                               description: "true to draw round what is under the owner's mouse pointer instead of a name."),
                                     Parameter(name: "text", required: false,
@@ -666,7 +690,7 @@ nonisolated enum RealtimeVoiceVerbs {
     /// and pointed at only in the app the call named.
     static func isAppScopedMenuTool(_ toolName: String) -> Bool {
         [findMenuItemsName, pressMenuName, findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
-         annotateName, searchHelpName].contains(toolName)
+         annotateName, searchHelpName, dragItemName, pressKeysName].contains(toolName)
     }
 
     /// One name an app answers to: its file name in an Applications folder, or
@@ -822,6 +846,10 @@ nonisolated enum RealtimeVoiceVerbs {
             return "Finding \(call.elementName.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2026}"
         case pressElementName:
             return "Pressing \(call.elementName.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2026}"
+        case dragItemName:
+            return "Dragging \(call.elementName.map(RealtimeOpenAppTool.captionName) ?? "it")\u{2026}"
+        case pressKeysName:
+            return "Pressing \(call.shortcut.map(RealtimeOpenAppTool.captionName) ?? "keys")\u{2026}"
         case scrollName:
             let way = call.direction.flatMap(ScrollDirection.init(rawValue:)).map { " \($0.rawValue)" } ?? ""
             return "Scrolling\(way)\u{2026}"
@@ -892,26 +920,31 @@ nonisolated enum RealtimePointFormat: String, CaseIterable, Sendable {
     /// two numbers) is dropped, never guessed.
     static func normalised(_ call: RealtimeToolCall, format: RealtimePointFormat, stack: VoiceStackChoice,
                            screenshotPixels: CGSize?) -> RealtimeToolCall {
-        guard format == .native, RealtimeVoiceVerbs.aimsAtScreen(call.name) else { return call }
+        guard format == .native, RealtimeVoiceVerbs.aimsAtScreen(call.name) || call.name == RealtimeVoiceVerbs.annotateName else { return call }
         var normalised = call
-        switch stack {
-        case .geminiLive:
-            normalised.x = nil
-            normalised.y = nil
-            if let point = call.point, point.count == 2 {
-                normalised.x = point[1] / 1000
-                normalised.y = point[0] / 1000
-            }
-        case .openAIRealtime:
-            guard let x = call.x, let y = call.y, let size = screenshotPixels, size.width > 0, size.height > 0 else {
-                normalised.x = nil
-                normalised.y = nil
-                break
-            }
-            normalised.x = x / Double(size.width)
-            normalised.y = y / Double(size.height)
+        (normalised.x, normalised.y) = fractions(x: call.x, y: call.y, point: call.point, stack: stack, screenshotPixels: screenshotPixels)
+        if call.name == RealtimeVoiceVerbs.dragItemName {
+            (normalised.toX, normalised.toY) = fractions(x: call.toX, y: call.toY, point: call.toPoint, stack: stack, screenshotPixels: screenshotPixels)
+        }
+        normalised.shapes = call.shapes?.map { shape in
+            var shape = shape
+            (shape.x, shape.y) = fractions(x: shape.x, y: shape.y, point: shape.point, stack: stack, screenshotPixels: screenshotPixels)
+            return shape
         }
         return normalised
+    }
+
+    /// One position as fractions, or nil, nil when it cannot be read.
+    private static func fractions(x: Double?, y: Double?, point: [Double]?, stack: VoiceStackChoice,
+                                  screenshotPixels: CGSize?) -> (Double?, Double?) {
+        switch stack {
+        case .geminiLive:
+            guard let point, point.count == 2 else { return (nil, nil) }
+            return (point[1] / 1000, point[0] / 1000)
+        case .openAIRealtime:
+            guard let x, let y, let size = screenshotPixels, size.width > 0, size.height > 0 else { return (nil, nil) }
+            return (x / Double(size.width), y / Double(size.height))
+        }
     }
 }
 
@@ -1138,6 +1171,11 @@ nonisolated enum RealtimeDecisionTrace {
         if let x = call.x { arguments["x"] = x }
         if let y = call.y { arguments["y"] = y }
         if call.underPointer { arguments["underPointer"] = true }
+        // The universal hand's action (2026-10-31); a drag's drop end like its start.
+        if let action = call.pointerAction { arguments["pointerAction"] = action }
+        if let toX = call.toX { arguments["toX"] = toX }
+        if let toY = call.toY { arguments["toY"] = toY }
+        if let toName = call.toName { arguments["toName"] = RealtimeScreenVerbs.isPrivateName(toName) ? privatePathPlaceholder[0] : toName }
         if let path = call.path { arguments["path"] = RealtimeVoiceVerbs.isPrivateMenuPath(path) ? privatePathPlaceholder : path }
         if let shortcut = call.shortcut { arguments["shortcut"] = shortcut }
         if let direction = call.direction { arguments["direction"] = direction }
@@ -1157,7 +1195,7 @@ nonisolated enum RealtimeDecisionTrace {
     /// are the owner's request, and agent-loop.log already keeps only lengths.
     static func lengthOnlyArguments(for call: RealtimeToolCall) -> [String: Any] {
         var arguments = loggedArguments(for: call)
-        for key in ["words", "name"] {
+        for key in ["words", "name", "toName"] {
             if let text = arguments.removeValue(forKey: key) as? String { arguments[key + "Length"] = text.count }
         }
         if let path = arguments.removeValue(forKey: "path") as? [String] { arguments["pathSteps"] = path.count }

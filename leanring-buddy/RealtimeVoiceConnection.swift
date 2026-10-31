@@ -1009,6 +1009,7 @@ final class RealtimeVoiceConnection {
         let offered = isScreenTarget ? nil : chosen.offer?.candidates
         let offeredApp = isScreenTarget ? nil : chosen.offer?.app
         var screenTarget: RealtimeScreenTarget?
+        var dropTarget: RealtimeScreenTarget?
         var screenRefusal: RealtimeToolRefusal?
         if isScreenTarget {
             let rung = RungBox()
@@ -1034,8 +1035,10 @@ final class RealtimeVoiceConnection {
                     }.value
                     let found = await RealtimeOpenAppTool.liveLookup(named: name, app: app, answer: harnessAnswer, screens: screens,
                                                                      screenshotDisplay: turn.screenshotDisplayFrame)
-                    // Pointing only, never pressing: a name the window lacks may be a Dock icon or a menu-bar item.
-                    guard call.name == RealtimeVoiceVerbs.pointAtName else { return found }
+                    // A name the window lacks may be a Dock icon or a menu-bar item: pointed at, or (owner's ruling
+                    // 2026-10-31) pressed or dragged by the pointer, which judges what is there itself.
+                    guard [RealtimeVoiceVerbs.pointAtName, RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.dragItemName]
+                        .contains(call.name), !call.open else { return found }
                     return await RealtimeOpenAppTool.withSystemUIFallback(found, named: name, frontApp: app, answer: harnessAnswer, screens: screens)
                 },
                 lookUpResults: {
@@ -1051,12 +1054,38 @@ final class RealtimeVoiceConnection {
                     rung.value = answered.rung
                     return answered.hit
                 }
-            switch resolved {
-            case .success(let target):
+            // drag_item's drop end: aimed exactly as its start, by name or position (`dropCall`).
+            var resolvedDrop: Result<RealtimeScreenTarget, RealtimeToolRefusal>?
+            if call.name == RealtimeVoiceVerbs.dragItemName, case .success = resolved {
+                resolvedDrop = await RealtimeOpenAppTool.resolveScreenTarget(
+                    call: RealtimeOpenAppTool.dropCall(call), thisTurn: thisTurnScreenOffer, previousTurn: turn.previousTurnScreenOffer,
+                    followUpConfirmed: heard?.followUpConfirmed, confirmedByYes: heard?.confirmedByYes == true,
+                    now: ProcessInfo.processInfo.systemUptime, screenshotDisplay: turn.screenshotDisplayFrame,
+                    screenshotStale: RealtimeOpenAppTool.screenshotIsStale(decisions: Array(turn.decisions[..<decisionIndex]),
+                                                                          freshLookOutcome: turn.freshLookOutcome),
+                    keyDownPointer: nil, heard: heardWords, ordinalWords: nil,
+                    lookUp: { name in
+                        let appName = call.appName
+                        let app = await Task.detached { () -> String? in
+                            guard let appName else { return nil }
+                            if case .resolved(let bundle, _) = RealtimeVoiceVerbs.appIdentity(named: appName) { return bundle }
+                            return appName
+                        }.value
+                        let found = await RealtimeOpenAppTool.liveLookup(named: name, app: app, answer: harnessAnswer, screens: screens,
+                                                                         screenshotDisplay: turn.screenshotDisplayFrame)
+                        return await RealtimeOpenAppTool.withSystemUIFallback(found, named: name, frontApp: app, answer: harnessAnswer, screens: screens)
+                    }) { point in
+                        await RealtimeOpenAppTool.screenHit(at: point, app: call.appName, answer: harnessAnswer, screens: screens,
+                                                            primaryDisplayHeight: primaryHeight, deadlineSeconds: hitTestDeadlineSeconds).hit
+                    }
+            }
+            switch (resolved, resolvedDrop) {
+            case (.failure(let refusal), _), (_, .failure(let refusal)?): screenRefusal = refusal
+            case (.success(let target), let drop):
                 screenTarget = target
+                if case .success(let end)? = drop { dropTarget = end }
                 // Which rung named it: the offer, the key-down pointer, the walk or AX.
                 turn.decisions[decisionIndex].snappedBy = target.source == .screenshotPoint ? (rung.value ?? "none") : target.source.rawValue
-            case .failure(let refusal): screenRefusal = refusal
             }
             turn.decisions[decisionIndex].offeredElementsBeforeCall = (thisTurnScreenOffer ?? turn.previousTurnScreenOffer)?.elements
         } else {
@@ -1102,7 +1131,7 @@ final class RealtimeVoiceConnection {
                 agentCardOpened?()
             }
             dispatch = await RealtimeOpenAppTool.dispatch(call, offered: offered, offeredApp: offeredApp, screenTarget: screenTarget,
-                                                          screenshotDisplay: turn.screenshotDisplayFrame,
+                                                          dropTarget: dropTarget, screenshotDisplay: turn.screenshotDisplayFrame,
                                                           answer: heard?.unnamedApp == nil ? harnessAnswer : unnamedAppAnswer(harnessAnswer),
                                                           confirmationWaitSeconds: confirmationWaitSeconds,
                                                           onConfirmationRequired: onConfirmationRequired)
@@ -1151,7 +1180,7 @@ final class RealtimeVoiceConnection {
                         guard isCurrent() else { return recordSuperseded(autoFocus: autoFocus) }
                         JarvisNotch.shared.handle(.toolCall(title: RealtimeVoiceVerbs.intentTitle(for: call)))
                         dispatch = await RealtimeOpenAppTool.dispatch(call, offered: offered, offeredApp: offeredApp,
-                                                                      screenTarget: screenTarget, answer: harnessAnswer,
+                                                                      screenTarget: screenTarget, dropTarget: dropTarget, answer: harnessAnswer,
                                                                       confirmationWaitSeconds: confirmationWaitSeconds,
                                                                       onConfirmationRequired: onConfirmationRequired)
                         autoFocus["retried"] = true

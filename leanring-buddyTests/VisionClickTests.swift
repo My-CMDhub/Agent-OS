@@ -141,22 +141,23 @@ struct VisionClickTests {
         (try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]) ?? [:]
     }
 
-    @Test func aVisionTargetBecomesAVisionClickAndAPointerTargetCarriesTheOwnersPointer() throws {
+    /// Owner's ruling 2026-10-31 (universal screen hands) changed this: a press with nothing AX names at the point
+    /// was `visionClick` (words read back, front window only); it is now the harness's `pointer` click at the point,
+    /// judged there by what is drawn, the model's words as its label.
+    @Test func aVisionTargetBecomesAPointerClickAndAPointerTargetToo() throws {
         let press = RealtimeToolCall(callID: "p", name: "press_element", appName: "Google Chrome", elementName: "Launch demo", x: 0.24, y: 0.54)
         let seen = RealtimeScreenTarget(candidate: nil, point: CGPoint(x: 340, y: 410), app: nil, source: .vision)
         let line = object(try RealtimeOpenAppTool.harnessRequestLine(for: press, expectApp: "com.google.Chrome", screenTarget: seen).get())
-        #expect(line["verb"] as? String == "visionClick")
-        #expect(line["title"] as? String == "Launch demo")
+        #expect(line["verb"] as? String == "pointer" && line["action"] as? String == "click")
+        #expect(line["label"] as? String == "Launch demo")
         #expect((line["nearPoint"] as? [String: Double])?["x"] == 340)
-        #expect(line["expectApp"] as? String == "com.google.Chrome")
-        #expect(line["ownerPointed"] == nil)
-        // "Click this one", nothing AX can name under the owner's pointer.
+        // "Click this one", nothing AX can name under the owner's pointer: the pointer, at their pointer.
         let pointed = RealtimeToolCall(callID: "q", name: "press_element", appName: "Google Chrome", underPointer: true)
         let mouse = RealtimeScreenTarget(candidate: nil, point: CGPoint(x: 500, y: 300), app: nil, source: .underPointer)
         let owner = object(try RealtimeOpenAppTool.harnessRequestLine(for: pointed, expectApp: "com.google.Chrome", screenTarget: mouse).get())
-        #expect(owner["verb"] as? String == "visionClick")
-        #expect(owner["ownerPointed"] as? Bool == true)
-        #expect(owner["title"] == nil)
+        #expect(owner["verb"] as? String == "pointer")
+        #expect((owner["nearPoint"] as? [String: Double]) == ["x": 500, "y": 300])
+        #expect(owner["label"] == nil)
         // A vision target is a press's alone: pointing at it is the approximate ring, as before.
         let point = RealtimeToolCall(callID: "r", name: "point_at", appName: "Google Chrome", elementName: "Launch demo", x: 0.24, y: 0.54)
         #expect(object(try RealtimeOpenAppTool.harnessRequestLine(for: point, expectApp: "com.google.Chrome", screenTarget: seen).get())["verb"] as? String
@@ -174,6 +175,7 @@ struct VisionClickTests {
         let named = RealtimeToolCall(callID: "a", name: "press_element", appName: "Google Chrome", elementName: "Launch demo", x: 0.25, y: 0.5)
         let target = try await resolve(named, hit: .nothing).get()
         #expect(target.source == .vision && target.candidate == nil && target.point == CGPoint(x: 360, y: 450))
+        // Owner's ruling 2026-10-31: these `.vision` targets go to the harness's `pointer`, not `visionClick`.
         // AX names something there that it cannot press (a canvas's labelled group): sight, at the model's point.
         let group = RealtimeScreenCandidate(name: "Game area", role: "AXGroup", frame: CGRect(x: 200, y: 300, width: 400, height: 300),
                                             position: "centre", pressable: false)
@@ -182,10 +184,9 @@ struct VisionClickTests {
         // A pressable control there is AX's to press: never sight.
         let button = RealtimeScreenCandidate(name: "Start", role: "AXButton", frame: CGRect(x: 340, y: 440, width: 60, height: 20), position: "centre")
         #expect(try await resolve(named, hit: .element(button, app: "com.google.Chrome")).get().source == .screenshotPoint)
-        // No name: nothing to read back, so nothing is clicked.
+        // No name (owner's ruling 2026-10-31, was nothingAtPoint): the point itself, for the pointer, which judges what is there.
         let bare = RealtimeToolCall(callID: "b", name: "press_element", appName: "Google Chrome", x: 0.25, y: 0.5)
-        if case .failure(let refusal) = await resolve(bare, hit: .nothing) { #expect(refusal.error == "nothingAtPoint") }
-        else { Issue.record("a bare position was clicked") }
+        #expect(try await resolve(bare, hit: .nothing).get().source == .vision)
         // Typing never goes by sight.
         let type = RealtimeToolCall(callID: "c", name: "type_text", appName: "Google Chrome", elementName: "Launch demo", x: 0.25, y: 0.5, text: "hi")
         // Generality suite 2026-10-06: an anonymous field at the point is the FOCUSED field's,
