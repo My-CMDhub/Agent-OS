@@ -149,6 +149,12 @@ struct RealtimeScreenVerbsTests {
             element("AXStaticText", "Brightness", CGRect(x: 546, y: 435, width: 65, height: 18), actions: [], source: "value"), brightness]]
         #expect(RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: displays, words: "brightness", screens: [window])
                     .candidates.compactMap { $0.jsonObject["level"] as? String } == ["44%"])
+        // macOS 27: read from the thumb's place on the track, the level is said "about".
+        brightness["levelApproximate"] = true
+        let approximate: [String: Any] = ["ok": true, "walkStopReasons": [String](), "windowFrame": frameJSON(window), "elements": [
+            element("AXWindow", "Displays", window), brightness]]
+        #expect(RealtimeScreenVerbs.screenOffer(fromSnapshotResponse: approximate, words: "brightness", screens: [window])
+                    .candidates.compactMap { $0.jsonObject["level"] as? String } == ["about 44%"])
         #expect(AccessibilityElementNode.percent(0.35, min: nil, max: nil) == 35)
         #expect(AccessibilityElementNode.percent(70, min: 0, max: 200) == 35)
         #expect(AccessibilityElementNode.percent(3, min: nil, max: nil) == nil, "no range is guessed outside 0...1")

@@ -2367,6 +2367,7 @@ final class HarnessServer {
                 if let selected = node.selected { entry["selected"] = selected }
                 if let valueLength = node.valueLength, !node.mightBeSecure { entry["valueLength"] = valueLength }
                 if let level = node.levelPercent { entry["levelPercent"] = level }
+                if node.levelPercent != nil, node.levelIsApproximate { entry["levelApproximate"] = true }
                 listed.append(entry)
                 next = listed.count - 1
             }

@@ -762,10 +762,10 @@ extension GeneralitySuite {
         return [element] + ((children as? [AXUIElement]) ?? []).flatMap { descendants($0, pages: pages) }
     }
 
-    nonisolated static func loginPasswordField() -> AXUIElement? {
+    nonisolated static func loginPasswordField() -> (field: AXUIElement, window: AXUIElement, pid: pid_t)? {
         guard let pid = pid(safari) else { return nil }
         for window in CoverageAudit.windows(of: pid) where string(window, kAXTitleAttribute) == Sandbox.loginTitle {
-            if let field = descendants(window).first(where: { string($0, kAXSubroleAttribute) == "AXSecureTextField" }) { return field }
+            if let field = descendants(window).first(where: { string($0, kAXSubroleAttribute) == "AXSecureTextField" }) { return (field, window, pid) }
         }
         return nil
     }
@@ -778,23 +778,30 @@ extension GeneralitySuite {
         // on: measured). Bring Safari forward first; if focusing is not enough, press the box as a click would.
         await MainActor.run { _ = NSRunningApplication.runningApplications(withBundleIdentifier: safari).first?.activate() }
         let focused = await read { () -> Bool in
-            guard let field = loginPasswordField() else { return false }
-            return AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+            guard let found = loginPasswordField() else { return false }
+            return AXUIElementSetAttributeValue(found.field, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
         } ?? false
         var secure = false
+        var click: String?
         for attempt in 0..<15 where !secure {
-            // Neither the AXFocused write nor AXPress focuses Safari 27's web field (live 2026-10-31): click its centre, a mouse
-            // click on our own fixture page only — nothing is typed.
+            // Neither the AXFocused write nor AXPress focuses Safari 27's web field (live 2026-10-31): click it — through the
+            // harness's guarded click (Safari in front, live frame inside the fixture window, the hit at the point is the box
+            // itself), never a raw post that could land in the owner's window. A refusal skips the click; nothing is typed.
             if attempt == 5 {
-                _ = await read { () -> Bool in
-                    guard let field = loginPasswordField(), let frame = AccessibilityTreeWalker.copyFrame(from: field).frame else { return false }
-                    return HarnessHands.postClick(atTopLeft: CGPoint(x: frame.midX, y: frame.midY))
+                click = await read { () -> String in
+                    guard let found = loginPasswordField() else { return "fieldNotFound" }
+                    guard let windowFrame = HarnessHands.liveAppKitFrame(of: found.window), windowFrame.width > 0, windowFrame.height > 0
+                    else { return "windowFrameUnreadable" }
+                    switch HarnessHands.clickElement(found.field, windowFrame: windowFrame, processIdentifier: found.pid) {
+                    case .success: return "clicked"
+                    case .failure(let refusal): return refusal.code
+                    }
                 }
             }
             try? await Task.sleep(for: .milliseconds(200))
             secure = SecureInputState.current().isOn
         }
-        return ["pageOpened": opened, "passwordFocused": focused, "secureInputBefore": secure]
+        return ["pageOpened": opened, "passwordFocused": focused, "secureInputBefore": secure, "passwordClick": click ?? "notNeeded"]
     }
 
     /// "Password characters typed: N" as the fixture page shows it; nil when the page is not readable.

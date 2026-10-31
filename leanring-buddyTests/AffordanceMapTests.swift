@@ -85,6 +85,10 @@ struct AffordanceMapTests {
         let without = try #require(AffordanceMap(menusResponse: ["ok": true, "items": [item(["View", "Scientific"])]],
                                                  bundleIdentifier: "b", version: "1", pid: 1, builtUptime: 0))
         #expect(!without.block(appName: "Calculator", readOnly: false).contains("search_help"))
+        // A top menu that only starts with "Help" (a Helpers menu) is not the Help menu.
+        let helpers = try #require(AffordanceMap(menusResponse: ["ok": true, "items": [item(["Helpers", "Run"])]],
+                                                 bundleIdentifier: "b", version: "1", pid: 1, builtUptime: 0))
+        #expect(!helpers.block(appName: "Calculator", readOnly: false).contains("search_help"))
     }
 
     @Test func aShortcutResolvesToTheOneItemThatOwnsIt() throws {

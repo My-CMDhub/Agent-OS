@@ -41,16 +41,21 @@ struct AccessibilityElementNode {
     /// Controls whose AXValue is a position on a range (`levelPercent`).
     static let levelRoles: Set<String> = ["AXSlider", "AXLevelIndicator", "AXProgressIndicator"]
 
-    /// `current` as a whole percent of its range (`HarnessAdjust.range`'s rule: 0...1 when neither bound is published).
-    /// Where a slider's thumb sits along its track, 0...100, from two AX frames in the same (top-left) space; nil when the
-    /// shapes cannot be a thumb on that track. Vertical sliders grow upwards.
-    nonisolated static func thumbPercent(slider: CGRect, thumb: CGRect, vertical: Bool) -> Int? {
-        let track = vertical ? slider.height - thumb.height : slider.width - thumb.width
-        guard track > 0, slider.insetBy(dx: -1, dy: -1).contains(thumb) else { return nil }
+    /// Where a slider's thumb sits along its track, 0...100, from AX frames in the same (top-left) space. `thumbs` holds
+    /// every AXValueIndicator child's frame (nil: unreadable); anything but exactly one readable thumb gives nil, as does a
+    /// "thumb" a third of the track long or more (a fill bar, not a thumb) or one off the track. `vertical` nil (orientation
+    /// unread): a slider taller than wide is vertical. Vertical sliders grow upwards. A geometry level is approximate.
+    nonisolated static func thumbPercent(slider: CGRect, thumbs: [CGRect?], vertical: Bool?) -> Int? {
+        guard thumbs.count == 1, let thumb = thumbs[0] else { return nil }
+        let vertical = vertical ?? (slider.height > slider.width)
+        let (length, thumbLength) = vertical ? (slider.height, thumb.height) : (slider.width, thumb.width)
+        let track = length - thumbLength
+        guard track > 0, thumbLength < length / 3, slider.insetBy(dx: -1, dy: -1).contains(thumb) else { return nil }
         let travelled = vertical ? slider.maxY - thumb.maxY : thumb.minX - slider.minX
         return Int((min(max(travelled / track, 0), 1) * 100).rounded())
     }
 
+    /// `current` as a whole percent of its range (`HarnessAdjust.range`'s rule: 0...1 when neither bound is published).
     nonisolated static func percent(_ current: Double, min: Double?, max: Double?) -> Int? {
         guard current.isFinite, let range = HarnessAdjust.range(min: min, max: max, current: current) else { return nil }
         return Int(((current - range.lowerBound) / (range.upperBound - range.lowerBound) * 100).rounded())
@@ -231,6 +236,8 @@ struct AccessibilityElementNode {
     /// A slider's or level indicator's position as a whole percent of its AXMinValue...AXMaxValue
     /// (unseen R12 2026-10-24: "a little under a third" for a volume of 35). nil for other roles.
     let levelPercent: Int?
+    /// `levelPercent` came from the thumb's place on the track (`thumbPercent`), not a published value: "about" on the wire.
+    let levelIsApproximate: Bool
 
     /// The live cross-process handle. Present only on nodes produced by a real
     /// walk — hand-built nodes in tests leave it nil.
@@ -263,7 +270,8 @@ struct AccessibilityElementNode {
         accessibilityElement: AXUIElement? = nil,
         frameReadFailed: Bool = false,
         childrenReadFailed: Bool = false,
-        levelPercent: Int? = nil
+        levelPercent: Int? = nil,
+        levelIsApproximate: Bool = false
     ) {
         self.role = role
         self.subrole = subrole
@@ -282,6 +290,7 @@ struct AccessibilityElementNode {
         self.selected = selected
         self.valueLength = valueLength
         self.levelPercent = levelPercent
+        self.levelIsApproximate = levelIsApproximate
         self.accessibilityElement = accessibilityElement
         self.frameReadFailed = frameReadFailed
         self.childrenReadFailed = childrenReadFailed
@@ -1160,9 +1169,12 @@ enum AccessibilityTreeWalker {
         // The individual read runs whenever the batch gave no string, as before;
         // only ITS failure is counted, so a batch error it recovered from is not.
         var value = batched?.value
+        // The unbatched read's raw answer, kept for a level control's number (a batch failure must not lose the level).
+        var unbatchedRawValue: AnyObject?
         if value == nil {
             var rawValue: AnyObject?
             let valueError = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &rawValue)
+            unbatchedRawValue = rawValue
             value = (rawValue as? String).flatMap { $0.isEmpty ? nil : $0 }
             // Same predicate as the subrole (only noValue / attributeUnsupported mean
             // "none"), counted only where the value could be on-screen text.
@@ -1187,28 +1199,13 @@ enum AccessibilityTreeWalker {
                 selected: $0.rawSelected, selectedError: $0.selectedError)
         }
 
-        // Two extra reads, sliders and level indicators only.
+        // Two extra reads, sliders and level indicators only. Without a batch, the individual value read's answer.
         var levelPercent = AccessibilityElementNode.levelRoles.contains(role)
-            ? (batched?.rawValue as? NSNumber).flatMap { current in
+            ? ((batched.map { $0.rawValue } ?? unbatchedRawValue) as? NSNumber).flatMap { current in
                 AccessibilityElementNode.percent(current.doubleValue, min: copyNumberAttribute(from: element, attribute: kAXMinValueAttribute),
                                                  max: copyNumberAttribute(from: element, attribute: kAXMaxValueAttribute))
               } : nil
-        // macOS 27 (2026-10-31): System Settings' Brightness slider publishes no AXValue and no min/max; its thumb, a child
-        // AXValueIndicator, still has a frame, and the thumb's place along the track IS the level (measured 78.5 of 178 pt = 44%).
-        if levelPercent == nil, role == "AXSlider", let sliderFrame = AccessibilityTreeWalker.copyFrame(from: element).frame {
-            var kids: AnyObject?
-            if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &kids) == .success,
-               let thumb = (kids as? [AXUIElement])?.first(where: { kid in
-                   var kidRole: AnyObject?
-                   return AXUIElementCopyAttributeValue(kid, kAXRoleAttribute as CFString, &kidRole) == .success && kidRole as? String == "AXValueIndicator"
-               }),
-               let thumbFrame = AccessibilityTreeWalker.copyFrame(from: thumb).frame {
-                var orientation: AnyObject?
-                AXUIElementCopyAttributeValue(element, kAXOrientationAttribute as CFString, &orientation)
-                levelPercent = AccessibilityElementNode.thumbPercent(slider: sliderFrame, thumb: thumbFrame,
-                                                                     vertical: orientation as? String == kAXVerticalOrientationValue)
-            }
-        }
+        var levelIsApproximate = false
 
         // AXFrame is not an SDK constant and not every app publishes it, so fall
         // back to position + size rather than reporting a frameless node.
@@ -1237,6 +1234,19 @@ enum AccessibilityTreeWalker {
             ?? copyChildElements(from: element)
         if childReadResult.readFailed {
             subtreesLostToFailedReads += 1
+        }
+
+        // macOS 27 (2026-10-31): System Settings' Brightness slider publishes no AXValue and no min/max; its thumb, a child
+        // AXValueIndicator, still has a frame, and the thumb's place along the track is the level (measured 78.5 of 178 pt = 44%).
+        // Approximate: a geometry reading, said "about" on the wire.
+        if levelPercent == nil, role == "AXSlider", let sliderFrame = frameReadResult.frame {
+            let thumbs = childReadResult.children
+                .filter { copyStringAttribute(from: $0, attribute: kAXRoleAttribute) == "AXValueIndicator" }
+                .map { copyFrame(from: $0).frame }
+            let orientation = copyStringAttribute(from: element, attribute: kAXOrientationAttribute)
+            let vertical: Bool? = orientation == kAXVerticalOrientationValue ? true : orientation == kAXHorizontalOrientationValue ? false : nil
+            levelPercent = AccessibilityElementNode.thumbPercent(slider: sliderFrame, thumbs: thumbs, vertical: vertical)
+            levelIsApproximate = levelPercent != nil
         }
 
         // Stop descending when this node sits far outside the window. A
@@ -1331,7 +1341,8 @@ enum AccessibilityTreeWalker {
             accessibilityElement: element,
             frameReadFailed: frameReadResult.frame == nil,
             childrenReadFailed: childReadResult.readFailed,
-            levelPercent: levelPercent
+            levelPercent: levelPercent,
+            levelIsApproximate: levelIsApproximate
         )
     }
 

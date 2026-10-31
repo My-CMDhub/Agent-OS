@@ -124,6 +124,8 @@ nonisolated enum RealtimeScreenVerbs {
         var popup = false
         /// A slider's or level indicator's position, percent of its range (`levelPercent` on the wire).
         var levelPercent: Int? = nil
+        /// The level is the thumb's place on the track, not a published value (`levelApproximate` on the wire).
+        var levelApproximate = false
 
         /// press_element has something to click (`RealtimeScreenCandidate.clickTarget`).
         var isClickable: Bool {
@@ -203,7 +205,8 @@ nonisolated enum RealtimeScreenVerbs {
             }
             let kept = PoolElement(name: name, role: role, subrole: subrole, frame: frame, pressable: pressable, parent: parentIndex,
                                    pressAncestor: ancestor, selected: element["selected"] as? Bool, popup: element["popup"] as? Bool == true,
-                                   levelPercent: element["levelPercent"] as? Int)
+                                   levelPercent: element["levelPercent"] as? Int,
+                                   levelApproximate: element["levelApproximate"] as? Bool == true)
             // One per name, except two clickable controls apart from each other (scenario
             // B12 2026-10-03: two "Download" buttons offered as one, and the press guessed).
             let sameName = pool.filter { $0.name == name }
@@ -267,7 +270,8 @@ nonisolated enum RealtimeScreenVerbs {
                 RealtimeScreenCandidate(name: element.name, role: element.role, frame: element.frame,
                                         position: positionPhrase(of: element.frame, neighbours: neighbours, screens: display),
                                         subrole: element.subrole, pressable: element.pressable, pressAncestor: element.pressAncestor,
-                                        selected: element.selected, inPopup: element.popup, levelPercent: element.levelPercent)
+                                        selected: element.selected, inPopup: element.popup, levelPercent: element.levelPercent,
+                                        levelApproximate: element.levelApproximate)
             },
             elementCount: (response["elements"] as? [[String: Any]])?.count ?? 0,
             privacyDroppedCount: hidden,
@@ -551,6 +555,8 @@ nonisolated struct RealtimeScreenCandidate: Equatable, Sendable {
     var inPopup = false
     /// A slider's or level indicator's position, percent of its range: a reading, never the picture's guess.
     var levelPercent: Int? = nil
+    /// `levelPercent` read from the thumb's place on the track: "about 44%", so the model says "about".
+    var levelApproximate = false
 
     var roleWord: String { RealtimeScreenVerbs.roleWord(role: role, subrole: subrole) }
 
@@ -573,7 +579,7 @@ nonisolated struct RealtimeScreenCandidate: Equatable, Sendable {
     var jsonObject: [String: Any] {
         var object: [String: Any] = ["name": name, "role": roleWord, "where": position]
         if let selected { object["selected"] = selected }
-        if let levelPercent { object["level"] = "\(levelPercent)%" }
+        if let levelPercent { object["level"] = levelApproximate ? "about \(levelPercent)%" : "\(levelPercent)%" }
         return object
     }
 

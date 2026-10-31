@@ -237,7 +237,7 @@ nonisolated struct AffordanceMap: Sendable {
             + (listingIncomplete ? "The listing stopped early: an item not here may still exist. " : "")
             // Generality G07 on macOS 27 (2026-10-31, twice): the agent pressed Help > Calculator Help and typed into the
             // Tips window's search, which runs nothing, though search_help returned topics. Said where the Help menu is seen.
-            + (lines.contains { $0.hasPrefix("Help") } ? Self.helpSearchHint : "")
+            + (lines.contains { $0.hasPrefix("Help > ") } ? Self.helpSearchHint : "")
             + "\n" + lines.joined(separator: "\n")
     }
 
