@@ -762,20 +762,35 @@ extension GeneralitySuite {
         return [element] + ((children as? [AXUIElement]) ?? []).flatMap { descendants($0, pages: pages) }
     }
 
+    nonisolated static func loginPasswordField() -> AXUIElement? {
+        guard let pid = pid(safari) else { return nil }
+        for window in CoverageAudit.windows(of: pid) where string(window, kAXTitleAttribute) == Sandbox.loginTitle {
+            if let field = descendants(window).first(where: { string($0, kAXSubroleAttribute) == "AXSecureTextField" }) { return field }
+        }
+        return nil
+    }
+
     /// U03/U06's start: the login page in front with its password box focused, and secure input on (3 s).
     static func openLoginPageFocused() async -> [String: Any] {
         let opened = await openFixturePage(Sandbox.loginFile, title: Sandbox.loginTitle)
+        // macOS 27 / Safari (2026-10-31): an AXFocused write on the web password box reads back success but gives it no
+        // keyboard focus, so secure input never came on and U03/U06 could not set up (a native NSSecureTextField still turns it
+        // on: measured). Bring Safari forward first; if focusing is not enough, press the box as a click would.
+        await MainActor.run { _ = NSRunningApplication.runningApplications(withBundleIdentifier: safari).first?.activate() }
         let focused = await read { () -> Bool in
-            guard let pid = pid(safari) else { return false }
-            for window in CoverageAudit.windows(of: pid) where string(window, kAXTitleAttribute) == Sandbox.loginTitle {
-                if let field = descendants(window).first(where: { string($0, kAXSubroleAttribute) == "AXSecureTextField" }) {
-                    return AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
-                }
-            }
-            return false
+            guard let field = loginPasswordField() else { return false }
+            return AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
         } ?? false
         var secure = false
-        for _ in 0..<15 where !secure {
+        for attempt in 0..<15 where !secure {
+            // Neither the AXFocused write nor AXPress focuses Safari 27's web field (live 2026-10-31): click its centre, a mouse
+            // click on our own fixture page only — nothing is typed.
+            if attempt == 5 {
+                _ = await read { () -> Bool in
+                    guard let field = loginPasswordField(), let frame = AccessibilityTreeWalker.copyFrame(from: field).frame else { return false }
+                    return HarnessHands.postClick(atTopLeft: CGPoint(x: frame.midX, y: frame.midY))
+                }
+            }
             try? await Task.sleep(for: .milliseconds(200))
             secure = SecureInputState.current().isOn
         }
