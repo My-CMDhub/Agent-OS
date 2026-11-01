@@ -272,6 +272,16 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // The focus resolver live (OwnerFocusProbe): posted pointer paths over a TextEdit file it opens,
+        // a menu-bar icon, the Dock and a Finder window it opens; no model, nothing pressed. Then quits.
+        if CommandLine.arguments.contains("--focus-probe") {
+            Task { @MainActor in
+                await OwnerFocusProbe.run(harness: self.harnessServer)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         if CommandLine.arguments.contains("--vision-probe") {
             confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
             Task { @MainActor in

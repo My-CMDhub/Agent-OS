@@ -146,6 +146,8 @@ final class RealtimeVoiceSession {
         var watchdogFired = false
         /// `RealtimeVoiceSession.previousReplyWasHeard`, decided at the press.
         var previousReplyWasHeard = false
+        /// What "this" means this turn: the path watched from the press, resolved at the release.
+        var focus: OwnerFocusTracker?
         init(line: RealtimeLiveTurnLine, pressedUptime: TimeInterval) {
             self.line = line
             self.pressedUptime = pressedUptime
@@ -339,8 +341,8 @@ final class RealtimeVoiceSession {
         connection.onClosed = { [weak self, weak connection] in
             if let self, self.connection === connection { self.connection = nil }
         }
-        connection.onDoTask = { [weak self] goal, heard, startBundle in
-            self?.startAgentLoop(goal: goal, heard: heard, startBundle: startBundle)
+        connection.onDoTask = { [weak self] goal, heard, startBundle, focus in
+            self?.startAgentLoop(goal: goal, heard: heard, startBundle: startBundle, focus: focus)
                 ?? ["ok": false, "status": NSNull(), "error": "noSession", "message": "the task runner is not available"]
         }
         connection.isAgentLoopRunning = { [weak self] in self?.agentLoop?.isRunning == true }
@@ -400,7 +402,8 @@ final class RealtimeVoiceSession {
     /// do_task's answer, at once; the loop runs on and speaks for itself.
     /// `heard`: the owner's words of the turn that called it.
     /// `startBundle`: the app in front at the owner's key-down — where the task began.
-    private func startAgentLoop(goal: String, heard: String, startBundle: String?) -> [String: Any] {
+    /// `focus`: what "this" meant in the turn that asked (`OwnerFocusNote`); a new task's first step is told it.
+    private func startAgentLoop(goal: String, heard: String, startBundle: String?, focus: OwnerFocusNote? = nil) -> [String: Any] {
         agentTask?.cancel()
         // The old task's lines must not speak over the new one.
         agentSpeech?.cancel()
@@ -441,6 +444,7 @@ final class RealtimeVoiceSession {
                                   routeMemory: routeMemory) { [weak self] line in
                 self?.enqueueAgentSpeech(line, final: false)
             }
+            loop.ownerFocus = focus
         }
         let setAside = paused != nil && !resuming
         if setAside { paused?.cancel() }
@@ -613,6 +617,7 @@ final class RealtimeVoiceSession {
         // Barge-in: a new press silences whatever is still being said.
         let previousLineWasOpen = liveTurn != nil
         let previousAudioWasPlaying = isReplyAudioPlaying
+        liveTurn?.focus?.stop()
         writeLiveTurnLine(bargedIn: true)
         let stack = selectedStack
         var line = RealtimeLiveTurnLine(stack: stack.rawValue, turnID: UUID().uuidString,
@@ -623,6 +628,8 @@ final class RealtimeVoiceSession {
         }
         lastTurnID = line.turnID
         liveTurn = LiveTurn(line: line, pressedUptime: uptime)
+        // Watched from the press (passive monitors), the selection read beside the frontmost read.
+        if !probeMode { liveTurn?.focus = OwnerFocusTracker() }
         liveTurn?.previousReplyWasHeard = Self.previousReplyWasHeard(line: line, previousErrorKind: lastLineErrorKind)
             && replyHeardAtSilentPress != false
         replyHeardAtSilentPress = nil
@@ -656,6 +663,7 @@ final class RealtimeVoiceSession {
 
     func released() {
         liveTurn?.releasedUptime = uptime
+        liveTurn?.focus?.stop(at: uptime)
         if !probeMode && !fixtureMic { stopMic() }
         audioContinuation?.finish()
         audioContinuation = nil
@@ -781,7 +789,8 @@ final class RealtimeVoiceSession {
             }
             watchForStopWords(in: marks)
             let closeUp = pointerCloseUp
-            let contextSend = Task { @MainActor in
+            // The pointer line waits for the release: a selection, a circle or a rest replaces it (`OwnerFocusTracker`).
+            let contextSend = Task { @MainActor () -> String? in
                 if let guardLine, connection.turn === marks {
                     try? await connection.sendContextText(guardLine)
                 }
@@ -800,7 +809,7 @@ final class RealtimeVoiceSession {
                     try? await connection.sendContextText(RealtimeOpenAppTool.screenshotSizeContextLine(pixels: screenshotPixelSize))
                 }
                 // Where, in the tools' own space; what AX names there; the words under it.
-                guard connection.turn === marks else { return }
+                guard connection.turn === marks else { return nil }
                 let position = screenshotDisplayFrame.flatMap {
                     RealtimeOpenAppTool.pointerPosition(mouse: mouse, display: $0, format: connection.pointFormat, stack: connection.stack,
                                                         pixels: screenshotPixelSize)
@@ -808,18 +817,13 @@ final class RealtimeVoiceSession {
                 // Over a password box, Clicky or a refused app: no name and no aim, but where it is still goes (owner
                 // 2026-10-31: "name what is under my pointer" is answered from the screenshot at that position).
                 guard let pointer = RealtimeOpenAppTool.keyDownPointerTarget(hit: pointerHit, mouse: mouse) else {
-                    if let line = RealtimeOpenAppTool.ownerPointerContextLine(candidate: nil, appName: nil, position: position,
-                                                                              wordsUnderPointer: nil, closeUpSent: false) {
-                        try? await connection.sendContextText(line)
-                    }
-                    return
+                    return RealtimeOpenAppTool.ownerPointerContextLine(candidate: nil, appName: nil, position: position,
+                                                                       wordsUnderPointer: nil, closeUpSent: false)
                 }
                 marks.keyDownPointer = pointer
                 let appName = pointer.app.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first?.localizedName }
-                if let line = RealtimeOpenAppTool.ownerPointerContextLine(candidate: pointer.candidate, appName: appName, position: position,
-                                                                          wordsUnderPointer: closeUp?.wordsUnderPointer, closeUpSent: closeUp != nil) {
-                    try? await connection.sendContextText(line)
-                }
+                return RealtimeOpenAppTool.ownerPointerContextLine(candidate: pointer.candidate, appName: appName, position: position,
+                                                                   wordsUnderPointer: closeUp?.wordsUnderPointer, closeUpSent: closeUp != nil)
             }
             for pcmChunk in heldAudio { try await connection.appendAudio(pcmChunk) }
             heldAudio = []
@@ -831,7 +835,16 @@ final class RealtimeVoiceSession {
             guard !Task.isCancelled else { return }
             // Bounded by the read's deadline, which started at key-down: already over
             // for any hold longer than ~0.3 s.
-            await contextSend.value
+            let pointerLine = await contextSend.value
+            // The owner's focus, now the path is known; before the release is stated, so it is this turn's.
+            if let liveTurn, let tracker = liveTurn.focus, connection.turn === marks {
+                await sendFocus(tracker, turn: liveTurn, pointerLine: pointerLine, closeUp: closeUp?.jpeg, marks: marks, connection: connection,
+                                screenshot: (try? screenshotResult.get())?.imageData, display: screenshotDisplayFrame,
+                                pixels: screenshotPixelSize)
+            } else if let pointerLine, connection.turn === marks {
+                try? await connection.sendContextText(pointerLine)
+            }
+            guard !Task.isCancelled else { return }
             try await connection.endTurn()
             // Still thinking this long after the release, with not a word or a call:
             // say so. The turn keeps waiting; a late answer still plays.
@@ -861,6 +874,42 @@ final class RealtimeVoiceSession {
             onStateChange?(.idle)
             prewarm()
         }
+    }
+
+    /// The focus at the release (`OwnerFocusTracker.resolve`): a selection, a circle or rests
+    /// replace the key-down pointer line with their own, plus the guarded close-up (on Gemini the
+    /// screenshot goes again after it, so the whole screen stays the last frame); hover keeps the
+    /// pointer line. "This one" (`underPointer`) then aims at the focus. The notch says "Focus: …".
+    private func sendFocus(_ tracker: OwnerFocusTracker, turn: LiveTurn, pointerLine: String?, closeUp: Data?, marks: RealtimeTurnMarks,
+                           connection: RealtimeVoiceConnection, screenshot: Data?, display: CGRect?, pixels: CGSize?) async {
+        let (note, target, measured) = await tracker.resolve(harnessAnswer: harnessAnswer)
+        turn.line.focusRung = measured.rung.rawValue
+        turn.line.focusMs = measured.milliseconds
+        turn.line.focusSelectionReadMs = measured.selectionReadMilliseconds
+        turn.line.focusSamples = measured.samples
+        turn.line.focusDwells = measured.dwells
+        turn.line.focusNames = measured.namesFound
+        turn.line.focusCrop = measured.crop
+        guard connection.turn === marks, !Task.isCancelled else { return }
+        guard let note else {
+            // Hover: the key-down pointer line says it; the agent loop gets the same as a note.
+            if let pointerLine { try? await connection.sendContextText(pointerLine) }
+            marks.ownerFocus = OwnerFocusNote.hoverNote(target: marks.keyDownPointer, closeUp: closeUp)
+            if let name = marks.keyDownPointer?.candidate?.name { JarvisNotch.shared.handle(.focusShown(name: OwnerFocusNote.notchName(name))) }
+            return
+        }
+        if let crop = note.crop {
+            try? await connection.sendScreenshot(crop)
+            if connection.stack == .geminiLive, let screenshot { try? await connection.sendScreenshot(screenshot) }
+        }
+        let line = note.line(position: { point in
+            display.flatMap { RealtimeOpenAppTool.pointerPosition(mouse: point, display: $0, format: connection.pointFormat,
+                                                                   stack: connection.stack, pixels: pixels) }
+        }, closeUpWasSentAtPress: closeUp != nil)
+        try? await connection.sendContextText(line)
+        marks.ownerFocus = note
+        if let target { marks.keyDownPointer = target }
+        JarvisNotch.shared.handle(.focusShown(name: note.notchName))
     }
 
     /// A press the gate heard no words in: no turn, no model call. The barge-in
@@ -1111,6 +1160,16 @@ nonisolated struct RealtimeLiveTurnLine {
     var pointedWhenTelling: String?
     /// The speech gate over the whole hold (`PushToTalkSpeechGate.Summary`); nil when the turn never got that far.
     var speech: PushToTalkSpeechGate.Summary?
+    /// The owner's focus (`OwnerFocusTracker.Measured`), counts only: selection | circle | dwell | hover, ms from the
+    /// release to resolved, the key-down selection read's ms, path samples, rests, names found, and the close-up
+    /// ("attached" or why not). Never the selected text or a name.
+    var focusRung: String?
+    var focusMs: Int?
+    var focusSelectionReadMs: Int?
+    var focusSamples: Int?
+    var focusDwells: Int?
+    var focusNames: Int?
+    var focusCrop: String?
 
     init(stack: String, turnID: String, sessionWasWarm: Bool) {
         self.stack = stack
@@ -1138,7 +1197,10 @@ nonisolated struct RealtimeLiveTurnLine {
             "internalWordsSpoken": internalWordsSpoken,
             "receiptCorrectionSent": receiptCorrectionSent, "pointedWhenTelling": value(pointedWhenTelling),
             "speechVoicedMs": value(speech?.voicedMilliseconds), "speechLoudestDb": value(speech?.loudestDecibels),
-            "speechQuietestDb": value(speech?.quietestDecibels)
+            "speechQuietestDb": value(speech?.quietestDecibels),
+            "focusRung": value(focusRung), "focusMs": value(focusMs), "focusSelectionReadMs": value(focusSelectionReadMs),
+            "focusSamples": value(focusSamples), "focusDwells": value(focusDwells), "focusNames": value(focusNames),
+            "focusCrop": value(focusCrop)
         ]
     }
 }

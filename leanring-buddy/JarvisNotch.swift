@@ -52,6 +52,9 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
     case didntTake(reason: String)
     /// The turn ended and nothing came back: no words, no tool call.
     case noReply
+    /// Just after the release, briefly: what "this" means this turn (`OwnerFocusNote.notchName`,
+    /// caption-safe). Still thinking underneath: it gives way to the reply, a tool call or its hold.
+    case focus(name: String)
 
     var name: String {
         switch self {
@@ -64,6 +67,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .needsYou: return "needsYou"
         case .didntTake: return "didntTake"
         case .noReply: return "noReply"
+        case .focus: return "focus"
         }
     }
 
@@ -71,7 +75,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         switch self {
         case .idle: return .idle
         case .listening, .thinking, .speaking: return .compact
-        case .intent, .proof, .needsYou, .didntTake, .noReply: return .expanded
+        case .intent, .proof, .needsYou, .didntTake, .noReply, .focus: return .expanded
         }
     }
 
@@ -81,6 +85,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .proof: return 1.8
         case .didntTake: return 2.5
         case .noReply: return 2
+        case .focus: return 1.2
         default: return nil
         }
     }
@@ -93,6 +98,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .needsYou: return "Needs your approval"
         case .didntTake: return "Didn\u{2019}t take"
         case .noReply: return "No reply"
+        case .focus(let name): return "Focus: \(name)"
         default: return nil
         }
     }
@@ -125,7 +131,8 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .hotkeyUp:
             return self == .listening ? .thinking : nil
         case .firstAudioWithoutTool:
-            // A late answer clears "No reply".
+            // A late answer clears "No reply"; the reply takes over from the focus line.
+            if case .focus = self { return .speaking }
             return self == .thinking || self == .noReply ? .speaking : nil
         case .replyAudioEnded:
             return self == .speaking ? .idle : nil
@@ -143,18 +150,23 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
                 return nil
             }
         case .holdElapsed:
+            // The focus line was shown over thinking: the turn is still being answered.
+            if case .focus = self { return .thinking }
             return holdSeconds == nil ? nil : .idle
         case .turnEnded:
             switch self {
-            case .thinking, .intent, .needsYou: return .idle
+            case .thinking, .intent, .needsYou, .focus: return .idle
             default: return nil
             }
         case .noReply:
             // Only a turn still waiting: a press, an intent or an answer owns the notch.
             return self == .thinking ? .noReply : nil
+        case .focusShown(let name):
+            // Only over thinking: a reply, a tool call or a new press already owns the notch.
+            return self == .thinking ? .focus(name: name) : nil
         case .turnFailed(let reason):
             switch self {
-            case .thinking, .intent, .needsYou, .noReply: return .didntTake(reason: reason)
+            case .thinking, .intent, .needsYou, .noReply, .focus: return .didntTake(reason: reason)
             default: return nil
             }
         }
@@ -183,6 +195,8 @@ nonisolated enum JarvisNotchEvent: Equatable, Sendable {
     case turnFailed(reason: String)
     /// The turn ended with no words and no tool call, or the watchdog gave up on it.
     case noReply
+    /// The owner's focus this turn, resolved at the release (`OwnerFocusNote.notchName`).
+    case focusShown(name: String)
 }
 
 // MARK: - Reason map
@@ -985,7 +999,7 @@ private struct JarvisNotchView: View {
             LevelBars(level: model.level, still: model.reduceMotion)
         case .speaking:
             LevelBars(level: model.outputLevel, still: model.reduceMotion)
-        case .thinking:
+        case .thinking, .focus:
             JVGlyph(kind: .orbit, size: 14, animated: !model.reduceMotion)
         case .intent, .proof:
             ArcRing(closed: { if case .proof = model.state { return true }; return false }(), still: model.reduceMotion)

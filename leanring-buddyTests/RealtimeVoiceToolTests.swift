@@ -330,7 +330,8 @@ struct RealtimeVoiceToolTests {
             "followUpFirstAudioMs", "releaseToSpokenResultMs", "turnDoneMs", "bargedIn", "errorKind", "notchTransitions",
             "turnEndReason", "watchdogFired", "finishedMs", "staleCompletionsIgnored", "bargedInPreviousTurnId", "previousAudioWasPlaying", "eventTrail",
             "claimedWithoutReceipt", "internalWordsSpoken", "receiptCorrectionSent", "pointedWhenTelling",
-            "speechVoicedMs", "speechLoudestDb", "speechQuietestDb"
+            "speechVoicedMs", "speechLoudestDb", "speechQuietestDb",
+            "focusRung", "focusMs", "focusSelectionReadMs", "focusSamples", "focusDwells", "focusNames", "focusCrop"
         ])
     }
 

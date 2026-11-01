@@ -461,6 +461,9 @@ final class AgentLoop {
     /// The owner's words made it explore-only (`isReadOnlyTask`); `live` sets it
     /// and guards every request (`readOnlyGuardedAnswer`). Here it only tells the model.
     var readOnly = false
+    /// What "this" meant in the voice turn that asked (`OwnerFocusNote`): told once, in the first step,
+    /// with its close-up before that step's screenshot and its positions in that screenshot's pixels.
+    var ownerFocus: OwnerFocusNote?
     /// The live run's carry (the tabs it opened), for a probe to clean up by identity.
     private(set) var liveCarry: MarksCarry?
 
@@ -675,6 +678,11 @@ final class AgentLoop {
                     content.append(["type": "text", "text": hint.text])
                     dependencies.trace(["kind": "routeHint", "run": runID, "goalHash": goalHash, "score": (hint.score * 100).rounded() / 100,
                                         "stepsHinted": hint.steps, "uptime": MeasurementLogFile.roundedUptime(dependencies.uptime())])
+                }
+                if let ownerFocus {
+                    content += Self.focusBlocks(ownerFocus, observation: observation)
+                    dependencies.trace(["kind": "ownerFocus", "run": runID, "rung": ownerFocus.rung.rawValue, "crop": ownerFocus.crop != nil,
+                                        "uptime": MeasurementLogFile.roundedUptime(dependencies.uptime())])
                 }
             }
             content += Self.observationBlocks(observation, step: step)
@@ -1276,6 +1284,18 @@ final class AgentLoop {
         var blocks: [[String: Any]] = [["type": "text", "text": (["Step \(step)."] + observation.lines + [picture]).joined(separator: " ")]]
         if let jpeg = observation.jpeg {
             blocks.append(["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": jpeg.base64EncodedString()]])
+        }
+        return blocks
+    }
+
+    /// The owner's focus for the first step: its line, positions in THIS step's screenshot pixels
+    /// (the computer actions' space), then its close-up — the screenshot comes after, the last image.
+    nonisolated static func focusBlocks(_ focus: OwnerFocusNote, observation: AgentObservation) -> [[String: Any]] {
+        let line = focus.line(position: { OwnerFocusNote.agentPosition($0, frame: observation.frame, pixels: observation.imagePixels) })
+            .replacingOccurrences(of: "system context, not the owner's words: ", with: "When the owner asked, ")
+        var blocks: [[String: Any]] = [["type": "text", "text": SecretScanner.redact(line)]]
+        if let crop = focus.crop {
+            blocks.append(["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": crop.base64EncodedString()]])
         }
         return blocks
     }

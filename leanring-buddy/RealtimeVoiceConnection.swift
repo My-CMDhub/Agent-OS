@@ -75,6 +75,8 @@ final class RealtimeTurnMarks {
     var taskStarted = false
     /// The app in front at the owner's key-down (the frontmost read): a task this turn starts began there.
     var keyDownFrontBundle: String?
+    /// What "this" meant this turn (`OwnerFocusTracker`), resolved at the release: a task this turn starts is told it.
+    var ownerFocus: OwnerFocusNote?
     var ownerTurnTranscript = ""
     var toolResultSentUptime: TimeInterval?
     /// First audio after the LATEST tool result — with find -> press, the words
@@ -827,7 +829,7 @@ final class RealtimeVoiceConnection {
 
     /// do_task: the session starts the agent loop and answers at once
     /// (`RealtimeVoiceSession`), given the goal and the OWNER's own words.
-    var onDoTask: ((_ goal: String, _ heard: String, _ startBundle: String?) -> [String: Any])?
+    var onDoTask: ((_ goal: String, _ heard: String, _ startBundle: String?, _ focus: OwnerFocusNote?) -> [String: Any])?
     /// Whether a task is running: then no system turn may call a tool.
     var isAgentLoopRunning: () -> Bool = { false }
 
@@ -914,7 +916,7 @@ final class RealtimeVoiceConnection {
                     // judged against the owner's words (`turnRefusal` waited for them).
                     let refusal = RealtimeToolRefusal(error: "missingGoal", message: "do_task needs the owner's request as its goal")
                     let heard = turn.heardText
-                    let result = call.goal.flatMap { goal in self?.onDoTask?(goal, heard, turn.keyDownFrontBundle) }
+                    let result = call.goal.flatMap { goal in self?.onDoTask?(goal, heard, turn.keyDownFrontBundle, turn.ownerFocus) }
                         ?? RealtimeOpenAppTool.toolResult(for: refusal)
                     if result["ok"] as? Bool == true { turn.taskStarted = true }
                     dispatch = RealtimeToolDispatch(result: result, harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: nil)

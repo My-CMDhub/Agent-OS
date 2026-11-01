@@ -180,12 +180,13 @@ struct CompanionPanelView: View {
         case .intent(let title): return (.openArc, title)
         case .needsYou: return (.arcDown, approvalsWaiting(max(1, pendingApprovals)))
         case .didntTake: return (.brokenRing, "Didn\u{2019}t take")
+        case .focus(let name): return (.orbit, "Focus: \(name)")
         }
     }
 
     static func glyphTurns(_ state: JarvisNotchState) -> Bool {
         switch state {
-        case .thinking, .intent: return true
+        case .thinking, .intent, .focus: return true
         default: return false
         }
     }
