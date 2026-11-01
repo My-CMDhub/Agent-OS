@@ -2,16 +2,10 @@
 //  ElementPointer.swift
 //  leanring-buddy
 //
-//  The voice loop's `point_at`, drawn: a blue cursor flies from the mouse to a
-//  control's exact frame (resolved from structure by the harness's
-//  `highlight`), then marks it in a shape that follows its role, holds, and
-//  fades. Read-only: it touches only its own click-through window.
-//
-//  Beside the legacy buddy cursor, not through it. That cursor is driven by
-//  `CompanionManager`'s published `detectedElementScreenLocation` — a POINT
-//  that only the legacy `[POINT:x,y]` flow sets, drawn by one view per screen
-//  that may be hidden by the cursor toggle and is tied to its speech bubble.
-//  Driving it from a frame would mean reaching into that god-object's state.
+//  The voice loop's `point_at`, drawn: an ink reticle (spec §3.6) flies from
+//  the mouse to a control's exact frame (resolved from structure by the
+//  harness's `highlight`), then marks it in a shape that follows its role,
+//  holds, and fades. Read-only: it touches only its own click-through window.
 //
 //  The WINDOW itself flies: it starts as a small square at the mouse and is
 //  animated to the element's frame plus a margin, so its final frame is the
@@ -25,7 +19,7 @@ import SwiftUI
 
 /// How the pointer marks an element, by what the owner would do with it.
 nonisolated enum ElementPointerShape: Equatable, Sendable {
-    /// Icon, button, checkbox, toggle: a pulsing ring around it.
+    /// Icon, button, checkbox, toggle: its own rect, framed at radius 6.
     case ring
     /// Text or a link: a stroke drawn under it, left to right.
     case underline
@@ -127,13 +121,11 @@ enum ElementPointer {
         let overlay = OverlayWindow(screen: screen)
         overlay.collectionBehavior.insert(.ignoresCycle)
         let model = ElementPointerModel()
-        let hostingView = NSHostingView(rootView: ElementPointerView(
+        // The window's frame is the flight's, never the content's (`host`).
+        overlay.host(ElementPointerView(
             shape: approximate ? .approximate : ElementPointerShape.forElement(role: role, size: rectInAppKitCoordinates.size),
             still: reduceMotion, model: model
         ))
-        // The window's frame is the flight's, never the content's.
-        hostingView.sizingOptions = []
-        overlay.contentView = hostingView
         // From the mouse; on another display, from the target display's nearest point.
         let mouse = NSEvent.mouseLocation
         let start = CGPoint(x: min(max(mouse.x, screen.frame.minX), screen.frame.maxX),
@@ -195,79 +187,68 @@ private final class ElementPointerModel: ObservableObject {
     @Published var arrived = false
 }
 
-/// Fills its window. In flight: the buddy's blue triangle at the centre. On
-/// arrival: the role's shape. Blue, never the notch's proof cyan — pointing
-/// shows where, it verifies nothing.
+/// Fills its window. In flight: a 1.5-stroke ring at 70%. On arrival, at 100%:
+/// the role's mark, traced once. Ink on a dark keyline (`JVReticle`), never the
+/// notch's proof cyan — pointing shows where, it verifies nothing. Nothing
+/// pulses or glows (spec §2.6). Reduce Motion: no flight, no trace — the mark whole.
 private struct ElementPointerView: View {
     let shape: ElementPointerShape
     let still: Bool
     @ObservedObject var model: ElementPointerModel
-    @State private var drawn: CGFloat = 0
-    @State private var pulse = false
+    @State private var traced: CGFloat = 0
 
-    private let color = DS.Colors.overlayCursorBlue
     private let inset = ElementPointer.marginPoints / 2
+    private var drawn: CGFloat { still ? 1 : traced }
 
     var body: some View {
         ZStack {
-            Triangle()
-                .fill(color)
+            Circle()
+                .reticleStroke()
                 .frame(width: 16, height: 16)
-                .rotationEffect(.degrees(-35))
-                .shadow(color: color, radius: 8)
-                .opacity(model.arrived ? 0 : 1)
+                .opacity(model.arrived ? 0 : 0.7)
             if model.arrived { mark }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(false)
-        .animation(.easeOut(duration: 0.15), value: model.arrived)
+        .animation(still ? nil : .easeOut(duration: 0.15), value: model.arrived)
         .onChange(of: model.arrived) { _, arrived in
-            guard arrived else { return }
-            if still { drawn = 1; return }
-            withAnimation(.easeOut(duration: 0.35)) { drawn = 1 }
-            if shape == .ring { withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) { pulse = true } }
+            guard arrived, !still else { return }
+            withAnimation(.easeOut(duration: 0.35)) { traced = 1 }
         }
     }
 
     @ViewBuilder private var mark: some View {
-        if still, shape == .approximate {
-            Circle().stroke(color, style: StrokeStyle(lineWidth: 2.5, dash: [5, 5])).padding(inset)
-        } else if still {
-            // Reduce Motion: one static outline, whatever the role.
-            RoundedRectangle(cornerRadius: 6).stroke(color, lineWidth: 2.5).padding(inset)
-        } else {
-            switch shape {
-            case .ring:
-                GeometryReader { proxy in
-                    let side = min(proxy.size.width, proxy.size.height)
-                    RoundedRectangle(cornerRadius: side / 2)
-                        .stroke(color, lineWidth: 2.5)
-                        .shadow(color: color.opacity(0.6), radius: pulse ? 6 : 2)
-                        .padding(inset)
-                        .scaleEffect(pulse ? 1.06 : 0.96)
-                        .opacity(drawn)
+        switch shape {
+        case .ring, .outline:
+            RoundedRectangle(cornerRadius: JVReticle.radius, style: .continuous)
+                .trim(from: 0, to: drawn)
+                .reticleStroke()
+                .padding(inset)
+        case .underline:
+            GeometryReader { proxy in
+                Path { path in
+                    let y = proxy.size.height - inset
+                    path.move(to: CGPoint(x: inset, y: y))
+                    path.addLine(to: CGPoint(x: proxy.size.width - inset, y: y))
                 }
-            case .underline:
-                GeometryReader { proxy in
-                    Path { path in
-                        let y = proxy.size.height - inset
-                        path.move(to: CGPoint(x: inset, y: y))
-                        path.addLine(to: CGPoint(x: proxy.size.width - inset, y: y))
-                    }
-                    .trim(from: 0, to: drawn)
-                    .stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                }
-            case .approximate:
-                Circle()
-                    .trim(from: 0, to: drawn)
-                    .stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: [5, 5]))
-                    .padding(inset)
-            case .outline:
-                RoundedRectangle(cornerRadius: 6)
-                    .trim(from: 0, to: drawn)
-                    .stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                    .padding(inset)
+                .trim(from: 0, to: drawn)
+                .reticleStroke()
             }
+        case .approximate:
+            // Dashed: approximate, nothing nameable at the point.
+            Circle()
+                .trim(from: 0, to: drawn)
+                .reticleStroke(StrokeStyle(lineWidth: JVReticle.stroke, lineCap: .round, dash: [5, 5]))
+                .padding(inset)
         }
+    }
+}
+
+extension ElementPointer {
+    /// UI snapshots only: the pointer in flight or arrived, still (as Reduce Motion draws it).
+    static func snapshotView(shape: ElementPointerShape, arrived: Bool) -> AnyView {
+        let model = ElementPointerModel()
+        model.arrived = arrived
+        return AnyView(ElementPointerView(shape: shape, still: true, model: model))
     }
 }

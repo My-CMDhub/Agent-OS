@@ -131,6 +131,45 @@ enum UISnapshotRenderer {
             }
         }
 
+        // J.A.R.V.I.S.'s marks on other apps (spec §3.6): the ink reticle on a mock
+        // window, light and dark, so the keyline is judged on both kinds of content.
+        let markScreen = CGRect(x: 0, y: 0, width: 420, height: 170)
+        let button = CGRect(x: 160, y: 66, width: 96, height: 28)     // AppKit: y up
+        let link = CGRect(x: 40, y: 120, width: 150, height: 18)
+        func onMockWindow(_ mark: AnyView) -> AnyView {
+            AnyView(ZStack(alignment: .topLeading) {
+                MockWindowForMarks(screen: markScreen, button: button, link: link)
+                mark
+            }.frame(width: markScreen.width, height: markScreen.height))
+        }
+        func pointer(_ shape: ElementPointerShape, arrived: Bool, at rect: CGRect) -> AnyView {
+            let frame = ElementPointer.arrivedFrame(for: rect)
+            let side: CGFloat = arrived ? 0 : 24
+            let size = arrived ? frame.size : CGSize(width: side, height: side)
+            return onMockWindow(AnyView(ElementPointer.snapshotView(shape: shape, arrived: arrived)
+                .frame(width: size.width, height: size.height)
+                .position(x: arrived ? frame.midX : 330, y: markScreen.height - (arrived ? frame.midY : 40))))
+        }
+        let marks: [(name: String, view: AnyView, note: String)] = [
+            ("overlay-pointer-flight", pointer(.ring, arrived: false, at: button), "point_at in flight: a 1.5 ink ring at 70%"),
+            ("overlay-pointer-ring", pointer(.ring, arrived: true, at: button), "point_at landed on a button: its rect framed at radius 6"),
+            ("overlay-pointer-underline", pointer(.underline, arrived: true, at: link), "point_at landed on a link: an ink underline"),
+            ("overlay-pointer-approximate", pointer(.approximate, arrived: true,
+                                                   at: CGRect(x: 300, y: 30, width: ElementPointer.approximateSidePoints, height: ElementPointer.approximateSidePoints)),
+             "point_at with nothing nameable at the point: a dashed ring"),
+            ("overlay-highlight", onMockWindow(ElementHighlightOverlay.snapshotView(button, label: "Send", screenFrame: markScreen)),
+             "the harness's highlight with its label"),
+            ("overlay-annotate", onMockWindow(AnnotationOverlay.snapshotView([
+                .init(kind: "box", frame: button, label: "Send", described: ""),
+                .init(kind: "underline", frame: link, label: nil, described: ""),
+                .init(kind: "circle", frame: CGRect(x: 320, y: 110, width: 40, height: 22), label: nil, described: ""),
+                .init(kind: "arrow", frame: CGRect(x: 320, y: 30, width: 60, height: 22), label: nil, described: ""),
+            ], screenFrame: markScreen)), "annotate: box with caption, underline, circle, arrow"),
+        ]
+        for mark in marks {
+            manifest += renderBoth(mark.view, name: mark.name, note: mark.note, size: markScreen.size)
+        }
+
         let manifestURL = directory.appendingPathComponent("manifest.txt")
         try? (manifest.joined(separator: "\n") + "\n").write(to: manifestURL, atomically: true, encoding: .utf8)
         print("🧪 ui snapshots: \(manifest.count - 1) files -> \(directory.path)")
@@ -238,5 +277,34 @@ enum UISnapshotRenderer {
         hostingView.cacheDisplay(in: hostingView.bounds, to: bitmap)
         guard let png = bitmap.representation(using: .png, properties: [:]), (try? png.write(to: url)) != nil else { return nil }
         return "\(bitmap.pixelsWide)x\(bitmap.pixelsHigh) px"
+    }
+}
+
+/// Something for the marks to land on: a window with a button, a link and a
+/// field, in the appearance being rendered (white page in light, dark in dark).
+private struct MockWindowForMarks: View {
+    let screen: CGRect
+    let button: CGRect
+    let link: CGRect
+
+    private func top(_ rect: CGRect) -> CGFloat { screen.height - rect.maxY }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color(nsColor: .textBackgroundColor)
+            Text("Show all in Finder")
+                .font(.system(size: 13)).underline().foregroundStyle(Color(nsColor: .linkColor))
+                .frame(width: link.width, height: link.height, alignment: .leading)
+                .offset(x: link.minX, y: top(link))
+            Text("Send")
+                .font(.system(size: 13, weight: .medium)).foregroundStyle(.white)
+                .frame(width: button.width, height: button.height)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlAccentColor)))
+                .offset(x: button.minX, y: top(button))
+            Text("Re: Q3 plan \u{2014} the launch moves to the 14th")
+                .font(.system(size: 12)).foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                .offset(x: 40, y: 18)
+        }
+        .frame(width: screen.width, height: screen.height)
     }
 }

@@ -51,23 +51,59 @@ class OverlayWindow: NSWindow {
     override var canBecomeMain: Bool {
         return false
     }
+
+    /// SwiftUI inside a plain container, never AS the contentView: on macOS 27 a
+    /// hosting view that is its window's contentView resizes that window to its
+    /// root on every layout (b7631a7), and these windows' frames are ours — the
+    /// pointer's even flies.
+    func host<Content: View>(_ view: Content) {
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.sizingOptions = []
+        let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        hostingView.frame = container.bounds
+        hostingView.autoresizingMask = [.width, .height]
+        container.addSubview(hostingView)
+        contentView = container
+    }
 }
 
-// Cursor-like triangle shape (equilateral)
-struct Triangle: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let size = min(rect.width, rect.height)
-        let height = size * sqrt(3.0) / 2.0
+/// J.A.R.V.I.S.'s marks on other apps' pixels — the pointer, the highlight, the
+/// annotations — in the ink of the glass (spec §3.6), never cyan (pointing is
+/// not proof) and never Clicky's blue. Ink alone vanishes on a white page, so
+/// every mark rides on a thin dark keyline: legible on any content, still one ink.
+enum JVReticle {
+    static let ink = JV.ink
+    static let stroke = JV.stroke
+    static let keyline = Color.black.opacity(0.45)
+    static let keylineWidth: CGFloat = JV.stroke + 2
+    static let radius: CGFloat = 6
+}
 
-        // Top vertex
-        path.move(to: CGPoint(x: rect.midX, y: rect.midY - height / 1.5))
-        // Bottom left vertex
-        path.addLine(to: CGPoint(x: rect.midX - size / 2, y: rect.midY + height / 3))
-        // Bottom right vertex
-        path.addLine(to: CGPoint(x: rect.midX + size / 2, y: rect.midY + height / 3))
-        path.closeSubpath()
-        return path
+extension Shape {
+    /// The mark's stroke: ink over its dark keyline.
+    func reticleStroke(_ style: StrokeStyle = StrokeStyle(lineWidth: JVReticle.stroke, lineCap: .round, lineJoin: .round)) -> some View {
+        var keyline = style
+        keyline.lineWidth = style.lineWidth + 2
+        return ZStack {
+            stroke(JVReticle.keyline, style: keyline)
+            stroke(JVReticle.ink, style: style)
+        }
+    }
+}
+
+/// A caption on glass: ink text, the glass the card and panel are made of.
+private struct ReticleCaption: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(JV.bodyMedium)
+            .foregroundStyle(JV.ink)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(RoundedRectangle(cornerRadius: JV.keycapRadius, style: .continuous).fill(JV.glass))
+            .overlay(RoundedRectangle(cornerRadius: JV.keycapRadius, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+            .fixedSize()
     }
 }
 
@@ -86,9 +122,7 @@ enum ElementHighlightOverlay {
         guard NSScreen.screens.indices.contains(screenIndex) else { return }
         let screen = NSScreen.screens[screenIndex]
         let overlay = OverlayWindow(screen: screen)
-        overlay.contentView = NSHostingView(rootView: ElementHighlightView(
-            rect: rectInAppKitCoordinates, screenFrame: screen.frame, label: label
-        ))
+        overlay.host(ElementHighlightView(rect: rectInAppKitCoordinates, screenFrame: screen.frame, label: label))
         overlay.orderFrontRegardless()
         window = overlay
         let shown = generation
@@ -109,19 +143,14 @@ private struct ElementHighlightView: View {
         // SwiftUI's y grows downward, so the AppKit rect is flipped within the screen.
         let top = screenFrame.height - (rect.maxY - screenFrame.origin.y)
         ZStack(alignment: .topLeading) {
-            Rectangle()
-                .stroke(Color.cyan, lineWidth: 3)
-                .frame(width: rect.width, height: rect.height)
+            // The element's own rect, framed at the reticle's radius, 4 pt outside it.
+            RoundedRectangle(cornerRadius: JVReticle.radius, style: .continuous)
+                .reticleStroke()
+                .frame(width: rect.width + 8, height: rect.height + 8)
                 .position(x: rect.midX - screenFrame.origin.x, y: top + rect.height / 2)
             if let label {
-                Text(label)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.black)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.cyan)
-                    .fixedSize()
-                    .position(x: rect.midX - screenFrame.origin.x, y: max(top - 12, 12))
+                ReticleCaption(text: label)
+                    .position(x: rect.midX - screenFrame.origin.x, y: max(top - 18, 14))
             }
         }
         .frame(width: screenFrame.width, height: screenFrame.height, alignment: .topLeading)
@@ -194,7 +223,7 @@ enum AnnotationOverlay {
             guard !here.isEmpty else { continue }
             let overlay = OverlayWindow(screen: screen)
             overlay.collectionBehavior.insert(.ignoresCycle)
-            overlay.contentView = NSHostingView(rootView: AnnotationView(shapes: here, screenFrame: screen.frame))
+            overlay.host(AnnotationView(shapes: here, screenFrame: screen.frame))
             overlay.orderFrontRegardless()
             windows.append(overlay)
         }
@@ -211,7 +240,6 @@ enum AnnotationOverlay {
 private struct AnnotationView: View {
     let shapes: [RealtimeAnnotate.Drawn]
     let screenFrame: CGRect
-    private let color = Color.orange
 
     /// AppKit point to this view's top-left space.
     private func flipped(_ point: CGPoint) -> CGPoint {
@@ -241,18 +269,18 @@ private struct AnnotationView: View {
         switch shape.kind {
         case "box":
             let box = rect(shape.frame, margin: 4)
-            RoundedRectangle(cornerRadius: 5).stroke(color, lineWidth: 3)
+            RoundedRectangle(cornerRadius: JVReticle.radius, style: .continuous).reticleStroke()
                 .frame(width: box.width, height: box.height).position(x: box.midX, y: box.midY)
         case "circle":
             let ring = rect(shape.frame, margin: 10)
-            Ellipse().stroke(color, lineWidth: 3)
+            Ellipse().reticleStroke()
                 .frame(width: ring.width, height: ring.height).position(x: ring.midX, y: ring.midY)
         case "underline":
             let under = rect(shape.frame, margin: 0)
             Path { path in
                 path.move(to: CGPoint(x: under.minX, y: under.maxY + 3))
                 path.addLine(to: CGPoint(x: under.maxX, y: under.maxY + 3))
-            }.stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+            }.reticleStroke()
         case "arrow":
             let geometry = AnnotationGeometry.arrow(to: shape.frame, on: screenFrame)
             let start = flipped(geometry.start), tip = flipped(geometry.tip)
@@ -264,20 +292,27 @@ private struct AnnotationView: View {
                     path.move(to: tip)
                     path.addLine(to: CGPoint(x: tip.x - 14 * cos(angle + side * .pi / 7), y: tip.y - 14 * sin(angle + side * .pi / 7)))
                 }
-            }.stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+            }.reticleStroke()
         default:
             EmptyView()   // "label": the caption alone
         }
     }
 
     private func caption(_ text: String, over target: CGRect) -> some View {
-        Text(text)
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundColor(.black)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(RoundedRectangle(cornerRadius: 5).fill(color))
-            .fixedSize()
-            .position(x: target.midX, y: max(target.minY - 14, 14))
+        ReticleCaption(text: text).position(x: target.midX, y: max(target.minY - 16, 14))
+    }
+}
+
+extension ElementHighlightOverlay {
+    /// UI snapshots only: the highlight as drawn on a `screenFrame`-sized screen.
+    static func snapshotView(_ rect: CGRect, label: String?, screenFrame: CGRect) -> AnyView {
+        AnyView(ElementHighlightView(rect: rect, screenFrame: screenFrame, label: label))
+    }
+}
+
+extension AnnotationOverlay {
+    /// UI snapshots only: one `annotate` call's shapes on a `screenFrame`-sized screen.
+    static func snapshotView(_ shapes: [RealtimeAnnotate.Drawn], screenFrame: CGRect) -> AnyView {
+        AnyView(AnnotationView(shapes: shapes, screenFrame: screenFrame))
     }
 }
