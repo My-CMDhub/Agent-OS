@@ -670,12 +670,9 @@ final class RealtimeVoiceSession {
             // (cross-process AX), bounded from key-down. Its name only; never
             // Clicky's own panel.
             let frontmostLineTask = Task { () -> (line: String?, bundle: String?)? in
-                guard !probeMode else { return nil }
-                return await Self.value(within: Self.frontmostReadDeadlineSeconds) { () -> (line: String?, bundle: String?)? in
-                    guard let application = AccessibilityTreeWalker.focusedApplication(),
-                          !HarnessServer.isHarnessItself(bundleIdentifier: application.bundleIdentifier) else { return nil }
-                    return (RealtimeOpenAppTool.frontmostAppContextLine(application: application), application.bundleIdentifier)
-                }
+                guard !probeMode,
+                      let front = await RealtimeOpenAppTool.frontmostRead(deadline: Self.frontmostReadDeadlineSeconds) else { return nil }
+                return (front.line, front.process.bundleIdentifier)
             }
             // What is under the owner's mouse, from structure, bounded from key-down
             // like the frontmost line: "this one" / "where my cursor is".

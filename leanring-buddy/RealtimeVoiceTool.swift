@@ -2148,10 +2148,39 @@ nonisolated enum RealtimeOpenAppTool {
             .map { OpenApps.contextLine($0) }
     }
 
+    /// The process in front, as the guards need it (heard check, expectApp): never Clicky's own panel.
+    struct FrontProcess: Sendable, Equatable {
+        let pid: pid_t
+        let bundleIdentifier: String?
+        let name: String?
+    }
+
+    /// The descriptive line's own budget, after the bundle has already arrived.
+    static let frontLineDeadlineSeconds: Double = 0.2
+
+    static func liveFrontProcess() -> FrontProcess? {
+        guard let application = AccessibilityTreeWalker.focusedApplication(),
+              !HarnessServer.isHarnessItself(bundleIdentifier: application.bundleIdentifier) else { return nil }
+        return FrontProcess(pid: application.processIdentifier, bundleIdentifier: application.bundleIdentifier,
+                            name: application.localizedName)
+    }
+
     /// The live line (owner 2026-11-01): the desktop when Finder is in front with no window on screen, else the app
-    /// with its focused window's title (quoted), full screen, or no window at all (`OpenApps.Front`). Cross-process: off main.
-    static func frontmostAppContextLine(application: NSRunningApplication) -> String? {
-        OpenApps.contextLineNow(application)
+    /// with its focused window's title (quoted), full screen, or no window at all (`OpenApps.Front`).
+    static func describeLive(_ process: FrontProcess) -> String? {
+        NSRunningApplication(processIdentifier: process.pid).flatMap { OpenApps.contextLineNow($0) }
+    }
+
+    /// The bundle FIRST, under `deadline`, and returned whatever the line does: the line's extra reads (window list,
+    /// focused window title, full screen) run under their own `lineDeadline`, and a slow front app costs only the
+    /// description — the old name-only line stands in. nil only when the process itself did not read in time.
+    static func frontmostRead(deadline: Double, lineDeadline: Double = frontLineDeadlineSeconds,
+                              front: @escaping @Sendable () -> FrontProcess? = { liveFrontProcess() },
+                              describe: @escaping @Sendable (FrontProcess) -> String? = { describeLive($0) })
+        async -> (process: FrontProcess, line: String?)? {
+        guard let process = await RealtimeVoiceSession.value(within: deadline, front) else { return nil }
+        let described = await RealtimeVoiceSession.value(within: lineDeadline) { describe(process) }
+        return (process, described ?? frontmostAppContextLine(appName: process.name))
     }
 
     /// The credential guard's line for this turn, or nil when the screenshot went

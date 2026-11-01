@@ -101,6 +101,24 @@ struct OpenAppsTests {
         #expect(Self.front(Self.bareDesktop, title: "x") == .desktop)
     }
 
+    /// The bundle feeds guards (heard check, expectApp): a front app slow to answer the line's extra reads costs only
+    /// the description, never the bundle.
+    @Test func aSlowDescriptionNeverCostsTheBundle() async {
+        let process = RealtimeOpenAppTool.FrontProcess(pid: 42, bundleIdentifier: "com.apple.Notes", name: "Notes")
+        let start = ProcessInfo.processInfo.systemUptime
+        let slow = await RealtimeOpenAppTool.frontmostRead(deadline: 1, lineDeadline: 0.05, front: { process },
+                                                           describe: { _ in Thread.sleep(forTimeInterval: 2); return "late" })
+        #expect(slow?.process == process, "the bundle arrives")
+        #expect(slow?.line == "system context, not the owner's words: the app in front is \"Notes\".", "name-only fallback")
+        #expect(ProcessInfo.processInfo.systemUptime - start < 1.5)
+        let fast = await RealtimeOpenAppTool.frontmostRead(deadline: 1, front: { process }, describe: { _ in "described" })
+        #expect(fast?.line == "described")
+        let none = await RealtimeOpenAppTool.frontmostRead(deadline: 0.05, front: { Thread.sleep(forTimeInterval: 2); return process },
+                                                           describe: { _ in "x" })
+        #expect(none == nil, "no process read in time: nothing, as before")
+        #expect(RealtimeOpenAppTool.frontLineDeadlineSeconds <= 0.2)
+    }
+
     @Test func otherAppsStatesAndTheDesktopInList() {
         let result = OpenApps.toolResult(apps: [
             .init(name: "Finder", frontmost: true, hidden: false, windowsHere: 1, windowsOnScreen: 0, minimised: 1,

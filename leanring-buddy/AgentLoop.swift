@@ -2678,12 +2678,14 @@ extension AgentLoop {
         var line: String? = nil
     }
 
+    /// `withLine`: also the descriptive line, under its own deadline after the bundle (`frontmostRead`).
     static func frontApp(withLine: Bool = false) async -> FrontApp? {
-        await RealtimeVoiceSession.value(within: 0.5) { () -> FrontApp? in
-            guard let application = AccessibilityTreeWalker.focusedApplication(),
-                  !HarnessServer.isHarnessItself(bundleIdentifier: application.bundleIdentifier) else { return nil }
-            return FrontApp(name: application.localizedName, bundleIdentifier: application.bundleIdentifier,
-                            line: withLine ? RealtimeOpenAppTool.frontmostAppContextLine(application: application) : nil)
+        if withLine {
+            guard let front = await RealtimeOpenAppTool.frontmostRead(deadline: 0.5) else { return nil }
+            return FrontApp(name: front.process.name, bundleIdentifier: front.process.bundleIdentifier, line: front.line)
+        }
+        return await RealtimeVoiceSession.value(within: 0.5) { () -> FrontApp? in
+            RealtimeOpenAppTool.liveFrontProcess().map { FrontApp(name: $0.name, bundleIdentifier: $0.bundleIdentifier) }
         }
     }
 
