@@ -114,15 +114,18 @@ enum UISnapshotRenderer {
             _ = store.deleteItem()
         }
 
-        // The notch in every state it can show.
-        let notchStates: [(name: String, state: JarvisNotchState)] = [
-            ("listening", .listening), ("thinking", .thinking), ("intent", .intent(title: "Opening Safari")),
-            ("proof", .proof(subject: "Wi\u{2011}Fi off")), ("needs-you", .needsYou),
-            ("didnt-take", .didntTake(reason: "the button did not respond")), ("no-reply", .noReply),
+        // The notch in every state it can show. Speaking twice: live output bars, and
+        // the static fallback drawn until the playback tap's first reading (D7).
+        let notchStates: [(name: String, state: JarvisNotchState, outputLevel: CGFloat?)] = [
+            ("listening", .listening, nil), ("thinking", .thinking, nil), ("speaking", .speaking, 0.6),
+            ("speaking-static", .speaking, nil), ("intent", .intent(title: "Opening Safari\u{2026}"), nil),
+            ("intent-long", .intent(title: "Clicking \u{201C}Show all in Finder and open the enclosing folder\u{201D}\u{2026}"), nil),
+            ("proof", .proof(subject: "Wi\u{2011}Fi off"), nil), ("needs-you", .needsYou, nil),
+            ("didnt-take", .didntTake(reason: "the button did not respond"), nil), ("no-reply", .noReply, nil),
         ]
         for (screen, geometry) in [("notch", notched), ("notchless", notchless)] {
             for item in notchStates {
-                manifest += renderBoth(JarvisNotch.snapshotView(state: item.state, geometry: geometry),
+                manifest += renderBoth(JarvisNotch.snapshotView(state: item.state, geometry: geometry, outputLevel: item.outputLevel),
                                        name: "notch-\(screen)-\(item.name)", note: "notch \(item.name), \(screen) screen",
                                        size: geometry.panelFrame.size, backdropStrip: geometry)
             }

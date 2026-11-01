@@ -245,6 +245,22 @@ final class RealtimeVoiceSession {
             return self.liveTurn != nil || self.isReplyAudioPlaying
         }
         ElementPointer.onVisibilityChange = { [weak self] visible, uptime in self?.pointerVisibilityChanged(visible, at: uptime) }
+        // The notch's speaking state, read-only: when the reply stops playing, and
+        // its level as rendered (a tap on the player's output, before the probe's
+        // volume 0 at the mixer), so the right wing's bars follow what is heard.
+        JarvisNotch.shared.replyAudioPlaying = { [weak self] in self?.isReplyAudioPlaying ?? false }
+        playerNode.installTap(onBus: 0, bufferSize: 1024, format: nil, block: Self.makeOutputLevelTapBlock())
+    }
+
+    /// Off the main actor, like `makeTapBlock`: the tap runs on the audio thread.
+    private nonisolated static func makeOutputLevelTapBlock() -> AVAudioNodeTapBlock {
+        { buffer, _ in
+            guard let channel = buffer.floatChannelData?[0] else { return }
+            let rms = JarvisNotchLevel.rms(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+            // A stopped player renders exact silence: nothing for main to do.
+            guard rms > 0 else { return }
+            Task { @MainActor in JarvisNotch.shared.setOutputLevel(rms: rms) }
+        }
     }
 
     /// The turn the pointer was shown in: its id and release, and when it appeared.

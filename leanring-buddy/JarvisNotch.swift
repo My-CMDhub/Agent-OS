@@ -39,6 +39,9 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
     case idle
     case listening
     case thinking
+    /// The reply is playing: output bars in the RIGHT wing (left = you,
+    /// right = J.A.R.V.I.S.). Ends with playback, a press, or a tool call.
+    case speaking
     /// Text arrives already made safe (`RealtimeOpenAppTool.captionName`): the
     /// model or the target app wrote the names in it, and a newline must not
     /// forge a second line. `title` is the whole line ("Opening Finder…");
@@ -55,6 +58,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .idle: return "idle"
         case .listening: return "listening"
         case .thinking: return "thinking"
+        case .speaking: return "speaking"
         case .intent: return "intent"
         case .proof: return "proof"
         case .needsYou: return "needsYou"
@@ -66,7 +70,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
     var shape: JarvisNotchShape {
         switch self {
         case .idle: return .idle
-        case .listening, .thinking: return .compact
+        case .listening, .thinking, .speaking: return .compact
         case .intent, .proof, .needsYou, .didntTake, .noReply: return .expanded
         }
     }
@@ -86,7 +90,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         switch self {
         case .intent(let title): return title
         case .proof(let subject): return subject
-        case .needsYou: return "Needs you"
+        case .needsYou: return "Needs your approval"
         case .didntTake: return "Didn\u{2019}t take"
         case .noReply: return "No reply"
         default: return nil
@@ -96,20 +100,20 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
     var detail: String? {
         switch self {
         case .proof: return " \u{2014} verified"
-        case .needsYou: return " \u{2014} approve on the card"
+        case .needsYou: return " \u{2014} on the card"
         case .didntTake(let reason): return " \u{2014} \(reason)"
-        case .noReply: return " \u{2014} try again"
+        case .noReply: return " \u{2014} say it again"
         default: return nil
         }
     }
 
-    /// VoiceOver hears proof, needs you and didn't take; listening and thinking are silent.
+    /// VoiceOver hears proof, needs you, didn't take and no reply; listening, thinking and speaking are silent.
     var announcement: String? {
         switch self {
         case .proof(let subject): return "\(subject) verified"
-        case .needsYou: return "Needs you. Approve on the card."
+        case .needsYou: return "Needs your approval. On the card."
         case .didntTake(let reason): return "Didn\u{2019}t take. \(reason)"
-        case .noReply: return "No reply. Try again."
+        case .noReply: return "No reply. Say it again."
         default: return nil
         }
     }
@@ -122,7 +126,9 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
             return self == .listening ? .thinking : nil
         case .firstAudioWithoutTool:
             // A late answer clears "No reply".
-            return self == .thinking || self == .noReply ? .idle : nil
+            return self == .thinking || self == .noReply ? .speaking : nil
+        case .replyAudioEnded:
+            return self == .speaking ? .idle : nil
         case .toolCall(let title):
             // A new press is already listening; its turn owns the notch now.
             return self == .listening ? nil : .intent(title: title)
@@ -160,6 +166,10 @@ nonisolated enum JarvisNotchEvent: Equatable, Sendable {
     case hotkeyUp
     /// The model spoke and no tool was called (yet).
     case firstAudioWithoutTool
+    /// The reply's scheduled audio ran out (or was stopped) and stayed out
+    /// for `JarvisNotch.speakingQuietSeconds`. `turnEnded` does not end
+    /// speaking: the server finishes a turn long before its audio has played.
+    case replyAudioEnded
     /// Before the harness request; `title` is the intent line.
     case toolCall(title: String)
     /// A ticket is open; the card is waiting on the owner.
@@ -325,9 +335,16 @@ nonisolated enum JarvisNotchReason {
 /// resizes: it is sized once for the expanded pill and the pill animates inside it.
 nonisolated struct JarvisNotchGeometry: Equatable, Sendable {
     static let wingWidth: CGFloat = 34
-    static let expandedSideWidth: CGFloat = 150
+    /// The expanded pill hugs its line (spec §3.5): glyph + gap + text + 16 a
+    /// side, clamped to the notch plus 64...180 a side, or 200...420 with no notch.
+    static let expandedSideWidthRange: ClosedRange<CGFloat> = 64...180
+    static let noNotchExpandedWidthRange: ClosedRange<CGFloat> = 200...420
+    static let lineInset: CGFloat = 16
+    static let glyphSide: CGFloat = 16
+    static let glyphGap: CGFloat = 8
     static let textBandHeight: CGFloat = 30
-    static let noNotchCompactSize = CGSize(width: 68, height: 28)
+    /// Bars in the left half for you, the right half for J.A.R.V.I.S.
+    static let noNotchCompactSize = CGSize(width: 96, height: 28)
     static let noNotchExpandedHeight: CGFloat = 32
     /// The no-notch pill hangs this far under the menu bar.
     static let noNotchGap: CGFloat = 6
@@ -355,21 +372,27 @@ nonisolated struct JarvisNotchGeometry: Equatable, Sendable {
             x: screenFrame.midX, y: screenFrame.maxY - menuBarHeight - noNotchGap, width: 0, height: 0))
     }
 
-    func pillSize(_ shape: JarvisNotchShape) -> CGSize {
+    /// `lineWidth` is the expanded line's measured text width (`JarvisNotch.lineWidth`); 0 gives the narrowest pill.
+    func pillSize(_ shape: JarvisNotchShape, lineWidth: CGFloat = 0) -> CGSize {
+        let content = Self.glyphSide + Self.glyphGap + max(0, lineWidth) + 2 * Self.lineInset
+        func clamped(_ width: CGFloat, _ range: ClosedRange<CGFloat>) -> CGFloat { min(range.upperBound, max(range.lowerBound, width)) }
         switch (hasNotch, shape) {
         case (true, .idle): return anchor.size
         case (true, .compact): return CGSize(width: anchor.width + 2 * Self.wingWidth, height: anchor.height)
         case (true, .expanded):
-            return CGSize(width: anchor.width + 2 * Self.expandedSideWidth, height: anchor.height + Self.textBandHeight)
+            let sides = Self.expandedSideWidthRange
+            let range = (anchor.width + 2 * sides.lowerBound)...(anchor.width + 2 * sides.upperBound)
+            return CGSize(width: clamped(content, range), height: anchor.height + Self.textBandHeight)
         case (false, .idle): return .zero
         case (false, .compact): return Self.noNotchCompactSize
-        case (false, .expanded): return CGSize(width: 2 * Self.expandedSideWidth, height: Self.noNotchExpandedHeight)
+        case (false, .expanded): return CGSize(width: clamped(content, Self.noNotchExpandedWidthRange), height: Self.noNotchExpandedHeight)
         }
     }
 
-    /// Top edge on the anchor's top, centred on it.
+    /// Top edge on the anchor's top, centred on it. Sized once for the widest
+    /// pill, so the panel never resizes while the pill hugs its text inside it.
     var panelFrame: CGRect {
-        let expanded = pillSize(.expanded)
+        let expanded = pillSize(.expanded, lineWidth: .infinity)
         let width = expanded.width + 2 * Self.margin
         let height = expanded.height + Self.margin
         return CGRect(x: anchor.midX - width / 2, y: anchor.maxY - height, width: width, height: height)
@@ -589,6 +612,17 @@ final class JarvisNotch: ObservableObject {
 
     private init() {}
 
+    /// The voice session's "its reply is still playing" (scheduled-audio
+    /// arithmetic, `RealtimeVoiceSession.isReplyAudioPlaying`). nil reads as
+    /// not playing, so speaking can never outlive its audio.
+    var replyAudioPlaying: (() -> Bool)?
+    /// Quiet this long ends speaking: one late network chunk must not flicker it to idle.
+    nonisolated static let speakingQuietSeconds: TimeInterval = 0.4
+    private var speakingQuietSince: TimeInterval?
+    /// Reduce Motion: bars step at 10 Hz with no spring (spec §2.6).
+    nonisolated static let reducedMotionLevelInterval: TimeInterval = 0.1
+    private var lastLevelUptime: TimeInterval = 0
+
     /// The agent loop's step while a task runs; the scenario runner reads it.
     var doingStep: Int?
 
@@ -644,6 +678,9 @@ final class JarvisNotch: ObservableObject {
         generation += 1
         model.reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         if next != .listening { model.level = 0 }
+        // Static bars until the output tap's first reading (D7's fallback).
+        model.outputLevel = nil
+        model.lineWidth = Self.lineWidth(for: next)
         model.state = next
         let shown = generation
         if next == .idle {
@@ -654,6 +691,10 @@ final class JarvisNotch: ObservableObject {
             }
         } else {
             panel?.orderFrontRegardless()
+        }
+        if next == .speaking {
+            speakingQuietSince = nil
+            watchSpeaking(shown)
         }
         if let seconds = next.holdSeconds {
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
@@ -709,7 +750,9 @@ final class JarvisNotch: ObservableObject {
             "occlusionVisible": panel?.occlusionState.contains(.visible) ?? false, "windowNumber": windowNumber,
             "panelFrame": rect(panel?.frame), "screenFrame": rect(panel?.screen?.frame), "onCursorScreen": onCursorScreen,
             "windowServer": serverInfo == nil ? NSNull() : ["onscreen": serverOnscreen, "alpha": serverAlpha, "bounds": rect(serverBounds)] as [String: Any],
-            "drawnMatchesLogic": matchesLogic
+            "drawnMatchesLogic": matchesLogic,
+            // The bars as drawn: speaking's level is the playback tap's (nil: the static fallback).
+            "outputLevel": state == .speaking ? (model.outputLevel.map { Double($0) } ?? NSNull()) as Any : NSNull()
         ], toFileNamed: Self.drawnLogFileName, rotatingAtBytes: HarnessServer.auditLogRotationBytes)
     }
 
@@ -724,8 +767,48 @@ final class JarvisNotch: ObservableObject {
 
     /// Mic RMS, from the audio thread via main. Moves the bars only while listening.
     func setLevel(rms: Float) {
-        guard state == .listening else { return }
+        guard state == .listening, levelMayStep() else { return }
         model.level = JarvisNotchLevel.normalised(rms: rms)
+    }
+
+    /// Reply-audio RMS from the playback tap, via main. Moves the right wing's bars only while speaking.
+    func setOutputLevel(rms: Float) {
+        guard state == .speaking, levelMayStep() else { return }
+        model.outputLevel = JarvisNotchLevel.normalised(rms: rms)
+    }
+
+    private func levelMayStep() -> Bool {
+        guard model.reduceMotion else { return true }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastLevelUptime >= Self.reducedMotionLevelInterval else { return false }
+        lastLevelUptime = now
+        return true
+    }
+
+    /// Pure: speaking ends once the reply has been quiet for `speakingQuietSeconds`.
+    nonisolated static func speakingEnds(playing: Bool, quietSince: TimeInterval?, now: TimeInterval) -> (ends: Bool, quietSince: TimeInterval?) {
+        if playing { return (false, nil) }
+        let since = quietSince ?? now
+        return (now - since >= speakingQuietSeconds - 1e-9, since)
+    }
+
+    /// Polled at 10 Hz: the reply's audio is scheduled arithmetic in the session, not an event.
+    private func watchSpeaking(_ shown: Int) {
+        guard generation == shown, state == .speaking else { return }
+        let decision = Self.speakingEnds(playing: replyAudioPlaying?() ?? false, quietSince: speakingQuietSince,
+                                         now: ProcessInfo.processInfo.systemUptime)
+        speakingQuietSince = decision.quietSince
+        if decision.ends { handle(.replyAudioEnded); return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.watchSpeaking(shown) }
+    }
+
+    /// The expanded line's width as drawn (13 pt medium, monospaced digits),
+    /// plus 2 pt so a rounding pixel never truncates it. 0 for a compact state.
+    static func lineWidth(for state: JarvisNotchState) -> CGFloat {
+        guard state.shape == .expanded else { return 0 }
+        let text = (state.title ?? "") + (state.detail ?? "")
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .medium)
+        return ceil((text as NSString).size(withAttributes: [.font: font]).width) + 2
     }
 
     /// Where the panel sits, for the probe's screenshots.
@@ -768,9 +851,15 @@ final class JarvisNotch: ObservableObject {
         panel.hasShadow = false
         panel.animationBehavior = .none
         let hostingView = NSHostingView(rootView: JarvisNotchView(model: model))
-        // The panel's frame is the geometry's, never the content's.
+        // The panel's frame is the geometry's, never the content's — and never
+        // SwiftUI's: a hosting view that IS the contentView gets macOS 27's
+        // window-size bridge (b7631a7), so it sits inside a plain container.
         hostingView.sizingOptions = []
-        panel.contentView = hostingView
+        let container = NSView(frame: .zero)
+        hostingView.frame = container.bounds
+        hostingView.autoresizingMask = [.width, .height]
+        container.addSubview(hostingView)
+        panel.contentView = container
         return panel
     }
 }
@@ -786,6 +875,10 @@ private final class JarvisNotchPanel: NSPanel {
 private final class JarvisNotchModel: ObservableObject {
     @Published var state: JarvisNotchState = .idle
     @Published var level: CGFloat = 0
+    /// The reply's level; nil until the playback tap's first reading this state.
+    @Published var outputLevel: CGFloat?
+    /// The expanded line's measured width, which the pill hugs.
+    @Published var lineWidth: CGFloat = 0
     @Published var reduceMotion = false
     @Published var coveredByCard = false
     @Published var geometry = JarvisNotchGeometry(hasNotch: false, anchor: .zero)
@@ -795,26 +888,31 @@ private final class JarvisNotchModel: ObservableObject {
 
 private enum JarvisNotchStyle {
     /// Arc reactor. The proof ring and its glow, nothing else.
-    static let proofCyan = Color(red: 0x3F / 255, green: 0xE0 / 255, blue: 0xFF / 255)
-    static let strokeWidth: CGFloat = 1.5
-    static let spring = Animation.spring(response: 0.34, dampingFraction: 0.86)
+    static let proofCyan = JV.proof
+    static let strokeWidth: CGFloat = JV.stroke
+    static let spring = JV.spring
 }
 
 private struct JarvisNotchView: View {
     @ObservedObject var model: JarvisNotchModel
+    @Environment(\.colorScheme) private var colorScheme
+
+    /// Shape and width together: a proof after an intent re-hugs its own line.
+    private struct PillKey: Hashable { let shape: JarvisNotchShape; let width: CGFloat }
 
     var body: some View {
         let geometry = model.geometry
         let panelSize = geometry.panelFrame.size
+        let key = PillKey(shape: model.state.shape, width: model.lineWidth)
         ZStack(alignment: .top) {
             if model.reduceMotion {
-                // No spring: each state's pill crossfades in whole.
-                pill.id(model.state.shape).transition(.opacity)
+                // No spring: each pill crossfades in whole.
+                pill.id(key).transition(.opacity)
             } else {
                 pill
             }
         }
-        .animation(model.reduceMotion ? .easeInOut(duration: 0.15) : JarvisNotchStyle.spring, value: model.state.shape)
+        .animation(model.reduceMotion ? JV.reduceMotionFade : JarvisNotchStyle.spring, value: key)
         .frame(width: panelSize.width, height: panelSize.height, alignment: .top)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
@@ -822,15 +920,17 @@ private struct JarvisNotchView: View {
 
     private var pill: some View {
         let geometry = model.geometry
-        let size = geometry.pillSize(model.state.shape)
+        let size = geometry.pillSize(model.state.shape, lineWidth: model.lineWidth)
         let shoulder: CGFloat = geometry.hasNotch && model.state.shape != .idle ? 6 : 0
         let bottomRadius: CGFloat = model.state.shape == .expanded ? 14 : min(10, size.height / 2)
         let outline = NotchPillShape(shoulder: shoulder, bottomRadius: bottomRadius, topRadius: geometry.hasNotch ? 0 : bottomRadius)
+        let light = colorScheme == .light
         return outline
-            .fill(Color.black)
+            .fill(JV.void)
             .overlay {
-                // No black hardware to blend into: the one case with a border.
-                if !geometry.hasNotch { outline.stroke(Color.white.opacity(0.08), lineWidth: 1) }
+                // No black hardware to blend into: the one case with an edge, and the
+                // one appearance-dependent token. Clipped to the inside: 2 drawn = 1 pt.
+                if !geometry.hasNotch { outline.stroke(light ? Color.black.opacity(0.14) : Color.white.opacity(0.08), lineWidth: 2) }
             }
             .overlay {
                 if model.state == .needsYou { NeedsYouPulse(outline: outline, still: model.reduceMotion) }
@@ -843,7 +943,7 @@ private struct JarvisNotchView: View {
             }
             .clipShape(outline)
             .frame(width: size.width + 2 * shoulder, height: size.height)
-            .shadow(color: geometry.hasNotch ? .clear : .black.opacity(0.35), radius: 7, x: 0, y: 4)
+            .shadow(color: geometry.hasNotch ? .clear : .black.opacity(light ? 0.35 : 0.5), radius: 7, x: 0, y: 4)
             .opacity(model.coveredByCard || (!geometry.hasNotch && model.state == .idle) ? 0 : 1)
             .animation(.easeInOut(duration: 0.15), value: model.coveredByCard)
     }
@@ -855,19 +955,23 @@ private struct JarvisNotchView: View {
         case .idle:
             EmptyView()
         case .compact:
+            // Left = you (listening, thinking), right = J.A.R.V.I.S. (speaking): a
+            // wing beside the camera, or a half of the notchless pill.
+            let side = geometry.hasNotch ? JarvisNotchGeometry.wingWidth : size.width / 2
             HStack(spacing: 0) {
-                glyph.frame(width: geometry.hasNotch ? JarvisNotchGeometry.wingWidth : size.width)
-                Spacer(minLength: 0)
+                if model.state == .speaking { Spacer(minLength: 0) }
+                glyph.frame(width: side)
+                if model.state != .speaking { Spacer(minLength: 0) }
             }
             .padding(.horizontal, shoulder)
         case .expanded:
             VStack(spacing: 0) {
                 if geometry.hasNotch { Color.clear.frame(height: geometry.anchor.height) }
-                HStack(spacing: 8) {
-                    glyph.frame(width: 16, height: 16)
+                HStack(spacing: JarvisNotchGeometry.glyphGap) {
+                    glyph.frame(width: JarvisNotchGeometry.glyphSide, height: JarvisNotchGeometry.glyphSide)
                     line
                 }
-                .padding(.horizontal, 16 + shoulder)
+                .padding(.horizontal, JarvisNotchGeometry.lineInset + shoulder)
                 .frame(maxHeight: .infinity)
             }
         }
@@ -878,38 +982,34 @@ private struct JarvisNotchView: View {
     private var glyph: some View {
         switch model.state {
         case .listening:
-            ListeningBars(level: model.level)
+            LevelBars(level: model.level, still: model.reduceMotion)
+        case .speaking:
+            LevelBars(level: model.outputLevel, still: model.reduceMotion)
         case .thinking:
-            ThinkingDot(still: model.reduceMotion)
+            JVGlyph(kind: .orbit, size: 14, animated: !model.reduceMotion)
         case .intent, .proof:
             ArcRing(closed: { if case .proof = model.state { return true }; return false }(), still: model.reduceMotion)
         case .needsYou:
-            Image(systemName: "hand.point.up.left")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Color.white.opacity(0.92))
+            JVGlyph(kind: .arcDown, size: 14)
         case .didntTake:
-            Image(systemName: "circle.slash")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Color.white.opacity(0.6))
+            JVGlyph(kind: .brokenRing, size: 14)
         case .noReply:
-            Image(systemName: "speaker.slash")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Color.white.opacity(0.6))
+            JVGlyph(kind: .ellipsis, size: 14)
         case .idle:
             EmptyView()
         }
     }
 
     private var line: some View {
-        (Text(model.state.title ?? "").foregroundColor(.white.opacity(0.92))
-            + Text(model.state.detail ?? "").foregroundColor(.white.opacity(0.64)))
+        (Text(model.state.title ?? "").foregroundColor(JV.ink.opacity(0.92))
+            + Text(model.state.detail ?? "").foregroundColor(JV.ink2))
             .font(.system(size: 13, weight: .medium))
             .monospacedDigit()
             .lineLimit(1)
             .truncationMode(.middle)
             .id(model.state)
             .transition(.opacity)
-            .animation(.easeInOut(duration: model.reduceMotion ? 0.15 : 0.12), value: model.state)
+            .animation(model.reduceMotion ? JV.reduceMotionFade : JV.textFade, value: model.state)
     }
 }
 
@@ -955,42 +1055,38 @@ private struct NotchPillShape: Shape {
     }
 }
 
-private struct ListeningBars: View {
-    let level: CGFloat
+/// Five bars on a level: the mic's in the left wing, the reply's in the right.
+/// A nil level (the reply before the playback tap's first reading) draws three
+/// still bars at 70% (D7's fallback). Reduce Motion: no spring, and the level
+/// already steps at 10 Hz (`JarvisNotch.levelMayStep`).
+private struct LevelBars: View {
+    let level: CGFloat?
+    let still: Bool
     /// The middle bar leads; the outer ones follow at a fraction, so one level reads as a voice, not a meter.
     private static let weights: [CGFloat] = [0.5, 0.8, 1, 0.75, 0.45]
 
     var body: some View {
         HStack(spacing: 2) {
-            ForEach(Self.weights.indices, id: \.self) { index in
-                Capsule()
-                    .fill(Color.white.opacity(0.85))
-                    .frame(width: 2, height: 3 + 11 * level * Self.weights[index])
+            if let level {
+                ForEach(Self.weights.indices, id: \.self) { index in
+                    bar(height: 3 + 11 * level * Self.weights[index])
+                }
+            } else {
+                ForEach(0..<3, id: \.self) { _ in bar(height: 3 + 11 * 0.7) }
             }
         }
         .frame(height: 14)
-        .animation(.linear(duration: 0.08), value: level)
+        .animation(still ? nil : .linear(duration: 0.08), value: level)
+    }
+
+    private func bar(height: CGFloat) -> some View {
+        Capsule().fill(JV.ink.opacity(0.85)).frame(width: 2, height: height)
     }
 }
 
-private struct ThinkingDot: View {
-    let still: Bool
-    @State private var bright = false
-
-    var body: some View {
-        Circle()
-            .fill(Color.white.opacity(0.7))
-            .frame(width: 5, height: 5)
-            .opacity(still ? 0.85 : (bright ? 1.0 : 0.6))
-            .onAppear {
-                guard !still else { return }
-                withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) { bright = true }
-            }
-    }
-}
-
-/// The signature: an open arc turning slowly while the harness works, which
-/// closes into a full ring and fills cyan when it has verified. Authored, not borrowed.
+/// The signature: an open arc (300°, gap at 1 o'clock) turning slowly while the
+/// harness works, which closes into a full ring and fills cyan when it has
+/// verified. Authored, not borrowed; the still glyph is `JVGlyph(.openArc)`.
 private struct ArcRing: View {
     let closed: Bool
     let still: Bool
@@ -998,16 +1094,18 @@ private struct ArcRing: View {
     var body: some View {
         TimelineView(.animation(paused: closed || still)) { context in
             let degrees = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 2.4) / 2.4 * 360
+            // Gap centred on 1 o'clock when still: the trim starts at 3 o'clock, so turn to the gap's far edge.
+            let gapStart = 1.0 * 30 - 90 + 30
             ZStack {
                 Circle()
                     .fill(JarvisNotchStyle.proofCyan)
                     .scaleEffect(closed ? 0.62 : 0.2)
                     .opacity(closed ? 1 : 0)
                 Circle()
-                    .trim(from: 0, to: closed ? 1 : 0.72)
-                    .stroke(closed ? JarvisNotchStyle.proofCyan : Color.white.opacity(0.7),
+                    .trim(from: 0, to: closed ? 1 : 300.0 / 360)
+                    .stroke(closed ? JarvisNotchStyle.proofCyan : JV.ink.opacity(0.8),
                             style: StrokeStyle(lineWidth: JarvisNotchStyle.strokeWidth, lineCap: .round))
-                    .rotationEffect(.degrees(closed || still ? -90 : degrees))
+                    .rotationEffect(.degrees(closed ? -90 : gapStart + (still ? 0 : degrees)))
             }
             .frame(width: 14, height: 14)
         }
@@ -1053,7 +1151,7 @@ private struct NeedsYouPulse: View {
 
     var body: some View {
         outline
-            .stroke(Color.white.opacity(0.4), lineWidth: 1)
+            .stroke(JV.ink.opacity(0.4), lineWidth: 1)
             .opacity(still ? 1 : (bright ? 1 : 0.25))
             .onAppear {
                 guard !still else { return }
@@ -1065,11 +1163,15 @@ private struct NeedsYouPulse: View {
 extension JarvisNotch {
     /// UI snapshots only (`UISnapshotRenderer`): the notch drawn in `state` on
     /// `geometry`, at its panel's size, with no window and no state machine.
-    static func snapshotView(state: JarvisNotchState, geometry: JarvisNotchGeometry, level: CGFloat = 0.6) -> AnyView {
+    /// `outputLevel` nil draws speaking's static fallback.
+    static func snapshotView(state: JarvisNotchState, geometry: JarvisNotchGeometry, level: CGFloat = 0.6,
+                             outputLevel: CGFloat? = 0.6) -> AnyView {
         let model = JarvisNotchModel()
         model.state = state
         model.geometry = geometry
         model.level = level
+        model.outputLevel = outputLevel
+        model.lineWidth = lineWidth(for: state)
         return AnyView(JarvisNotchView(model: model))
     }
 }

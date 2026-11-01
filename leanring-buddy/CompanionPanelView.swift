@@ -176,6 +176,7 @@ struct CompanionPanelView: View {
         case .idle, .noReply, .proof: return (.openArc, "Standing by")
         case .listening: return (.openArc, "Listening")
         case .thinking: return (.orbit, "Thinking")
+        case .speaking: return (.openArc, "Speaking")
         case .intent(let title): return (.openArc, title)
         case .needsYou: return (.arcDown, approvalsWaiting(max(1, pendingApprovals)))
         case .didntTake: return (.brokenRing, "Didn\u{2019}t take")

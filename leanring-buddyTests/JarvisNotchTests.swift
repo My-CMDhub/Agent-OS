@@ -57,12 +57,50 @@ struct JarvisNotchTests {
     @Test func eventsOutsideTheirStateAreIgnored() {
         #expect(JarvisNotchState.thinking.next(on: .hotkeyUp) == nil)
         #expect(JarvisNotchState.listening.next(on: .toolCall(title: "x")) == nil)
-        #expect(JarvisNotchState.thinking.next(on: .firstAudioWithoutTool) == .idle)
+        #expect(JarvisNotchState.thinking.next(on: .firstAudioWithoutTool) == .speaking)
         #expect(JarvisNotchState.intent(title: "x").next(on: .firstAudioWithoutTool) == nil)
         #expect(JarvisNotchState.proof(subject: "x").next(on: .turnEnded) == nil)
         #expect(JarvisNotchState.intent(title: "x").next(on: .turnEnded) == .idle)
         // A press always wins, whatever is showing.
         #expect(JarvisNotchState.proof(subject: "x").next(on: .hotkeyDown) == .listening)
+    }
+
+    /// Spec §3.5: speaking enters at the reply's first audio and leaves at playback
+    /// end, a press (barge-in) or a tool call — never at the server's turnEnded,
+    /// which lands while the audio is still playing.
+    @Test func aSpokenReplyRunsListeningThinkingSpeakingIdle() {
+        var state = JarvisNotchState.idle
+        var names: [String] = []
+        for event: JarvisNotchEvent in [.hotkeyDown, .hotkeyUp, .firstAudioWithoutTool, .turnEnded, .replyAudioEnded] {
+            state = state.next(on: event) ?? state
+            names.append(state.name)
+        }
+        #expect(names == ["listening", "thinking", "speaking", "speaking", "idle"])
+        // Barge-in: a press while it talks is listening at once.
+        #expect(JarvisNotchState.speaking.next(on: .hotkeyDown) == .listening)
+        // A tool call mid-sentence is acting.
+        #expect(JarvisNotchState.speaking.next(on: .toolCall(title: "Opening Safari\u{2026}")) == .intent(title: "Opening Safari\u{2026}"))
+        // Nothing else moves it: no hold, no no-reply, no failure after words were heard.
+        for event: JarvisNotchEvent in [.holdElapsed, .noReply, .turnEnded, .turnFailed(reason: "r"), .confirmationRequired, .hotkeyUp,
+                                        .harnessAnswered(ok: true, subject: "x", error: nil), .firstAudioWithoutTool] {
+            #expect(JarvisNotchState.speaking.next(on: event) == nil, "\(event)")
+        }
+        // Playback end moves only speaking.
+        for state: JarvisNotchState in [.idle, .listening, .thinking, .intent(title: "x"), .proof(subject: "x"), .needsYou, .noReply] {
+            #expect(state.next(on: .replyAudioEnded) == nil, "\(state.name)")
+        }
+        #expect(JarvisNotchState.speaking.shape == .compact)
+        #expect(JarvisNotchState.speaking.holdSeconds == nil)
+        #expect(JarvisNotchState.speaking.announcement == nil)
+    }
+
+    @Test func speakingEndsOnlyAfterTheReplyStaysQuiet() {
+        let quiet = JarvisNotch.speakingQuietSeconds
+        #expect(JarvisNotch.speakingEnds(playing: true, quietSince: 5, now: 10) == (false, nil))
+        #expect(JarvisNotch.speakingEnds(playing: false, quietSince: nil, now: 10) == (false, 10))
+        // One late chunk inside the window keeps it speaking.
+        #expect(JarvisNotch.speakingEnds(playing: false, quietSince: 10, now: 10 + quiet / 2) == (false, 10))
+        #expect(JarvisNotch.speakingEnds(playing: false, quietSince: 10, now: 10 + quiet) == (true, 10))
     }
 
     @Test func shapesHoldsAndAnnouncementsMatchTheContract() {
@@ -88,17 +126,17 @@ struct JarvisNotchTests {
         #expect(JarvisNotchState.noReply.next(on: .holdElapsed) == .idle)
         #expect(JarvisNotchState.noReply.next(on: .hotkeyDown) == .listening)
         // A late answer clears it.
-        #expect(JarvisNotchState.noReply.next(on: .firstAudioWithoutTool) == .idle)
+        #expect(JarvisNotchState.noReply.next(on: .firstAudioWithoutTool) == .speaking)
         // Only a turn still waiting says it: a press, an intent or an answer owns the notch.
         for state: JarvisNotchState in [.idle, .listening, .intent(title: "x"), .proof(subject: "x"), .needsYou, .didntTake(reason: "x")] {
             #expect(state.next(on: .noReply) == nil, "\(state.name)")
         }
         let line = (JarvisNotchState.noReply.title ?? "") + (JarvisNotchState.noReply.detail ?? "")
-        #expect(line == "No reply \u{2014} try again")
+        #expect(line == "No reply \u{2014} say it again")
         #expect(line.count <= JarvisNotchReason.maximumLength)
         #expect(JarvisNotchState.noReply.shape == .expanded)
         #expect(JarvisNotchState.noReply.holdSeconds == 2)
-        #expect(JarvisNotchState.noReply.announcement == "No reply. Try again.")
+        #expect(JarvisNotchState.noReply.announcement == "No reply. Say it again.")
     }
 
     /// Live 2026-10-26 12:30: the voice service refused three turns and the notch said nothing.
@@ -178,7 +216,10 @@ struct JarvisNotchTests {
         #expect(geometry.anchor == CGRect(x: 663.5, y: 950, width: 185, height: 32))
         #expect(geometry.pillSize(.idle) == CGSize(width: 185, height: 32))
         #expect(geometry.pillSize(.compact) == CGSize(width: 185 + 68, height: 32))
-        #expect(geometry.pillSize(.expanded) == CGSize(width: 185 + 300, height: 62))
+        // Hugs its line: glyph 16 + gap 8 + text + 16 a side, between notch + 2x64 and notch + 2x180.
+        #expect(geometry.pillSize(.expanded) == CGSize(width: 185 + 128, height: 62))
+        #expect(geometry.pillSize(.expanded, lineWidth: 300).width == CGFloat(16 + 8 + 300 + 32))
+        #expect(geometry.pillSize(.expanded, lineWidth: 2_000) == CGSize(width: 185 + 360, height: 62))
         // Top edge on the screen's top edge, centred on the notch.
         #expect(geometry.panelFrame.maxY == 982)
         #expect(geometry.panelFrame.midX == 756)
@@ -195,6 +236,11 @@ struct JarvisNotchTests {
         #expect(geometry.anchor.maxY == screen.maxY - 24 - JarvisNotchGeometry.noNotchGap)
         #expect(geometry.pillSize(.idle) == .zero)
         #expect(geometry.pillSize(.compact) == JarvisNotchGeometry.noNotchCompactSize)
+        #expect(geometry.pillSize(.expanded).width == 200)
+        #expect(geometry.pillSize(.expanded, lineWidth: 250).width == CGFloat(16 + 8 + 250 + 32))
+        #expect(geometry.pillSize(.expanded, lineWidth: 2_000).width == 420)
+        // The panel is sized once, for the widest pill.
+        #expect(geometry.panelFrame.width == 420 + 2 * JarvisNotchGeometry.margin)
         #expect(geometry.panelFrame.maxY == geometry.anchor.maxY)
         // Auxiliary areas that leave no gap are not a notch.
         let noGap = JarvisNotchGeometry.resolve(screenFrame: screen, safeAreaTop: 24, auxiliaryTopLeftWidth: 960,
