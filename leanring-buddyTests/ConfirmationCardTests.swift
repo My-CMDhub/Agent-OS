@@ -277,4 +277,37 @@ struct ConfirmationCardTests {
         #expect(HarnessConfirmations.openRefusal(for: shape, appName: "Finder", reason: "r", pendingCount: 0)?.code
                 == "confirmationTooLongToShow")
     }
+
+    // MARK: The panel's Always rules list (2026-11-01)
+
+    /// Every rule stays reachable without the panel outgrowing the screen: four
+    /// rows show and the rest scroll, at a height known before layout.
+    @MainActor @Test func theRulesListShowsAtMostFourRowsAndScrollsTheRest() {
+        let row = AlwaysRulesListView.rowHeight
+        #expect(AlwaysRulesListView.listHeight(ruleCount: 0) == 0)
+        #expect(AlwaysRulesListView.listHeight(ruleCount: 1) == row)
+        #expect(AlwaysRulesListView.listHeight(ruleCount: 2) == 2 * row + 1)
+        #expect(AlwaysRulesListView.listHeight(ruleCount: 4) == 4 * row + 3)
+        #expect(AlwaysRulesListView.listHeight(ruleCount: 40) == AlwaysRulesListView.listHeight(ruleCount: 4))
+    }
+
+    /// A compact row folds the preview, place, scope and every qualifier onto
+    /// one line; the tooltip and accessibility label carry it whole.
+    @MainActor @Test func aCompactRuleRowKeepsEveryQualifier() {
+        let rule = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.mail", verb: "press", target: "Send",
+                                                     withinNamed: "Drafts", role: "AXButton")
+        let summary = HarnessConfirmations.ruleSummary(for: rule, appName: "Mail")
+        let detail = AlwaysRulesListView.detailLine(summary)
+        #expect(detail.contains(summary.place))
+        #expect(detail.contains(summary.scope))
+        #expect(!summary.qualifiers.isEmpty)
+        for qualifier in summary.qualifiers { #expect(detail.contains(qualifier)) }
+    }
+
+    /// The panel follows its content but never runs past the screen's bottom.
+    @Test func theMenuBarPanelNeverRunsPastTheScreen() {
+        #expect(MenuBarPanelManager.panelHeight(content: 300, statusItemBottom: 870, screenVisibleBottom: 0, gap: 4) == 300)
+        #expect(MenuBarPanelManager.panelHeight(content: 965, statusItemBottom: 870, screenVisibleBottom: 0, gap: 4) == 866)
+        #expect(MenuBarPanelManager.panelHeight(content: 965, statusItemBottom: 870, screenVisibleBottom: 70, gap: 4) == 796)
+    }
 }

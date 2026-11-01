@@ -568,29 +568,58 @@ struct AlwaysRulesListView: View {
             .map { FileManager.default.displayName(atPath: $0.path) }
     }
 
+    /// Compact rows of one fixed height, so the list's height is arithmetic, not
+    /// a measurement: at most `visibleRowLimit` rows show and the rest scroll.
+    /// Before 2026-11-01 each row wrapped every line in full and the panel had
+    /// no height cap, so a long list ran off the bottom of the screen.
+    static let rowHeight: CGFloat = 40
+    static let visibleRowLimit = 4
+
+    static func listHeight(ruleCount: Int) -> CGFloat {
+        let shown = min(ruleCount, visibleRowLimit)
+        return CGFloat(shown) * rowHeight + CGFloat(max(0, shown - 1))
+    }
+
+    /// Everything a row folds onto its second line, in full: the tooltip and
+    /// the accessibility label carry it, so truncation never hides scope.
+    static func detailLine(_ summary: HarnessConfirmations.RuleSummary) -> String {
+        ([summary.preview, summary.place, summary.scope].compactMap { $0 } + summary.qualifiers)
+            .joined(separator: "  \u{00B7}  ")
+    }
+
     var body: some View {
         Group {
             if !confirmations.alwaysRules.isEmpty || confirmations.alwaysRulesProblem != nil {
+                let rules = confirmations.alwaysRules
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("ALWAYS ALLOWED")
+                    Text(rules.isEmpty ? "ALWAYS ALLOWED" : "ALWAYS ALLOWED \u{00B7} \(rules.count)")
                         .font(.system(size: 11, weight: .medium))
                         .tracking(0.6)
                         .foregroundStyle(Self.ink.opacity(0.62))
-                        .padding(.bottom, 8)
+                        .padding(.bottom, 6)
                     if let problem = confirmations.alwaysRulesProblem {
                         Text(problem)
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(DS.Colors.warning)
                             .fixedSize(horizontal: false, vertical: true)
-                            .padding(.bottom, 8)
+                            .padding(.bottom, 6)
                     }
-                    ForEach(Array(confirmations.alwaysRules.enumerated()), id: \.offset) { index, rule in
-                        if index > 0 { Rectangle().fill(Self.ink.opacity(0.1)).frame(height: 1) }
-                        row(rule, HarnessConfirmations.ruleSummary(for: rule, appName: Self.installedAppName(rule.bundleIdentifier)))
+                    if !rules.isEmpty {
+                        ScrollView(.vertical) {
+                            VStack(spacing: 0) {
+                                ForEach(Array(rules.enumerated()), id: \.offset) { index, rule in
+                                    if index > 0 { Rectangle().fill(Self.ink.opacity(0.1)).frame(height: 1) }
+                                    row(rule, HarnessConfirmations.ruleSummary(for: rule, appName: Self.installedAppName(rule.bundleIdentifier)))
+                                }
+                            }
+                        }
+                        .scrollIndicators(rules.count > Self.visibleRowLimit ? .visible : .hidden)
+                        .frame(height: Self.listHeight(ruleCount: rules.count))
                     }
                 }
-                .padding(14)
-                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(ConfirmationCardStyle.material))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(ConfirmationCardStyle.material))
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
             }
@@ -600,38 +629,40 @@ struct AlwaysRulesListView: View {
     }
 
     private func row(_ rule: HarnessConfirmations.ApprovalRule, _ summary: HarnessConfirmations.RuleSummary) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(Self.ink, lineWidth: 1.25)
-                .frame(width: 22, height: 22)
-                .overlay(Image(systemName: ConfirmationPromptView.symbol(for: rule.verb))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(Self.ink))
-            VStack(alignment: .leading, spacing: 3) {
+        let detail = Self.detailLine(summary)
+        return HStack(spacing: 8) {
+            Image(systemName: ConfirmationPromptView.symbol(for: rule.verb))
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Self.ink.opacity(0.8))
+                .frame(width: 18, height: 18)
+                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(Self.ink.opacity(0.5), lineWidth: 1))
+            VStack(alignment: .leading, spacing: 2) {
                 Text(summary.title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Self.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let preview = summary.preview {
-                    Text(preview).font(.system(size: 12)).foregroundStyle(Self.ink)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                (Text(summary.place).font(.system(size: 11, design: .monospaced)).foregroundColor(Self.ink.opacity(0.72))
-                 + Text(verbatim: "  \u{00B7}  \(summary.scope)").font(.system(size: 11, weight: .medium)).foregroundColor(Self.ink.opacity(0.62)))
-                    .fixedSize(horizontal: false, vertical: true)
-                ConfirmationPromptView.monoLinesView(summary.qualifiers, size: 10, opacity: 0.45)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(detail)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(Self.ink.opacity(0.6))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
             Spacer(minLength: 0)
             Button { confirmations.removeAlwaysRule(rule) } label: {
                 Text("Remove")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Self.ink)
-                    .frame(width: 64, height: 24)
-                    .overlay(Capsule().stroke(Self.ink.opacity(0.6), lineWidth: 1.25))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Self.ink.opacity(0.85))
+                    .padding(.horizontal, 8)
+                    .frame(height: 20)
+                    .overlay(Capsule().stroke(Self.ink.opacity(0.4), lineWidth: 1))
                     .contentShape(Capsule())
             }
             .buttonStyle(.plain)
         }
-        .padding(.vertical, 8)
+        .frame(height: Self.rowHeight)
+        .help(summary.title + "\n" + detail)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(summary.title + ", " + detail)
     }
 }
