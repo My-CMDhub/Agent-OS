@@ -2,538 +2,661 @@
 //  CompanionPanelView.swift
 //  leanring-buddy
 //
-//  The SwiftUI content hosted inside the menu bar panel. Shows the companion
-//  voice status, push-to-talk shortcut, and quick settings. Designed to feel
-//  like Loom's recording panel — dark, rounded, minimal, and special.
+//  The menu-bar panel: "Standby" (docs/specs/2026-11-01-jarvis-ui-redesign.md
+//  §3.1). Standby and housekeeping only — who it is, what state it is in (the
+//  notch's state, mirrored), how to talk to it, the last thing it proved, what
+//  it is always allowed to do, and setup when setup is broken. It is not a
+//  dashboard and it never asks a question: tickets are answered only on the
+//  card at the notch (owner's D2).
+//
+//  Order is fixed — header, state, conditional rows, settings — and nothing
+//  ever renders above the header. Dark glass in both appearances (D1); only
+//  the outer edge follows the menu bar.
 //
 
 import AVFoundation
 import SwiftUI
 
+/// The permissions setup walks through, one at a time, in this order.
+enum PanelPermission: CaseIterable, Equatable {
+    case microphone, accessibility, screenRecording, screenContent
+
+    var name: String {
+        switch self {
+        case .microphone: "Microphone"
+        case .accessibility: "Accessibility"
+        case .screenRecording: "Screen Recording"
+        case .screenContent: "Screen Content"
+        }
+    }
+
+    /// The progress chip's word: four fit across the panel.
+    var chipName: String {
+        switch self {
+        case .microphone: "Mic"
+        case .accessibility: "Accessibility"
+        case .screenRecording: "Screen"
+        case .screenContent: "Content"
+        }
+    }
+
+    /// The one-line "why" for THIS permission, in J.A.R.V.I.S.'s voice.
+    var reason: String {
+        switch self {
+        case .microphone: "to hear you while you hold \u{2303} \u{2325}"
+        case .accessibility: "to read and press controls, and to check my work"
+        case .screenRecording: "to see what you see when you speak \u{2014} reopen me after granting"
+        case .screenContent: "to capture the window you ask about"
+        }
+    }
+
+    /// The rows setup counts. Screen Content exists only once Screen Recording
+    /// is granted (its check captures the screen), so "N of M" counts what is
+    /// actually there — the old copy said "all four" while three rows showed.
+    static func rows(screenRecordingGranted: Bool) -> [PanelPermission] {
+        screenRecordingGranted ? allCases : [.microphone, .accessibility, .screenRecording]
+    }
+}
+
 struct CompanionPanelView: View {
+    static let width: CGFloat = 300
+
+    enum Page { case standby, rules }
+
     @ObservedObject var companionManager: CompanionManager
     @ObservedObject var confirmations: HarnessConfirmations
+    @ObservedObject private var notch: JarvisNotch
+    /// UI snapshots only: the notch state and receipt to draw instead of the live ones.
+    private let pinnedState: JarvisNotchState?
+    private let pinnedReceipt: JarvisProofReceipt?
+    @State private var page: Page
+    @State private var hoveringPower = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(companionManager: CompanionManager, confirmations: HarnessConfirmations, notch: JarvisNotch = .shared,
+         pinnedState: JarvisNotchState? = nil, pinnedReceipt: JarvisProofReceipt? = nil, page: Page = .standby) {
+        self.companionManager = companionManager
+        self.confirmations = confirmations
+        _notch = ObservedObject(wrappedValue: notch)
+        self.pinnedState = pinnedState
+        self.pinnedReceipt = pinnedReceipt
+        _page = State(initialValue: page)
+    }
+
+    private var notchState: JarvisNotchState { pinnedState ?? notch.state }
+    private var receipt: JarvisProofReceipt? { pinnedReceipt ?? notch.lastProof }
+    private var isReady: Bool { companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted }
 
     var body: some View {
+        ZStack(alignment: .top) {
+            switch page {
+            case .standby:
+                standby.transition(pageTransition(edge: .leading))
+            case .rules:
+                AlwaysRulesPage(confirmations: confirmations, back: { show(.standby) })
+                    .transition(pageTransition(edge: .trailing))
+            }
+        }
+        .frame(width: Self.width, alignment: .top)
+        // Every control inside draws dark (a system Menu follows the appearance);
+        // the edge below reads the REAL appearance, outside this override.
+        .environment(\.colorScheme, .dark)
+        .clipShape(RoundedRectangle(cornerRadius: JV.panelRadius, style: .continuous))
+        .jvGlass(radius: JV.panelRadius)
+        .onReceive(NotificationCenter.default.publisher(for: .jarvisPanelWillShow)) { _ in page = .standby }
+    }
+
+    private func pageTransition(edge: Edge) -> AnyTransition {
+        reduceMotion ? .opacity : .move(edge: edge).combined(with: .opacity)
+    }
+
+    private func show(_ next: Page) {
+        withAnimation(reduceMotion ? JV.reduceMotionFade : .easeOut(duration: 0.15)) { page = next }
+    }
+
+    // MARK: Standby
+
+    private var standby: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // The header first, always: nothing renders above who this is.
-            panelHeader
-            Divider()
-                .background(DS.Colors.borderSubtle)
-                .padding(.horizontal, 16)
-
-            // Owner's D2 (2026-11-01): the card at the notch is the ONE place a
-            // ticket is answered. The panel only says one is waiting, and where.
-            approvalWaitingRow
-            // Only here, not on the floating card: revoking is a panel chore.
-            AlwaysRulesListView(confirmations: confirmations)
-
-            permissionsCopySection
-                .padding(.top, 16)
-                .padding(.horizontal, 16)
-
-            if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-                Spacer()
-                    .frame(height: 12)
-
-                modelPickerRow
-                    .padding(.horizontal, 16)
+            header
+            VStack(alignment: .leading, spacing: 14) {
+                if isReady {
+                    stateBlock
+                    if let receipt { receiptRow(receipt) }
+                    if confirmations.pendingCount() > 0, notchState != .needsYou { approvalRow }
+                } else {
+                    setupBlock
+                }
             }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 14)
 
-            if !companionManager.allPermissionsGranted {
-                Spacer()
-                    .frame(height: 16)
-
-                settingsSection
-                    .padding(.horizontal, 16)
-            }
-
-            if !companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-                Spacer()
-                    .frame(height: 16)
-
-                startButton
-                    .padding(.horizontal, 16)
-            }
-
-            Spacer()
-                .frame(height: 12)
-
-            Divider()
-                .background(DS.Colors.borderSubtle)
+            if companionManager.hasCompletedOnboarding {
+                Rectangle().fill(JV.hairline).frame(height: 1)
+                VStack(spacing: 0) {
+                    alwaysAllowedRow
+                    voiceRow
+                }
                 .padding(.horizontal, 16)
-
-            footerSection
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.vertical, 6)
+            }
         }
-        .frame(width: 320)
-        .background(panelBackground)
     }
 
-    // MARK: - Header
-
-    private var panelHeader: some View {
+    private var header: some View {
         HStack {
-            HStack(spacing: 8) {
-                // Animated status dot
-                Circle()
-                    .fill(statusDotColor)
-                    .frame(width: 8, height: 8)
-                    .shadow(color: statusDotColor.opacity(0.6), radius: 4)
-
-                Text("J.A.R.V.I.S.")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(DS.Colors.textPrimary)
-            }
-
+            Text("J.A.R.V.I.S.")
+                .font(JV.wordmark)
+                .tracking(JV.wordmarkTracking)
+                .foregroundStyle(JV.ink2)
             Spacer()
-
-            Text(statusText)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textTertiary)
-
-            Button(action: {
-                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
-            }) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .frame(width: 20, height: 20)
-                    .background(
-                        Circle()
-                            .fill(Color.white.opacity(0.08))
-                    )
+            Button { NSApp.terminate(nil) } label: {
+                Image(systemName: "power")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(hoveringPower ? JV.ink : JV.ink3)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .onHover { hoveringPower = $0 }
+            .help("Quit J.A.R.V.I.S.")
+            .accessibilityLabel("Quit J.A.R.V.I.S.")
             .pointerCursor()
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        .padding(.leading, 16)
+        .padding(.trailing, 10)
+        .frame(height: 44)
     }
 
-    // MARK: - Permissions Copy
+    // MARK: State
 
-    @ViewBuilder
-    private var permissionsCopySection: some View {
-        if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-            Text("Hold Control+Option to talk.")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else if companionManager.allPermissionsGranted {
-            Text("All set. Press Begin.")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else if companionManager.hasCompletedOnboarding {
-            // Permissions were revoked after onboarding — tell user to re-grant
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Permissions needed")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(DS.Colors.textSecondary)
-
-                Text("Some permissions were revoked. Grant the ones below to keep using J.A.R.V.I.S.")
-                    .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("At your service, sir.")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(DS.Colors.textSecondary)
-
-                Text("I act only while you hold \u{2303} \u{2325} and speak. I'll show what I'm about to do, ask before anything that matters, and check every result before I call it done.")
-                    .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+    /// What the notch is doing, in the panel's words. Pure, so a test holds the mapping.
+    static func stateLine(_ state: JarvisNotchState, pendingApprovals: Int) -> (glyph: JVGlyphKind, text: String) {
+        switch state {
+        case .idle, .noReply, .proof: return (.openArc, "Standing by")
+        case .listening: return (.openArc, "Listening")
+        case .thinking: return (.orbit, "Thinking")
+        case .intent(let title): return (.openArc, title)
+        case .needsYou: return (.arcDown, approvalsWaiting(max(1, pendingApprovals)))
+        case .didntTake: return (.brokenRing, "Didn\u{2019}t take")
         }
     }
 
-    // MARK: - Begin Button
-
-    @ViewBuilder
-    private var startButton: some View {
-        if !companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-            Button(action: {
-                companionManager.triggerOnboarding()
-            }) {
-                Text("Begin")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(DS.Colors.textOnAccent)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                            .fill(DS.Colors.accent)
-                    )
-            }
-            .buttonStyle(.plain)
-            .pointerCursor()
+    static func glyphTurns(_ state: JarvisNotchState) -> Bool {
+        switch state {
+        case .thinking, .intent: return true
+        default: return false
         }
     }
 
-    // MARK: - Approval waiting
+    static func approvalsWaiting(_ count: Int) -> String {
+        count == 1 ? "Approval waiting \u{00B7} at the notch" : "\(count) approvals waiting \u{00B7} at the notch"
+    }
 
-    /// No answer controls: the card at the notch asks, on every Space.
+    /// "Wi‑Fi off · verified 2 min ago".
+    static func receiptText(_ receipt: JarvisProofReceipt, now: Date) -> String {
+        let seconds = max(0, now.timeIntervalSince(receipt.at))
+        let when: String
+        if seconds < 60 { when = "just now" }
+        else if seconds < 3600 { when = "\(Int(seconds / 60)) min ago" }
+        else { when = "\(Int(seconds / 3600)) h ago" }
+        return "\(receipt.subject) \u{00B7} verified \(when)"
+    }
+
+    private var stateBlock: some View {
+        let line = Self.stateLine(notchState, pendingApprovals: confirmations.pendingCount())
+        return HStack(alignment: .top, spacing: 10) {
+            // Only work in progress turns (thinking, acting); standing by is still.
+            JVGlyph(kind: line.glyph, animated: Self.glyphTurns(notchState))
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(line.text)
+                    .font(JV.title)
+                    .foregroundStyle(JV.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .animation(reduceMotion ? nil : JV.textFade, value: line.text)
+                hotkeyHint
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var hotkeyHint: some View {
+        HStack(spacing: 4) {
+            Text("Hold")
+            keycap("\u{2303}")
+            keycap("\u{2325}")
+            Text("to speak")
+        }
+        .font(JV.body)
+        .foregroundStyle(JV.ink2)
+        .accessibilityLabel("Hold Control and Option to speak")
+    }
+
+    private func keycap(_ symbol: String) -> some View {
+        Text(symbol)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(JV.ink)
+            .frame(width: 20, height: 20)
+            .background(RoundedRectangle(cornerRadius: JV.keycapRadius, style: .continuous).fill(JV.raised))
+            .overlay(RoundedRectangle(cornerRadius: JV.keycapRadius, style: .continuous).strokeBorder(JV.hairline, lineWidth: 1))
+    }
+
+    /// The last thing proven, this session only (D9) — the one cyan on the panel.
+    private func receiptRow(_ receipt: JarvisProofReceipt) -> some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            HStack(spacing: 10) {
+                JVGlyph(kind: .ring, size: 10)
+                    .frame(width: 16)
+                Text(Self.receiptText(receipt, now: context.date))
+                    .font(JV.caption)
+                    .foregroundStyle(JV.ink2)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    /// One row, no answer controls. Shown only when the notch has moved on
+    /// while a ticket still waits; when the notch says "needs you" the state
+    /// line already is this row. The clock catches a ticket that expires.
     @ViewBuilder
-    private var approvalWaitingRow: some View {
+    private var approvalRow: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let waiting = confirmations.pendingCount(now: context.date)
             if waiting > 0 {
-                Text(waiting == 1 ? "Approval waiting \u{00B7} at the notch" : "\(waiting) approvals waiting \u{00B7} at the notch")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textPrimary)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
+                HStack(spacing: 10) {
+                    JVGlyph(kind: .arcDown)
+                    Text(Self.approvalsWaiting(waiting))
+                        .font(JV.body)
+                        .foregroundStyle(JV.ink)
+                }
             }
         }
     }
 
-    // MARK: - Permissions
+    // MARK: Setup — one action at a time
 
-    private var settingsSection: some View {
-        VStack(spacing: 2) {
-            Text("PERMISSIONS")
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .foregroundColor(DS.Colors.textTertiary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.bottom, 6)
-
-            microphonePermissionRow
-
-            accessibilityPermissionRow
-
-            screenRecordingPermissionRow
-
-            if companionManager.hasScreenRecordingPermission {
-                screenContentPermissionRow
-            }
-
+    private func granted(_ permission: PanelPermission) -> Bool {
+        switch permission {
+        case .microphone: companionManager.hasMicrophonePermission
+        case .accessibility: companionManager.hasAccessibilityPermission
+        case .screenRecording: companionManager.hasScreenRecordingPermission
+        case .screenContent: companionManager.hasScreenContentPermission
         }
     }
 
-    private var accessibilityPermissionRow: some View {
-        let isGranted = companionManager.hasAccessibilityPermission
-        return HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "hand.raised")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
-                    .frame(width: 16)
-
-                Text("Accessibility")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
-            }
-
-            Spacer()
-
-            if isGranted {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(DS.Colors.success)
-                        .frame(width: 6, height: 6)
-                    Text("Granted")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
-                }
-            } else {
-                HStack(spacing: 6) {
-                    Button(action: {
-                        // Triggers the system accessibility prompt (AXIsProcessTrustedWithOptions)
-                        // on first attempt, then opens System Settings on subsequent attempts.
-                        WindowPositionManager.requestAccessibilityPermission()
-                    }) {
-                        Text("Grant")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(DS.Colors.textOnAccent)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule()
-                                    .fill(DS.Colors.accent)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
-
-                    Button(action: {
-                        // Reveals the app in Finder so the user can drag it into
-                        // the Accessibility list if it doesn't appear automatically
-                        // (common with unsigned dev builds).
-                        WindowPositionManager.revealAppInFinder()
-                        WindowPositionManager.openAccessibilitySettings()
-                    }) {
-                        Text("Find App")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(DS.Colors.textSecondary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule(style: .circular)
-                                    .strokeBorder(DS.Colors.borderSubtle, lineWidth: 0.8)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
+    @ViewBuilder
+    private var setupBlock: some View {
+        let rows = PanelPermission.rows(screenRecordingGranted: companionManager.hasScreenRecordingPermission)
+        let missing = rows.filter { !granted($0) }
+        VStack(alignment: .leading, spacing: 12) {
+            if !companionManager.hasCompletedOnboarding {
+                VStack(alignment: .leading, spacing: 6) {
+                    // "Sir" on glass exactly once, here (D8).
+                    Text("At your service, sir.")
+                        .font(JV.title)
+                        .foregroundStyle(JV.ink)
+                    Text("I act only while you hold \u{2303} \u{2325} and speak. I\u{2019}ll show what I\u{2019}m about to do, ask before anything that matters, and check every result before I call it done.")
+                        .font(JV.body)
+                        .foregroundStyle(JV.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-        }
-        .padding(.vertical, 6)
-    }
-
-    private var screenRecordingPermissionRow: some View {
-        let isGranted = companionManager.hasScreenRecordingPermission
-        return HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "rectangle.dashed.badge.record")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
-                    .frame(width: 16)
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Screen Recording")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(DS.Colors.textSecondary)
-
-                    Text(isGranted
-                         ? "Only takes a screenshot when you use the hotkey"
-                         : "Quit and reopen after granting")
-                        .font(.system(size: 10))
-                        .foregroundColor(DS.Colors.textTertiary)
-                }
-            }
-
-            Spacer()
-
-            if isGranted {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(DS.Colors.success)
-                        .frame(width: 6, height: 6)
-                    Text("Granted")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
-                }
-            } else {
-                Button(action: {
-                    // Triggers the native macOS screen recording prompt on first
-                    // attempt (auto-adds app to the list), then opens System Settings
-                    // on subsequent attempts.
-                    WindowPositionManager.requestScreenRecordingPermission()
-                }) {
-                    Text("Grant")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(DS.Colors.accent)
-                        )
-                }
-                .buttonStyle(.plain)
-                .pointerCursor()
-            }
-        }
-        .padding(.vertical, 6)
-    }
-
-    private var screenContentPermissionRow: some View {
-        let isGranted = companionManager.hasScreenContentPermission
-        return HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "eye")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
-                    .frame(width: 16)
-
-                Text("Screen Content")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
-            }
-
-            Spacer()
-
-            if isGranted {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(DS.Colors.success)
-                        .frame(width: 6, height: 6)
-                    Text("Granted")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
-                }
-            } else {
-                Button(action: {
-                    companionManager.requestScreenContentPermission()
-                }) {
-                    Text("Grant")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(DS.Colors.accent)
-                        )
-                }
-                .buttonStyle(.plain)
-                .pointerCursor()
-            }
-        }
-        .padding(.vertical, 6)
-    }
-
-    private var microphonePermissionRow: some View {
-        let isGranted = companionManager.hasMicrophonePermission
-        return HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "mic")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
-                    .frame(width: 16)
-
-                Text("Microphone")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
-            }
-
-            Spacer()
-
-            if isGranted {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(DS.Colors.success)
-                        .frame(width: 6, height: 6)
-                    Text("Granted")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
-                }
-            } else {
-                Button(action: {
-                    // Triggers the native macOS microphone permission dialog on
-                    // first attempt. If already denied, opens System Settings.
-                    let status = AVCaptureDevice.authorizationStatus(for: .audio)
-                    if status == .notDetermined {
-                        AVCaptureDevice.requestAccess(for: .audio) { _ in }
-                    } else {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
-                            NSWorkspace.shared.open(url)
+            if let current = missing.first {
+                HStack(alignment: .top, spacing: 10) {
+                    JVGlyph(kind: .openArc).padding(.top, 2)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Setup \u{00B7} \(missing.count) of \(rows.count) left")
+                            .font(JV.title)
+                            .foregroundStyle(JV.ink)
+                        Text("I need \(current.name) \(current.reason).")
+                            .font(JV.body)
+                            .foregroundStyle(JV.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        primaryButton(actionTitle(for: current)) { act(on: current) }
+                            .disabled(current == .screenContent && companionManager.isRequestingScreenContent)
+                        if current == .accessibility {
+                            Button {
+                                // Unsigned dev builds sometimes never appear in the list.
+                                WindowPositionManager.revealAppInFinder()
+                                WindowPositionManager.openAccessibilitySettings()
+                            } label: {
+                                Text("Not in the list? Show the app")
+                                    .font(JV.caption)
+                                    .underline()
+                                    .foregroundStyle(JV.ink2)
+                            }
+                            .buttonStyle(.plain)
+                            .pointerCursor()
                         }
+                        progressChips(rows)
+                            .padding(.top, 4)
                     }
-                }) {
-                    Text("Grant")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(DS.Colors.accent)
-                        )
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
+            } else if !companionManager.hasCompletedOnboarding {
+                primaryButton("Begin") { companionManager.triggerOnboarding() }
             }
         }
-        .padding(.vertical, 6)
     }
 
-    // MARK: - Model Picker
+    private func actionTitle(for permission: PanelPermission) -> String {
+        switch permission {
+        case .microphone:
+            AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined ? "Allow Microphone" : "Open Microphone settings"
+        case .accessibility: "Open Accessibility settings"
+        case .screenRecording: "Open Screen Recording settings"
+        case .screenContent: "Allow Screen Content"
+        }
+    }
 
-    private var modelPickerRow: some View {
+    private func act(on permission: PanelPermission) {
+        switch permission {
+        case .microphone:
+            // The system prompt the first time; Settings once it has been answered.
+            if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+                AVCaptureDevice.requestAccess(for: .audio) { _ in }
+            } else if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                NSWorkspace.shared.open(url)
+            }
+        case .accessibility:
+            // The system prompt on the first attempt, System Settings after.
+            WindowPositionManager.requestAccessibilityPermission()
+        case .screenRecording:
+            WindowPositionManager.requestScreenRecordingPermission()
+        case .screenContent:
+            companionManager.requestScreenContentPermission()
+        }
+    }
+
+    private func progressChips(_ rows: [PanelPermission]) -> some View {
+        HStack(spacing: 8) {
+            ForEach(rows, id: \.self) { permission in
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(granted(permission) ? JV.ink : Color.clear)
+                        .overlay(Circle().strokeBorder(granted(permission) ? Color.clear : JV.ink3, lineWidth: JV.stroke))
+                        .frame(width: 8, height: 8)
+                    Text(permission.chipName)
+                        .font(JV.meta)
+                        .foregroundStyle(granted(permission) ? JV.ink2 : JV.ink3)
+                        .fixedSize()
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(permission.name) \(granted(permission) ? "granted" : "missing")")
+            }
+        }
+    }
+
+    private func primaryButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(JV.bodySemibold)
+                .foregroundStyle(JV.glass)
+                .frame(maxWidth: .infinity)
+                .frame(height: JV.buttonHeight)
+                .background(RoundedRectangle(cornerRadius: JV.buttonRadius, style: .continuous).fill(JV.ink))
+                .contentShape(RoundedRectangle(cornerRadius: JV.buttonRadius, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    // MARK: Settings rows
+
+    private var alwaysAllowedRow: some View {
+        let problem = confirmations.alwaysRulesProblem
+        let unreadable = problem == HarnessConfirmations.unreadableRulesMessage
+        return Button { show(.rules) } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Text("Always allowed")
+                        .font(JV.bodyMedium)
+                        .foregroundStyle(JV.ink)
+                    Spacer()
+                    Text(unreadable ? "Unreadable" : "\(confirmations.alwaysRules.count)")
+                        .font(JV.meta)
+                        .foregroundStyle(unreadable ? JV.ink : JV.ink3)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(JV.ink3)
+                }
+                if let problem {
+                    Text(problem)
+                        .font(JV.caption)
+                        .foregroundStyle(JV.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.vertical, 9)
+            .frame(minHeight: 36)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    private var voiceRow: some View {
         HStack {
             Text("Voice")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
-
+                .font(JV.bodyMedium)
+                .foregroundStyle(JV.ink)
             Spacer()
-
-            HStack(spacing: 0) {
+            Menu {
                 ForEach(VoiceStackChoice.allCases, id: \.self) { stack in
-                    voiceStackOptionButton(stack)
+                    Button(stack.pickerLabel) { companionManager.setSelectedVoiceStack(stack) }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(companionManager.selectedVoiceStack.pickerLabel)
+                        .font(JV.body)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .foregroundStyle(JV.ink2)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .pointerCursor()
+        }
+        .frame(height: 36)
+    }
+}
+
+// MARK: - Always allowed (a page inside the panel, not a window)
+
+/// The rules an "Always" answer created. They live in the data-protection
+/// keychain, which the `security` CLI cannot reach, so this page is the only
+/// way to revoke one. Grouped by app; every row wraps its scope in full, never
+/// cut ("exac…" hid what a consent covered). Remove takes effect at once and
+/// needs no hardware click — it only narrows — and there is deliberately no
+/// Undo: undo would recreate a rule without one.
+struct AlwaysRulesPage: View {
+    @ObservedObject var confirmations: HarnessConfirmations
+    let back: () -> Void
+    @State private var hoveredRemove: Int?
+    @State private var listHeight: CGFloat = 0
+
+    /// The app's name from the local install, never from the rule.
+    static func installedAppName(_ bundleIdentifier: String) -> String? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
+            .map { FileManager.default.displayName(atPath: $0.path) }
+    }
+
+    /// Rules by app, case-insensitive bundle id, in the order first saved.
+    static func groups(_ rules: [HarnessConfirmations.ApprovalRule]) -> [[(index: Int, rule: HarnessConfirmations.ApprovalRule)]] {
+        var order: [String] = []
+        var byApp: [String: [(index: Int, rule: HarnessConfirmations.ApprovalRule)]] = [:]
+        for (index, rule) in rules.enumerated() {
+            let key = rule.bundleIdentifier.lowercased()
+            if byApp[key] == nil { order.append(key) }
+            byApp[key, default: []].append((index, rule))
+        }
+        return order.compactMap { byApp[$0] }
+    }
+
+    /// The card's question without "in "App"" — the group header names the app.
+    static func rowTitle(_ summary: HarnessConfirmations.RuleSummary, appLabel: String) -> String {
+        let suffix = " in " + UntrustedText(appLabel).forDisplayInFull
+        return summary.title.hasSuffix(suffix) ? String(summary.title.dropLast(suffix.count)) : summary.title
+    }
+
+    /// Under the title, wrapping and never truncated: the typed text, where,
+    /// and the scope — "exactly this" or "whole app".
+    static func rowDetail(_ summary: HarnessConfirmations.RuleSummary) -> String {
+        let place = summary.place == "any target" ? nil : summary.place
+        let line = [summary.preview, place, summary.scope].compactMap { $0 }.joined(separator: " \u{00B7} ")
+        return line.prefix(1).uppercased() + line.dropFirst()
+    }
+
+    /// Everything, qualifiers too, for the tooltip and the accessibility label.
+    static func detailLine(_ summary: HarnessConfirmations.RuleSummary) -> String {
+        ([summary.preview, summary.place, summary.scope].compactMap { $0 } + summary.qualifiers)
+            .joined(separator: "  \u{00B7}  ")
+    }
+
+    /// The page scrolls inside the panel once it would pass this.
+    private var maximumListHeight: CGFloat {
+        max(200, (NSScreen.main?.visibleFrame.height ?? 800) - 200)
+    }
+
+    var body: some View {
+        let rules = confirmations.alwaysRules
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: back) {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("Always allowed")
+                        .font(JV.bodySemibold)
+                }
+                .foregroundStyle(JV.ink)
+                .frame(height: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .padding(.horizontal, 16)
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("These run without a card. Removing one makes me ask again.")
+                    .font(JV.caption)
+                    .foregroundStyle(JV.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let problem = confirmations.alwaysRulesProblem {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(problem)
+                            .font(JV.body)
+                            .foregroundStyle(JV.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let detail = confirmations.alwaysRulesProblemDetail {
+                            // The raw error never draws; it goes to the pasteboard on request.
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(detail, forType: .string)
+                            } label: {
+                                Text("Copy details").font(JV.caption).underline().foregroundStyle(JV.ink2)
+                            }
+                            .buttonStyle(.plain)
+                            .pointerCursor()
+                        }
+                    }
+                } else if rules.isEmpty {
+                    Text("Nothing is always allowed. Every risky action asks first.")
+                        .font(JV.body)
+                        .foregroundStyle(JV.ink)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
-            )
-        }
-        .padding(.vertical, 4)
-    }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
 
-    private func voiceStackOptionButton(_ stack: VoiceStackChoice) -> some View {
-        let isSelected = companionManager.selectedVoiceStack == stack
-        return Button(action: {
-            companionManager.setSelectedVoiceStack(stack)
-        }) {
-            Text(stack.pickerLabel)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
-                )
-        }
-        .buttonStyle(.plain)
-        .pointerCursor()
-    }
-
-    // MARK: - Footer
-
-    private var footerSection: some View {
-        Button(action: {
-            NSApp.terminate(nil)
-        }) {
-            HStack(spacing: 6) {
-                Image(systemName: "power")
-                    .font(.system(size: 11, weight: .medium))
-                Text("Quit J.A.R.V.I.S.")
-                    .font(.system(size: 12, weight: .medium))
+            if !rules.isEmpty {
+                Rectangle().fill(JV.hairline).frame(height: 1)
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(Self.groups(rules).enumerated()), id: \.offset) { position, group in
+                            if position > 0 { Rectangle().fill(JV.hairline).frame(height: 1) }
+                            appGroup(group)
+                        }
+                    }
+                    .background(GeometryReader { proxy in
+                        Color.clear.onChange(of: proxy.size.height, initial: true) { _, height in listHeight = height }
+                    })
+                }
+                .scrollIndicators(listHeight > maximumListHeight ? .visible : .hidden)
+                .frame(height: min(listHeight > 0 ? listHeight : CGFloat(rules.count) * 56, maximumListHeight))
             }
-            .foregroundColor(DS.Colors.textSecondary)
         }
-        .buttonStyle(.plain)
-        .pointerCursor()
+        .onAppear { confirmations.refreshAlwaysRules() }
     }
 
-    // MARK: - Visual Helpers
-
-    private var panelBackground: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(DS.Colors.background)
-            .shadow(color: Color.black.opacity(0.5), radius: 20, x: 0, y: 10)
-            .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
+    private func appGroup(_ group: [(index: Int, rule: HarnessConfirmations.ApprovalRule)]) -> some View {
+        let bundle = group[0].rule.bundleIdentifier
+        let installed = Self.installedAppName(bundle)
+        let appLabel = installed ?? bundle
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                appIcon(bundle)
+                Text(appLabel)
+                    .font(JV.bodySemibold)
+                    .foregroundStyle(JV.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            ForEach(group, id: \.index) { item in
+                ruleRow(item.rule, index: item.index, summary: HarnessConfirmations.ruleSummary(for: item.rule, appName: installed),
+                        appLabel: appLabel)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 
-    private var statusDotColor: Color {
-        switch companionManager.voiceState {
-        case .idle: return DS.Colors.textTertiary
-        case .listening, .processing, .responding: return DS.Colors.textPrimary
+    @ViewBuilder
+    private func appIcon(_ bundleIdentifier: String) -> some View {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                .resizable()
+                .frame(width: 20, height: 20)
+        } else {
+            Image(systemName: "app.dashed")
+                .font(.system(size: 14))
+                .foregroundStyle(JV.ink3)
+                .frame(width: 20, height: 20)
         }
     }
 
-    private var statusText: String {
-        if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
-            return "Setup"
+    private func ruleRow(_ rule: HarnessConfirmations.ApprovalRule, index: Int, summary: HarnessConfirmations.RuleSummary,
+                         appLabel: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(Self.rowTitle(summary, appLabel: appLabel))
+                    .font(JV.bodyMedium)
+                    .foregroundStyle(JV.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(Self.rowDetail(summary))
+                    .font(JV.caption)
+                    .foregroundStyle(JV.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            Button { confirmations.removeAlwaysRule(rule) } label: {
+                Image(systemName: "minus.circle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(hoveredRemove == index ? JV.ink : JV.ink3)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hoveredRemove = $0 ? index : (hoveredRemove == index ? nil : hoveredRemove) }
+            .help("Remove \u{2014} I\u{2019}ll ask again next time")
+            .accessibilityLabel("Remove")
+            .pointerCursor()
         }
-        switch companionManager.voiceState {
-        case .idle: return "Standing by"
-        case .listening: return "Listening"
-        case .processing: return "Thinking"
-        case .responding: return "Speaking"
-        }
+        .padding(.leading, 28)
+        .help(summary.title + "\n" + Self.detailLine(summary))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(summary.title + ", " + Self.detailLine(summary))
     }
 }

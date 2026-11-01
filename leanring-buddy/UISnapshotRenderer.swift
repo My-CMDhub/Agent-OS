@@ -45,31 +45,53 @@ enum UISnapshotRenderer {
         }
         manifest.append("production keychain Always rules: \(realRules) (count only, none rendered)")
 
-        // The menu-bar panel, one file per state the owner can be in.
-        let panelStates: [(name: String, granted: Bool, onboarded: Bool, tickets: [Fixture], rules: Int, note: String)] = [
-            ("panel-ready", true, true, [], 0, "everyday panel: onboarded, all permissions, nothing pending"),
-            ("panel-ready-rules-2", true, true, [], 2, "two Always rules, the list at its natural height"),
-            ("panel-ready-rules-7", true, true, [], 7, "seven Always rules: four rows show, the rest scroll"),
-            ("panel-tickets-and-rules", true, true, [.send, .typeNote], 3, "two pending tickets (answered only at the notch) and three Always rules"),
-            ("panel-permissions-revoked", false, true, [], 0, "onboarded but permissions revoked: grant rows"),
-            ("panel-first-run", false, false, [], 0, "first launch: greeting and the grant rows"),
-            ("panel-begin", true, false, [], 0, "permissions granted, not yet onboarded: the Begin button"),
+        // The menu-bar panel, one file per state the owner can be in. The notch state
+        // and the receipt are pinned on the view, never driven through the live notch.
+        let all = Set(PanelPermission.allCases)
+        let receipt = JarvisProofReceipt(subject: "Wi\u{2011}Fi off", at: Date().addingTimeInterval(-125))
+        let panelStates: [(name: String, missing: Set<PanelPermission>, onboarded: Bool, state: JarvisNotchState, receipt: JarvisProofReceipt?,
+                           tickets: [Fixture], rules: Int, page: CompanionPanelView.Page, note: String)] = [
+            ("panel-ready", [], true, .idle, nil, [], 0, .standby, "Standby: onboarded, all permissions, nothing pending, nothing proven yet"),
+            ("panel-ready-receipt", [], true, .idle, receipt, [], 3, .standby, "Standby after a proof: the session's last-verified receipt, three rules"),
+            ("panel-acting", [], true, .intent(title: "Opening Safari\u{2026}"), receipt, [], 3, .standby, "the state line mirrors the notch: acting"),
+            ("panel-thinking", [], true, .thinking, nil, [], 0, .standby, "the state line mirrors the notch: thinking (orbit glyph)"),
+            ("panel-approval-waiting", [], true, .needsYou, nil, [.send, .typeNote], 3, .standby,
+             "two tickets pending, notch says needs you: the state line is the waiting row, no answer controls"),
+            ("panel-approval-waiting-notch-moved-on", [], true, .intent(title: "Doing \u{00B7} 3"), nil, [.send], 0, .standby,
+             "a ticket still waits while the notch moved on: its own row under the state line"),
+            ("panel-rules-page-7", [], true, .idle, nil, [], 7, .rules, "Always allowed page: seven rules grouped by app, scope never cut"),
+            ("panel-rules-page-empty", [], true, .idle, nil, [], 0, .rules, "Always allowed page with no rules"),
+            ("panel-permissions-revoked", [.accessibility], true, .idle, nil, [], 0, .standby,
+             "onboarded, Accessibility revoked: one action at a time"),
+            ("panel-screen-content", [.screenContent], true, .idle, nil, [], 0, .standby, "the fourth row, which exists only after Screen Recording"),
+            ("panel-first-run", all, false, .idle, nil, [], 0, .standby, "first launch: greeting and the first of three steps"),
+            ("panel-begin", [], false, .idle, nil, [], 0, .standby, "permissions granted, not yet onboarded: Begin"),
         ]
         for state in panelStates {
-            companionManager.pinPanelStateForSnapshot(permissionsGranted: state.granted, onboarded: state.onboarded)
+            companionManager.pinPanelStateForSnapshot(missing: state.missing, onboarded: state.onboarded)
             let (confirmations, store) = fixtureConfirmations(tickets: state.tickets, rules: Array(Fixture.rules.prefix(state.rules)))
-            let view = CompanionPanelView(companionManager: companionManager, confirmations: confirmations).frame(width: 320)
+            let view = CompanionPanelView(companionManager: companionManager, confirmations: confirmations,
+                                          pinnedState: state.state, pinnedReceipt: state.receipt, page: state.page)
             manifest += renderBoth(AnyView(view), name: state.name, note: state.note)
             _ = store.deleteItem()
         }
-        // An item that is there but cannot be decoded: the list says so instead of showing none.
-        companionManager.pinPanelStateForSnapshot(permissionsGranted: true, onboarded: true)
+        // An item that is there but cannot be decoded: the panel says what that means, never the raw error.
+        companionManager.pinPanelStateForSnapshot(missing: [], onboarded: true)
         let unreadableStore = ApprovalRulesKeychainStore(serviceName: "\(ApprovalRulesKeychainStore.productionServiceName).ui-snapshot-\(UUID().uuidString)")
         _ = unreadableStore.write(Data("not json".utf8))
         let unreadable = HarnessConfirmations(rulesStore: unreadableStore)
-        manifest += renderBoth(AnyView(CompanionPanelView(companionManager: companionManager, confirmations: unreadable).frame(width: 320)),
-                               name: "panel-rules-unreadable", note: "Always rules item unreadable: the warning line")
+        for page in [CompanionPanelView.Page.standby, .rules] {
+            manifest += renderBoth(AnyView(CompanionPanelView(companionManager: companionManager, confirmations: unreadable,
+                                                              pinnedState: .idle, page: page)),
+                                   name: page == .standby ? "panel-rules-unreadable" : "panel-rules-unreadable-page",
+                                   note: "Always rules item unreadable: \"Unreadable\", none in effect, Copy details on the page")
+        }
         _ = unreadableStore.deleteItem()
+
+        // The menu-bar icon: the open arc, a template image, on a light and a dark bar.
+        manifest += renderBoth(AnyView(Image(nsImage: MenuBarPanelManager.makeArcMenuBarIcon()).renderingMode(.template)
+                                    .foregroundStyle(.primary).frame(width: 44, height: 24)),
+                               name: "menubar-icon", note: "the arc icon at 18 x 18 pt")
 
         // The approval card, grown, on a notched and a notchless screen.
         let cards: [(name: String, tickets: [Fixture], step: ConfirmationStep?, notch: JarvisNotchGeometry, expanded: Bool, note: String)] = [

@@ -106,12 +106,13 @@ final class CompanionManager: ObservableObject {
     /// memory. Never UserDefaults and never TCC — the owner's state is not touched.
     private var onboardingPinnedForSnapshot: Bool?
 
-    func pinPanelStateForSnapshot(permissionsGranted: Bool, onboarded: Bool) {
-        hasAccessibilityPermission = permissionsGranted
-        hasScreenRecordingPermission = permissionsGranted
-        hasMicrophonePermission = permissionsGranted
-        hasScreenContentPermission = permissionsGranted
+    func pinPanelStateForSnapshot(missing: Set<PanelPermission>, onboarded: Bool) {
+        hasMicrophonePermission = !missing.contains(.microphone)
+        hasAccessibilityPermission = !missing.contains(.accessibility)
+        hasScreenRecordingPermission = !missing.contains(.screenRecording)
+        hasScreenContentPermission = !missing.contains(.screenContent)
         onboardingPinnedForSnapshot = onboarded
+        objectWillChange.send()
     }
 
     func start() {

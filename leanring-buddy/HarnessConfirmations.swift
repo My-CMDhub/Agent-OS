@@ -377,7 +377,12 @@ final class HarnessConfirmations: ObservableObject {
     @Published private(set) var alwaysRulesProblem: String?
     /// The raw keychain error behind an unreadable rules item (tooltip only); nil otherwise.
     @Published private(set) var alwaysRulesProblemDetail: String?
-    static let unreadableRulesMessage = "Saved \u{201C}Always\u{201D} rules can\u{2019}t be read, so none apply \u{2014} everything that needs approval will ask."
+    /// The panel's words when the keychain item cannot be read: what it MEANS
+    /// (fail-safe, nothing runs unasked), never the raw error — that is
+    /// `alwaysRulesProblemDetail`, copied from the rules page on request.
+    static let unreadableRulesMessage = "None are in effect \u{2014} I\u{2019}ll ask every time."
+    static let unsavedRuleMessage = "Your \u{201C}Always\u{201D} wasn\u{2019}t saved \u{2014} it applied once only."
+    static let unremovedRuleMessage = "That rule wasn\u{2019}t removed \u{2014} it still applies."
 
     private let rulesStore: ApprovalRulesKeychainStore
     /// The pre-2026-09-14 rules file. Never read as rules — any process running
@@ -889,7 +894,8 @@ final class HarnessConfirmations: ObservableObject {
         let status = rulesStore.save(rules + [rule])
         refreshAlwaysRules()
         if status != errSecSuccess {
-            alwaysRulesProblem = "\"Always\" was not saved (keychain OSStatus \(status)) — it allowed this once only"
+            alwaysRulesProblem = Self.unsavedRuleMessage
+            alwaysRulesProblemDetail = "keychain OSStatus \(status) saving an Always rule"
         }
     }
 
@@ -899,7 +905,8 @@ final class HarnessConfirmations: ObservableObject {
         let status = rulesStore.remove(rule)
         refreshAlwaysRules()
         if status != errSecSuccess {
-            alwaysRulesProblem = "rule not removed (keychain OSStatus \(status))"
+            alwaysRulesProblem = Self.unremovedRuleMessage
+            alwaysRulesProblemDetail = "keychain OSStatus \(status) removing an Always rule"
         }
     }
 

@@ -16,10 +16,12 @@ import SwiftUI
 
 extension Notification.Name {
     static let clickyDismissPanel = Notification.Name("clickyDismissPanel")
+    /// Posted as the panel opens: it starts on Standby, never on a sub-page left open.
+    static let jarvisPanelWillShow = Notification.Name("jarvisPanelWillShow")
 }
 
 /// Custom NSPanel subclass that can become the key window even with
-/// .nonactivatingPanel style, allowing text fields to receive focus.
+/// .nonactivatingPanel style, so its Voice menu and buttons take the first click.
 private class KeyablePanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
@@ -33,7 +35,7 @@ final class MenuBarPanelManager: NSObject {
 
     private let companionManager: CompanionManager
     private let confirmations: HarnessConfirmations
-    private let panelWidth: CGFloat = 320
+    private let panelWidth: CGFloat = CompanionPanelView.width
     private let panelHeight: CGFloat = 380
     /// The SwiftUI content's own height, as last laid out.
     private var contentHeight: CGFloat = 0
@@ -72,45 +74,31 @@ final class MenuBarPanelManager: NSObject {
 
         guard let button = statusItem?.button else { return }
 
-        button.image = makeClickyMenuBarIcon()
-        button.image?.isTemplate = true
+        button.image = Self.makeArcMenuBarIcon()
+        button.toolTip = "J.A.R.V.I.S."
+        button.setAccessibilityLabel("J.A.R.V.I.S.")
         button.action = #selector(statusItemClicked)
         button.target = self
     }
 
-    /// Draws the clicky triangle as a menu bar icon. Uses the same shape
-    /// and rotation as the in-app cursor so the menu bar icon matches.
-    private func makeClickyMenuBarIcon() -> NSImage {
-        let iconSize: CGFloat = 18
-        let image = NSImage(size: NSSize(width: iconSize, height: iconSize))
-        image.lockFocus()
-
-        let triangleSize = iconSize * 0.7
-        let cx = iconSize * 0.50
-        let cy = iconSize * 0.50
-        let height = triangleSize * sqrt(3.0) / 2.0
-
-        let top = CGPoint(x: cx, y: cy + height / 1.5)
-        let bottomLeft = CGPoint(x: cx - triangleSize / 2, y: cy - height / 3)
-        let bottomRight = CGPoint(x: cx + triangleSize / 2, y: cy - height / 3)
-
-        let angle = 35.0 * .pi / 180.0
-        func rotate(_ point: CGPoint) -> CGPoint {
-            let dx = point.x - cx, dy = point.y - cy
-            let cosA = CGFloat(cos(angle)), sinA = CGFloat(sin(angle))
-            return CGPoint(x: cx + cosA * dx - sinA * dy, y: cy + sinA * dx + cosA * dy)
+    /// The open arc (spec §2.5): a 300° ring with its gap at one o'clock, 18 x 18,
+    /// 1.6 pt round-capped stroke, as a template so the menu bar tints it. Static:
+    /// the notch carries state, the menu bar only says who lives here.
+    static func makeArcMenuBarIcon() -> NSImage {
+        let side: CGFloat = 18
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            let path = NSBezierPath()
+            // AppKit angles: counter-clockwise from 3 o'clock, y up. One o'clock is
+            // 60°, so a 60° gap centred there runs 30°...90°; the arc is the rest.
+            path.appendArc(withCenter: NSPoint(x: rect.midX, y: rect.midY), radius: 6.6, startAngle: 90, endAngle: 390,
+                           clockwise: false)
+            path.lineWidth = 1.6
+            path.lineCapStyle = .round
+            NSColor.black.setStroke()
+            path.stroke()
+            return true
         }
-
-        let path = NSBezierPath()
-        path.move(to: rotate(top))
-        path.line(to: rotate(bottomLeft))
-        path.line(to: rotate(bottomRight))
-        path.close()
-
-        NSColor.black.setFill()
-        path.fill()
-
-        image.unlockFocus()
+        image.isTemplate = true
         return image
     }
 
@@ -140,6 +128,7 @@ final class MenuBarPanelManager: NSObject {
 
         // The rules live in the keychain, not in this view: read them as the panel opens.
         confirmations.refreshAlwaysRules()
+        NotificationCenter.default.post(name: .jarvisPanelWillShow, object: nil)
         positionPanelBelowStatusItem()
 
         panel?.makeKeyAndOrderFront(nil)

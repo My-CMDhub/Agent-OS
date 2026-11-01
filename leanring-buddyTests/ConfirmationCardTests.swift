@@ -319,30 +319,54 @@ struct ConfirmationCardTests {
                 == "confirmationTooLongToShow")
     }
 
-    // MARK: The panel's Always rules list (2026-11-01)
+    // MARK: The panel (2026-11-01 redesign)
 
-    /// Every rule stays reachable without the panel outgrowing the screen: four
-    /// rows show and the rest scroll, at a height known before layout.
-    @MainActor @Test func theRulesListShowsAtMostFourRowsAndScrollsTheRest() {
-        let row = AlwaysRulesListView.rowHeight
-        #expect(AlwaysRulesListView.listHeight(ruleCount: 0) == 0)
-        #expect(AlwaysRulesListView.listHeight(ruleCount: 1) == row)
-        #expect(AlwaysRulesListView.listHeight(ruleCount: 2) == 2 * row + 1)
-        #expect(AlwaysRulesListView.listHeight(ruleCount: 4) == 4 * row + 3)
-        #expect(AlwaysRulesListView.listHeight(ruleCount: 40) == AlwaysRulesListView.listHeight(ruleCount: 4))
+    /// Rules are grouped by app (bundle id, any case) in the order first saved;
+    /// a row's title drops the app the group header already names, and its
+    /// detail line carries the scope whole — the tooltip carries the qualifiers.
+    @MainActor @Test func theAlwaysPageGroupsByAppAndNeverCutsTheScope() {
+        let rules: [HarnessConfirmations.ApprovalRule] = [
+            .init(bundleIdentifier: "com.apple.mail", verb: "press", target: "Send", withinNamed: "Drafts", role: "AXButton"),
+            .init(bundleIdentifier: "com.apple.Terminal", verb: "launch", target: nil),
+            .init(bundleIdentifier: "COM.APPLE.MAIL", verb: "select", target: "Inbox"),
+        ]
+        let groups = AlwaysRulesPage.groups(rules)
+        #expect(groups.map { $0.map(\.index) } == [[0, 2], [1]])
+
+        let send = HarnessConfirmations.ruleSummary(for: rules[0], appName: "Mail")
+        #expect(AlwaysRulesPage.rowTitle(send, appLabel: "Mail") == "Press \"Send\"")
+        #expect(AlwaysRulesPage.rowDetail(send) == "\"Drafts\" \u{203A} \"Send\" \u{00B7} exactly this")
+        let detail = AlwaysRulesPage.detailLine(send)
+        #expect(detail.contains(send.scope) && detail.contains(send.place))
+        for qualifier in send.qualifiers { #expect(detail.contains(qualifier)) }
+
+        let launch = HarnessConfirmations.ruleSummary(for: rules[1], appName: "Terminal")
+        #expect(AlwaysRulesPage.rowTitle(launch, appLabel: "Terminal") == "Launch \"Terminal\"")
+        #expect(AlwaysRulesPage.rowDetail(launch) == "Whole app")
+        // A title that does not end in this app (an escaped, odd name) is left whole.
+        #expect(AlwaysRulesPage.rowTitle(send, appLabel: "Ma\"il") == send.title)
     }
 
-    /// A compact row folds the preview, place, scope and every qualifier onto
-    /// one line; the tooltip and accessibility label carry it whole.
-    @MainActor @Test func aCompactRuleRowKeepsEveryQualifier() {
-        let rule = HarnessConfirmations.ApprovalRule(bundleIdentifier: "com.apple.mail", verb: "press", target: "Send",
-                                                     withinNamed: "Drafts", role: "AXButton")
-        let summary = HarnessConfirmations.ruleSummary(for: rule, appName: "Mail")
-        let detail = AlwaysRulesListView.detailLine(summary)
-        #expect(detail.contains(summary.place))
-        #expect(detail.contains(summary.scope))
-        #expect(!summary.qualifiers.isEmpty)
-        for qualifier in summary.qualifiers { #expect(detail.contains(qualifier)) }
+    /// The state line mirrors the notch, not the retired overlay (finding #6).
+    @Test func thePanelsStateLineMirrorsTheNotch() {
+        #expect(CompanionPanelView.stateLine(.idle, pendingApprovals: 0).text == "Standing by")
+        #expect(CompanionPanelView.stateLine(.proof(subject: "Wi-Fi off"), pendingApprovals: 0).text == "Standing by")
+        #expect(CompanionPanelView.stateLine(.thinking, pendingApprovals: 0).glyph == .orbit)
+        #expect(CompanionPanelView.stateLine(.intent(title: "Opening Safari\u{2026}"), pendingApprovals: 0).text == "Opening Safari\u{2026}")
+        #expect(CompanionPanelView.stateLine(.needsYou, pendingApprovals: 1) == (.arcDown, "Approval waiting \u{00B7} at the notch"))
+        #expect(CompanionPanelView.stateLine(.needsYou, pendingApprovals: 2).text == "2 approvals waiting \u{00B7} at the notch")
+        #expect(CompanionPanelView.stateLine(.didntTake(reason: "x"), pendingApprovals: 0).glyph == .brokenRing)
+
+        let receipt = JarvisProofReceipt(subject: "Wi-Fi off", at: Date(timeIntervalSinceReferenceDate: 0))
+        #expect(CompanionPanelView.receiptText(receipt, now: Date(timeIntervalSinceReferenceDate: 20)) == "Wi-Fi off \u{00B7} verified just now")
+        #expect(CompanionPanelView.receiptText(receipt, now: Date(timeIntervalSinceReferenceDate: 125)) == "Wi-Fi off \u{00B7} verified 2 min ago")
+        #expect(CompanionPanelView.receiptText(receipt, now: Date(timeIntervalSinceReferenceDate: 7_300)) == "Wi-Fi off \u{00B7} verified 2 h ago")
+    }
+
+    /// Setup counts the rows that exist: Screen Content only after Screen Recording.
+    @Test func setupCountsOnlyThePermissionRowsThatExist() {
+        #expect(PanelPermission.rows(screenRecordingGranted: false) == [.microphone, .accessibility, .screenRecording])
+        #expect(PanelPermission.rows(screenRecordingGranted: true) == PanelPermission.allCases)
     }
 
     /// The panel follows its content but never runs past the screen's bottom.

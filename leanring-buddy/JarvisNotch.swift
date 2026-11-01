@@ -528,8 +528,14 @@ nonisolated enum ConfirmationChime: CaseIterable, Sendable {
 
 // MARK: - The notch
 
+/// "Wi‑Fi off · verified 2 min ago" on the panel. The subject is the notch's own proof line.
+struct JarvisProofReceipt: Equatable {
+    let subject: String
+    let at: Date
+}
+
 @MainActor
-final class JarvisNotch {
+final class JarvisNotch: ObservableObject {
     static let shared = JarvisNotch()
 
     struct Transition {
@@ -543,7 +549,12 @@ final class JarvisNotch {
     private let model = JarvisNotchModel()
     private var panel: JarvisNotchPanel?
     private var generation = 0
-    private(set) var state: JarvisNotchState = .idle
+    /// Published so the menu-bar panel's state line mirrors the notch, not the
+    /// legacy overlay (2026-11-01 redesign, finding #6).
+    @Published private(set) var state: JarvisNotchState = .idle
+    /// The last thing proven this session, for the panel's receipt (owner's D9:
+    /// in memory only, no history — the audit log already exists).
+    @Published private(set) var lastProof: JarvisProofReceipt?
     /// The last 64, for the live line and the probe.
     private(set) var transitions: [Transition] = []
 
@@ -629,6 +640,7 @@ final class JarvisNotch {
         if event == .hotkeyDown || panel == nil { placeOnScreenUnderCursor() }
         let before = frontmostWitness?()
         state = next
+        if case .proof(let subject) = next { lastProof = JarvisProofReceipt(subject: subject, at: Date()) }
         generation += 1
         model.reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         if next != .listening { model.level = 0 }
