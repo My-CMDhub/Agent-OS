@@ -311,6 +311,8 @@ nonisolated enum JarvisNotchReason {
         guard parts.count == 3, parts[0] == "openAI", ["responseFailed", "serverError"].contains(parts[1]) else { return nil }
         switch parts[2] {
         case "insufficient_quota": return "the voice service is out of quota"
+        // OpenAI's socket error when the account has no credit left (probed 2026-11-01: type insufficient_quota).
+        case "credit_balance_exhausted": return "the voice service is out of credit"
         case "rate_limit_exceeded": return "the voice service hit a rate limit"
         default: return "the voice service refused it"
         }

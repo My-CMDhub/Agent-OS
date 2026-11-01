@@ -136,6 +136,15 @@ final class RealtimeTurnMarks {
     /// OpenAI only: the follow-up after the tool results came back empty and
     /// was asked for once more (`openAIFollowUpWasEmpty`).
     var emptyFollowUpReasked = false
+    /// When a call of this turn handed its approval card's question to the model
+    /// (`handCardToVoice`): every later call of the turn is refused `cardPending`.
+    var cardAskedUptime: TimeInterval?
+    /// Cards handed to the model and not yet answered: the turn's end leaves the notch on "needs you".
+    var cardsAwaitingOwner = 0
+    /// The card was answered while the model was still saying its ask: the rest of that is not played.
+    var replyMuted = false
+    /// The session's id for this turn (voice-live.log), for the card's outcome line.
+    var turnID: String?
     let finished = VoiceBenchWaiter<TimeInterval>()
 
     /// Each event with its arrival in ms after the release, negative before it.
@@ -230,6 +239,11 @@ final class RealtimeVoiceConnection {
     var onAudio: ((Data) -> Void)?
     var onTurnFinished: (() -> Void)?
     var onClosed: (() -> Void)?
+    /// A card the model asked about was answered (`cardAnswered`): `text` is the system line telling it the
+    /// outcome; `askStillCurrent` — the asking turn is still the current one, so what still plays of its ask
+    /// is moot; `line` is the outcome's voice-live.log record. nil (a probe's bare connection): the line goes
+    /// to the model as context only.
+    var onCardAnswered: ((_ text: String, _ askStillCurrent: Bool, _ line: [String: Any]) -> Void)?
 
     /// A model that keeps calling tools is answered with an error after this
     /// many calls in one turn, not left to loop against the harness. focus ->
@@ -740,6 +754,7 @@ final class RealtimeVoiceConnection {
             if turn.toolCalls.isEmpty { JarvisNotch.shared.handle(.firstAudioWithoutTool) }
         }
         if turn.toolResultSentUptime != nil, turn.followUpFirstAudioUptime == nil { turn.followUpFirstAudioUptime = arrivalUptime }
+        guard !turn.replyMuted else { return }
         onAudio?(audio)
     }
 
@@ -801,7 +816,10 @@ final class RealtimeVoiceConnection {
         // A find with no press leaves its "Looking for…" up; the turn is over.
         // Proof and didn't-take hold their own time and ignore this. A turn that
         // ends with no word and no call says so, rather than go quiet.
-        JarvisNotch.shared.handle(turn.firstAudioUptime == nil && turn.toolCalls.isEmpty ? .noReply : .turnEnded)
+        // A card still up keeps "needs you" until its answer shows proof or didn't-take.
+        if turn.cardsAwaitingOwner == 0 {
+            JarvisNotch.shared.handle(turn.firstAudioUptime == nil && turn.toolCalls.isEmpty ? .noReply : .turnEnded)
+        }
         onTurnFinished?()
     }
 
@@ -862,11 +880,17 @@ final class RealtimeVoiceConnection {
             let overLimit = turn.toolCalls.count > Self.maximumToolCallsPerTurn
             let previousCall = turn.lastCallTask
             turn.lastCallTask = Task { @MainActor [weak self] in
-                await previousCall?.value
+                await Self.waitForPreviousCall(previousCall, in: turn)
                 // No app named on a screen tool or a read: the app in front is meant.
                 let call = await RealtimeOpenAppTool.withFrontmostApp(call)
                 var dispatch: RealtimeToolDispatch
-                if overLimit {
+                if turn.cardAskedUptime != nil {
+                    // A card of this turn is with the owner: the model asks now, and nothing more runs for it.
+                    dispatch = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: Self.cardPendingRefusal), harnessMilliseconds: 0,
+                                                    waitedForConfirmation: false, harnessResponse: nil)
+                    turn.dispatches.append(dispatch)
+                    turn.decisions[decisionIndex].dispatch = dispatch
+                } else if overLimit {
                     turn.decisions[decisionIndex].offeredBeforeCall = turn.latestMenuOffer?.candidates
                     turn.decisions[decisionIndex].offeredElementsBeforeCall = turn.latestScreenOffer?.elements
                     let refusal = RealtimeToolRefusal(error: "tooManyToolCalls", message: "only \(Self.maximumToolCallsPerTurn) tool calls are allowed per turn")
@@ -899,8 +923,22 @@ final class RealtimeVoiceConnection {
                 } else {
                     // `dispatch` hops off main for every harness call.
                     guard let harnessAnswer = self?.harnessAnswer else { return }
-                    guard let ran = await Self.runToolCall(call, decisionIndex: decisionIndex, in: turn, harnessAnswer: harnessAnswer,
-                                                           isCurrent: { [weak self] in self?.turn === turn && !turn.supersededByPress }) else {
+                    // A card: the model is told at once and asks in its own voice (`handCardToVoice`); this call
+                    // still waits on the ticket, and its answer reaches the model as a system line (`cardAnswered`).
+                    let handOff = CardHandOff()
+                    let ran = await Self.runToolCall(call, decisionIndex: decisionIndex, in: turn, harnessAnswer: harnessAnswer,
+                                                     onConfirmationRequired: { [weak self] in
+                                                         guard handOff.send == nil, let self, self.turn === turn, !turn.supersededByPress else { return }
+                                                         handOff.send = Task { @MainActor in await self.handCardToVoice(call, decisionIndex: decisionIndex, in: turn) }
+                                                     },
+                                                     isCurrent: { [weak self] in self?.turn === turn && !turn.supersededByPress })
+                    if let send = handOff.send {
+                        await send.value
+                        turn.cardsAwaitingOwner -= 1
+                        self?.cardAnswered(ran, call: call, in: turn)
+                        return
+                    }
+                    guard let ran else {
                         // Superseded: recorded; no result is sent, it would start a reply inside the new turn.
                         turn.toolsInFlight -= 1
                         return
@@ -923,6 +961,95 @@ final class RealtimeVoiceConnection {
                 let superseded = self?.turn !== turn || turn.supersededByPress
                 await self?.sendToolResult(dispatch.result, for: call, in: turn, requestingReply: !superseded)
             }
+        }
+    }
+
+    // MARK: Approval cards (owner's live test 2026-10-31)
+
+    /// Behind the call before it — unless a call of this turn hands its card to the model meanwhile: then
+    /// this one goes at once (refused `cardPending`), or the model's ask would wait for the card's answer.
+    private static func waitForPreviousCall(_ previous: Task<Void, Never>?, in turn: RealtimeTurnMarks) async {
+        guard let previous else { return }
+        let done = CardHandOff()
+        Task { @MainActor in
+            await previous.value
+            done.previousFinished = true
+        }
+        while !done.previousFinished, turn.cardAskedUptime == nil { try? await Task.sleep(for: .milliseconds(20)) }
+    }
+
+    static let cardPendingRefusal = RealtimeToolRefusal(
+        error: "cardPending", message: "nothing was done: an earlier step of this request is waiting on the owner's card. When they "
+            + "answer it, a system line tells you what happened; after that the owner can ask for the rest")
+
+    /// What the model gets the moment the card shows, in place of the held result. Live 2026-10-31 12:15:07Z:
+    /// with the result held until the click, the model said "please click approve on screen" 3.9 s AFTER the
+    /// owner clicked Allow (and after Claude had quit), and a canned nudge had spoken for it before.
+    static let cardHandOffResult: [String: Any] = [
+        "ok": false, "status": "awaitingOwner", "error": "confirmationRequired",
+        "message": "a card is on screen now, asking the owner to allow this. Only their click on the card can allow it; words cannot. "
+            + "Tell them now, in one short sentence, that it needs their click on the card. Do not call this tool again: when they "
+            + "answer the card, a system line tells you what happened."
+    ]
+
+    /// The system line with the card's answer: what happened, from the harness's own result.
+    nonisolated static func cardAnsweredText(result: [String: Any]) -> String {
+        let outcome: String
+        switch result["error"] as? String {
+        case "confirmationDenied": outcome = "the owner denied it on the card, so nothing was done"
+        case "confirmationExpired", "confirmationPending": outcome = "the card expired without an answer, so nothing was done"
+        default:
+            outcome = result["ok"] as? Bool == true ? "the owner allowed it on the card, and it was done"
+                : "the owner answered the card, and the action did not complete"
+        }
+        let json = String(decoding: (try? JSONSerialization.data(withJSONObject: SecretScanner.scrub(result), options: [.sortedKeys])) ?? Data("{}".utf8),
+                          as: UTF8.self)
+        return "system context, not the owner's words: \(outcome). The result: \(json). The card is gone: never ask for approval "
+            + "again. Say what happened in one short sentence, from the result only."
+    }
+
+    /// "allowed" | "denied" | "expired" | "failed": the card's answer as the outcome line records it.
+    nonisolated static func cardOutcome(result: [String: Any]) -> String {
+        switch result["error"] as? String {
+        case "confirmationDenied": return "denied"
+        case "confirmationExpired", "confirmationPending": return "expired"
+        default: return result["ok"] as? Bool == true ? "allowed" : "failed"
+        }
+    }
+
+    /// The card is up: the model gets `cardHandOffResult` as the call's result now and asks in its own
+    /// voice; the canned nudge stands back (`ConfirmationNudger.voiceAskedUptime`).
+    private func handCardToVoice(_ call: RealtimeToolCall, decisionIndex: Int, in turn: RealtimeTurnMarks) async {
+        turn.cardAskedUptime = uptime
+        turn.cardsAwaitingOwner += 1
+        ConfirmationNudger.voiceAskedUptime = uptime
+        turn.decisions[decisionIndex].dispatch = RealtimeToolDispatch(
+            result: Self.cardHandOffResult, harnessMilliseconds: Int(((uptime - turn.decisions[decisionIndex].callUptime) * 1000).rounded()),
+            waitedForConfirmation: true, harnessResponse: nil)
+        await sendToolResult(Self.cardHandOffResult, for: call, in: turn, requestingReply: true)
+    }
+
+    /// The card was answered (or expired): the model is told what happened, so it never asks again. An ask
+    /// still being said by the asking turn is cut (`replyMuted`; the session stops what is playing).
+    private func cardAnswered(_ dispatch: RealtimeToolDispatch?, call: RealtimeToolCall, in turn: RealtimeTurnMarks) {
+        let askStillCurrent = self.turn === turn && !turn.supersededByPress
+        if askStillCurrent { turn.replyMuted = true }
+        // nil: the owner pressed again before the call ran — nothing was done.
+        let result = dispatch?.result ?? RealtimeOpenAppTool.toolResult(for: RealtimeToolRefusal(error: Self.supersededError, message: "nothing was done"))
+        let text = Self.cardAnsweredText(result: result)
+        func value(_ optional: Any?) -> Any { optional ?? NSNull() }
+        let line: [String: Any] = [
+            "kind": "cardOutcome", "turnId": value(turn.turnID), "stack": stack.rawValue, "tool": call.name,
+            "outcome": Self.cardOutcome(result: result), "ok": value(result["ok"]), "error": value(result["error"]),
+            "verification": value(result["verification"]), "harnessMs": value(dispatch?.harnessMilliseconds),
+            "askSentMs": value(turn.cardAskedUptime.map { Int((($0 - (turn.lastAudioSentUptime ?? $0)) * 1000).rounded()) }),
+            "answeredMs": value(turn.lastAudioSentUptime.map { Int(((uptime - $0) * 1000).rounded()) }),
+            "askStillCurrent": askStillCurrent, "askAudioStarted": turn.followUpFirstAudioUptime != nil
+        ]
+        if let onCardAnswered {
+            onCardAnswered(text, askStillCurrent, line)
+        } else {
+            Task { @MainActor [weak self] in try? await self?.sendContextText(text) }
         }
     }
 
@@ -1484,6 +1611,12 @@ final class RealtimeVoiceConnection {
             turn.finished.settle(.failure(VoiceBenchFailure(kind: "\(stack.rawValue):toolResultSendFailed")))
         }
     }
+}
+
+/// One call's card hand-off (`send`), or a waiter's "the call before me finished".
+@MainActor private final class CardHandOff {
+    var send: Task<Void, Never>?
+    var previousFinished = false
 }
 
 /// The hit test's rung, written from inside `resolveScreenTarget`'s closure.

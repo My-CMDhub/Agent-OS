@@ -66,6 +66,8 @@ final class RealtimeVoiceSession {
     /// owner's voice-live.log stays the owner's.
     var onLiveTurnLine: ((RealtimeLiveTurnLine) -> Void)?
     var liveTurnLogFileName = RealtimeVoiceSession.liveLogFileName
+    /// Probe only (`--card-voice-probe`): a card's outcome line once said (its system turn), or nil when it was only told.
+    var onCardOutcomeSaid: ((RealtimeTurnMarks?) -> Void)?
     var estimatedOpenAIUSD: Double { connection?.estimatedOpenAIUSD ?? 0 }
 
     // MARK: Agent loop state (`do_task`)
@@ -323,6 +325,22 @@ final class RealtimeVoiceSession {
                 ?? ["ok": false, "status": NSNull(), "error": "noSession", "message": "the task runner is not available"]
         }
         connection.isAgentLoopRunning = { [weak self] in self?.agentLoop?.isRunning == true }
+        connection.onCardAnswered = { [weak self] text, askStillCurrent, line in
+            self?.cardAnswered(text, askStillCurrent: askStillCurrent, line: line)
+        }
+    }
+
+    /// A card the model asked about was answered (`RealtimeVoiceConnection.cardAnswered`). What still plays
+    /// of that turn's ask stops — the card is gone — and the model hears the outcome as a speech-only system
+    /// line between the owner's turns, queued with the agent's lines; one the owner talks over is only told.
+    private func cardAnswered(_ text: String, askStillCurrent: Bool, line: [String: Any]) {
+        if askStillCurrent { stopPlayback() }
+        MeasurementLogFile.appendJSONLine(line, toFileNamed: liveTurnLogFileName)
+        let previous = agentSpeech
+        agentSpeech = Task { @MainActor [weak self] in
+            await previous?.value
+            await self?.speakForAgent(text, final: true, forCard: true)
+        }
     }
 
     // MARK: Agent loop
@@ -526,28 +544,36 @@ final class RealtimeVoiceSession {
 
     /// A speech-only system turn, only between the owner's turns, and waited
     /// on until answered so the next line never collides with it.
-    private func speakForAgent(_ text: String, final: Bool) async {
+    /// `forCard`: a card's outcome (`cardAnswered`) — never one of the task's spoken lines, and a line that
+    /// cannot be spoken still reaches the model as context, so it never asks for the answered card again.
+    private func speakForAgent(_ text: String, final: Bool, forCard: Bool = false) async {
         agentSpeechBusy = true
         defer { agentSpeechBusy = false }
         let deadline = uptime + (final ? 15 : 0)
+        func tellOnly() async {
+            guard forCard else { return }
+            try? await connection?.sendContextText(text)
+            onCardOutcomeSaid?(nil)
+        }
         // A cancelled sleep returns at once; the next pass then drops the line, never spins.
         waiting: while true {
             switch Self.agentSpeechStep(cancelled: Task.isCancelled, final: final, ownerTurnActive: liveTurn != nil,
                                         replyPlaying: isReplyAudioPlaying, pastDeadline: uptime >= deadline) {
-            case .drop: return
+            case .drop: return await tellOnly()
             case .wait: try? await Task.sleep(for: .milliseconds(200))
             case .speak: break waiting
             }
         }
-        guard let connection = try? await readyConnection(), liveTurn == nil, !Task.isCancelled else { return }
+        guard let connection = try? await readyConnection(), liveTurn == nil, !Task.isCancelled else { return await tellOnly() }
         do {
             try await connection.beginSystemTurn(text: text, variant: RealtimeOpenAppTool.systemTurnVariant(for: connection.stack),
                                                  speechOnly: true)
             let turn = connection.turn
-            agentSpokenTurns.append(turn)
+            if !forCard { agentSpokenTurns.append(turn) }
             _ = try? await turn.finished.value(timeoutSeconds: 20, timeoutKind: "agentSpeech")
             // The audio it scheduled plays out before the next line may start.
             while isReplyAudioPlaying, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(100)) }
+            if forCard { onCardOutcomeSaid?(turn) }
         } catch {
             print("🤖 agent loop: system turn failed: \(error)")
         }
@@ -696,6 +722,7 @@ final class RealtimeVoiceSession {
             try await connection.beginTurn(previousReplyWasHeard: liveTurn?.previousReplyWasHeard == true)
             let marks = connection.turn
             liveTurn?.marks = marks
+            marks.turnID = liveTurn?.line.turnID
             marks.screenshotDisplayFrame = screenshotDisplayFrame
             marks.screenshotPixelSize = screenshotPixelSize
             marks.screenshotGuard = (try? screenshotResult.get())?.secretGuard?.outcome ?? withheld?.outcome

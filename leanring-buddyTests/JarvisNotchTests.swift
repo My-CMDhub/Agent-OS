@@ -107,9 +107,12 @@ struct JarvisNotchTests {
         #expect(JarvisNotchReason.plain(forTurnFailure: "openAI:responseFailed:rate_limit_exceeded") == "the voice service hit a rate limit")
         #expect(JarvisNotchReason.plain(forTurnFailure: "openAI:responseFailed:failed") == "the voice service refused it")
         #expect(JarvisNotchReason.plain(forTurnFailure: "openAI:serverError:-") == "the voice service refused it")
+        // Live 2026-10-31 08:12Z: the socket's own error when the OpenAI account has no credit left.
+        #expect(JarvisNotchReason.plain(forTurnFailure: "openAI:serverError:credit_balance_exhausted") == "the voice service is out of credit")
         #expect(JarvisNotchReason.plain(forTurnFailure: "turnTimeout") == nil)
         #expect(JarvisNotchReason.plain(forTurnFailure: "openAIRealtime:reaskSendFailed") == nil)
-        for kind in ["openAI:responseFailed:insufficient_quota", "openAI:responseFailed:rate_limit_exceeded", "openAI:responseFailed:x"] {
+        for kind in ["openAI:responseFailed:insufficient_quota", "openAI:responseFailed:rate_limit_exceeded", "openAI:responseFailed:x",
+                     "openAI:serverError:credit_balance_exhausted"] {
             #expect((JarvisNotchReason.plain(forTurnFailure: kind) ?? "").count <= JarvisNotchReason.maximumLength)
         }
         for state: JarvisNotchState in [.thinking, .intent(title: "x"), .needsYou, .noReply] {

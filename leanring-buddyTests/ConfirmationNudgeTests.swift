@@ -12,9 +12,25 @@ import Testing
 
 struct ConfirmationNudgeTests {
     private func step(now: TimeInterval, spoken: Int = 0, lastSpokenAt: TimeInterval? = nil,
-                      pending: Bool = true, busy: Bool = false) -> ConfirmationNudge.Step {
+                      pending: Bool = true, busy: Bool = false, voiceAsked: Bool = false, voiceSpoke: Bool = false) -> ConfirmationNudge.Step {
         ConfirmationNudge.step(shownAt: 100, now: 100 + now, spoken: spoken, lastSpokenAt: lastSpokenAt.map { 100 + $0 },
-                               pending: pending, voiceBusy: busy)
+                               pending: pending, voiceBusy: busy, voiceAsked: voiceAsked, voiceSpoke: voiceSpoke)
+    }
+
+    /// Owner's live test 2026-10-31: this line spoke at 2 s, then the voice asked again after the card was
+    /// answered. A card the realtime voice asks about is the voice's: once it speaks, nothing of ours.
+    @Test func aCardTheVoiceAskedAboutIsNeverNudgedOnceTheVoiceSpeaks() {
+        #expect(step(now: 2, voiceAsked: true) == .wait)
+        #expect(step(now: 2, voiceAsked: true, voiceSpoke: true) == .done)
+        #expect(step(now: 25, spoken: 0, voiceAsked: true, voiceSpoke: true) == .done)
+    }
+
+    /// A voice that stays silent is stood in for, later than a card nobody asked about.
+    @Test func aSilentVoiceIsStoodInForAfterItsGrace() {
+        #expect(step(now: ConfirmationNudge.voiceGraceSeconds - 0.1, voiceAsked: true) == .wait)
+        #expect(step(now: ConfirmationNudge.voiceGraceSeconds, voiceAsked: true) == .speak(.first))
+        #expect(step(now: ConfirmationNudge.voiceGraceSeconds, busy: true, voiceAsked: true) == .wait)
+        #expect(ConfirmationNudge.voiceGraceSeconds > ConfirmationNudge.quietSeconds)
     }
 
     @Test func aCardAnsweredWithinTwoSecondsIsNeverNudged() {

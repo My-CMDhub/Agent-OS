@@ -115,6 +115,14 @@ enum NotchProbe {
             print("🧪 notch probe: owner active (idle \(idle ?? -1) s), not running -> \(logPath)")
             return
         }
+        // One voice around an approval card, on a stub ticket (`CardVoiceProbe`).
+        if CommandLine.arguments.contains("--card-voice-probe") {
+            let stacks = CommandLine.arguments.first { $0.hasPrefix("--notch-probe-stacks=") }.map { argument in
+                argument.dropFirst("--notch-probe-stacks=".count).split(separator: ",").compactMap { VoiceStackChoice(rawValue: String($0)) }
+            } ?? [.geminiLive]
+            await CardVoiceProbe.run(stacks: stacks)
+            return
+        }
         guard let (clip16k, clip24k) = VoiceToolProbe.clips(forFixture: questionFixtureFileName) else {
             appendLine(["kind": "fixtureUnreadable", "probeId": probeID, "fixture": questionFixtureFileName])
             return
