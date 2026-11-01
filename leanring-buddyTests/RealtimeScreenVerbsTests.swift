@@ -328,6 +328,9 @@ struct RealtimeScreenVerbsTests {
         let longName = RealtimeSnapNode(name: String(repeating: "word ", count: 20), role: "AXStaticText", subrole: nil,
                                         frame: CGRect(x: 40, y: 640, width: 600, height: 16))
         #expect(RealtimeScreenVerbs.snap([longName, row], windowFrame: window) == .element(1))
+        // macOS 27: a Control Centre status icon is the whole of its own 26x30 window, and is still named.
+        let battery = RealtimeSnapNode(name: "Battery", role: "AXMenuBarItem", subrole: "AXMenuExtra", frame: CGRect(x: 1139, y: 874, width: 26, height: 22))
+        #expect(RealtimeScreenVerbs.snap([battery], windowFrame: CGRect(x: 1139, y: 870, width: 26, height: 30)) == .element(0))
     }
 
     /// Review 2026-10-02: past the snap depth (12) the hit test read only for a

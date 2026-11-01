@@ -477,8 +477,12 @@ nonisolated enum RealtimeScreenVerbs {
     /// ancestors: the first with a pointable name (not document-length), a
     /// non-trivial frame, and no bigger than a third of the window. A password
     /// box — or a text field whose subrole did not read — on the way refuses.
+    /// A window smaller than `iconWindowArea` IS its control, so no third applies:
+    /// on macOS 27 each Control Centre status icon (Battery, Wi‑Fi) sits in its own
+    /// 26x30 pt window, and the third read every one of them as "nothing" (live 2026-11-01).
+    static let iconWindowArea: CGFloat = 100 * 100
     static func snap(_ chain: [RealtimeSnapNode], windowFrame: CGRect?) -> RealtimeSnapOutcome {
-        let windowArea = windowFrame.map { $0.width * $0.height }
+        let windowArea = windowFrame.map { $0.width * $0.height }.flatMap { $0 >= iconWindowArea ? $0 : nil }
         // The whole chain first (review 2026-09-30): a password box anywhere on
         // the way refuses, and whatever sits INSIDE a text input is typed text —
         // the input itself is the nearest thing that may be named.
