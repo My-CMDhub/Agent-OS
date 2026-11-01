@@ -878,3 +878,157 @@ extension Color {
         return Color(red: red, green: green, blue: blue)
     }
 }
+
+// MARK: - J.A.R.V.I.S. tokens ("Arc & Glass", docs/specs/2026-11-01-jarvis-ui-redesign.md §2)
+
+/// One material (dark glass), one ink (cool white), one earned colour (proof
+/// cyan). Every J.A.R.V.I.S. surface — notch, card, panel — is dark glass in
+/// BOTH system appearances (owner's D1): only the edge where the glass meets a
+/// light or dark menu bar adapts. No blue, amber or red: risk is weight and
+/// inversion (D3). `DS.*` stays for code this redesign did not touch.
+enum JV {
+    // Colour. Contrast figures are on `glass`.
+    /// The notch pill and the card's tab: continuous with the hardware notch.
+    static let void = Color.black
+    /// The card and the panel surface.
+    static let glass = Color(red: 0x07 / 255, green: 0x09 / 255, blue: 0x0A / 255)
+    /// Headlines, primary text, the filled button. 17.0:1.
+    static let ink = Color(red: 0xE8 / 255, green: 0xEE / 255, blue: 0xF0 / 255)
+    /// Secondary text, place lines. 8.0:1.
+    static let ink2 = ink.opacity(0.68)
+    /// Meta (expiry, counts). 5.3:1 — the floor for ANY text.
+    static let ink3 = ink.opacity(0.54)
+    /// Non-text only: inactive strokes, a ring's track.
+    static let inkFaint = ink.opacity(0.30)
+    /// Inset groups, the destructive band, keycaps.
+    static let raised = ink.opacity(0.06)
+    /// Row separators.
+    static let hairline = ink.opacity(0.10)
+    /// Proven. Nothing else is ever cyan.
+    static let proof = Color(red: 0x3F / 255, green: 0xE0 / 255, blue: 0xFF / 255)
+
+    // Type: SF Pro, SF Mono only for machine identifiers.
+    static let wordmark = Font.system(size: 11, weight: .semibold)
+    static let wordmarkTracking: CGFloat = 2.4
+    static let display = Font.system(size: 17, weight: .semibold)
+    static let displayTracking: CGFloat = -0.2
+    static let title = Font.system(size: 15, weight: .semibold)
+    static let body = Font.system(size: 13)
+    static let bodyMedium = Font.system(size: 13, weight: .medium)
+    static let bodySemibold = Font.system(size: 13, weight: .semibold)
+    static let caption = Font.system(size: 12)
+    static let meta = Font.system(size: 11, weight: .medium).monospacedDigit()
+    static let mono = Font.system(size: 11, design: .monospaced)
+
+    // Shape.
+    static let cardRadius: CGFloat = 18
+    static let panelRadius: CGFloat = 16
+    static let groupRadius: CGFloat = 12
+    static let buttonRadius: CGFloat = 10
+    static let bandRadius: CGFloat = 8
+    static let keycapRadius: CGFloat = 5
+    static let buttonHeight: CGFloat = 32
+    /// One stroke weight, always drawn INSIDE the frame (`strokeBorder`).
+    static let stroke: CGFloat = 1.5
+
+    // Motion.
+    static let spring = Animation.spring(response: 0.34, dampingFraction: 0.86)
+    static let textFade = Animation.easeInOut(duration: 0.12)
+    static let reduceMotionFade = Animation.easeInOut(duration: 0.15)
+}
+
+/// The one appearance-dependent token: the glass's outer edge. On a dark menu
+/// bar a 1 px white-8% line; on a light one a black-14% line plus a shadow, so
+/// the dark glass does not read as a hole in a light desktop.
+struct JVEdge: ViewModifier {
+    let radius: CGFloat
+    @Environment(\.colorScheme) private var colorScheme
+
+    func body(content: Content) -> some View {
+        let light = colorScheme == .light
+        content
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .strokeBorder(light ? Color.black.opacity(0.14) : Color.white.opacity(0.08), lineWidth: 1))
+            .shadow(color: .black.opacity(light ? 0.35 : 0.5), radius: light ? 7 : 10, x: 0, y: light ? 4 : 6)
+    }
+}
+
+extension View {
+    /// Dark glass at `radius`, with the edge for whatever menu bar it meets.
+    func jvGlass(radius: CGFloat) -> some View {
+        background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(JV.glass).modifier(JVEdge(radius: radius)))
+    }
+}
+
+/// The arc family: one authored glyph set drawn in code, 16 pt box, 1.5 stroke
+/// (spec §2.5). Angles are clock positions; the gap is where the arc is open.
+enum JVGlyphKind: Equatable {
+    /// 60° circling: thinking.
+    case orbit
+    /// 300°, gap at 1 o'clock: acting, intent — and J.A.R.V.I.S. itself.
+    case openArc
+    /// A closed ring, filled proof cyan: proven.
+    case ring
+    /// 300°, gap at 6 o'clock, pointing at the card: needs you.
+    case arcDown
+    /// Two 150° arcs, gaps at 3 and 9 o'clock: the ring that did not close.
+    case brokenRing
+    /// No reply: three dots.
+    case ellipsis
+}
+
+struct JVGlyph: View {
+    let kind: JVGlyphKind
+    var size: CGFloat = 16
+    /// Orbit and open arc turn; false (and Reduce Motion) draws them still.
+    var animated = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// A trimmed circle starts at 3 o'clock and runs clockwise (SwiftUI's y-down).
+    /// `gapCentre` in clock hours, `gap` in degrees.
+    private func arc(gapCentre hours: Double, gap: Double, colour: Color) -> some View {
+        let gapStartFromThree = (hours * 30 - 90) + gap / 2
+        return Circle()
+            .trim(from: 0, to: (360 - gap) / 360)
+            .stroke(colour, style: StrokeStyle(lineWidth: JV.stroke, lineCap: .round))
+            .rotationEffect(.degrees(gapStartFromThree))
+    }
+
+    var body: some View {
+        let turning = animated && !reduceMotion && (kind == .orbit || kind == .openArc)
+        TimelineView(.animation(paused: !turning)) { context in
+            let period = kind == .orbit ? 1.2 : 2.4
+            let degrees = turning ? context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period * 360 : 0
+            ZStack {
+                switch kind {
+                case .orbit:
+                    Circle().stroke(JV.inkFaint.opacity(0.5), lineWidth: JV.stroke)
+                    Circle().trim(from: 0, to: 60.0 / 360)
+                        .stroke(JV.ink.opacity(0.7), style: StrokeStyle(lineWidth: JV.stroke, lineCap: .round))
+                        .rotationEffect(.degrees(degrees - 90))
+                case .openArc:
+                    arc(gapCentre: 1, gap: 60, colour: JV.ink.opacity(0.8)).rotationEffect(.degrees(degrees))
+                case .ring:
+                    Circle().fill(JV.proof).padding(size * 0.22)
+                    Circle().stroke(JV.proof, lineWidth: JV.stroke)
+                case .arcDown:
+                    arc(gapCentre: 6, gap: 60, colour: JV.ink.opacity(0.92))
+                case .brokenRing:
+                    // 15°..165° and 195°..345° from 3 o'clock: gaps centred at 3 and 9.
+                    Circle().trim(from: 0, to: 150.0 / 360)
+                        .stroke(JV.ink.opacity(0.6), style: StrokeStyle(lineWidth: JV.stroke, lineCap: .round))
+                        .rotationEffect(.degrees(15))
+                    Circle().trim(from: 0, to: 150.0 / 360)
+                        .stroke(JV.ink.opacity(0.6), style: StrokeStyle(lineWidth: JV.stroke, lineCap: .round))
+                        .rotationEffect(.degrees(195))
+                case .ellipsis:
+                    HStack(spacing: size * 0.12) {
+                        ForEach(0..<3, id: \.self) { _ in Circle().fill(JV.ink.opacity(0.6)).frame(width: size * 0.16, height: size * 0.16) }
+                    }
+                }
+            }
+            .frame(width: size, height: size)
+        }
+        .accessibilityHidden(true)
+    }
+}

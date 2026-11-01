@@ -72,17 +72,22 @@ enum UISnapshotRenderer {
         _ = unreadableStore.deleteItem()
 
         // The approval card, grown, on a notched and a notchless screen.
-        let cards: [(name: String, tickets: [Fixture], step: ConfirmationStep?, notch: JarvisNotchGeometry, note: String)] = [
-            ("card-one", [.send], nil, notched, "one ticket, notched screen"),
-            ("card-one-notchless", [.send], nil, notchless, "one ticket, notchless screen (this Mac)"),
-            ("card-two", [.send, .typeNote], nil, notched, "two tickets stacked"),
-            ("card-destructive", [.moveToBin], nil, notched, "destructive: warning line, Allow once and Deny only"),
-            ("card-agent-step", [.send], ConfirmationStep(current: 3, total: 5), notched, "asked from step 3 of 5 of a task"),
-            ("card-three", [.send, .typeNote, .moveToBin], nil, notched, "three tickets, the most that can be pending"),
+        let cards: [(name: String, tickets: [Fixture], step: ConfirmationStep?, notch: JarvisNotchGeometry, expanded: Bool, note: String)] = [
+            ("card-one", [.send], nil, notched, false, "one ticket, notched screen"),
+            ("card-one-notchless", [.send], nil, notchless, false, "one ticket, notchless screen (this Mac)"),
+            ("card-two", [.send, .typeNote], nil, notched, false, "two tickets stacked"),
+            ("card-destructive", [.moveToBin], nil, notched, false, "destructive: band, inverted fills, Allow once and Deny only"),
+            ("card-agent-step", [.send], ConfirmationStep(current: 3, total: 5), notched, false, "asked from step 3 of 5 of a task"),
+            ("card-three", [.send, .typeNote, .moveToBin], nil, notched, false, "three tickets, the most that can be pending"),
+            ("card-long-text", [.typeLong], nil, notched, false, "typed text over 90 characters: a head and \"+N more\""),
+            ("card-long-text-expanded", [.typeLong], nil, notched, true,
+             "the same with +N more, Details and a rejection open: all below the buttons, which must not move"),
+            ("card-one-expanded", [.send], nil, notched, true, "card-one with Details and a rejection open: Deny/Allow where card-one has them"),
         ]
         for card in cards {
             let (confirmations, store) = fixtureConfirmations(tickets: card.tickets, rules: [])
-            let grown = ConfirmationCardWindowManager.grownCardForSnapshot(confirmations: confirmations, notch: card.notch, step: card.step)
+            let grown = ConfirmationCardWindowManager.grownCardForSnapshot(confirmations: confirmations, notch: card.notch, step: card.step,
+                                                                           expanded: card.expanded)
             manifest += renderBoth(grown.view, name: card.name, note: card.note, size: grown.size, backdropStrip: card.notch)
             _ = store.deleteItem()
         }
@@ -109,7 +114,7 @@ enum UISnapshotRenderer {
     // MARK: - Fixtures
 
     enum Fixture {
-        case send, typeNote, moveToBin
+        case send, typeNote, typeLong, moveToBin
 
         var shape: HarnessConfirmations.Shape {
             switch self {
@@ -118,6 +123,11 @@ enum UISnapshotRenderer {
             case .typeNote:
                 return .init(verb: "type", bundleIdentifier: "com.apple.Notes", rawTarget: "Body", text: "Buy oat milk and call the bank",
                              mode: "insert", withinNamed: "Groceries")
+            case .typeLong:
+                return .init(verb: "type", bundleIdentifier: "com.apple.mail", rawTarget: "Body",
+                             text: "Thanks for the notes on the Q3 plan. I've moved the launch to the 14th so design has a full week, "
+                                 + "and I'll send the revised budget by Friday once finance signs off.",
+                             mode: "insert", withinNamed: "Re: Q3 plan", thenConfirm: false)
             case .moveToBin:
                 return .init(verb: "press", bundleIdentifier: "com.apple.finder", rawTarget: "Move to Bin", withinNamed: "Downloads",
                              role: "AXMenuItem")
@@ -127,6 +137,7 @@ enum UISnapshotRenderer {
             switch self {
             case .send: "Mail"
             case .typeNote: "Notes"
+            case .typeLong: "Mail"
             case .moveToBin: "Finder"
             }
         }

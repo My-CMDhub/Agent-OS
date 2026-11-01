@@ -191,6 +191,47 @@ struct ConfirmationCardTests {
         #expect(HarnessConfirmations.destructiveWarning(for: replace) == "Replaces everything in this field")
     }
 
+    /// Owner's D5: the headline names the target when it is short — the same
+    /// escaped string the place line binds — and falls back to the verb's phrase
+    /// when it is long, a placeholder, or a verb whose target is not an object.
+    @Test func theHeadlineNamesAShortTargetAndFallsBackWhenLong() {
+        func headline(_ shape: HarnessConfirmations.Shape) -> String? {
+            HarnessConfirmations.cardLines(for: shape, appName: "Mail").first { $0.kind == .question }?.text
+        }
+        func press(_ target: String) -> HarnessConfirmations.Shape {
+            .init(verb: "press", bundleIdentifier: "com.apple.mail", rawTarget: target, withinNamed: "Re: Q3 plan")
+        }
+        let send = press("Send")
+        #expect(headline(send) == "Press \"Send\" in \"Mail\"?")
+        // App-written text is escaped exactly as on the place line: a quote cannot close the quote.
+        let quoted = press("Send\" in \"Bank")
+        #expect(headline(quoted) == #"Press "Send\" in \"Bank" in "Mail"?"#)
+        // 40 scalars still fit; 41 fall back, and the place line keeps the whole name.
+        let fits = press(String(repeating: "a", count: HarnessConfirmations.headlineTargetScalarLimit))
+        #expect(headline(fits)?.contains(fits.rawTarget) == true)
+        let long = press(String(repeating: "a", count: HarnessConfirmations.headlineTargetScalarLimit + 1))
+        #expect(headline(long) == "Press a control in \"Mail\"?")
+        #expect(HarnessConfirmations.cardLines(for: long, appName: "Mail").contains { $0.kind == .place && $0.text.contains(long.rawTarget) })
+        // One grapheme of many scalars is long, not short.
+        let marks = press("a" + String(repeating: "\u{0301}", count: 60))
+        #expect(headline(marks) == "Press a control in \"Mail\"?")
+        // A placeholder and a non-object verb keep the phrase; a submit still shows.
+        let focusedField = HarnessConfirmations.Shape(verb: "type", bundleIdentifier: "com.apple.mail", rawTarget: "<focused>",
+                                                      text: "hi", mode: "insert")
+        #expect(headline(focusedField) == "Type this in \"Mail\"?")
+        var submit = send; submit.thenConfirm = true
+        #expect(headline(submit) == "Press \"Send\" and submit it in \"Mail\"?")
+        #expect(headline(.init(verb: "launch", bundleIdentifier: "com.apple.mail", rawTarget: "Mail")) == "Launch \"Mail\"?")
+    }
+
+    /// The countdown is text in the button row, from the ticket's own expiry.
+    @MainActor @Test func theExpiryIsTextFromTheTicketsOwnClock() {
+        let now = Date(timeIntervalSinceReferenceDate: 1_000)
+        #expect(ConfirmationPromptView.expiryText(expiresAt: now.addingTimeInterval(60), now: now) == "Expires in 1:00")
+        #expect(ConfirmationPromptView.expiryText(expiresAt: now.addingTimeInterval(41.2), now: now) == "Expires in 0:42")
+        #expect(ConfirmationPromptView.expiryText(expiresAt: now.addingTimeInterval(-3), now: now) == "Expires in 0:00")
+    }
+
     @Test func aLongTypedTextIsShortenedWithACountNeverCut() {
         let text = String(repeating: "abc ", count: 60)
         let preview = TypedTextPreview(text)
@@ -217,7 +258,7 @@ struct ConfirmationCardTests {
 
         let exact = HarnessConfirmations.ruleSummary(for: HarnessConfirmations.rule(for: pressTicket), appName: "TextEdit")
         #expect(exact.title + "?" == line(pressTicket, .question))
-        #expect(exact.title == "Press a control in \"TextEdit\"")
+        #expect(exact.title == "Press \"Delete\" in \"TextEdit\"")
         #expect(exact.place == line(pressTicket, .place))
         #expect(exact.scope == HarnessConfirmations.exactRuleScope)
         #expect(exact.qualifiers.contains("role \"AXButton\""))

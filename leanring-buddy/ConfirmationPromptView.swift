@@ -21,8 +21,9 @@ struct ConfirmationPromptView: View {
     static let alwaysVisibleSections: [HarnessConfirmations.CardLine.Kind] = [.question, .warning, .preview, .place]
     static let detailSections: [HarnessConfirmations.CardLine.Kind] = [.qualifier, .effect]
     static var cardSections: [HarnessConfirmations.CardLine.Kind] { alwaysVisibleSections + detailSections }
-    /// Expanding a long preview moves the buttons (Details opens below them);
-    /// the move is this long and `minimumRowSettledSeconds` outlasts it (a test holds that).
+    /// Details and "+N more" open BELOW the buttons and move nothing clickable;
+    /// should that ever change, the move is this long and `minimumRowSettledSeconds`
+    /// outlasts it (a test holds that).
     static let expandSeconds: TimeInterval = 0.2
     /// Tickets whose Details, or whose whole typed text, the owner opened.
     @State private var openDetails: Set<String> = []
@@ -30,6 +31,20 @@ struct ConfirmationPromptView: View {
     /// Why the last approval pressed on a ticket did not count, by ticket id.
     /// Every reason is our own words and numbers — no app-written text.
     @State private var approvalRejections: [String: String] = [:]
+
+    /// `expandedForSnapshot` (UI snapshots only): every ticket drawn with Details
+    /// and its whole typed text open and a rejection line showing, so the
+    /// renderer can show that none of them moves a button.
+    init(confirmations: HarnessConfirmations, expandedForSnapshot: Bool = false) {
+        _confirmations = ObservedObject(wrappedValue: confirmations)
+        guard expandedForSnapshot else { return }
+        let ids = Set(confirmations.tickets.map(\.id))
+        _openDetails = State(initialValue: ids)
+        _openPreviews = State(initialValue: ids)
+        _approvalRejections = State(initialValue: Dictionary(uniqueKeysWithValues: ids.map {
+            ($0, "the button moved 0.3 s before the click (needs 0.8 s still)")
+        }))
+    }
     /// Where each row and this view's window sit, for `minimumRowSettledSeconds`.
     @State private var placementTracker = ConfirmationPlacementTracker()
 
@@ -136,7 +151,7 @@ struct ConfirmationPromptView: View {
                 if !visible.isEmpty {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(visible.enumerated()), id: \.element.id) { index, ticket in
-                            if index > 0 { Rectangle().fill(ConfirmationCardStyle.ink.opacity(0.1)).frame(height: 1) }
+                            if index > 0 { Rectangle().fill(JV.hairline).frame(height: 1) }
                             cardRow(ticket, now: context.date)
                         }
                     }
@@ -148,133 +163,185 @@ struct ConfirmationPromptView: View {
 
     // MARK: Card
 
-    private static let ink = ConfirmationCardStyle.ink
-    /// Icon tile plus its gap: the lines under the question start here.
-    private static let textInset: CGFloat = 40
+    /// The verb glyph's column plus its gap: every line under the headline starts here.
+    private static let textInset: CGFloat = 28
+    static let denyWidth: CGFloat = 88
+    static let allowWidth: CGFloat = 112
+    /// The expiry turns from ink3 to ink in its last seconds.
+    static let urgentSeconds: TimeInterval = 10
+
+    /// "Expires in 0:42": the ticket's own `expiresAt`, never a timer of its own.
+    static func expiryText(expiresAt: Date, now: Date) -> String {
+        let seconds = Int(max(0, expiresAt.timeIntervalSince(now)).rounded(.up))
+        return String(format: "Expires in %d:%02d", seconds / 60, seconds % 60)
+    }
 
     /// One ticket on the card. Pending only (the card never shows answered rows).
-    /// Owner's layout 2026-10-05: question + countdown, where, Details, buttons.
+    /// Top to bottom: headline, warning band, preview, place — then the buttons —
+    /// then everything that can open or appear. Principle 4 of the 2026-11-01
+    /// spec: nothing that can grow sits above a control it would displace, so a
+    /// rejected click, Details or "+N more" never moves Deny or Allow (each move
+    /// restarts the 0.8 s settle clock, and the owner's retry would land lower).
     @ViewBuilder
     private func cardRow(_ ticket: HarnessConfirmations.Ticket, now: Date) -> some View {
         let texts = { (kind: HarnessConfirmations.CardLine.Kind) in ticket.cardLines.filter { $0.kind == kind }.map(\.text) }
         let detailsOpen = openDetails.contains(ticket.id)
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 12) {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .stroke(Self.ink, lineWidth: 1.5)
-                    .frame(width: 28, height: 28)
-                    .overlay(Image(systemName: Self.symbol(for: ticket.verb))
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Self.ink))
-                Text(texts(.question).joined(separator: " "))
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Self.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 8)
-                CountdownRing(expiresAt: ticket.expiresAt)
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                // No colour (cyan means proof, and the card is notch black): a glyph
-                // and weight mark it, and the second chime already sounded.
-                ForEach(Array(texts(.warning).enumerated()), id: \.offset) { _, text in
-                    Label(text, systemImage: "exclamationmark.triangle")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Self.ink)
+        let previews = texts(.preview)
+        let hiddenPreview = previews.map { TypedTextPreview($0).hiddenCharacters }.max() ?? 0
+        let previewOpen = openPreviews.contains(ticket.id)
+        let remaining = ticket.expiresAt.timeIntervalSince(now)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                // Our own verb, bare: no tile, so the headline is the brightest thing.
+                Image(systemName: Self.symbol(for: ticket.verb))
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(JV.ink2)
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 8) {
+                    // The consequence, in the words the voice says: "Press "Send" in "Mail"?".
+                    Text(texts(.question).joined(separator: " "))
+                        .font(JV.display)
+                        .tracking(JV.displayTracking)
+                        .foregroundStyle(JV.ink)
+                        .lineLimit(3)
                         .fixedSize(horizontal: false, vertical: true)
+                    // No colour (cyan means proof; D3 keeps amber and red off the
+                    // glass): a raised band, a glyph and weight mark a warning.
+                    ForEach(Array(texts(.warning).enumerated()), id: \.offset) { _, text in
+                        warningBand(text)
+                    }
+                    // The typed text: a head and an ellipsis here; the whole text
+                    // opens BELOW the buttons ("+N more"), never pushing them down.
+                    ForEach(Array(previews.enumerated()), id: \.offset) { _, text in
+                        let preview = TypedTextPreview(text)
+                        Text(preview.hiddenCharacters == 0 ? text : preview.head + "\u{2026}")
+                            .font(JV.title)
+                            .foregroundStyle(JV.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    // App-written names are quoted, not logged: SF Pro, escaped as bound.
+                    ForEach(Array(texts(.place).enumerated()), id: \.offset) { _, text in
+                        Text(text)
+                            .font(JV.body)
+                            .foregroundStyle(JV.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-                ForEach(Array(texts(.preview).enumerated()), id: \.offset) { _, text in
-                    previewText(text, ticketID: ticket.id)
-                }
-                monoLines(texts(.place), size: 12, opacity: 0.72)
             }
-            .padding(.leading, Self.textInset)
-            // The step lives in the tab only ("Step 3 of 5 · needs your approval").
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
-                Button { press("deny", ticket, allow: false, scope: .once) } label: {
-                    Text("Deny")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Self.ink)
-                        .frame(width: 84, height: 30)
-                        .overlay(Capsule(style: .circular).strokeBorder(Self.ink.opacity(0.6), lineWidth: 1.5))
-                        .contentShape(Capsule())
+            buttonRow(ticket, remaining: remaining, now: now)
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                toggle(detailsOpen ? "Details \u{2303}" : "Details \u{2304}", id: ticket.id, in: $openDetails)
+                if hiddenPreview > 0 {
+                    toggle(previewOpen ? "Show less" : "+\(hiddenPreview) more", id: ticket.id, in: $openPreviews)
                 }
-                .buttonStyle(.plain)
-                Button { press("allowOnce", ticket, allow: true, scope: .once) } label: {
-                    Text("Allow once")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(ConfirmationCardStyle.material)
-                        .frame(width: 100, height: 30)
-                        .background(Capsule().fill(Self.ink))
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .background(recordsFrame(of: "allowOnce", ticketID: ticket.id))
-            }
-            // Everything that can grow sits BELOW every control of this ticket:
-            // Details above the buttons, or a rejection line, pushed Deny and
-            // Allow down ~16 pt, so the retry landed lower and restarted the
-            // settle clock. Now opening or rejecting moves nothing clickable.
-            HStack(alignment: .firstTextBaseline) {
-                toggle(detailsOpen ? "Details \u{25B4}" : "Details \u{25BE}", id: ticket.id, in: $openDetails)
-                    .padding(.leading, Self.textInset)
                 Spacer(minLength: 8)
-                // The quieter third control, only where today's card offered it: a
+                // The quieter third control, only where the card offers it: a
                 // destructive question is Allow once and Deny only. Its words are the
                 // scope the "Always allowed" list will show for the rule it saves.
                 if HarnessConfirmations.offersAlwaysRule(for: ticket) {
                     Button { press("always", ticket, allow: true, scope: .always) } label: {
                         Text(HarnessConfirmations.alwaysButtonTitle(for: ticket))
-                            .font(.system(size: 11))
+                            .font(JV.caption)
                             .underline()
-                            .foregroundStyle(Self.ink.opacity(0.62))
+                            .foregroundStyle(JV.ink2)
                             .fixedSize()
+                            .frame(height: 28)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .background(recordsFrame(of: "always", ticketID: ticket.id))
                 }
             }
-            if detailsOpen {
+            .padding(.leading, Self.textInset)
+            .padding(.top, -4)
+            if previewOpen && hiddenPreview > 0 {
                 VStack(alignment: .leading, spacing: 6) {
-                    monoLines(texts(.qualifier), size: 11, opacity: 0.5)
-                    ForEach(Array(texts(.effect).enumerated()), id: \.offset) { _, text in
-                        Text(text).font(.system(size: 12)).foregroundStyle(Self.ink.opacity(0.85))
-                            .fixedSize(horizontal: false, vertical: true)
+                    ForEach(Array(previews.enumerated()), id: \.offset) { _, text in
+                        Text(text).font(JV.body).foregroundStyle(JV.ink).fixedSize(horizontal: false, vertical: true)
                     }
-                    // The kernel's reason: why it asked.
-                    Text(ticket.reason).font(.system(size: 12)).foregroundStyle(Self.ink.opacity(0.62))
-                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.leading, Self.textInset)
                 .transition(.opacity)
             }
+            if detailsOpen {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(texts(.effect).enumerated()), id: \.offset) { _, text in
+                        Text(text).font(JV.body).foregroundStyle(JV.ink2).fixedSize(horizontal: false, vertical: true)
+                    }
+                    // The kernel's reason: why it asked.
+                    Text(verbatim: "Why I asked: \(ticket.reason)")
+                        .font(JV.caption).foregroundStyle(JV.ink2).fixedSize(horizontal: false, vertical: true)
+                    ForEach(Array(texts(.qualifier).enumerated()), id: \.offset) { _, text in
+                        Text(text).font(JV.mono).foregroundStyle(JV.ink3).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.leading, Self.textInset)
+                .transition(.opacity)
+            }
+            // Below everything clickable: it appears after a click and moves nothing.
             if let rejection = approvalRejections[ticket.id] {
                 Text(verbatim: "Not counted: \(rejection)")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Self.ink)
+                    .font(JV.caption)
+                    .foregroundStyle(JV.ink)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, Self.textInset)
             }
         }
-        .padding(18)
+        .padding(20)
         .modifier(TracksRowPlacement(ticketID: ticket.id, tracker: placementTracker))
     }
 
-    /// The typed text, never silently cut: a short head and "+N more", which
-    /// opens the whole line (`open` refused anything over 300 scalars).
-    @ViewBuilder
-    private func previewText(_ text: String, ticketID: String) -> some View {
-        let preview = TypedTextPreview(text)
-        let whole = preview.hiddenCharacters == 0 || openPreviews.contains(ticketID)
-        VStack(alignment: .leading, spacing: 2) {
-            Text(whole ? text : preview.head + "\u{2026}")
-                .font(.system(size: 13))
-                .foregroundStyle(Self.ink)
-                .fixedSize(horizontal: false, vertical: true)
-            if preview.hiddenCharacters > 0 {
-                toggle(whole ? "Show less" : "+\(preview.hiddenCharacters) more", id: ticketID, in: $openPreviews)
+    /// Expiry text in the leading slot, then Deny and Allow once, trailing: the
+    /// text's width changes every second and moves neither button (a Spacer
+    /// takes up the difference). A destructive question inverts the fills —
+    /// Deny filled, Allow once outlined — in the SAME frames, so position memory
+    /// holds and only the emphasis changes (owner's D3).
+    private func buttonRow(_ ticket: HarnessConfirmations.Ticket, remaining: TimeInterval, now: Date) -> some View {
+        let serious = ticket.isDestructive
+        let seconds = Int(max(0, remaining).rounded(.up))
+        return HStack(spacing: 8) {
+            Text(Self.expiryText(expiresAt: ticket.expiresAt, now: now))
+                .font(JV.meta)
+                .foregroundStyle(remaining <= Self.urgentSeconds ? JV.ink : JV.ink3)
+                .accessibilityLabel("\(seconds) seconds left")
+            Spacer(minLength: 8)
+            Button { press("deny", ticket, allow: false, scope: .once) } label: {
+                cardButtonLabel("Deny", filled: serious, width: Self.denyWidth)
             }
+            .buttonStyle(.plain)
+            Button { press("allowOnce", ticket, allow: true, scope: .once) } label: {
+                cardButtonLabel("Allow once", filled: !serious, width: Self.allowWidth)
+            }
+            .buttonStyle(.plain)
+            .background(recordsFrame(of: "allowOnce", ticketID: ticket.id))
         }
+    }
+
+    private func cardButtonLabel(_ title: String, filled: Bool, width: CGFloat) -> some View {
+        let shape = RoundedRectangle(cornerRadius: JV.buttonRadius, style: .continuous)
+        return Text(title)
+            .font(filled ? JV.bodySemibold : JV.bodyMedium)
+            .foregroundStyle(filled ? JV.glass : JV.ink)
+            .frame(width: width, height: JV.buttonHeight)
+            .background(shape.fill(filled ? JV.ink : Color.clear))
+            .overlay(shape.strokeBorder(filled ? Color.clear : JV.ink.opacity(0.6), lineWidth: JV.stroke))
+            .contentShape(shape)
+    }
+
+    private func warningBand(_ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 13, weight: .semibold))
+            Text(text)
+                .font(JV.bodySemibold)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(JV.ink)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(minHeight: 32)
+        .background(RoundedRectangle(cornerRadius: JV.bandRadius, style: .continuous).fill(JV.raised))
     }
 
     /// A quiet text control that opens or closes one ticket's part of the card.
@@ -285,26 +352,12 @@ struct ConfirmationPromptView: View {
             }
         } label: {
             Text(title)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Self.ink.opacity(0.62))
+                .font(JV.caption)
+                .foregroundStyle(JV.ink2)
+                .frame(height: 28)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-
-    fileprivate static func monoLinesView(_ texts: [String], size: CGFloat, opacity: Double) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            ForEach(Array(texts.enumerated()), id: \.offset) { _, text in
-                Text(text)
-                    .font(.system(size: size, design: .monospaced))
-                    .foregroundStyle(ink.opacity(opacity))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    private func monoLines(_ texts: [String], size: CGFloat, opacity: Double) -> some View {
-        Self.monoLinesView(texts, size: size, opacity: opacity)
     }
 
     /// The icon tile: our own verb, never app-written.
@@ -333,30 +386,6 @@ struct TypedTextPreview: Equatable {
     init(_ text: String, limit: Int = visibleCharacters) {
         head = String(text.prefix(limit))
         hiddenCharacters = max(0, text.count - limit)
-    }
-}
-
-/// The 60 s ring, drawn from the ticket's own `expiresAt` — never a timer of its own.
-private struct CountdownRing: View {
-    let expiresAt: Date
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.5)) { context in
-            let remaining = max(0, expiresAt.timeIntervalSince(context.date))
-            let fraction = remaining / HarnessConfirmations.ticketLifetimeInSeconds
-            ZStack {
-                Circle().stroke(ConfirmationCardStyle.ink.opacity(0.25), lineWidth: 3)
-                Circle()
-                    .trim(from: 0, to: fraction)
-                    .stroke(ConfirmationCardStyle.ink, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                Text(verbatim: "\(Int(remaining.rounded(.up)))")
-                    .font(.system(size: 9, weight: .medium).monospacedDigit())
-                    .foregroundStyle(ConfirmationCardStyle.ink.opacity(0.62))
-            }
-            .frame(width: 26, height: 26)
-            .accessibilityLabel("\(Int(remaining.rounded(.up))) seconds left")
-        }
     }
 }
 

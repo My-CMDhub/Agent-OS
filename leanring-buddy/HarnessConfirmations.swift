@@ -505,12 +505,33 @@ final class HarnessConfirmations: ObservableObject {
         cardLines(for: shape, appName: appName, binding: binding, destructive: destructive).map(\.text)
     }
 
-    /// The headline. Every word is ours except `app`, which is already escaped:
-    /// the verb as a phrase, then whatever changes what it does — the typing mode
-    /// and a submit — so none of those can hide behind Details.
+    /// Owner's D5 (2026-11-01): the headline names the target when its escaped
+    /// form is short enough to read in a glance — "Press "Send" in "Mail"?" —
+    /// because "Press a control" is the mechanism, not the consequence. Counted
+    /// in unicode scalars, not graphemes: one grapheme can carry thousands of
+    /// combining marks, and scalars bound what is actually drawn.
+    static let headlineTargetScalarLimit = 40
+
+    /// The escaped target for the headline, or nil: empty, a placeholder like
+    /// "<focused>", or longer than the limit (the place line still shows it whole).
+    static func headlineTarget(_ shape: Shape) -> String? {
+        let raw = shape.rawTarget
+        guard !raw.isEmpty, !(raw.hasPrefix("<") && raw.hasSuffix(">")),
+              raw.unicodeScalars.count <= headlineTargetScalarLimit else { return nil }
+        return UntrustedText(raw).forDisplayInFull
+    }
+
+    /// The headline. Every word is ours except `app` and the target, both
+    /// already escaped: the verb as a phrase, then whatever changes what it does
+    /// — the typing mode and a submit — so none of those can hide behind Details.
     static func question(for shape: Shape, app: String) -> String {
         if shape.verb == "launch" { return "Launch \(app)?" }
         var phrase: String
+        if let target = headlineTarget(shape), let named = namedPhrase(verb: shape.verb, target: target) {
+            phrase = named
+            if shape.thenConfirm { phrase += " and submit it" }
+            return "\(phrase) in \(app)?"
+        }
         switch shape.verb {
         case "type":
             let object = shape.text == nil ? "no text" : "this"
@@ -536,6 +557,24 @@ final class HarnessConfirmations: ObservableObject {
         }
         if shape.thenConfirm { phrase += " and submit it" }
         return "\(phrase) in \(app)?"
+    }
+
+    /// The verbs whose target is a named element, in the words the voice says.
+    /// The rest (type, scroll, key, the screen hands, pages) keep their phrase:
+    /// their target is a field, a direction or a position, not an object.
+    static func namedPhrase(verb: String, target: String) -> String? {
+        switch verb {
+        case "press": return "Press \(target)"
+        case "click": return "Click \(target)"
+        case "select": return "Select \(target)"
+        case "open": return "Open \(target)"
+        case "menu": return "Choose \(target)"
+        case "focus": return "Bring \(target) forward"
+        case "renameItem": return "Rename \(target)"
+        case "moveItems": return "Move \(target)"
+        case "adjust": return "Set \(target)"
+        default: return nil
+        }
     }
 
     /// Owner's ruling 2026-10-08: "Open <name>'s LinkedIn profile?", the name

@@ -99,6 +99,8 @@ final class ConfirmationCardModel: ObservableObject {
     @Published var contentHeight: CGFloat = 0
     /// The card's own height as last placed; frozen while it shrinks away.
     @Published var cardHeight: CGFloat = 0
+    /// UI snapshots only: Details, previews and a rejection line all open.
+    var expandedForSnapshot = false
 
     nonisolated static func tabText(step: ConfirmationStep?) -> String {
         step.map { "Step \($0.current) of \($0.total) \u{00B7} needs your approval" } ?? "Needs your approval"
@@ -284,11 +286,12 @@ final class ConfirmationCardWindowManager {
     /// may not have drawn the newest list yet (seen live: the first frame of a
     /// card came up 80 pt too high), so a fresh one measures it.
     private func measuredContentHeight() -> CGFloat {
-        Self.measuredContentHeight(confirmations: confirmations, geometry: model.geometry)
+        Self.measuredContentHeight(confirmations: confirmations, geometry: model.geometry, expanded: false)
     }
 
-    private static func measuredContentHeight(confirmations: HarnessConfirmations, geometry: ConfirmationCardGeometry) -> CGFloat {
-        let card = ConfirmationPromptView(confirmations: confirmations)
+    private static func measuredContentHeight(confirmations: HarnessConfirmations, geometry: ConfirmationCardGeometry,
+                                              expanded: Bool) -> CGFloat {
+        let card = ConfirmationPromptView(confirmations: confirmations, expandedForSnapshot: expanded)
             .frame(width: ConfirmationCardGeometry.cardWidth)
         return NSHostingView(rootView: card).fittingSize.height + geometry.cardTop + ConfirmationCardGeometry.margin
     }
@@ -296,13 +299,14 @@ final class ConfirmationCardWindowManager {
     /// UI snapshots only (`UISnapshotRenderer`): the card fully grown for these
     /// tickets, as `refresh` + `place` would leave it, and the panel's size.
     static func grownCardForSnapshot(confirmations: HarnessConfirmations, notch: JarvisNotchGeometry,
-                                     step: ConfirmationStep?) -> (view: AnyView, size: CGSize) {
+                                     step: ConfirmationStep?, expanded: Bool = false) -> (view: AnyView, size: CGSize) {
         let model = ConfirmationCardModel()
         model.geometry = ConfirmationCardGeometry(notch: notch)
         model.grown = true
         model.interactive = true
         model.step = step
-        let height = measuredContentHeight(confirmations: confirmations, geometry: model.geometry)
+        model.expandedForSnapshot = expanded
+        let height = measuredContentHeight(confirmations: confirmations, geometry: model.geometry, expanded: expanded)
         model.contentHeight = height
         model.cardHeight = max(0, height - model.geometry.cardTop - ConfirmationCardGeometry.margin)
         return (AnyView(ConfirmationCardRootView(model: model, confirmations: confirmations)),
@@ -368,11 +372,11 @@ final class ConfirmationCardWindowManager {
 }
 
 enum ConfirmationCardStyle {
-    /// The journal's `--notch` and `--notch-ink`. No cyan anywhere on the
-    /// card: cyan means verified proof, and a question is not proof.
-    static let material = Color(red: 0x07 / 255, green: 0x09 / 255, blue: 0x0A / 255)
-    static let ink = Color(red: 0xE8 / 255, green: 0xEE / 255, blue: 0xF0 / 255)
-    static let cornerRadius: CGFloat = 18
+    /// The journal's `--notch` and `--notch-ink`, now the `JV` tokens. No cyan
+    /// anywhere on the card: cyan means verified proof, and a question is not proof.
+    static let material = JV.glass
+    static let ink = JV.ink
+    static let cornerRadius: CGFloat = JV.cardRadius
 }
 
 /// The tab and the card, both grown out of the notch's rect.
@@ -387,7 +391,7 @@ private struct ConfirmationCardRootView: View {
         let open = model.grown || model.reduceMotion
         VStack(spacing: 0) {
             Color.clear.frame(height: geometry.cardTop)
-            ConfirmationPromptView(confirmations: confirmations)
+            ConfirmationPromptView(confirmations: confirmations, expandedForSnapshot: model.expandedForSnapshot)
                 .frame(width: ConfirmationCardGeometry.cardWidth)
                 // Text waits for the black to reach it (seen live: at the same
                 // spring it floated outside the growing shape); on the way back
@@ -431,13 +435,14 @@ private struct ConfirmationCardRootView: View {
         return UnevenRoundedRectangle(topLeadingRadius: geometry.notch.hasNotch ? 0 : 10,
                                       bottomLeadingRadius: open ? 14 : 10, bottomTrailingRadius: open ? 14 : 10,
                                       topTrailingRadius: geometry.notch.hasNotch ? 0 : 10, style: .continuous)
-            .fill(Color.black)
+            .fill(JV.void)
             .frame(width: size.width, height: size.height)
             .overlay(alignment: .bottom) {
                 Text(text)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(ConfirmationCardStyle.ink)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                     .frame(height: geometry.notch.hasNotch ? ConfirmationCardGeometry.tabTextBand : size.height)
                     .opacity(model.grown ? 1 : 0)
             }
