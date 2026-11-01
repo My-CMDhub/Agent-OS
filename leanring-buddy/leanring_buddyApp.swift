@@ -55,6 +55,14 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Every main SwiftUI surface to PNG, light and dark, from fixture data
+        // (UISnapshotRenderer): /private/tmp/clicky-ui-snapshots/, then quits.
+        if CommandLine.arguments.contains("--render-ui-snapshots") {
+            UISnapshotRenderer.run(companionManager: companionManager)
+            NSApp.terminate(nil)
+            return
+        }
+
         // Owner at the desk: lists each protected folder once so macOS asks for Files & Folders
         // (Clicky is not in /Applications, so Settings offers no "+"). Counts only, never names.
         if CommandLine.arguments.contains("--folder-access-request") {

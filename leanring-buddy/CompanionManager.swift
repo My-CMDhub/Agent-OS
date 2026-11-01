@@ -161,8 +161,21 @@ final class CompanionManager: ObservableObject {
     /// Whether the user has completed onboarding at least once. Persisted
     /// to UserDefaults so the Start button only appears on first launch.
     var hasCompletedOnboarding: Bool {
-        get { UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") }
+        get { onboardingPinnedForSnapshot ?? UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") }
         set { UserDefaults.standard.set(newValue, forKey: "hasCompletedOnboarding") }
+    }
+
+    /// UI snapshots only (`UISnapshotRenderer`): what the panel reads, pinned in
+    /// memory. Never UserDefaults and never TCC — the owner's state is not touched.
+    private var onboardingPinnedForSnapshot: Bool?
+
+    func pinPanelStateForSnapshot(permissionsGranted: Bool, onboarded: Bool, emailSubmitted: Bool) {
+        hasAccessibilityPermission = permissionsGranted
+        hasScreenRecordingPermission = permissionsGranted
+        hasMicrophonePermission = permissionsGranted
+        hasScreenContentPermission = permissionsGranted
+        onboardingPinnedForSnapshot = onboarded
+        hasSubmittedEmail = emailSubmitted
     }
 
     /// Whether the user has submitted their email during onboarding.

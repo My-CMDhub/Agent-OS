@@ -1049,3 +1049,15 @@ private struct NeedsYouPulse: View {
             }
     }
 }
+
+extension JarvisNotch {
+    /// UI snapshots only (`UISnapshotRenderer`): the notch drawn in `state` on
+    /// `geometry`, at its panel's size, with no window and no state machine.
+    static func snapshotView(state: JarvisNotchState, geometry: JarvisNotchGeometry, level: CGFloat = 0.6) -> AnyView {
+        let model = JarvisNotchModel()
+        model.state = state
+        model.geometry = geometry
+        model.level = level
+        return AnyView(JarvisNotchView(model: model))
+    }
+}

@@ -280,9 +280,30 @@ final class ConfirmationCardWindowManager {
     /// may not have drawn the newest list yet (seen live: the first frame of a
     /// card came up 80 pt too high), so a fresh one measures it.
     private func measuredContentHeight() -> CGFloat {
-        let card = ConfirmationPromptView(confirmations: confirmations, style: .card(step: model.step))
+        Self.measuredContentHeight(confirmations: confirmations, step: model.step, geometry: model.geometry)
+    }
+
+    private static func measuredContentHeight(confirmations: HarnessConfirmations, step: ConfirmationStep?,
+                                              geometry: ConfirmationCardGeometry) -> CGFloat {
+        let card = ConfirmationPromptView(confirmations: confirmations, style: .card(step: step))
             .frame(width: ConfirmationCardGeometry.cardWidth)
-        return NSHostingView(rootView: card).fittingSize.height + model.geometry.cardTop + ConfirmationCardGeometry.margin
+        return NSHostingView(rootView: card).fittingSize.height + geometry.cardTop + ConfirmationCardGeometry.margin
+    }
+
+    /// UI snapshots only (`UISnapshotRenderer`): the card fully grown for these
+    /// tickets, as `refresh` + `place` would leave it, and the panel's size.
+    static func grownCardForSnapshot(confirmations: HarnessConfirmations, notch: JarvisNotchGeometry,
+                                     step: ConfirmationStep?) -> (view: AnyView, size: CGSize) {
+        let model = ConfirmationCardModel()
+        model.geometry = ConfirmationCardGeometry(notch: notch)
+        model.grown = true
+        model.interactive = true
+        model.step = step
+        let height = measuredContentHeight(confirmations: confirmations, step: step, geometry: model.geometry)
+        model.contentHeight = height
+        model.cardHeight = max(0, height - model.geometry.cardTop - ConfirmationCardGeometry.margin)
+        return (AnyView(ConfirmationCardRootView(model: model, confirmations: confirmations)),
+                CGSize(width: model.geometry.panelWidth, height: height))
     }
 
     private func play(_ chime: ConfirmationChime) {
