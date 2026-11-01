@@ -674,7 +674,7 @@ final class RealtimeVoiceSession {
                 return await Self.value(within: Self.frontmostReadDeadlineSeconds) { () -> (line: String?, bundle: String?)? in
                     guard let application = AccessibilityTreeWalker.focusedApplication(),
                           !HarnessServer.isHarnessItself(bundleIdentifier: application.bundleIdentifier) else { return nil }
-                    return (RealtimeOpenAppTool.frontmostAppContextLine(appName: application.localizedName), application.bundleIdentifier)
+                    return (RealtimeOpenAppTool.frontmostAppContextLine(application: application), application.bundleIdentifier)
                 }
             }
             // What is under the owner's mouse, from structure, bounded from key-down

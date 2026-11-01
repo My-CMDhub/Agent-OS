@@ -2674,13 +2674,16 @@ extension AgentLoop {
     struct FrontApp: Sendable {
         let name: String?
         let bundleIdentifier: String?
+        /// What the model is told is in front: the desktop, a window, or an app with none (`OpenApps.Front`).
+        var line: String? = nil
     }
 
-    static func frontApp() async -> FrontApp? {
+    static func frontApp(withLine: Bool = false) async -> FrontApp? {
         await RealtimeVoiceSession.value(within: 0.5) { () -> FrontApp? in
             guard let application = AccessibilityTreeWalker.focusedApplication(),
                   !HarnessServer.isHarnessItself(bundleIdentifier: application.bundleIdentifier) else { return nil }
-            return FrontApp(name: application.localizedName, bundleIdentifier: application.bundleIdentifier)
+            return FrontApp(name: application.localizedName, bundleIdentifier: application.bundleIdentifier,
+                            line: withLine ? RealtimeOpenAppTool.frontmostAppContextLine(application: application) : nil)
         }
     }
 
@@ -2690,9 +2693,9 @@ extension AgentLoop {
     static func liveObservation(harnessAnswer: @escaping @Sendable (String) -> String) async -> AgentObservation {
         let started = ProcessInfo.processInfo.systemUptime
         var observation = AgentObservation()
-        let front = await frontApp()
+        let front = await frontApp(withLine: true)
         observation.bundleIdentifier = front?.bundleIdentifier
-        if let line = RealtimeOpenAppTool.frontmostAppContextLine(appName: front?.name) { observation.lines.append(line) }
+        if let line = front?.line ?? RealtimeOpenAppTool.frontmostAppContextLine(appName: front?.name) { observation.lines.append(line) }
         let secureInput = SecureInputState.current()
         if secureInput.isOn {
             observation.look = "handOver"

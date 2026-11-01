@@ -229,6 +229,15 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // The "what is in front" line across desktop / Finder window / minimised (FrontStateProbe), then quits.
+        if CommandLine.arguments.contains("--front-state-probe") {
+            Task { @MainActor in
+                await FrontStateProbe.run(harness: self.harnessServer)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // The hands (click, type by AX write and by keystrokes, openURL) on a page
         // it writes, in a Chrome window it opens and closes by identity; JSON
         // summary 0600 to ~/Library/Logs/Clicky/hands-probe/, then quits. Real
