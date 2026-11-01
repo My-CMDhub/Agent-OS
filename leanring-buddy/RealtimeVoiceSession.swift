@@ -42,6 +42,9 @@ final class RealtimeVoiceSession {
     private var lastTurnID: String?
     /// The last written line's `errorKind`: a failed turn's words are no answer to agree with.
     private var lastLineErrorKind: String?
+    /// A press nobody spoke into is no turn, so the reply it cut off is still "the previous reply"
+    /// for the next press — and still unheard (`previousReplyWasHeard`). nil once a press reads it.
+    private var replyHeardAtSilentPress: Bool?
     /// When the scheduled reply audio runs out, by arithmetic on what was
     /// scheduled — no render callback to trust. 0 once playback is stopped.
     private var replyAudioEndsUptime: TimeInterval = 0
@@ -621,6 +624,8 @@ final class RealtimeVoiceSession {
         lastTurnID = line.turnID
         liveTurn = LiveTurn(line: line, pressedUptime: uptime)
         liveTurn?.previousReplyWasHeard = Self.previousReplyWasHeard(line: line, previousErrorKind: lastLineErrorKind)
+            && replyHeardAtSilentPress != false
+        replyHeardAtSilentPress = nil
         stopPlayback()
         // Owner 2026-10-08: the press interrupts speech only; the task runs on until the owner's words stop it
         // (`watchForStopWords`).
@@ -669,6 +674,7 @@ final class RealtimeVoiceSession {
     /// waits in the stream and is sent in order once the turn is open.
     private func runTurn(_ audioStream: AsyncStream<Data>) async {
         let liveTurn = self.liveTurn
+        let inputSampleRate = selectedStack.inputSampleRate
         do {
             let probeMode = self.probeMode
             // Key-down: a password being typed is the owner's (the hand-over) -
@@ -700,8 +706,29 @@ final class RealtimeVoiceSession {
                 return await Self.keyDownPointerHit(mouse: mouse, screens: screens, primaryDisplayHeight: primaryHeight)
             }
             let setupStart = uptime
-            let connection = try await readyConnection()
-            if liveTurn?.line.sessionWasWarm == false { liveTurn?.line.sessionSetupMs = Self.milliseconds(from: setupStart, to: uptime) }
+            // Connecting runs beside the speech gate: a silent press waits for neither.
+            let connecting = Task { () throws -> (connection: RealtimeVoiceConnection, readyUptime: TimeInterval) in
+                let connection = try await self.readyConnection()
+                return (connection, ProcessInfo.processInfo.systemUptime)
+            }
+            // Owner 2026-11-01: a press with no words never reaches the model. Nothing
+            // is sent — no screenshot, no activityStart / buffer, no audio — until the
+            // gate hears speech; the audio waits here, in order, and goes as a burst.
+            var speechGate = PushToTalkSpeechGate(sampleRate: inputSampleRate)
+            var audio = audioStream.makeAsyncIterator()
+            var heldAudio: [Data] = []
+            while !speechGate.heardSpeech, let chunk = await audio.next() {
+                heldAudio.append(chunk)
+                speechGate.add(pcm16: chunk)
+            }
+            guard speechGate.heardSpeech else {
+                // A new press cancelled this one and already wrote its line.
+                guard !Task.isCancelled, let liveTurn, self.liveTurn === liveTurn else { return }
+                endSilentPress(liveTurn, gate: speechGate)
+                return
+            }
+            let (connection, readyUptime) = try await connecting.value
+            if liveTurn?.line.sessionWasWarm == false { liveTurn?.line.sessionSetupMs = Self.milliseconds(from: setupStart, to: readyUptime) }
             var screenshotDisplayFrame: CGRect?
             var screenshotPixelSize: CGSize?
             let screenshotResult = await screenshotTask.result
@@ -794,9 +821,13 @@ final class RealtimeVoiceSession {
                     try? await connection.sendContextText(line)
                 }
             }
-            for await pcmChunk in audioStream {
+            for pcmChunk in heldAudio { try await connection.appendAudio(pcmChunk) }
+            heldAudio = []
+            while let pcmChunk = await audio.next() {
+                speechGate.add(pcm16: pcmChunk)
                 try await connection.appendAudio(pcmChunk)
             }
+            liveTurn?.line.speech = speechGate.summary
             guard !Task.isCancelled else { return }
             // Bounded by the read's deadline, which started at key-down: already over
             // for any hold longer than ~0.3 s.
@@ -832,6 +863,27 @@ final class RealtimeVoiceSession {
         }
     }
 
+    /// A press the gate heard no words in: no turn, no model call. The barge-in
+    /// already happened at the press (speech stopped, the old answer superseded).
+    private func endSilentPress(_ liveTurn: LiveTurn, gate: PushToTalkSpeechGate) {
+        liveTurn.line.speech = gate.summary
+        replyHeardAtSilentPress = liveTurn.previousReplyWasHeard
+        // This press took the "answer to the question" slot (`askedOwnerAfterPress`); the next one keeps it.
+        askedOwner?.pressesSince = 0
+        let holdSeconds = (liveTurn.releasedUptime ?? uptime) - liveTurn.pressedUptime
+        writeLiveTurnLine(noSpeech: true)
+        JarvisNotch.shared.handle(Self.silentPressNotchEvent(holdSeconds: holdSeconds))
+        onStateChange?(.idle)
+    }
+
+    /// A tap goes straight back to idle; a hold this long with nothing said gets the
+    /// existing quiet "No reply — try again", so a dead or muted mic is not invisible.
+    /// ponytail: 1 s guessed (a slip of the finger is shorter, a real question longer); no measured split exists.
+    nonisolated static let silentPressTellsOwnerAfterSeconds: Double = 1.0
+    nonisolated static func silentPressNotchEvent(holdSeconds: Double) -> JarvisNotchEvent {
+        holdSeconds >= silentPressTellsOwnerAfterSeconds ? .noReply : .turnEnded
+    }
+
     /// Once the reply is done (hands design items 9 and 10): a claim no receipt
     /// backs is corrected aloud through a system turn, and a reply that told
     /// the owner to click something nobody pointed at gets the pointer — never
@@ -861,7 +913,7 @@ final class RealtimeVoiceSession {
     /// Once per turn. Timings run from the key-up (`releasedUptime`), which is
     /// what the owner feels; the probe's origin is its last audio sent, which a
     /// fixture sends at the same instant.
-    private func writeLiveTurnLine(bargedIn: Bool = false, errorKind: String? = nil) {
+    private func writeLiveTurnLine(bargedIn: Bool = false, errorKind: String? = nil, noSpeech: Bool = false) {
         guard let liveTurn else { return }
         self.liveTurn = nil
         var line = liveTurn.line
@@ -871,7 +923,7 @@ final class RealtimeVoiceSession {
         line.errorKind = errorKind
         lastLineErrorKind = errorKind
         line.watchdogFired = liveTurn.watchdogFired
-        line.turnEndReason = errorKind != nil ? "error" : bargedIn ? "bargedIn"
+        line.turnEndReason = errorKind != nil ? "error" : bargedIn ? "bargedIn" : noSpeech ? "noSpeech"
             : (liveTurn.marks?.toolCalls.isEmpty == false ? "toolAnswered" : liveTurn.marks?.firstAudioUptime != nil ? "spoke" : "silent")
         line.notchTransitions = JarvisNotch.shared.transitions.filter { $0.uptime >= liveTurn.pressedUptime }.map { transition in
             ["state": transition.state, "ms": Self.milliseconds(from: released ?? liveTurn.pressedUptime, to: transition.uptime) ?? 0]
@@ -1031,7 +1083,7 @@ nonisolated struct RealtimeLiveTurnLine {
     var turnDoneMs: Int?
     var bargedIn = false
     var errorKind: String?
-    /// spoke | toolAnswered | silent | error | bargedIn — how it really ended.
+    /// spoke | toolAnswered | silent | error | bargedIn | noSpeech (never sent) — how it really ended.
     var turnEndReason: String?
     /// The no-reply watchdog showed "No reply" before that.
     var watchdogFired = false
@@ -1057,6 +1109,8 @@ nonisolated struct RealtimeLiveTurnLine {
     var receiptCorrectionSent = false
     /// The reply told the owner to click something unpointed: pointed | notFound | noApp | an error code; nil when it did not.
     var pointedWhenTelling: String?
+    /// The speech gate over the whole hold (`PushToTalkSpeechGate.Summary`); nil when the turn never got that far.
+    var speech: PushToTalkSpeechGate.Summary?
 
     init(stack: String, turnID: String, sessionWasWarm: Bool) {
         self.stack = stack
@@ -1082,7 +1136,9 @@ nonisolated struct RealtimeLiveTurnLine {
             "bargedInPreviousTurnId": value(bargedInPreviousTurnID), "previousAudioWasPlaying": previousAudioWasPlaying,
             "eventTrail": eventTrail, "notchTransitions": notchTransitions, "claimedWithoutReceipt": claimedWithoutReceipt,
             "internalWordsSpoken": internalWordsSpoken,
-            "receiptCorrectionSent": receiptCorrectionSent, "pointedWhenTelling": value(pointedWhenTelling)
+            "receiptCorrectionSent": receiptCorrectionSent, "pointedWhenTelling": value(pointedWhenTelling),
+            "speechVoicedMs": value(speech?.voicedMilliseconds), "speechLoudestDb": value(speech?.loudestDecibels),
+            "speechQuietestDb": value(speech?.quietestDecibels)
         ]
     }
 }
@@ -1149,4 +1205,69 @@ struct AgentLoopReport {
     let steps: Int
     let decisions: [RealtimeToolDecision]
     let spoken: String
+}
+
+/// Did the owner say anything while the key was held? Local, pure and cheap: an
+/// energy gate over 20 ms windows of the PCM16 the mic tap already produces.
+/// Speech is SUSTAINED energy, so it counts voiced time, not a peak: the press's
+/// own transients (the press tick, 60 ms at -24 dBFS before the speaker-to-mic
+/// path; the key's click) stay under the minimum, and a word clears it.
+/// Measured on the 72 `say` fixtures (scripts/scenarios, campaign, voice-fixtures):
+/// the shortest, B8 "stop", is 400 ms voiced at -45 dBFS, and 240 ms with the
+/// whole clip 20 dB quieter. No real-mic recording exists; every turn line now
+/// carries `speechVoicedMs` / `speechLoudestDb` / `speechQuietestDb` to calibrate on.
+nonisolated struct PushToTalkSpeechGate {
+    static let windowMilliseconds = 20
+    /// ponytail: guessed for the room — a quiet room on a laptop mic sits well below it,
+    /// but a noise floor above it opens the gate on every press (today's behaviour,
+    /// never worse); raise it from `speechQuietestDb` in voice-live.log if that happens.
+    static let voicedThresholdDecibels: Float = -45
+    /// 2.5x a press's own transients at full level (the tick is 20 ms voiced, plus a 40 ms
+    /// click), under the shortest word (240 ms at -20 dB). ponytail: the click is guessed;
+    /// lower this if real one-word answers ("no") show up as `noSpeech` in voice-live.log.
+    static let minimumVoicedMilliseconds = 150
+
+    struct Summary: Equatable, Sendable {
+        let voicedMilliseconds: Int
+        /// Whole dBFS per 20 ms window; nil before the first full window.
+        let loudestDecibels: Int?
+        let quietestDecibels: Int?
+    }
+
+    private let windowSamples: Int
+    private var windowSumOfSquares: Float = 0
+    private var windowCount = 0
+    private(set) var voicedMilliseconds = 0
+    private var loudest: Float?
+    private var quietest: Float?
+
+    init(sampleRate: Int) { windowSamples = max(1, sampleRate * Self.windowMilliseconds / 1000) }
+
+    var heardSpeech: Bool { voicedMilliseconds >= Self.minimumVoicedMilliseconds }
+    var summary: Summary {
+        Summary(voicedMilliseconds: voicedMilliseconds,
+                loudestDecibels: loudest.map { Int($0.rounded()) }, quietestDecibels: quietest.map { Int($0.rounded()) })
+    }
+
+    /// Little-endian PCM16 mono; windows run across chunk boundaries.
+    mutating func add(pcm16 chunk: Data) {
+        chunk.withUnsafeBytes { raw in
+            for index in 0..<(raw.count / 2) {
+                let sample = Float(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: index * 2, as: Int16.self))) / 32_768
+                windowSumOfSquares += sample * sample
+                windowCount += 1
+                if windowCount == windowSamples { closeWindow() }
+            }
+        }
+    }
+
+    private mutating func closeWindow() {
+        let rms = (windowSumOfSquares / Float(windowCount)).squareRoot()
+        let decibels = rms > 0 ? max(-120, 20 * log10(rms)) : -120
+        if decibels >= Self.voicedThresholdDecibels { voicedMilliseconds += Self.windowMilliseconds }
+        loudest = max(loudest ?? decibels, decibels)
+        quietest = min(quietest ?? decibels, decibels)
+        windowSumOfSquares = 0
+        windowCount = 0
+    }
 }

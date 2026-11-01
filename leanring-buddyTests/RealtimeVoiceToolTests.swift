@@ -329,7 +329,8 @@ struct RealtimeVoiceToolTests {
             "toolName", "toolCallMs", "harnessMs", "harnessStatus", "harnessError", "freshLook", "freshLookMs", "freshLookArrivedAfterSpeechStartMs",
             "followUpFirstAudioMs", "releaseToSpokenResultMs", "turnDoneMs", "bargedIn", "errorKind", "notchTransitions",
             "turnEndReason", "watchdogFired", "finishedMs", "staleCompletionsIgnored", "bargedInPreviousTurnId", "previousAudioWasPlaying", "eventTrail",
-            "claimedWithoutReceipt", "internalWordsSpoken", "receiptCorrectionSent", "pointedWhenTelling"
+            "claimedWithoutReceipt", "internalWordsSpoken", "receiptCorrectionSent", "pointedWhenTelling",
+            "speechVoicedMs", "speechLoudestDb", "speechQuietestDb"
         ])
     }
 
