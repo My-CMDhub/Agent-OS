@@ -3130,7 +3130,9 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
     let consulted = broken.rule(for: finderEmptyBin, destructive: false)
     #expect(consulted.rule == nil)
     #expect(consulted.unreadable?.contains(store.serviceName) == true)
-    #expect(broken.alwaysRules.isEmpty && broken.alwaysRulesProblem != nil)
+    #expect(broken.alwaysRules.isEmpty && broken.alwaysRulesProblem == HarnessConfirmations.unreadableRulesMessage)
+    // The panel says what it means; the raw keychain error is kept for the tooltip only.
+    #expect(broken.alwaysRulesProblemDetail?.contains(store.serviceName) == true)
     guard case .opened(let ticket) = broken.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false) else {
         Issue.record("expected a ticket"); return
     }

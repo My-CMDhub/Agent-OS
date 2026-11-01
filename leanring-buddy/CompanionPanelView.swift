@@ -328,8 +328,8 @@ struct CompanionPanelView: View {
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)
                             .background(
-                                Capsule()
-                                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.8)
+                                Capsule(style: .circular)
+                                    .strokeBorder(DS.Colors.borderSubtle, lineWidth: 0.8)
                             )
                     }
                     .buttonStyle(.plain)

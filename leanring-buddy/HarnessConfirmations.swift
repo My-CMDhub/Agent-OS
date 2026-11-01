@@ -375,6 +375,9 @@ final class HarnessConfirmations: ObservableObject {
     /// Why the rules could not be read or saved, shown beside the list. An
     /// "always" that failed to save is a "once" the owner thinks is permanent.
     @Published private(set) var alwaysRulesProblem: String?
+    /// The raw keychain error behind an unreadable rules item (tooltip only); nil otherwise.
+    @Published private(set) var alwaysRulesProblemDetail: String?
+    static let unreadableRulesMessage = "Saved \u{201C}Always\u{201D} rules can\u{2019}t be read, so none apply \u{2014} everything that needs approval will ask."
 
     private let rulesStore: ApprovalRulesKeychainStore
     /// The pre-2026-09-14 rules file. Never read as rules — any process running
@@ -866,9 +869,16 @@ final class HarnessConfirmations: ObservableObject {
         case .success(let rules):
             if alwaysRules != rules { alwaysRules = rules }
             if alwaysRulesProblem != nil { alwaysRulesProblem = nil }
+            if alwaysRulesProblemDetail != nil { alwaysRulesProblemDetail = nil }
         case .failure(let failure):
             if !alwaysRules.isEmpty { alwaysRules = [] }
-            if alwaysRulesProblem != failure.reason { alwaysRulesProblem = failure.reason }
+            // The panel says what it means (fail-safe: no rule, so it asks); the raw
+            // keychain error is the tooltip and this log line, once per change.
+            if alwaysRulesProblem != Self.unreadableRulesMessage { alwaysRulesProblem = Self.unreadableRulesMessage }
+            if alwaysRulesProblemDetail != failure.reason {
+                alwaysRulesProblemDetail = failure.reason
+                print("⚠️ Always rules unreadable, none apply: \(failure.reason)")
+            }
         }
     }
 

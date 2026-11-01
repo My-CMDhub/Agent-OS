@@ -30,8 +30,8 @@ struct ConfirmationPromptView: View {
     static let alwaysVisibleSections: [HarnessConfirmations.CardLine.Kind] = [.question, .warning, .preview, .place]
     static let detailSections: [HarnessConfirmations.CardLine.Kind] = [.qualifier, .effect]
     static var cardSections: [HarnessConfirmations.CardLine.Kind] { alwaysVisibleSections + detailSections }
-    /// Opening Details or a long preview moves the buttons; the move is this
-    /// long and `minimumRowSettledSeconds` outlasts it (a test holds that).
+    /// Expanding a long preview moves the buttons (Details opens below them);
+    /// the move is this long and `minimumRowSettledSeconds` outlasts it (a test holds that).
     static let expandSeconds: TimeInterval = 0.2
     /// Tickets whose Details, or whose whole typed text, the owner opened.
     @State private var openDetails: Set<String> = []
@@ -196,20 +196,29 @@ struct ConfirmationPromptView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             if status == .pending {
-                HStack(spacing: DS.Spacing.sm) {
-                    Button("Allow once") { press("allowOnce", ticket, allow: true, scope: .once) }
-                        .background(recordsFrame(of: "allowOnce", ticketID: ticket.id))
+                VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+                    HStack(spacing: DS.Spacing.sm) {
+                        Button("Allow once") { press("allowOnce", ticket, allow: true, scope: .once) }
+                            .background(recordsFrame(of: "allowOnce", ticketID: ticket.id))
+                        Button("Deny") { press("deny", ticket, allow: false, scope: .once) }
+                            .tint(DS.Colors.destructive)
+                    }
                     // The lines above are the definition of "exactly this".
                     // For focus/launch the rule is app-wide, and the label says so.
+                    // Its own line, never cut: beside the others it truncated to
+                    // "Always allow · exact…", and the cut word was the consent.
                     if HarnessConfirmations.offersAlwaysRule(for: ticket) {
                         Button(HarnessConfirmations.alwaysButtonTitle(for: ticket)) { press("always", ticket, allow: true, scope: .always) }
+                            .fixedSize()
                             .background(recordsFrame(of: "always", ticketID: ticket.id))
                     }
-                    Button("Deny") { press("deny", ticket, allow: false, scope: .once) }
-                        .tint(DS.Colors.destructive)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                // The panel is dark in every system appearance; a bordered button
+                // follows the appearance, so in light mode it drew dark text on the
+                // dark panel (~1.2:1).
+                .environment(\.colorScheme, .dark)
                 if let rejection = approvalRejections[ticket.id] {
                     Text(verbatim: "Not counted: \(rejection)")
                         .font(.system(size: 11, weight: .medium))
@@ -224,6 +233,7 @@ struct ConfirmationPromptView: View {
             }
         }
         .padding(DS.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(DS.Colors.surface2)
         .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.medium))
         .overlay(RoundedRectangle(cornerRadius: DS.CornerRadius.medium)
@@ -271,28 +281,8 @@ struct ConfirmationPromptView: View {
                     previewText(text, ticketID: ticket.id)
                 }
                 monoLines(texts(.place), size: 12, opacity: 0.72)
-                toggle(detailsOpen ? "Details \u{25B4}" : "Details \u{25BE}", id: ticket.id, in: $openDetails)
-                if detailsOpen {
-                    VStack(alignment: .leading, spacing: 6) {
-                        monoLines(texts(.qualifier), size: 11, opacity: 0.5)
-                        ForEach(Array(texts(.effect).enumerated()), id: \.offset) { _, text in
-                            Text(text).font(.system(size: 12)).foregroundStyle(Self.ink.opacity(0.85))
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        // The kernel's reason: why it asked.
-                        Text(ticket.reason).font(.system(size: 12)).foregroundStyle(Self.ink.opacity(0.62))
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .transition(.opacity)
-                }
             }
             .padding(.leading, Self.textInset)
-            if let rejection = approvalRejections[ticket.id] {
-                Text(verbatim: "Not counted: \(rejection)")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Self.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
             HStack(spacing: 8) {
                 if let step {
                     Text(verbatim: "Doing \u{00B7} step \(step.current)/\(step.total)")
@@ -305,7 +295,7 @@ struct ConfirmationPromptView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(Self.ink)
                         .frame(width: 84, height: 30)
-                        .overlay(Capsule().stroke(Self.ink.opacity(0.6), lineWidth: 1.5))
+                        .overlay(Capsule(style: .circular).strokeBorder(Self.ink.opacity(0.6), lineWidth: 1.5))
                         .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
@@ -320,22 +310,49 @@ struct ConfirmationPromptView: View {
                 .buttonStyle(.plain)
                 .background(recordsFrame(of: "allowOnce", ticketID: ticket.id))
             }
-            // The quieter third control, only where today's card offered it: a
-            // destructive question is Allow once and Deny only. Its words are the
-            // scope the "Always allowed" list will show for the rule it saves.
-            if HarnessConfirmations.offersAlwaysRule(for: ticket) {
-                HStack {
-                    Spacer(minLength: 0)
+            // Everything that can grow sits BELOW every control of this ticket:
+            // Details above the buttons, or a rejection line, pushed Deny and
+            // Allow down ~16 pt, so the retry landed lower and restarted the
+            // settle clock. Now opening or rejecting moves nothing clickable.
+            HStack(alignment: .firstTextBaseline) {
+                toggle(detailsOpen ? "Details \u{25B4}" : "Details \u{25BE}", id: ticket.id, in: $openDetails)
+                    .padding(.leading, Self.textInset)
+                Spacer(minLength: 8)
+                // The quieter third control, only where today's card offered it: a
+                // destructive question is Allow once and Deny only. Its words are the
+                // scope the "Always allowed" list will show for the rule it saves.
+                if HarnessConfirmations.offersAlwaysRule(for: ticket) {
                     Button { press("always", ticket, allow: true, scope: .always) } label: {
                         Text(HarnessConfirmations.alwaysButtonTitle(for: ticket))
                             .font(.system(size: 11))
                             .underline()
                             .foregroundStyle(Self.ink.opacity(0.62))
+                            .fixedSize()
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .background(recordsFrame(of: "always", ticketID: ticket.id))
                 }
+            }
+            if detailsOpen {
+                VStack(alignment: .leading, spacing: 6) {
+                    monoLines(texts(.qualifier), size: 11, opacity: 0.5)
+                    ForEach(Array(texts(.effect).enumerated()), id: \.offset) { _, text in
+                        Text(text).font(.system(size: 12)).foregroundStyle(Self.ink.opacity(0.85))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    // The kernel's reason: why it asked.
+                    Text(ticket.reason).font(.system(size: 12)).foregroundStyle(Self.ink.opacity(0.62))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.leading, Self.textInset)
+                .transition(.opacity)
+            }
+            if let rejection = approvalRejections[ticket.id] {
+                Text(verbatim: "Not counted: \(rejection)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Self.ink)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(18)
@@ -587,6 +604,12 @@ struct AlwaysRulesListView: View {
             .joined(separator: "  \u{00B7}  ")
     }
 
+    /// The same line without the scope, which the row draws first and whole; nil when nothing is left.
+    static func detailLineAfterScope(_ summary: HarnessConfirmations.RuleSummary) -> String? {
+        let rest = ([summary.preview, summary.place].compactMap { $0 } + summary.qualifiers)
+        return rest.isEmpty ? nil : rest.joined(separator: "  \u{00B7}  ")
+    }
+
     var body: some View {
         Group {
             if !confirmations.alwaysRules.isEmpty || confirmations.alwaysRulesProblem != nil {
@@ -598,11 +621,13 @@ struct AlwaysRulesListView: View {
                         .foregroundStyle(Self.ink.opacity(0.62))
                         .padding(.bottom, 6)
                     if let problem = confirmations.alwaysRulesProblem {
+                        // Plain words; the raw keychain error is the tooltip and the log.
                         Text(problem)
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(DS.Colors.warning)
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(.bottom, 6)
+                            .help(confirmations.alwaysRulesProblemDetail ?? problem)
                     }
                     if !rules.isEmpty {
                         ScrollView(.vertical) {
@@ -642,11 +667,18 @@ struct AlwaysRulesListView: View {
                     .foregroundStyle(Self.ink)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(detail)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(Self.ink.opacity(0.6))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                // The scope leads and is never cut ("exac…" hid what the consent
+                // covers); the rest may truncate, the tooltip carries it whole.
+                HStack(spacing: 0) {
+                    Text(summary.scope)
+                        .foregroundStyle(Self.ink.opacity(0.85))
+                        .fixedSize()
+                    Text(Self.detailLineAfterScope(summary).map { "  \u{00B7}  " + $0 } ?? "")
+                        .foregroundStyle(Self.ink.opacity(0.6))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .font(.system(size: 10, design: .monospaced))
             }
             Spacer(minLength: 0)
             Button { confirmations.removeAlwaysRule(rule) } label: {
@@ -655,7 +687,7 @@ struct AlwaysRulesListView: View {
                     .foregroundStyle(Self.ink.opacity(0.85))
                     .padding(.horizontal, 8)
                     .frame(height: 20)
-                    .overlay(Capsule().stroke(Self.ink.opacity(0.4), lineWidth: 1))
+                    .overlay(Capsule(style: .circular).strokeBorder(Self.ink.opacity(0.4), lineWidth: 1))
                     .contentShape(Capsule())
             }
             .buttonStyle(.plain)

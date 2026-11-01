@@ -17,7 +17,11 @@
 //  `ImageRenderer`: measured 2026-11-01, ImageRenderer drew a ScrollView as
 //  nothing, an NSViewRepresentable as a yellow "unsupported" placeholder, and
 //  dropped a plain Button — the rules list, the card's placement tracker and
-//  every answer button.
+//  every answer button. cacheDisplay has one lie of its own: a STROKED
+//  continuous-curve Capsule (SwiftUI's default) gets flat bars at both ends.
+//  Measured 2026-11-01, the same view through SCScreenshotManager (the window
+//  server) drew clean, old `.stroke` in a plain Button included — so live never
+//  clipped. Stroked capsules use `style: .circular`, which both draw the same.
 //
 
 import AppKit
