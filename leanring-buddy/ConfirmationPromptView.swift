@@ -3,26 +3,17 @@
 //  leanring-buddy
 //
 //  The in-process half of a harness confirmation: the kernel asked, the socket
-//  could not answer, so the question lands here. Every string shown is either
-//  ours or already escaped by `HarnessConfirmations.displayLines`.
+//  could not answer, so the question lands here — on the card under the notch,
+//  the ONE place a ticket can be answered (owner's D2, 2026-11-01: the menu-bar
+//  panel only says "Approval waiting · at the notch"). Every string shown is
+//  either ours or already escaped by `HarnessConfirmations.displayLines`.
 //
 
 import AppKit
 import SwiftUI
 
 struct ConfirmationPromptView: View {
-    enum Style: Equatable {
-        /// The menu-bar panel: every line in mono, answered rows kept a while.
-        case panel
-        /// The card under the notch: pending tickets only, laid out by line kind.
-        case card(step: ConfirmationStep?)
-    }
-
     @ObservedObject var confirmations: HarnessConfirmations
-    var style: Style = .panel
-    /// The menu-bar panel keeps answered and expired rows for a while; the
-    /// floating card asks only what is still open.
-    private var includesAnsweredTickets: Bool { style == .panel }
 
     /// The card's sections, top to bottom. Every `CardLine.Kind` is here (a test
     /// holds it), so no line a ticket binds can be left off the card. The first
@@ -85,17 +76,10 @@ struct ConfirmationPromptView: View {
         ], toFileNamed: inputLogFileName)
     }
 
-    /// How long an answered or expired ticket stays visible.
-    static let lingerInSeconds: TimeInterval = 20
-
-    static func visibleTickets(_ tickets: [HarnessConfirmations.Ticket], now: Date, includesAnswered: Bool = true) -> [HarnessConfirmations.Ticket] {
-        tickets.filter { ticket in
-            switch HarnessConfirmations.status(of: ticket, now: now) {
-            case .pending: return true
-            case .expired: return includesAnswered && now.timeIntervalSince(ticket.expiresAt) < lingerInSeconds
-            case .allowed, .denied, .stale: return includesAnswered && now.timeIntervalSince(ticket.answeredAt ?? now) < lingerInSeconds
-            }
-        }
+    /// Pending tickets only, oldest first: a new one appends below, so the rows
+    /// already showing (and their buttons' settle clocks) never move.
+    static func visibleTickets(_ tickets: [HarnessConfirmations.Ticket], now: Date) -> [HarnessConfirmations.Ticket] {
+        tickets.filter { HarnessConfirmations.status(of: $0, now: now) == .pending }
     }
 
     static func buttonFrameKey(_ ticketID: String, _ button: String) -> String { "\(ticketID)|\(button)" }
@@ -148,97 +132,18 @@ struct ConfirmationPromptView: View {
             // A one-second clock so a ticket greys out when it expires, not when
             // something else happens to redraw the panel.
             TimelineView(.periodic(from: .now, by: 1)) { context in
-                let visible = Self.visibleTickets(confirmations.tickets, now: context.date, includesAnswered: includesAnsweredTickets)
+                let visible = Self.visibleTickets(confirmations.tickets, now: context.date)
                 if !visible.isEmpty {
-                    if case .card(let step) = style {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(Array(visible.enumerated()), id: \.element.id) { index, ticket in
-                                if index > 0 { Rectangle().fill(ConfirmationCardStyle.ink.opacity(0.1)).frame(height: 1) }
-                                cardRow(ticket, step: step, now: context.date)
-                            }
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(visible.enumerated()), id: \.element.id) { index, ticket in
+                            if index > 0 { Rectangle().fill(ConfirmationCardStyle.ink.opacity(0.1)).frame(height: 1) }
+                            cardRow(ticket, now: context.date)
                         }
-                        .background(HostWindowReader(tracker: placementTracker))
-                    } else {
-                        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
-                            ForEach(visible) { ticket in
-                                row(ticket, now: context.date)
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.top, 12)
-                        .background(HostWindowReader(tracker: placementTracker))
                     }
+                    .background(HostWindowReader(tracker: placementTracker))
                 }
             }
         }
-    }
-
-    @ViewBuilder
-    private func row(_ ticket: HarnessConfirmations.Ticket, now: Date) -> some View {
-        let status = HarnessConfirmations.status(of: ticket, now: now)
-        VStack(alignment: .leading, spacing: DS.Spacing.xs) {
-            Text("Clicky asks to:")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(status == .pending ? DS.Colors.textPrimary : DS.Colors.textTertiary)
-            // Exactly the lines the ticket binds, computed once at `open` — this
-            // view never reads the fields itself, so it cannot show less than is
-            // approved. No lineLimit: a cut line is a prefix of the question, and
-            // `open` already refused anything too long to show whole.
-            ForEach(Array(ticket.displayLines.enumerated()), id: \.offset) { _, line in
-                Text(line)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(DS.Colors.codeText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Text(ticket.reason)
-                .font(.system(size: 11))
-                .foregroundStyle(DS.Colors.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if status == .pending {
-                VStack(alignment: .leading, spacing: DS.Spacing.xs) {
-                    HStack(spacing: DS.Spacing.sm) {
-                        Button("Allow once") { press("allowOnce", ticket, allow: true, scope: .once) }
-                            .background(recordsFrame(of: "allowOnce", ticketID: ticket.id))
-                        Button("Deny") { press("deny", ticket, allow: false, scope: .once) }
-                            .tint(DS.Colors.destructive)
-                    }
-                    // The lines above are the definition of "exactly this".
-                    // For focus/launch the rule is app-wide, and the label says so.
-                    // Its own line, never cut: beside the others it truncated to
-                    // "Always allow · exact…", and the cut word was the consent.
-                    if HarnessConfirmations.offersAlwaysRule(for: ticket) {
-                        Button(HarnessConfirmations.alwaysButtonTitle(for: ticket)) { press("always", ticket, allow: true, scope: .always) }
-                            .fixedSize()
-                            .background(recordsFrame(of: "always", ticketID: ticket.id))
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                // The panel is dark in every system appearance; a bordered button
-                // follows the appearance, so in light mode it drew dark text on the
-                // dark panel (~1.2:1).
-                .environment(\.colorScheme, .dark)
-                if let rejection = approvalRejections[ticket.id] {
-                    Text(verbatim: "Not counted: \(rejection)")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(DS.Colors.warning)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } else {
-                Text(status == .stale ? "stale — ask again (the \(ticket.staleField ?? "binding") changed)" : status.rawValue)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(status == .allowed ? DS.Colors.success
-                                     : status == .denied ? DS.Colors.destructiveText : DS.Colors.textTertiary)
-            }
-        }
-        .padding(DS.Spacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(DS.Colors.surface2)
-        .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.medium))
-        .overlay(RoundedRectangle(cornerRadius: DS.CornerRadius.medium)
-            .stroke(status == .pending ? DS.Colors.warning : DS.Colors.borderSubtle, lineWidth: 1))
-        .modifier(TracksRowPlacement(ticketID: ticket.id, tracker: placementTracker))
     }
 
     // MARK: Card
@@ -250,7 +155,7 @@ struct ConfirmationPromptView: View {
     /// One ticket on the card. Pending only (the card never shows answered rows).
     /// Owner's layout 2026-10-05: question + countdown, where, Details, buttons.
     @ViewBuilder
-    private func cardRow(_ ticket: HarnessConfirmations.Ticket, step: ConfirmationStep?, now: Date) -> some View {
+    private func cardRow(_ ticket: HarnessConfirmations.Ticket, now: Date) -> some View {
         let texts = { (kind: HarnessConfirmations.CardLine.Kind) in ticket.cardLines.filter { $0.kind == kind }.map(\.text) }
         let detailsOpen = openDetails.contains(ticket.id)
         VStack(alignment: .leading, spacing: 10) {
@@ -283,12 +188,8 @@ struct ConfirmationPromptView: View {
                 monoLines(texts(.place), size: 12, opacity: 0.72)
             }
             .padding(.leading, Self.textInset)
+            // The step lives in the tab only ("Step 3 of 5 · needs your approval").
             HStack(spacing: 8) {
-                if let step {
-                    Text(verbatim: "Doing \u{00B7} step \(step.current)/\(step.total)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Self.ink.opacity(0.62))
-                }
                 Spacer(minLength: 0)
                 Button { press("deny", ticket, allow: false, scope: .once) } label: {
                     Text("Deny")

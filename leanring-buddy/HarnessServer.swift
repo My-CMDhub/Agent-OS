@@ -39,7 +39,7 @@ struct HarnessRawRequest: Decodable {
     let dryRun: Bool?
     let confirmed: Bool?
     /// A confirmation ticket id from an earlier `confirmationRequired` response,
-    /// answered by the owner in the Clicky panel. See `HarnessConfirmations`.
+    /// answered by the owner on the approval card. See `HarnessConfirmations`.
     let ticket: String?
 
     /// menu / menus only: the path down the menu bar, e.g. ["File", "New Folder"].
@@ -2695,9 +2695,9 @@ final class HarnessServer {
                     confirmedBy = "owner"
                     confirmation["ticket"] = id
                 case .pending:
-                    refusal = ("confirmationPending", "ticket \(id) has not been answered in the Clicky panel yet")
+                    refusal = ("confirmationPending", "ticket \(id) has not been answered on the approval card yet")
                 case .denied:
-                    refusal = ("confirmationDenied", "ticket \(id) was denied in the Clicky panel")
+                    refusal = ("confirmationDenied", "ticket \(id) was denied on the approval card")
                 case .expired:
                     refusal = ("confirmationExpired",
                                "ticket \(id) expired after \(Int(HarnessConfirmations.ticketLifetimeInSeconds)) s — re-issue without it to open a new one")
@@ -2743,9 +2743,9 @@ final class HarnessServer {
                     case .opened(let ticket):
                         response["ticket"] = ticket.id
                         response["expiresAt"] = HarnessPolicy.auditTimestampFormatter.string(from: ticket.expiresAt)
-                        response["message"] = "re-issue this request with \"ticket\": \"\(ticket.id)\" once approved in the Clicky panel"
+                        response["message"] = "re-issue this request with \"ticket\": \"\(ticket.id)\" once approved on the approval card"
                         refusal = ("confirmationRequired",
-                                   "requires confirmation: \(reason) — ticket \(ticket.id) is waiting in the Clicky panel")
+                                   "requires confirmation: \(reason) — ticket \(ticket.id) is waiting on the approval card")
                     case .refused(let code, let message):
                         response["message"] = message
                         refusal = (code, "requires confirmation: \(reason) — no ticket opened: \(message)")

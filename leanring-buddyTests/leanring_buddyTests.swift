@@ -2998,7 +2998,7 @@ private func temporaryRulesStore() -> ApprovalRulesKeychainStore {
     }
     #expect(confirmations.open(finderEmptyBin, appName: "Finder", reason: "r", destructive: false)
         == .refused(code: "tooManyPendingConfirmations",
-                    message: "3 tickets are already waiting in the Clicky panel — answer or let them expire first"))
+                    message: "3 tickets are already waiting on the approval card — answer or let them expire first"))
 }
 
 @Test func theMenuTargetIsThePathAndAFocusedTypeIsNamedAsSuch() async throws {
@@ -3667,7 +3667,7 @@ private func realClickEvidence(timestamp: TimeInterval = 100) -> HarnessConfirma
         Issue.record("expected two tickets"); return
     }
     #expect(confirmations.tickets.map(\.id) == [first.id, second.id])
-    #expect(ConfirmationPromptView.visibleTickets(confirmations.tickets, now: Date(), includesAnswered: false).map(\.id)
+    #expect(ConfirmationPromptView.visibleTickets(confirmations.tickets, now: Date()).map(\.id)
             == [first.id, second.id])
 }
 

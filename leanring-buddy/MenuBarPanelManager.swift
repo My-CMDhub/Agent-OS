@@ -44,9 +44,9 @@ final class MenuBarPanelManager: NSObject {
         super.init()
         createStatusItem()
 
-        // Harness tickets no longer open this panel: `ConfirmationCardWindowManager`
-        // asks on whatever Space the owner is on, and one surface asks. This panel
-        // still lists tickets (and their answers) when the owner opens it.
+        // Harness tickets never open this panel: `ConfirmationCardWindowManager`
+        // asks on whatever Space the owner is on, and it is the only surface that
+        // answers (owner's D2, 2026-11-01). This panel only says one is waiting.
         dismissPanelObserver = NotificationCenter.default.addObserver(
             forName: .clickyDismissPanel,
             object: nil,

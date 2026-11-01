@@ -46,26 +46,24 @@ enum UISnapshotRenderer {
         manifest.append("production keychain Always rules: \(realRules) (count only, none rendered)")
 
         // The menu-bar panel, one file per state the owner can be in.
-        let panelStates: [(name: String, granted: Bool, onboarded: Bool, email: Bool, tickets: [Fixture], rules: Int, note: String)] = [
-            ("panel-ready", true, true, true, [], 0, "everyday panel: onboarded, all permissions, nothing pending"),
-            ("panel-ready-rules-2", true, true, true, [], 2, "two Always rules, the list at its natural height"),
-            ("panel-ready-rules-7", true, true, true, [], 7, "seven Always rules: four rows show, the rest scroll"),
-            ("panel-tickets-and-rules", true, true, true, [.send, .typeNote], 3, "two pending tickets above three Always rules"),
-            ("panel-permissions-revoked", false, true, true, [], 0, "onboarded but permissions revoked: grant rows"),
-            ("panel-first-run", false, false, false, [], 0, "first launch: intro copy and the four grant rows"),
-            ("panel-email", true, false, false, [], 0, "permissions granted, email field before Start"),
-            ("panel-start", true, false, true, [], 0, "permissions granted, email given: the Start button"),
+        let panelStates: [(name: String, granted: Bool, onboarded: Bool, tickets: [Fixture], rules: Int, note: String)] = [
+            ("panel-ready", true, true, [], 0, "everyday panel: onboarded, all permissions, nothing pending"),
+            ("panel-ready-rules-2", true, true, [], 2, "two Always rules, the list at its natural height"),
+            ("panel-ready-rules-7", true, true, [], 7, "seven Always rules: four rows show, the rest scroll"),
+            ("panel-tickets-and-rules", true, true, [.send, .typeNote], 3, "two pending tickets (answered only at the notch) and three Always rules"),
+            ("panel-permissions-revoked", false, true, [], 0, "onboarded but permissions revoked: grant rows"),
+            ("panel-first-run", false, false, [], 0, "first launch: greeting and the grant rows"),
+            ("panel-begin", true, false, [], 0, "permissions granted, not yet onboarded: the Begin button"),
         ]
         for state in panelStates {
-            companionManager.pinPanelStateForSnapshot(permissionsGranted: state.granted, onboarded: state.onboarded,
-                                                      emailSubmitted: state.email)
+            companionManager.pinPanelStateForSnapshot(permissionsGranted: state.granted, onboarded: state.onboarded)
             let (confirmations, store) = fixtureConfirmations(tickets: state.tickets, rules: Array(Fixture.rules.prefix(state.rules)))
             let view = CompanionPanelView(companionManager: companionManager, confirmations: confirmations).frame(width: 320)
             manifest += renderBoth(AnyView(view), name: state.name, note: state.note)
             _ = store.deleteItem()
         }
         // An item that is there but cannot be decoded: the list says so instead of showing none.
-        companionManager.pinPanelStateForSnapshot(permissionsGranted: true, onboarded: true, emailSubmitted: true)
+        companionManager.pinPanelStateForSnapshot(permissionsGranted: true, onboarded: true)
         let unreadableStore = ApprovalRulesKeychainStore(serviceName: "\(ApprovalRulesKeychainStore.productionServiceName).ui-snapshot-\(UUID().uuidString)")
         _ = unreadableStore.write(Data("not json".utf8))
         let unreadable = HarnessConfirmations(rulesStore: unreadableStore)

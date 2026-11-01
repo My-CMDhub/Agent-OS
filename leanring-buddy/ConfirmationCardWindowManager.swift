@@ -93,15 +93,19 @@ final class ConfirmationCardModel: ObservableObject {
     @Published var interactive = false
     @Published var reduceMotion = false
     /// The agent loop's step, when a multi-step task asked (`AgentLoop` feeds it);
-    /// the tab and the footer show it only when set.
+    /// the tab shows it only when set.
     @Published var step: ConfirmationStep?
     /// The tree's own height, as laid out — the panel follows it.
     @Published var contentHeight: CGFloat = 0
     /// The card's own height as last placed; frozen while it shrinks away.
     @Published var cardHeight: CGFloat = 0
+
+    nonisolated static func tabText(step: ConfirmationStep?) -> String {
+        step.map { "Step \($0.current) of \($0.total) \u{00B7} needs your approval" } ?? "Needs your approval"
+    }
 }
 
-/// "Doing · step 5/5".
+/// "Step 5 of 5 · needs your approval", in the tab.
 struct ConfirmationStep: Equatable {
     let current: Int
     let total: Int
@@ -143,7 +147,7 @@ final class ConfirmationCardWindowManager {
             JarvisNotchTick.buffer(chime.samples, format: chimeFormat).map { (chime, $0) }
         })
 
-    /// The agent loop's step, for the tab and the footer. nil hides both.
+    /// The agent loop's step, for the tab. nil hides it.
     var step: ConfirmationStep? {
         get { model.step }
         set { model.step = newValue }
@@ -280,12 +284,11 @@ final class ConfirmationCardWindowManager {
     /// may not have drawn the newest list yet (seen live: the first frame of a
     /// card came up 80 pt too high), so a fresh one measures it.
     private func measuredContentHeight() -> CGFloat {
-        Self.measuredContentHeight(confirmations: confirmations, step: model.step, geometry: model.geometry)
+        Self.measuredContentHeight(confirmations: confirmations, geometry: model.geometry)
     }
 
-    private static func measuredContentHeight(confirmations: HarnessConfirmations, step: ConfirmationStep?,
-                                              geometry: ConfirmationCardGeometry) -> CGFloat {
-        let card = ConfirmationPromptView(confirmations: confirmations, style: .card(step: step))
+    private static func measuredContentHeight(confirmations: HarnessConfirmations, geometry: ConfirmationCardGeometry) -> CGFloat {
+        let card = ConfirmationPromptView(confirmations: confirmations)
             .frame(width: ConfirmationCardGeometry.cardWidth)
         return NSHostingView(rootView: card).fittingSize.height + geometry.cardTop + ConfirmationCardGeometry.margin
     }
@@ -299,7 +302,7 @@ final class ConfirmationCardWindowManager {
         model.grown = true
         model.interactive = true
         model.step = step
-        let height = measuredContentHeight(confirmations: confirmations, step: step, geometry: model.geometry)
+        let height = measuredContentHeight(confirmations: confirmations, geometry: model.geometry)
         model.contentHeight = height
         model.cardHeight = max(0, height - model.geometry.cardTop - ConfirmationCardGeometry.margin)
         return (AnyView(ConfirmationCardRootView(model: model, confirmations: confirmations)),
@@ -384,7 +387,7 @@ private struct ConfirmationCardRootView: View {
         let open = model.grown || model.reduceMotion
         VStack(spacing: 0) {
             Color.clear.frame(height: geometry.cardTop)
-            ConfirmationPromptView(confirmations: confirmations, style: .card(step: model.step))
+            ConfirmationPromptView(confirmations: confirmations)
                 .frame(width: ConfirmationCardGeometry.cardWidth)
                 // Text waits for the black to reach it (seen live: at the same
                 // spring it floated outside the growing shape); on the way back
@@ -419,11 +422,12 @@ private struct ConfirmationCardRootView: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
-    /// The notch, grown one line taller: "needs you".
+    /// The notch, grown one line taller: "Needs your approval". The card below
+    /// is the question, so the tab names only the state (and the task's step).
     private func tab(open: Bool) -> some View {
         let geometry = model.geometry
         let size = open ? geometry.tabSize : geometry.collapsedSize
-        let text = model.step.map { "Doing \u{00B7} \($0.current)/\($0.total) \u{00B7} needs you" } ?? "needs you"
+        let text = ConfirmationCardModel.tabText(step: model.step)
         return UnevenRoundedRectangle(topLeadingRadius: geometry.notch.hasNotch ? 0 : 10,
                                       bottomLeadingRadius: open ? 14 : 10, bottomTrailingRadius: open ? 14 : 10,
                                       topTrailingRadius: geometry.notch.hasNotch ? 0 : 10, style: .continuous)

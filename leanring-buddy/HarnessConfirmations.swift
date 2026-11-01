@@ -709,7 +709,7 @@ final class HarnessConfirmations: ObservableObject {
         }
         if pendingCount >= maximumPendingTickets {
             return ("tooManyPendingConfirmations",
-                    "\(pendingCount) tickets are already waiting in the Clicky panel — answer or let them expire first")
+                    "\(pendingCount) tickets are already waiting on the approval card — answer or let them expire first")
         }
         return nil
     }
