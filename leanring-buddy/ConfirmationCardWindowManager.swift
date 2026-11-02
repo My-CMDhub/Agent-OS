@@ -92,9 +92,9 @@ final class ConfirmationCardModel: ObservableObject {
     /// their frames are not where they will be.
     @Published var interactive = false
     @Published var reduceMotion = false
-    /// The agent loop's step, when a multi-step task asked (`AgentLoop` feeds it);
-    /// the tab shows it only when set.
-    @Published var step: ConfirmationStep?
+    /// What the running task was doing when it asked (`AgentActivityWord`, fed by
+    /// `AgentLoop`); the tab shows it only when set.
+    @Published var activity: String?
     /// The tree's own height, as laid out — the panel follows it.
     @Published var contentHeight: CGFloat = 0
     /// The card's own height as last placed; frozen while it shrinks away.
@@ -102,12 +102,12 @@ final class ConfirmationCardModel: ObservableObject {
     /// UI snapshots only: Details, previews and a rejection line all open.
     var expandedForSnapshot = false
 
-    nonisolated static func tabText(step: ConfirmationStep?) -> String {
-        step.map { "Step \($0.current) of \($0.total) \u{00B7} needs your approval" } ?? "Needs your approval"
+    nonisolated static func tabText(activity: String?) -> String {
+        activity.map { "\($0) \u{00B7} needs your approval" } ?? AgentTaskPhase.approvalTitle
     }
 }
 
-/// "Step 5 of 5 · needs your approval", in the tab.
+/// Where a task's loop stands, for the scenario runner.
 struct ConfirmationStep: Equatable {
     let current: Int
     let total: Int
@@ -150,12 +150,12 @@ final class ConfirmationCardWindowManager {
         })
 
     /// The agent loop's step, for the tab. nil hides it.
-    var step: ConfirmationStep? {
-        get { model.step }
-        set { model.step = newValue }
+    var activity: String? {
+        get { model.activity }
+        set { model.activity = newValue }
     }
 
-    /// The process's card (one per process): where `AgentLoop` sets `step`.
+    /// The process's card (one per process): where `AgentLoop` sets `activity`.
     private(set) static weak var current: ConfirmationCardWindowManager?
 
     init(confirmations: HarnessConfirmations) {
@@ -299,12 +299,12 @@ final class ConfirmationCardWindowManager {
     /// UI snapshots only (`UISnapshotRenderer`): the card fully grown for these
     /// tickets, as `refresh` + `place` would leave it, and the panel's size.
     static func grownCardForSnapshot(confirmations: HarnessConfirmations, notch: JarvisNotchGeometry,
-                                     step: ConfirmationStep?, expanded: Bool = false) -> (view: AnyView, size: CGSize) {
+                                     activity: String?, expanded: Bool = false) -> (view: AnyView, size: CGSize) {
         let model = ConfirmationCardModel()
         model.geometry = ConfirmationCardGeometry(notch: notch)
         model.grown = true
         model.interactive = true
-        model.step = step
+        model.activity = activity
         model.expandedForSnapshot = expanded
         let height = measuredContentHeight(confirmations: confirmations, geometry: model.geometry, expanded: expanded)
         model.contentHeight = height
@@ -427,11 +427,11 @@ private struct ConfirmationCardRootView: View {
     }
 
     /// The notch, grown one line taller: "Needs your approval". The card below
-    /// is the question, so the tab names only the state (and the task's step).
+    /// is the question, so the tab names only the state (and what the task was doing).
     private func tab(open: Bool) -> some View {
         let geometry = model.geometry
         let size = open ? geometry.tabSize : geometry.collapsedSize
-        let text = ConfirmationCardModel.tabText(step: model.step)
+        let text = ConfirmationCardModel.tabText(activity: model.activity)
         return UnevenRoundedRectangle(topLeadingRadius: geometry.notch.hasNotch ? 0 : 10,
                                       bottomLeadingRadius: open ? 14 : 10, bottomTrailingRadius: open ? 14 : 10,
                                       topTrailingRadius: geometry.notch.hasNotch ? 0 : 10, style: .continuous)

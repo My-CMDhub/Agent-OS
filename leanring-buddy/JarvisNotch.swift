@@ -29,7 +29,7 @@ import SwiftUI
 nonisolated enum JarvisNotchShape: Equatable, Sendable {
     /// The hardware notch itself, or nothing when there is none.
     case idle
-    /// Widened sideways into the menu-bar row; a glyph in the left wing.
+    /// Widened sideways into the menu-bar row; a glyph in a wing, or centred with no notch.
     case compact
     /// Widened and dropped one text line below the notch.
     case expanded
@@ -39,8 +39,8 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
     case idle
     case listening
     case thinking
-    /// The reply is playing: output bars in the RIGHT wing (left = you,
-    /// right = J.A.R.V.I.S.). Ends with playback, a press, or a tool call.
+    /// The reply is playing: output bars, in the RIGHT wing beside a hardware notch
+    /// (left = you, right = J.A.R.V.I.S.), centred without one. Ends with playback, a press, or a tool call.
     case speaking
     /// Text arrives already made safe (`RealtimeOpenAppTool.captionName`): the
     /// model or the target app wrote the names in it, and a newline must not
@@ -365,7 +365,6 @@ nonisolated struct JarvisNotchGeometry: Equatable, Sendable {
     static let glyphSide: CGFloat = 16
     static let glyphGap: CGFloat = 8
     static let textBandHeight: CGFloat = 30
-    /// Bars in the left half for you, the right half for J.A.R.V.I.S.
     static let noNotchCompactSize = CGSize(width: 96, height: 28)
     static let noNotchExpandedHeight: CGFloat = 32
     /// The no-notch pill hangs this far under the menu bar.
@@ -409,6 +408,14 @@ nonisolated struct JarvisNotchGeometry: Equatable, Sendable {
         case (false, .compact): return Self.noNotchCompactSize
         case (false, .expanded): return CGSize(width: clamped(content, Self.noNotchExpandedWidthRange), height: Self.noNotchExpandedHeight)
         }
+    }
+
+    /// A compact glyph's centre, from the pill's left edge. The wings flank the hardware:
+    /// left = you, right = J.A.R.V.I.S. With no hardware to flank there is nothing to be left
+    /// of, and off-centre bars read as broken (owner, live 2026-11-03).
+    func compactGlyphCentreX(speaking: Bool, pillWidth: CGFloat) -> CGFloat {
+        guard hasNotch else { return pillWidth / 2 }
+        return speaking ? pillWidth - Self.wingWidth / 2 : Self.wingWidth / 2
     }
 
     /// Top edge on the anchor's top, centred on it. Sized once for the widest
@@ -648,8 +655,8 @@ final class JarvisNotch: ObservableObject {
     /// The agent loop's step while a task runs; the scenario runner reads it.
     var doingStep: Int?
 
-    /// The running task's title, from its phase (`AgentTaskPhase.notchTitle`):
-    /// "Doing · 3", "Waiting for you", "Needs your approval". A proof, a
+    /// The running task's title, from its phase and tool (`AgentTaskPhase.notchTitle`):
+    /// "Thinking", "Clicking", "Waiting for you", "Needs your approval". A proof, a
     /// didn't-take or a finished voice turn falls back to it instead of to idle,
     /// so the notch says where the task stands between steps.
     private(set) var taskTitle: String?
@@ -681,11 +688,8 @@ final class JarvisNotch: ObservableObject {
     }
 
     nonisolated static func isTaskTitle(_ title: String) -> Bool {
-        title.hasPrefix(doingPrefix) || title == AgentTaskPhase.waitingTitle || title == AgentTaskPhase.approvalTitle
+        AgentActivityWord.all.contains(title) || title == AgentTaskPhase.waitingTitle || title == AgentTaskPhase.approvalTitle
     }
-
-    nonisolated static let doingPrefix = "Doing \u{00B7} "
-    nonisolated static func doingTitle(_ step: Int) -> String { doingPrefix + "\(step)" }
 
     /// Applies an event; returns the new state, or nil when the event does not
     /// move this state (a late answer after a new press, say).
@@ -977,15 +981,8 @@ private struct JarvisNotchView: View {
         case .idle:
             EmptyView()
         case .compact:
-            // Left = you (listening, thinking), right = J.A.R.V.I.S. (speaking): a
-            // wing beside the camera, or a half of the notchless pill.
-            let side = geometry.hasNotch ? JarvisNotchGeometry.wingWidth : size.width / 2
-            HStack(spacing: 0) {
-                if model.state == .speaking { Spacer(minLength: 0) }
-                glyph.frame(width: side)
-                if model.state != .speaking { Spacer(minLength: 0) }
-            }
-            .padding(.horizontal, shoulder)
+            glyph.position(x: shoulder + geometry.compactGlyphCentreX(speaking: model.state == .speaking, pillWidth: size.width),
+                           y: size.height / 2)
         case .expanded:
             VStack(spacing: 0) {
                 if geometry.hasNotch { Color.clear.frame(height: geometry.anchor.height) }
@@ -1077,7 +1074,7 @@ private struct NotchPillShape: Shape {
     }
 }
 
-/// Five bars on a level: the mic's in the left wing, the reply's in the right.
+/// Five bars on a level: the mic's in the left wing, the reply's in the right (with no notch, both centred).
 /// A nil level (the reply before the playback tap's first reading) draws three
 /// still bars at 70% (D7's fallback). Reduce Motion: no spring, and the level
 /// already steps at 10 Hz (`JarvisNotch.levelMayStep`).

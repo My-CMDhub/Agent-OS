@@ -57,7 +57,7 @@ enum UISnapshotRenderer {
             ("panel-thinking", [], true, .thinking, nil, [], 0, .standby, "the state line mirrors the notch: thinking (orbit glyph)"),
             ("panel-approval-waiting", [], true, .needsYou, nil, [.send, .typeNote], 3, .standby,
              "two tickets pending, notch says needs you: the state line is the waiting row, no answer controls"),
-            ("panel-approval-waiting-notch-moved-on", [], true, .intent(title: "Doing \u{00B7} 3"), nil, [.send], 0, .standby,
+            ("panel-approval-waiting-notch-moved-on", [], true, .intent(title: "Clicking"), nil, [.send], 0, .standby,
              "a ticket still waits while the notch moved on: its own row under the state line"),
             ("panel-rules-page-7", [], true, .idle, nil, [], 7, .rules, "Always allowed page: seven rules grouped by app, scope never cut"),
             ("panel-rules-page-empty", [], true, .idle, nil, [], 0, .rules, "Always allowed page with no rules"),
@@ -94,12 +94,12 @@ enum UISnapshotRenderer {
                                name: "menubar-icon", note: "the arc icon at 18 x 18 pt")
 
         // The approval card, grown, on a notched and a notchless screen.
-        let cards: [(name: String, tickets: [Fixture], step: ConfirmationStep?, notch: JarvisNotchGeometry, expanded: Bool, note: String)] = [
+        let cards: [(name: String, tickets: [Fixture], activity: String?, notch: JarvisNotchGeometry, expanded: Bool, note: String)] = [
             ("card-one", [.send], nil, notched, false, "one ticket, notched screen"),
             ("card-one-notchless", [.send], nil, notchless, false, "one ticket, notchless screen (this Mac)"),
             ("card-two", [.send, .typeNote], nil, notched, false, "two tickets stacked"),
             ("card-destructive", [.moveToBin], nil, notched, false, "destructive: band, inverted fills, Allow once and Deny only"),
-            ("card-agent-step", [.send], ConfirmationStep(current: 3, total: 5), notched, false, "asked from step 3 of 5 of a task"),
+            ("card-agent-step", [.send], "Scheduling", notched, false, "asked by a task, with the longest word it can be doing"),
             ("card-three", [.send, .typeNote, .moveToBin], nil, notched, false, "three tickets, the most that can be pending"),
             ("card-long-text", [.typeLong], nil, notched, false, "typed text over 90 characters: a head and \"+N more\""),
             ("card-long-text-expanded", [.typeLong], nil, notched, true,
@@ -108,7 +108,7 @@ enum UISnapshotRenderer {
         ]
         for card in cards {
             let (confirmations, store) = fixtureConfirmations(tickets: card.tickets, rules: [])
-            let grown = ConfirmationCardWindowManager.grownCardForSnapshot(confirmations: confirmations, notch: card.notch, step: card.step,
+            let grown = ConfirmationCardWindowManager.grownCardForSnapshot(confirmations: confirmations, notch: card.notch, activity: card.activity,
                                                                            expanded: card.expanded)
             manifest += renderBoth(grown.view, name: card.name, note: card.note, size: grown.size, backdropStrip: card.notch)
             _ = store.deleteItem()
@@ -119,6 +119,8 @@ enum UISnapshotRenderer {
         let notchStates: [(name: String, state: JarvisNotchState, outputLevel: CGFloat?)] = [
             ("listening", .listening, nil), ("thinking", .thinking, nil), ("speaking", .speaking, 0.6),
             ("speaking-static", .speaking, nil), ("intent", .intent(title: "Opening Safari\u{2026}"), nil),
+            ("task-thinking", .intent(title: AgentActivityWord.thinking), nil), ("task-scheduling", .intent(title: "Scheduling"), nil),
+            ("task-typing", .intent(title: "Typing"), nil),
             ("intent-long", .intent(title: "Clicking \u{201C}Show all in Finder and open the enclosing folder\u{201D}\u{2026}"), nil),
             ("proof", .proof(subject: "Wi\u{2011}Fi off"), nil), ("needs-you", .needsYou, nil),
             ("didnt-take", .didntTake(reason: "the button did not respond"), nil), ("no-reply", .noReply, nil),

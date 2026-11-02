@@ -474,7 +474,7 @@ struct AgentLoopTests {
         #expect(URL(string: script.executed[1].url ?? "")?.host == "www.google.com")
     }
 
-    @MainActor @Test func aConfirmationStepWaitsAndTheCardShowsTheStep() async {
+    @MainActor @Test func aConfirmationStepWaitsAndItsStepIsKnownWhileItWaits() async {
         let answers = HarnessScriptedAnswers([
             #"{"ok":false,"error":"confirmationRequired","ticket":"T1"}"#,
             #"{"ok":false,"error":"confirmationPending"}"#,

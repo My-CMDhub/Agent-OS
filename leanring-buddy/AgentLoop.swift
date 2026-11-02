@@ -378,6 +378,8 @@ final class AgentLoop {
         var frontBundle: () async -> String? = { nil }
         /// Every phase change, with the step it happened at: the notch and agent-loop.log.
         var onPhase: (AgentTaskPhase, Int) -> Void = { _, _ in }
+        /// The notch's line for the task (`AgentTaskPhase.notchTitle`), on every phase and every tool.
+        var onTaskTitle: (String?) -> Void = { _ in }
         var now: () -> Date = { Date() }
         /// The task on disk after every phase change (`AgentTaskStore`); live only.
         var checkpoint: (AgentTaskCheckpoint) -> Void = { _ in }
@@ -445,6 +447,8 @@ final class AgentLoop {
     private let dependencies: Dependencies
     private(set) var runID = String(UUID().uuidString.prefix(8))
     private(set) var step = 0
+    /// The call this step is on: the notch's word for it, and the word to return to after a card.
+    private var runningTool: String?
     private(set) var isRunning = false
     private(set) var receipts: [Receipt] = []
     /// Every voice tool this run ran, as the voice turn records them.
@@ -561,6 +565,7 @@ final class AgentLoop {
         announcedStep = step
         transitions.append(AgentTaskTransition(phase: next, at: dependencies.now()))
         dependencies.onPhase(next, step)
+        dependencies.onTaskTitle(next.notchTitle(tool: runningTool))
         dependencies.checkpoint(checkpoint())
     }
 
@@ -759,7 +764,10 @@ final class AgentLoop {
                 return finish(.timeCap)
             }
             let toolUses = assistant.filter { $0["type"] as? String == "tool_use" }
-            if !toolUses.isEmpty { move(to: .acting) }
+            if !toolUses.isEmpty {
+                runningTool = toolUses.first?["name"] as? String
+                move(to: .acting)
+            }
             guard !toolUses.isEmpty else {
                 traced(["error": "noToolCall"])
                 pending = [["type": "text", "text": "Answer with a tool call. End the task with done or ask_owner."]]
@@ -821,6 +829,10 @@ final class AgentLoop {
             for (index, toolUse) in calls.enumerated() {
                 let toolUseID = (toolUse["id"] as? String) ?? "\(AgentLoopGemini.localIDPrefix)\(UUID().uuidString)"
                 let toolName = (toolUse["name"] as? String) ?? ""
+                if toolName != runningTool {
+                    runningTool = toolName
+                    dependencies.onTaskTitle(phase?.notchTitle(tool: toolName))
+                }
                 let input = toolUse["input"] as? [String: Any] ?? [:]
                 /// A member of Anthropic's computer toolset (`AgentComputer`): its result echoes the toolset's name.
                 let isMember = AgentComputer.isMember(toolUse)
@@ -2197,17 +2209,18 @@ extension AgentLoop {
             readPage: { await liveReadPage(harnessAnswer: harnessAnswer) },
             webLookup: { question, url, remaining in
                 await model.lookup(question: question, url: url, timeout: min(AgentLoopGemini.webLookupTimeoutSeconds, remaining)) },
-            onStep: { step in
-                ConfirmationCardWindowManager.current?.step = step
-                JarvisNotch.shared.doingStep = step?.current
-            },
+            onStep: { step in JarvisNotch.shared.doingStep = step?.current },
             narrate: { progress in narrate(narrationLine(progress)) },
             frontBundle: { await frontApp()?.bundleIdentifier },
             onPhase: { phase, step in
-                JarvisNotch.shared.showTask(phase.notchTitle(step: step))
                 appendTrace(["kind": "state", "run": carry.runID, "state": phase.rawValue, "step": step,
                              "at": ISO8601DateFormatter().string(from: Date()),
                              "uptime": MeasurementLogFile.roundedUptime(ProcessInfo.processInfo.systemUptime)])
+            },
+            onTaskTitle: { title in
+                JarvisNotch.shared.showTask(title)
+                // The tab keeps the word the card interrupted; its own title is already the tab's other half.
+                if title != AgentTaskPhase.approvalTitle { ConfirmationCardWindowManager.current?.activity = title }
             },
             checkpoint: { AgentTaskStore.write($0) },
             planPrecheck: { steps in

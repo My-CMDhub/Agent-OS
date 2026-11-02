@@ -121,11 +121,11 @@ enum AgentLoopProbe {
                     && HarnessConfirmations.status(of: ticket, now: Date()) == .pending
                     && Date().timeIntervalSince(ticket.createdAt) >= denyAfterSeconds {
                     seen.insert(ticket.id)
-                    let step = ConfirmationCardWindowManager.current?.step
+                    let tab = ConfirmationCardModel.tabText(activity: ConfirmationCardWindowManager.current?.activity)
                     let shot = photographCard(to: directory.appendingPathComponent("\(id)-card-\(cards.count + 1).png"))
                     confirmations.answer(ticket.id, allow: false, scope: .once)
                     cards.append(["verb": ticket.verb, "destructive": ticket.isDestructive, "appName": ticket.appName ?? NSNull(),
-                                  "stepFooter": step.map { "Doing \u{00B7} step \($0.current)/\($0.total)" } ?? NSNull(),
+                                  "tab": tab,
                                   "cardWindow": shot ?? NSNull(), "answered": "denied"])
                 }
                 try? await Task.sleep(for: .milliseconds(200))
