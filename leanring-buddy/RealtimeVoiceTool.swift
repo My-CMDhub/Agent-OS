@@ -833,6 +833,11 @@ nonisolated enum RealtimeOpenAppTool {
         }
         // open_settings_pane: a verified deep link, proven by its window title; no harness verb acts.
         if call.name == SettingsPaneLinks.toolName {
+            // So the harness's dry run cannot stop it, and it is the one tool here that changes the screen: live
+            // 2026-11-03, a notch probe's Haiku opened Wallpaper in the owner's System Settings.
+            if CommandLine.arguments.contains("--harness-dry-run") {
+                return finished(toolResult(for: RealtimeToolRefusal(error: "dryRun", message: "dry run: nothing was opened")), waited: false, harnessResponse: nil)
+            }
             return finished(await SettingsPaneLinks.open(paneName: call.appName, answer: answer), waited: false, harnessResponse: nil)
         }
         // find_file: a local Spotlight lookup; no harness verb, no AX, so a read-only task may run it.

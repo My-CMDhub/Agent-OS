@@ -55,6 +55,15 @@ nonisolated struct CascadeSentenceSplitter {
 }
 
 nonisolated enum CascadeDeepgram {
+    /// Its own session: a WebSocket holds a connection, the default is 6 per host, and a barge-in chain with spares
+    /// reached it (live 2026-11-03, the probe's chain): the seventh handshake just waits, its Speak queued, no error, no audio.
+    static let session: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.httpMaximumConnectionsPerHost = 32
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        return URLSession(configuration: configuration)
+    }()
     /// Aura-2's British baritone (developers.deepgram.com/docs/tts-models, read 2026-11-03).
     static let voice = "aura-2-draco-en"
     static let tokenMaximumAgeSeconds: TimeInterval = 45
@@ -187,9 +196,11 @@ nonisolated enum CascadeClaude {
     /// Trimmed from the front at a turn's start, past this.
     static let maximumHistoryMessages = 40
 
-    /// `--cascade-thinking-off`: the latency comparison only; default is adaptive, at low effort.
+    /// Adaptive thinking at low effort. Measured 2026-11-03 through the worker: thinking off is ~450 ms faster to first text
+    /// (564-663 ms against 1,109-1,141), but "open settings" then spoke and called nothing (0 of 1; adaptive 3 of 3), and a
+    /// voice that does not act costs more than 450 ms. `--cascade-thinking-off` re-measures. ponytail: n is small.
     static func requestBody(system: String, tools: [[String: Any]], messages: [[String: Any]],
-                            thinkingOff: Bool = CommandLine.arguments.contains("--cascade-thinking-off")) -> [String: Any] {
+                            thinkingOn: Bool = !CommandLine.arguments.contains("--cascade-thinking-off")) -> [String: Any] {
         var body: [String: Any] = [
             "model": model, "max_tokens": maxTokens, "stream": true,
             "system": [["type": "text", "text": system, "cache_control": ["type": "ephemeral"]]],
@@ -197,7 +208,7 @@ nonisolated enum CascadeClaude {
             "output_config": ["effort": "low"],
             "messages": messages
         ]
-        if thinkingOff { body["thinking"] = ["type": "disabled"] }
+        if !thinkingOn { body["thinking"] = ["type": "disabled"] }
         return body
     }
 
@@ -350,7 +361,7 @@ final class CascadeVoicePipeline {
         var request = URLRequest(url: url)
         // A grant JWT is presented as Bearer; the long-lived key would be `Token`.
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        return VoiceBenchWebSocket(request: request, session: VoiceStackBenchmark.benchURLSession)
+        return VoiceBenchWebSocket(request: request, session: CascadeDeepgram.session)
     }
 
     // MARK: Context
@@ -658,7 +669,7 @@ final class CascadeVoicePipeline {
                 self.flushedCount += 1
                 self.finishIfSpoken(arrival: arrival)
             case "Warning":
-                print("🎙️ cascade: Deepgram warning \(message["code"] ?? "-")")
+                self.currentTurn()?.events.append(("tts.warning:\(message["code"] as? String ?? "-")", arrival))
             default: break
             }
         }, onEnd: { [weak self] error in
@@ -715,7 +726,9 @@ final class CascadeVoicePipeline {
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(CascadeDeepgram.flushDeadlineSeconds))
             guard let self, self.tts === speaking, self.modelDone else { return }
-            print("🎙️ cascade: no Flushed in time")
+            marks.events.append(("tts.noFlushed", self.uptime))
+            // Not one sample of what it was asked to say: that is a failed leg, never a silent turn.
+            if marks.firstAudioUptime == nil { return self.onFailed("cascade:tts:noAudio") }
             self.givingUp = self.givingUp || !marks.toolCalls.isEmpty
             self.flushedCount = self.sentenceCount
             self.finishIfSpoken(arrival: self.uptime)

@@ -132,11 +132,12 @@ struct CascadeVoicePipelineTests {
     }
 
     @Test func theRequestIsHaikuAtLowEffortWithACachedPrefixAndNoSampling() throws {
-        let body = CascadeClaude.requestBody(system: "S", tools: [], messages: [], thinkingOff: false)
+        let body = CascadeClaude.requestBody(system: "S", tools: [], messages: [], thinkingOn: false)
         #expect(body["model"] as? String == "claude-haiku-5-5")
         #expect(body["stream"] as? Bool == true)
         #expect((body["output_config"] as? [String: Any])?["effort"] as? String == "low")
-        #expect(body["thinking"] == nil)
+        #expect((body["thinking"] as? [String: Any])?["type"] as? String == "disabled")
+        #expect(CascadeClaude.requestBody(system: "S", tools: [], messages: [], thinkingOn: true)["thinking"] == nil)
         #expect(body["temperature"] == nil)
         let system = try #require((body["system"] as? [[String: Any]])?.first)
         #expect((system["cache_control"] as? [String: Any])?["type"] as? String == "ephemeral")
@@ -186,5 +187,12 @@ struct CascadeFailureTests {
             #expect((line?.count ?? 99) <= JarvisNotchReason.maximumLength)
         }
         #expect(JarvisNotchReason.plain(forTurnFailure: "turnTimeout") == nil)
+    }
+}
+
+extension CascadeFailureTests {
+    /// A WebSocket holds a connection: past this a handshake waits silently (the live silent turn, 2026-11-03).
+    @Test func theCascadesSocketsAreNotHeldToTheDefaultPerHostLimit() {
+        #expect(CascadeDeepgram.session.configuration.httpMaximumConnectionsPerHost >= 16)
     }
 }
