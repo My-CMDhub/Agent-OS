@@ -139,9 +139,14 @@ struct RealtimeVoiceToolTests {
         #expect(VoiceStackChoice.stored(in: defaults) == .geminiLive)
         defaults.set("claude-sonnet-4-6", forKey: "selectedVoiceStack")
         #expect(VoiceStackChoice.stored(in: defaults) == .openAIRealtime)
-        #expect(VoiceStackChoice.allCases.map(\.pickerLabel) == ["OpenAI", "Gemini"])
+        #expect(VoiceStackChoice.allCases.map(\.pickerLabel) == ["OpenAI", "Gemini", "Cascade (Deepgram + Haiku)"])
         #expect(VoiceStackChoice.openAIRealtime.inputSampleRate == 24_000)
         #expect(VoiceStackChoice.geminiLive.inputSampleRate == 16_000)
+        #expect(VoiceStackChoice.cascade.inputSampleRate == 16_000)
+        // Selectable and stored, and never the default: the owner decides that from the numbers.
+        VoiceStackChoice.cascade.store(in: defaults)
+        #expect(VoiceStackChoice.stored(in: defaults) == .cascade)
+        #expect(VoiceStackChoice.defaultChoice == .openAIRealtime)
     }
 
     // MARK: Fresh look
@@ -331,7 +336,7 @@ struct RealtimeVoiceToolTests {
             "turnEndReason", "watchdogFired", "finishedMs", "staleCompletionsIgnored", "bargedInPreviousTurnId", "previousAudioWasPlaying", "eventTrail",
             "claimedWithoutReceipt", "internalWordsSpoken", "receiptCorrectionSent", "pointedWhenTelling",
             "speechVoicedMs", "speechLoudestDb", "speechQuietestDb",
-            "focusRung", "focusMs", "focusSelectionReadMs", "focusSamples", "focusDwells", "focusNames", "focusCrop"
+            "focusRung", "focusMs", "focusSelectionReadMs", "focusSamples", "focusDwells", "focusNames", "focusCrop", "cascadeSttFinalMs", "cascadeFirstTextMs", "cascadeTtsFirstAudioMs", "cascadeUsage", "cascadeThinkingBlocks"
         ])
     }
 

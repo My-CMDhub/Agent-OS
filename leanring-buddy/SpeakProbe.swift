@@ -40,6 +40,7 @@ enum SpeakProbe {
         switch stack {
         case .openAIRealtime: [.textOnly, .textThenCreate]
         case .geminiLive: [.textOnly, .clientContent]
+        case .cascade: [.textOnly]
         }
     }
 

@@ -332,6 +332,14 @@ nonisolated enum JarvisNotchReason {
     /// Live 2026-10-26 12:30: three turns ended with nothing said or shown.
     static func plain(forTurnFailure kind: String) -> String? {
         let parts = kind.split(separator: ":", maxSplits: 2).map(String.init)
+        // Any leg of the cascade (`cascade:stt|claude|tts|token:<why>`): no failure of it is ever silent.
+        if parts.first == "cascade" {
+            switch parts.dropFirst().first {
+            case "claude": return "the model didn\u{2019}t answer"
+            case "stt": return "speech recognition failed"
+            default: return "the voice service failed"
+            }
+        }
         guard parts.count == 3, parts[0] == "openAI", ["responseFailed", "serverError"].contains(parts[1]) else { return nil }
         switch parts[2] {
         case "insufficient_quota": return "the voice service is out of quota"

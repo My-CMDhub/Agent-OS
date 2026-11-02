@@ -478,7 +478,8 @@ final class VoiceBenchWebSocket {
     /// uptime it arrived at, taken before any parsing, so parse cost is not latency.
     func start(
         onMessage: @escaping @MainActor @Sendable ([String: Any], TimeInterval) -> Void,
-        onEnd: @escaping @MainActor @Sendable (Error) -> Void
+        onEnd: @escaping @MainActor @Sendable (Error) -> Void,
+        onBinary: (@MainActor @Sendable (Data, TimeInterval) -> Void)? = nil
     ) {
         task.resume()
         receiveLoop = Task { @MainActor [task] in
@@ -489,8 +490,13 @@ final class VoiceBenchWebSocket {
                     let messageData: Data
                     switch message {
                     case .string(let text): messageData = Data(text.utf8)
-                    // Gemini sends its JSON in binary frames.
-                    case .data(let data): messageData = data
+                    // Gemini sends its JSON in binary frames; Deepgram's TTS its audio (`onBinary`).
+                    case .data(let data):
+                        if let onBinary {
+                            onBinary(data, arrivalUptime)
+                            continue
+                        }
+                        messageData = data
                     @unknown default: continue
                     }
                     guard let messageObject = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any] else {

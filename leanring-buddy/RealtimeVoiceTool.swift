@@ -22,11 +22,12 @@ import ImageIO
 
 // MARK: - Stack choice
 
-/// The panel's two options. Both are speech-to-speech; the Claude pipeline is
-/// no longer reachable from the picker.
+/// The panel's options: two speech-to-speech stacks, and the cascade (Deepgram STT ->
+/// Claude Haiku -> Deepgram TTS, `CascadeVoicePipeline`) behind the same connection.
 nonisolated enum VoiceStackChoice: String, CaseIterable, Sendable {
     case openAIRealtime
     case geminiLive
+    case cascade
 
     static let defaultsKey = "selectedVoiceStack"
     /// OpenAI by the 2026-09-23 bench: first audio median 682 ms against Gemini's 1,204 ms.
@@ -46,6 +47,7 @@ nonisolated enum VoiceStackChoice: String, CaseIterable, Sendable {
         switch self {
         case .openAIRealtime: return "OpenAI"
         case .geminiLive: return "Gemini"
+        case .cascade: return "Cascade (Deepgram + Haiku)"
         }
     }
 
@@ -56,7 +58,7 @@ nonisolated enum VoiceStackChoice: String, CaseIterable, Sendable {
     var inputSampleRate: Int {
         switch self {
         case .openAIRealtime: return 24_000
-        case .geminiLive: return 16_000
+        case .geminiLive, .cascade: return 16_000
         }
     }
 
@@ -1879,7 +1881,7 @@ nonisolated enum RealtimeOpenAppTool {
         switch (format, stack) {
         case (.native, .geminiLive):
             return "point [y, x] [\(Int((y * 1000).rounded())), \(Int((x * 1000).rounded()))]"
-        case (.native, .openAIRealtime):
+        case (.native, .openAIRealtime), (.native, .cascade):
             guard let pixels else { return nil }
             return "x \(Int((x * pixels.width).rounded())), y \(Int((y * pixels.height).rounded())) pixels"
         case (.fractions, _):

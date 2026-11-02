@@ -147,6 +147,13 @@ final class RealtimeTurnMarks {
     var replyMuted = false
     /// The session's id for this turn (voice-live.log), for the card's outcome line.
     var turnID: String?
+    /// Cascade only (`CascadeVoicePipeline`): the release -> first audio legs, and Claude's usage summed over the turn's requests.
+    var cascadeSttFinalUptime: TimeInterval?
+    var cascadeRequestUptime: TimeInterval?
+    var cascadeFirstTextUptime: TimeInterval?
+    var cascadeFirstSpeakUptime: TimeInterval?
+    var cascadeUsage: [String: Int] = [:]
+    var cascadeThinkingBlocks = 0
     let finished = VoiceBenchWaiter<TimeInterval>()
 
     /// Each event with its arrival in ms after the release, negative before it.
@@ -227,6 +234,8 @@ final class RealtimeVoiceConnection {
     private(set) var estimatedOpenAIUSD = 0.0
     /// OpenAI only: input audio appended this turn, for the transcription charge.
     private var turnInputAudioBytes = 0
+    /// Cascade only: its three legs in place of the provider socket.
+    private var cascade: CascadeVoicePipeline?
 
     /// Probe only: replaces the app name of every `open_app` call, so a forced
     /// failure (an app that does not exist) runs the real harness path.
@@ -324,6 +333,25 @@ final class RealtimeVoiceConnection {
                     ]
                 ]
             ])
+        case .cascade:
+            let pipeline = CascadeVoicePipeline(
+                system: RealtimeOpenAppTool.systemPrompt(pointFormat: pointFormat, stack: stack),
+                tools: RealtimeVoiceVerbs.anthropicVoiceDeclarations(),
+                inputSampleRate: stack.inputSampleRate,
+                keyterms: RealtimeHeardCheck.transcriptionVocabulary(
+                    from: RealtimeVoiceVerbs.installedAppNames(),
+                    runningPaths: Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.standardizedFileURL.path })))
+            pipeline.currentTurn = { [weak self] in self?.turn }
+            pipeline.onAudio = { [weak self] audio, arrival in self?.receivedAudio(audio, arrivalUptime: arrival) }
+            pipeline.onToolCalls = { [weak self] calls, arrival in self?.receivedToolCalls(calls, arrivalUptime: arrival) }
+            pipeline.onTurnDone = { [weak self] arrival, givingUp in self?.receivedTurnDone(arrivalUptime: arrival, givingUpOnFollowUp: givingUp) }
+            pipeline.onFailed = { [weak self, weak pipeline] kind in
+                pipeline?.stopAfterFailure()
+                self?.turn.finished.settle(.failure(VoiceBenchFailure(kind: kind)))
+            }
+            try await pipeline.connect()
+            cascade = pipeline
+            readyWaiter.settle(.success(uptime))
         case .geminiLive:
             let tokenResponse = try await VoiceStackBenchmark.fetchWorkerJSON(routePath: "/gemini-live-token", stage: "geminiToken")
             guard let ephemeralToken = tokenResponse["token"] as? String else { throw VoiceBenchFailure(kind: "geminiToken:noToken") }
@@ -371,6 +399,7 @@ final class RealtimeVoiceConnection {
         isOpen = false
         socket?.close()
         socket = nil
+        cascade?.close()
     }
 
     // MARK: A turn
@@ -380,6 +409,8 @@ final class RealtimeVoiceConnection {
     func sendScreenshot(_ jpegData: Data) async throws {
         let base64Image = jpegData.base64EncodedString()
         switch stack {
+        case .cascade:
+            cascade?.add(image: jpegData)
         case .openAIRealtime:
             try await socket?.sendJSON([
                 "type": "conversation.item.create",
@@ -424,6 +455,7 @@ final class RealtimeVoiceConnection {
         switch stack {
         case .openAIRealtime: try await socket?.sendJSON(["type": "input_audio_buffer.clear"])
         case .geminiLive: try await socket?.sendJSON(["realtimeInput": ["activityStart": [String: Any]()]])
+        case .cascade: try await cascade?.beginOwnerTurn(marks: turn)
         }
     }
 
@@ -435,6 +467,8 @@ final class RealtimeVoiceConnection {
             try await socket?.sendJSON(["type": "input_audio_buffer.append", "audio": pcmData.base64EncodedString()])
         case .geminiLive:
             try await socket?.sendJSON(["realtimeInput": ["audio": ["mimeType": "audio/pcm;rate=16000", "data": pcmData.base64EncodedString()]]])
+        case .cascade:
+            try await cascade?.sendAudio(pcmData)
         }
     }
 
@@ -449,6 +483,8 @@ final class RealtimeVoiceConnection {
             try await sendResponseCreate(for: turn)
         case .geminiLive:
             try await socket?.sendJSON(["realtimeInput": ["activityEnd": [String: Any]()]])
+        case .cascade:
+            try await cascade?.endOwnerTurn(marks: turn)
         }
     }
 
@@ -459,6 +495,7 @@ final class RealtimeVoiceConnection {
     /// answer is about to start. A cancel with nothing active comes back
     /// `response_cancel_not_active`, which is harmless.
     func cancelResponse() {
+        cascade?.cancelForPress()
         guard stack == .openAIRealtime, openAIResponseActive || !turnsAwaitingResponseCreated.isEmpty else { return }
         Task { try? await socket?.sendJSON(["type": "response.cancel"]) }
     }
@@ -490,6 +527,8 @@ final class RealtimeVoiceConnection {
                     "item": ["type": "message", "role": "user", "content": [["type": "input_text", "text": text]]]]
         case .geminiLive:
             return ["realtimeInput": ["text": text]]
+        case .cascade:
+            return ["type": "text", "text": text]
         }
     }
 
@@ -505,7 +544,7 @@ final class RealtimeVoiceConnection {
             return [contextTextMessage(stack: stack, text: text)]
         case (.geminiLive, .clientContent):
             return [["clientContent": ["turns": [["role": "user", "parts": [["text": text]]]], "turnComplete": true]]]
-        case (.geminiLive, _):
+        case (.geminiLive, _), (.cascade, _):
             return [contextTextMessage(stack: stack, text: text)]
         }
     }
@@ -527,6 +566,7 @@ final class RealtimeVoiceConnection {
         turn.previousTurnMenuOffer = previous.latestMenuOffer ?? previous.previousTurnMenuOffer
         turn.staleHeardPiecesUntilUptime = .infinity
         turn.lastAudioSentUptime = uptime   // nothing after this is "before the release"
+        if stack == .cascade { return try await cascade?.beginSystemTurn(text: SecretScanner.redact(text), marks: turn) ?? () }
         for message in Self.systemTurnMessages(stack: stack, text: text, variant: variant) {
             if message["type"] as? String == "response.create" {
                 try await sendResponseCreate(for: turn)
@@ -538,6 +578,7 @@ final class RealtimeVoiceConnection {
 
     /// After `beginTurn`, before the audio (`contextTextMessage`).
     func sendContextText(_ text: String) async throws {
+        if stack == .cascade, let line = Self.contextTextMessage(stack: stack, text: text)["text"] as? String { return cascade?.add(context: line) ?? () }
         try await socket?.sendJSON(Self.contextTextMessage(stack: stack, text: text))
     }
 
@@ -555,6 +596,7 @@ final class RealtimeVoiceConnection {
         switch stack {
         case .openAIRealtime: handleOpenAI(message, arrivalUptime: arrivalUptime)
         case .geminiLive: handleGemini(message, arrivalUptime: arrivalUptime)
+        case .cascade: break   // Its legs call back directly (`connect`).
         }
     }
 
@@ -1574,6 +1616,9 @@ final class RealtimeVoiceConnection {
                     "item": ["type": "function_call_output", "call_id": call.callID, "output": output]]
         case .geminiLive:
             return ["toolResponse": ["functionResponses": [["id": call.callID, "name": call.name, "response": result]]]]
+        case .cascade:
+            let output = String(decoding: (try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])) ?? Data("{}".utf8), as: UTF8.self)
+            return ["type": "tool_result", "tool_use_id": call.callID, "content": output]
         }
     }
 
@@ -1608,6 +1653,15 @@ final class RealtimeVoiceConnection {
                 turn.toolResultSentUptime = uptime
                 turn.followUpFirstAudioUptime = nil
                 try await socket?.sendJSON(Self.toolResultMessage(stack: stack, result: result, call: call))
+            case .cascade:
+                cascade?.add(toolResult: Self.toolResultMessage(stack: stack, result: result, call: call))
+                turn.toolsInFlight -= 1
+                guard requestingReply, self.turn === turn, !turn.supersededByPress else { return ignoreStale("toolResult", arrivalUptime: uptime, in: turn) }
+                // One follow-up for all the calls of a message.
+                guard turn.toolsInFlight == 0 else { return }
+                turn.toolResultSentUptime = uptime
+                turn.followUpFirstAudioUptime = nil
+                cascade?.continueAfterTools(marks: turn)
             }
         } catch {
             turn.finished.settle(.failure(VoiceBenchFailure(kind: "\(stack.rawValue):toolResultSendFailed")))

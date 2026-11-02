@@ -413,13 +413,22 @@ nonisolated enum RealtimeVoiceVerbs {
     /// same table the voice model has (screen positions as fractions of the step's
     /// screenshot), never do_task. `extra`: the loop's own tools, already in that shape.
     static func anthropicDeclarations(extra: [[String: Any]] = []) -> [[String: Any]] {
+        anthropicShaped(declarations(.fractions, gemini: false, agent: true)) + extra
+    }
+
+    /// The voice model's own list in that shape, for the cascade: what the realtime stacks declare, do_task included.
+    static func anthropicVoiceDeclarations() -> [[String: Any]] {
+        anthropicShaped(realtimeDeclarations(.fractions, gemini: false))
+    }
+
+    private static func anthropicShaped(_ table: [Declaration]) -> [[String: Any]] {
         let openApp: [String: Any] = [
             "name": RealtimeOpenAppTool.name, "description": RealtimeOpenAppTool.toolDescription,
             "input_schema": ["type": "object",
                              "properties": ["name": ["type": "string", "description": RealtimeOpenAppTool.argumentDescription]],
                              "required": ["name"]] as [String: Any]
         ]
-        return [openApp] + declarations(.fractions, gemini: false, agent: true).map { declaration in
+        return [openApp] + table.map { declaration in
             [
                 "name": declaration.name, "description": declaration.description,
                 "input_schema": [
@@ -428,7 +437,7 @@ nonisolated enum RealtimeVoiceVerbs {
                     "required": declaration.parameters.filter(\.required).map(\.name)
                 ] as [String: Any]
             ]
-        } + extra
+        }
     }
 
     private static func property(_ parameter: Parameter, gemini: Bool) -> [String: Any] {
@@ -941,7 +950,7 @@ nonisolated enum RealtimePointFormat: String, CaseIterable, Sendable {
         case .geminiLive:
             guard let point, point.count == 2 else { return (nil, nil) }
             return (point[1] / 1000, point[0] / 1000)
-        case .openAIRealtime:
+        case .openAIRealtime, .cascade:
             guard let x, let y, let size = screenshotPixels, size.width > 0, size.height > 0 else { return (nil, nil) }
             return (x / Double(size.width), y / Double(size.height))
         }

@@ -1002,6 +1002,13 @@ final class RealtimeVoiceSession {
                 transcript: marks.transcript,
                 okToolNames: RealtimeOpenAppTool.okReceiptNames(marks.decisions))
             line.internalWordsSpoken = RealtimeOpenAppTool.internalWordsSpoken(marks.transcript).count
+            if line.stack == VoiceStackChoice.cascade.rawValue {
+                line.cascadeSttFinalMs = Self.milliseconds(from: released, to: marks.cascadeSttFinalUptime)
+                line.cascadeFirstTextMs = Self.milliseconds(from: marks.cascadeSttFinalUptime, to: marks.cascadeFirstTextUptime)
+                line.cascadeTtsFirstAudioMs = Self.milliseconds(from: marks.cascadeFirstSpeakUptime, to: marks.firstAudioUptime)
+                line.cascadeUsage = marks.cascadeUsage
+                line.cascadeThinkingBlocks = marks.cascadeThinkingBlocks
+            }
             // One line per tool call to voice-decisions.log, joinable on turnId.
             RealtimeDecisionTrace.append(marks.decisions, turnID: line.turnID, stack: line.stack, source: probeMode ? "notchProbe" : fixtureMic ? "scenarioRun" : "live",
                                          releasedUptime: released)
@@ -1170,6 +1177,13 @@ nonisolated struct RealtimeLiveTurnLine {
     var focusDwells: Int?
     var focusNames: Int?
     var focusCrop: String?
+    /// Cascade only, per leg: release -> STT final, STT final -> Claude's first text, first sentence sent -> first
+    /// audio (`firstAudioMs` is the total); Claude's usage over the turn, and how many thinking blocks it wrote.
+    var cascadeSttFinalMs: Int?
+    var cascadeFirstTextMs: Int?
+    var cascadeTtsFirstAudioMs: Int?
+    var cascadeUsage: [String: Int]?
+    var cascadeThinkingBlocks: Int?
 
     init(stack: String, turnID: String, sessionWasWarm: Bool) {
         self.stack = stack
@@ -1200,7 +1214,10 @@ nonisolated struct RealtimeLiveTurnLine {
             "speechQuietestDb": value(speech?.quietestDecibels),
             "focusRung": value(focusRung), "focusMs": value(focusMs), "focusSelectionReadMs": value(focusSelectionReadMs),
             "focusSamples": value(focusSamples), "focusDwells": value(focusDwells), "focusNames": value(focusNames),
-            "focusCrop": value(focusCrop)
+            "focusCrop": value(focusCrop),
+            "cascadeSttFinalMs": value(cascadeSttFinalMs), "cascadeFirstTextMs": value(cascadeFirstTextMs),
+            "cascadeTtsFirstAudioMs": value(cascadeTtsFirstAudioMs), "cascadeUsage": value(cascadeUsage),
+            "cascadeThinkingBlocks": value(cascadeThinkingBlocks)
         ]
     }
 }

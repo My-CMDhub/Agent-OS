@@ -123,8 +123,11 @@ enum NotchProbe {
             await CardVoiceProbe.run(stacks: stacks)
             return
         }
-        guard let (clip16k, clip24k) = VoiceToolProbe.clips(forFixture: questionFixtureFileName) else {
-            appendLine(["kind": "fixtureUnreadable", "probeId": probeID, "fixture": questionFixtureFileName])
+        // `--notch-probe-fixture=05-open-settings.wav`: a turn that calls a tool instead of the general question.
+        let fixture = CommandLine.arguments.first { $0.hasPrefix("--notch-probe-fixture=") }.map { String($0.dropFirst("--notch-probe-fixture=".count)) }
+            ?? questionFixtureFileName
+        guard let (clip16k, clip24k) = VoiceToolProbe.clips(forFixture: fixture) else {
+            appendLine(["kind": "fixtureUnreadable", "probeId": probeID, "fixture": fixture])
             return
         }
         let turnsPerStack = CommandLine.arguments.first { $0.hasPrefix("--notch-probe-turns=") }
@@ -133,7 +136,7 @@ enum NotchProbe {
             argument.dropFirst("--notch-probe-stacks=".count).split(separator: ",").compactMap { VoiceStackChoice(rawValue: String($0)) }
         } ?? VoiceStackChoice.allCases
         appendLine(["kind": "start", "probeId": probeID, "turnsPerStack": turnsPerStack, "stacks": stacks.map(\.rawValue),
-                    "hidIdleSeconds": idle, "fixture": questionFixtureFileName, "watchdogSeconds": RealtimeVoiceSession.noReplyWatchdogSeconds])
+                    "hidIdleSeconds": idle, "fixture": fixture, "watchdogSeconds": RealtimeVoiceSession.noReplyWatchdogSeconds])
 
         let watch = OwnerWatch()
         for stack in stacks {

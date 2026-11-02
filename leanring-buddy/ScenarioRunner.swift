@@ -353,6 +353,7 @@ enum ScenarioRunner {
             switch name.lowercased() {
             case "gemini", "geminilive": return .geminiLive
             case "openai", "openairealtime": return .openAIRealtime
+            case "cascade": return .cascade
             default: return nil
             }
         }
