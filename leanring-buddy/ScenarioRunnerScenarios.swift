@@ -115,7 +115,34 @@ enum ScenarioCatalog {
     static var all: [RunnerScenario] { singleSteps + safety + multiStep }
     /// What `--scenario-ids` may name. Section R is never in the default run: it
     /// drives the owner's Cursor and the live web, so it runs only when asked for.
-    static var catalog: [RunnerScenario] { all + realApps + GeneralitySuite.voiceScenarios }
+    static var catalog: [RunnerScenario] { all + realApps + twoActions + GeneralitySuite.voiceScenarios }
+
+    /// A request naming two actions, in both orders, on a TextEdit window this run opens (live 2026-11-03: "Minimize Xcode and
+    /// open Calendar" was half done in the wrong order). Asked for by id only; TextEdit must not be running.
+    static let calculator = "com.apple.calculator"
+    static let twoActions: [RunnerScenario] = ["Q1", "Q2"].map { id in
+        RunnerScenario(id: id, start: .textEditNotRunning, requiresAgentLoop: true, quitIfLaunched: [textEdit, calculator],
+                       baseline: { context in
+                           context.baseline["calculatorRunning"] = !NSRunningApplication.runningApplications(withBundleIdentifier: calculator).isEmpty
+                           _ = await VoiceToolProbe.ask(["verb": "launch", "app": textEdit], context.harnessAnswer)
+                           _ = await VoiceToolProbe.ask(["verb": "menu", "path": ["File", "New"], "expectApp": textEdit], context.harnessAnswer)
+                       },
+                       check: { context, outcome in
+                           let front = await frontmost()
+                           let minimised = await Task.detached { () -> Int in
+                               guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: textEdit).first else { return 0 }
+                               var value: AnyObject?
+                               guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(app.processIdentifier), kAXWindowsAttribute as CFString, &value) == .success,
+                                     let windows = value as? [AXUIElement] else { return 0 }
+                               return windows.filter { window in
+                                   var flag: AnyObject?
+                                   return AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &flag) == .success && flag as? Bool == true
+                               }.count
+                           }.value
+                           return verdict(front == calculator && minimised >= 1, "front \(front ?? "nothing"), \(minimised) TextEdit window(s) minimised",
+                                          ["frontmost": front ?? NSNull(), "minimised": minimised, "handedToTask": outcome.errorCodes.contains("handedToTask")])
+                       })
+    }
 
     static let singleSteps: [RunnerScenario] = [
         RunnerScenario(id: "A1", start: .finderFront, quitIfLaunched: [safari],

@@ -142,7 +142,8 @@ struct RealtimeHeardCheckTests {
         #expect(outcome("switch finder to list view", named: "Finder") == .match)
         #expect(outcome("switch to list view", named: "Finder") == .noAppHeard)
         #expect(outcome("open a new window in code", named: "Visual Studio Code") == .ambiguousApp)
-        #expect(outcome("open cursor and chrome", named: "Cursor") == .ambiguousApp)
+        // Two apps said, and this call names one of them: the owner named that app (live 2026-11-03).
+        #expect(outcome("open cursor and chrome", named: "Cursor") == .match)
         // Gemini's "Kasa": the tool names an app that is not installed; the words sound like Cursor.
         #expect(outcome("open a new window in kasa", named: "Kasa") == .heardNamedMismatch)
         // A name the identity check will ask about downstream is not contradicted here.
@@ -212,8 +213,8 @@ struct RealtimeHeardCheckTests {
         // D66FC598 kept: VS Code in front, an offer that mentions cursors, the owner said "in cursor".
         #expect(outcome("open a new window in cursor", named: "Visual Studio Code", tool: "press_menu",
                         target: ["File", "New Window", "Add Cursor Above"], frontmost: vsCode) == .heardNamedMismatch)
-        // Two apps for a menu press is still a question; a word that fits two apps is still a question.
-        #expect(outcome("open cursor and chrome", tool: "press_menu") == .ambiguousApp)
+        // A press in one of two apps the owner named is no question (live 2026-11-03); a word that fits two apps still is.
+        #expect(outcome("open cursor and chrome", tool: "press_menu") == .match)
         #expect(outcome("open code and chrome", named: "Visual Studio Code", tool: "open_app", frontmost: nil) == .ambiguousApp)
     }
 
@@ -394,7 +395,8 @@ struct RealtimeHeardCheckTests {
         // A possessive is a topic only when the sentence says where else to act.
         #expect(decide("Put Finder's toolbar path thing on.", named: "TextEdit", tool: "press_menu").outcome == .heardNamedMismatch)
         // A real wrong-app mishearing still refuses: no topic word, no place for the call's app.
-        #expect(decide("close Terminal and open Cursor", named: "Cursor", tool: "press_menu").refusalError != nil)
+        // Both named, and this press is in one of them: the owner named it (live 2026-11-03; two verbs go to the task runner anyway).
+        #expect(decide("close Terminal and open Cursor", named: "Cursor", tool: "press_menu").outcome == .match)
         #expect(decide("close Terminal and open Cursor").refusalError != nil)
         #expect(decide("search for Cursor tips in Terminal").outcome == .heardNamedMismatch)
         // A bare search object may be the app itself ("search for LinkedIn"): it still asks.

@@ -44,10 +44,12 @@ enum ApplicationLauncher {
         in directories: [URL],
         listing: (URL) -> [String]
     ) -> [URL] {
-        let wanted = name + ".app"
+        // Spacing is no part of a name: "X code" is Xcode.app (live 2026-11-03).
+        func unspaced(_ text: String) -> String { text.replacingOccurrences(of: " ", with: "") }
+        let wanted = unspaced(name + ".app")
         return directories.flatMap { directory in
             listing(directory)
-                .filter { $0.caseInsensitiveCompare(wanted) == .orderedSame }
+                .filter { unspaced($0).caseInsensitiveCompare(wanted) == .orderedSame }
                 .map { directory.appendingPathComponent($0, isDirectory: true) }
         }
     }
@@ -65,7 +67,7 @@ enum ApplicationLauncher {
     static func runningMatches(named query: String, among running: [(name: String?, bundleURL: URL?)]) -> [URL] {
         running.compactMap { entry in
             guard let name = entry.name, let url = entry.bundleURL,
-                  name.caseInsensitiveCompare(query) == .orderedSame else { return nil }
+                  name.replacingOccurrences(of: " ", with: "").caseInsensitiveCompare(query.replacingOccurrences(of: " ", with: "")) == .orderedSame else { return nil }
             return url
         }
     }

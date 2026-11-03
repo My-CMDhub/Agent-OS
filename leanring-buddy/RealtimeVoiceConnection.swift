@@ -956,6 +956,10 @@ final class RealtimeVoiceConnection {
                                                     waitedForConfirmation: false, harnessResponse: nil)
                     turn.dispatches.append(dispatch)
                     turn.decisions[decisionIndex].dispatch = dispatch
+                } else if let handed = await self?.handedToTask(call, in: turn) {
+                    dispatch = RealtimeToolDispatch(result: handed, harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: nil)
+                    turn.dispatches.append(dispatch)
+                    turn.decisions[decisionIndex].dispatch = dispatch
                 } else if call.name == RealtimeVoiceVerbs.doTaskName {
                     // Starts the loop and returns; the loop's own steps run every guard below,
                     // judged against the owner's words (`turnRefusal` waited for them).
@@ -1010,6 +1014,25 @@ final class RealtimeVoiceConnection {
             }
         }
     }
+
+    /// The first acting call of a turn whose words name two actions starts the task runner on those words instead, so
+    /// the voice model cannot half-do the request in the wrong order (`RealtimeHeardCheck.namesTwoActions`). A look still
+    /// runs: it changes nothing. nil: this call runs as it is. Not a new authority: the task runs on the owner's own words,
+    /// through every guard its steps meet. No runner here (a probe), or one that refuses: the call runs.
+    private func handedToTask(_ call: RealtimeToolCall, in turn: RealtimeTurnMarks) async -> [String: Any]? {
+        guard !turn.isSystemTurn, !turn.speechOnly, let onDoTask, call.name != RealtimeVoiceVerbs.pointAtName,
+              RealtimeVoiceVerbs.isActingTool(call.name) else { return nil }
+        let released = turn.lastAudioSentUptime ?? ProcessInfo.processInfo.systemUptime
+        guard let heard = await turn.waitForHeard(until: released + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds),
+              RealtimeHeardCheck.namesTwoActions(heard),
+              onDoTask(heard, heard, turn.keyDownFrontBundle, turn.ownerFocus)["ok"] as? Bool == true else { return nil }
+        turn.taskStarted = true
+        return RealtimeOpenAppTool.toolResult(for: Self.handedToTaskRefusal)
+    }
+
+    static let handedToTaskRefusal = RealtimeToolRefusal(
+        error: "handedToTask", message: "this call did nothing: the owner's request names more than one action, so the task runner is doing "
+            + "the whole of it now, in the owner's order. Say only a few words; progress and the outcome come as system lines")
 
     // MARK: Approval cards (owner's live test 2026-10-31)
 
@@ -1524,7 +1547,8 @@ final class RealtimeVoiceConnection {
                                                      afterHeardRefusal: afterHeardRefusal, toolName: call.name, menuWords: menuWords,
                                                      targetWords: menuWords + RealtimeVoiceVerbs.foldedTokens(offered.joined(separator: " ")),
                                                      frontmostApp: frontmost, contentWords: RealtimeHeardCheck.contentTokens(content),
-                                                     namedIsBrowser: namedIsBrowser, isWebAppShim: RealtimeHeardCheck.isWebAppShim(appURL:))
+                                                     namedIsBrowser: namedIsBrowser, isWebAppShim: RealtimeHeardCheck.isWebAppShim(appURL:),
+                                                     isHelper: RealtimeVoiceVerbs.isBackgroundHelper(appURL:))
             // A request names what it is about ("search Google for Superloop"): live
             // 2026-10-03 its "superloop" sat in the app slot and every scroll of the
             // task was refused heardUnavailable. appNameUnclear still means "ask"

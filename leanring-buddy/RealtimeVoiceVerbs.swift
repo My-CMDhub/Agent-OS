@@ -727,14 +727,16 @@ nonisolated enum RealtimeVoiceVerbs {
     /// "Claude Code URL Handler", so it is asked about. Words, never letters:
     /// "code" does not find Xcode. ponytail: no sound-alike matching ("Kasa" for
     /// Cursor is not installed, and says so); that is its own owner decision.
-    static func resolveApp(named query: String, among names: [AppName]) -> AppResolution {
+    /// Spacing is no part of a name ("X code" is Xcode, "Text Edit" is TextEdit). `isHelper` is asked only when
+    /// several apps answer to a partial name: a background-only bundle never competes with a real app.
+    static func resolveApp(named query: String, among names: [AppName], isHelper: (URL) -> Bool = { _ in false }) -> AppResolution {
         let wanted = foldedTokens(query)
         guard !wanted.isEmpty else { return .notInstalled(closest: []) }
         func unique(_ matches: [AppName]) -> [URL] {
             var seen = Set<String>()
             return matches.map(\.url).filter { seen.insert($0.standardizedFileURL.path).inserted }
         }
-        let fullName = unique(names.filter { $0.isFileName && foldedTokens($0.name) == wanted })
+        let fullName = unique(names.filter { $0.isFileName && foldedTokens($0.name).joined() == wanted.joined() })
         if fullName.count == 1 { return .resolved(fullName[0]) }
         if fullName.count > 1 { return .ambiguous(fullName) }
         let partial = unique(names.filter { name in
@@ -743,7 +745,10 @@ nonisolated enum RealtimeVoiceVerbs {
                 && (0...(tokens.count - wanted.count)).contains { Array(tokens[$0..<($0 + wanted.count)]) == wanted }
         })
         if partial.count == 1 { return .resolved(partial[0]) }
-        if partial.count > 1 { return .ambiguous(partial) }
+        if partial.count > 1 {
+            let real = partial.filter { !isHelper($0) }
+            return real.count == 1 ? .resolved(real[0]) : .ambiguous(real.isEmpty ? partial : real)
+        }
         let closest = unique(names.filter { name in
             let tokens = Set(foldedTokens(name.name))
             return wanted.contains { $0.count >= 3 && tokens.contains($0) }
@@ -779,6 +784,13 @@ nonisolated enum RealtimeVoiceVerbs {
         return names
     }
 
+    /// `LSBackgroundOnly`: a bundle with no window, no Dock icon and no menu bar, nothing a person opens or
+    /// quits (Claude Code URL Handler). Not `LSUIElement`: those are real menu-bar apps (Docker, SwiftBar).
+    /// Reads the bundle's Info.plist: off main, and only when two apps compete.
+    static func isBackgroundHelper(appURL: URL) -> Bool {
+        Bundle(url: appURL)?.infoDictionary?["LSBackgroundOnly"] as? Bool == true
+    }
+
     enum AppIdentity: Equatable {
         case resolved(bundleIdentifier: String, name: String)
         case ambiguous(candidates: [String])
@@ -792,7 +804,7 @@ nonisolated enum RealtimeVoiceVerbs {
         if query.contains("."), !query.contains(" "), let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: query) {
             resolution = .resolved(url)
         } else {
-            resolution = resolveApp(named: query, among: installedAppNames())
+            resolution = resolveApp(named: query, among: installedAppNames(), isHelper: isBackgroundHelper(appURL:))
         }
         switch resolution {
         case .resolved(let url):

@@ -46,6 +46,8 @@ S1	-	what step are you on
 S2	-	did you open the plans page yet
 # CardAskProbe: a do_task (act, then answer) whose first step raises a card: Script Editor is a code-running app.
 K1	-	open script editor and tell me what version it is
+Q1	-	minimize text edit and open calculator
+Q2	-	open calculator and minimize text edit
 # Section K: said the way a person talks to a colleague. make-fixtures.sh gives each its voice and what the room does to it.
 K01	-	uh can you, like, minimise text edit and open the calculator
 K02	-	open the calculator, and um, yeah, then minimise text edit

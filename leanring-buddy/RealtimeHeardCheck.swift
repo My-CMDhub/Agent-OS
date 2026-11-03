@@ -176,7 +176,19 @@ nonisolated enum RealtimeHeardCheck {
         }
     }
 
-    static func appsMentioned(in transcript: String, among names: [RealtimeVoiceVerbs.AppName]) -> HeardApps {
+    /// `isHelper`: a bundle that is background-only (`RealtimeVoiceVerbs.isBackgroundHelper`), asked only when two
+    /// apps compete. A URL handler nobody can see never competes with a real app: live 2026-11-03 "X code" and
+    /// 2026-10-31 "Quit Claude Code" both stopped at "… or the Claude Code URL Handler?". Alone, it is still heard.
+    static func appsMentioned(in transcript: String, among names: [RealtimeVoiceVerbs.AppName],
+                              isHelper: (URL) -> Bool = { _ in false }) -> HeardApps {
+        let heard = appsNamedByWords(in: transcript, among: names)
+        guard heard.apps.count > 1 else { return heard }
+        let real = heard.apps.filter { !isHelper($0) }
+        guard !real.isEmpty, real.count < heard.apps.count else { return heard }
+        return HeardApps(apps: real, ambiguousWord: heard.ambiguousWord && real.count > 1, tier: heard.tier)
+    }
+
+    private static func appsNamedByWords(in transcript: String, among names: [RealtimeVoiceVerbs.AppName]) -> HeardApps {
         let spoken = withThePointerUnnamed(RealtimeVoiceVerbs.foldedTokens(transcript))
         guard !spoken.isEmpty else { return .none }
         func path(_ url: URL) -> String { url.standardizedFileURL.path }
@@ -185,27 +197,34 @@ nonisolated enum RealtimeHeardCheck {
             return urls.filter { seen.insert(path($0)).inserted }
         }
         /// Where the run of spoken words, joined, equals the name's words joined.
-        func starts(_ name: String) -> [Int] {
+        func runs(_ name: String) -> [Range<Int>] {
             let wanted = RealtimeVoiceVerbs.foldedTokens(name).joined()
             guard !wanted.isEmpty else { return [] }
-            return spoken.indices.filter { start in
+            return spoken.indices.compactMap { start in
                 var joined = ""
-                for word in spoken[start...] {
+                for (offset, word) in spoken[start...].enumerated() {
                     joined += word
-                    if joined == wanted { return true }
-                    if joined.count >= wanted.count || !wanted.hasPrefix(joined) { return false }
+                    if joined == wanted { return start..<(start + offset + 1) }
+                    if joined.count >= wanted.count || !wanted.hasPrefix(joined) { return nil }
                 }
-                return false
+                return nil
             }
         }
-        func said(_ name: String) -> Bool { !starts(name).isEmpty }
+        func starts(_ name: String) -> [Int] { runs(name).map(\.lowerBound) }
+        func said(_ name: String) -> Bool { !runs(name).isEmpty }
         func isCommonWord(_ name: RealtimeVoiceVerbs.AppName) -> Bool {
             let tokens = RealtimeVoiceVerbs.foldedTokens(name.name)
             return tokens.count == 1 && commonWordAppNames.contains(tokens[0])
         }
         let unpadded = spoken.filter { !fillerWords.contains($0) }.joined()
 
-        let fullNames = distinct(names.filter { $0.isFileName && !isCommonWord($0) && said($0.name) }.map(\.url))
+        // The longest name said wins its words: "claude code url handler" is not also Claude.
+        let fileNameRuns = names.filter { $0.isFileName && !isCommonWord($0) }.map { (name: $0, runs: runs($0.name)) }.filter { !$0.runs.isEmpty }
+        let fullNames = distinct(fileNameRuns.filter { candidate in
+            candidate.runs.contains { run in
+                !fileNameRuns.contains { other in other.runs.contains { $0.count > run.count && $0.contains(run.lowerBound) && $0.contains(run.upperBound - 1) } }
+            }
+        }.map(\.name.url))
         // A common-word name, file or menu-bar, only where nothing but an app name fits.
         let slotNames = distinct(names.filter { name in
             isCommonWord(name) && (starts(name.name).contains { isInCommonNameSlot(spoken, at: $0) }
@@ -231,7 +250,10 @@ nonisolated enum RealtimeHeardCheck {
         // A menu-bar name of more than one word ("Google Chrome" while running).
         var wordApps = names.filter { !$0.isFileName && RealtimeVoiceVerbs.foldedTokens($0.name).count > 1 && said($0.name) }.map(\.url)
         var ambiguousWordApps: [URL] = []
-        for word in spoken {
+        // A word already spent on a whole name names nothing else: "X code" is Xcode, and its "code" is not also a
+        // word of Claude Code URL Handler (live 2026-11-03, three refusals in a row).
+        let spent = Set(fileNameRuns.flatMap { $0.runs.flatMap { Array($0) } })
+        for (index, word) in spoken.enumerated() where !spent.contains(index) {
             guard let apps = appsByWord[word].map(distinct) else { continue }
             if apps.count > 1 { ambiguousWordApps += apps } else { wordApps += apps }
         }
@@ -610,7 +632,7 @@ nonisolated enum RealtimeHeardCheck {
                        afterHeardRefusal: Bool = false, toolName: String = "", menuWords: [String] = [],
                        targetWords: [String] = [], frontmostApp: URL? = nil,
                        contentWords: [String] = [], namedIsBrowser: Bool = false,
-                       isWebAppShim: (URL) -> Bool = { _ in false }) -> Decision {
+                       isWebAppShim: (URL) -> Bool = { _ in false }, isHelper: (URL) -> Bool = { _ in false }) -> Decision {
         guard let rawTranscript = transcript, !rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return Decision(outcome: .transcriptMissing, heardApps: [], tier: nil)
         }
@@ -625,7 +647,7 @@ nonisolated enum RealtimeHeardCheck {
         let slot = readSlot(RealtimeVoiceVerbs.foldedTokens(transcript), among: names, menuWords: menuWords + targetWords + contentWords)
         var decision = decideHeard(transcript: transcript, named: named, among: names, afterHeardRefusal: afterHeardRefusal,
                                    toolName: toolName, targetWords: targetWords, frontmostApp: frontmostApp,
-                                   contentWords: contentWords, namedIsBrowser: namedIsBrowser, isWebAppShim: isWebAppShim)
+                                   contentWords: contentWords, namedIsBrowser: namedIsBrowser, isWebAppShim: isWebAppShim, isHelper: isHelper)
         // noAppHeard fails OPEN to the model's name, so a menu tool asks when a
         // name-like word sat where the app goes and matched nothing.
         if decision.outcome == .noAppHeard, RealtimeVoiceVerbs.isAppScopedMenuTool(toolName), !slot.unrecognised.isEmpty {
@@ -637,16 +659,17 @@ nonisolated enum RealtimeHeardCheck {
 
     private static func decideHeard(transcript: String, named: String, among names: [RealtimeVoiceVerbs.AppName],
                                     afterHeardRefusal: Bool, toolName: String, targetWords: [String], frontmostApp: URL?,
-                                    contentWords: [String], namedIsBrowser: Bool, isWebAppShim: (URL) -> Bool) -> Decision {
+                                    contentWords: [String], namedIsBrowser: Bool, isWebAppShim: (URL) -> Bool,
+                                    isHelper: (URL) -> Bool) -> Decision {
         func path(_ url: URL) -> String { url.standardizedFileURL.path }
         let namedPaths: Set<String>
-        switch RealtimeVoiceVerbs.resolveApp(named: named, among: names) {
+        switch RealtimeVoiceVerbs.resolveApp(named: named, among: names, isHelper: isHelper) {
         case .resolved(let url): namedPaths = [path(url)]
         // The existing identity check still asks about an ambiguous name downstream.
         case .ambiguous(let urls): namedPaths = Set(urls.map(path))
         case .notInstalled: namedPaths = []
         }
-        var heard = withoutContent(appsMentioned(in: transcript, among: names), contentWords: contentWords,
+        var heard = withoutContent(appsMentioned(in: transcript, among: names, isHelper: isHelper), contentWords: contentWords,
                                    namedPaths: namedPaths, among: names)
         // Live 2026-10-08 (84B0105A, 3 runs of 3): "send the link to Edward on LinkedIn", with
         // ~/Applications/LinkedIn.app a Safari web app, refused every press in Chrome. With a
@@ -660,9 +683,10 @@ nonisolated enum RealtimeHeardCheck {
                                               targetWords: targetWords, frontmostApp: frontmostApp, namedIsBrowser: namedIsBrowser)
         let heardNames = heard.apps.map(RealtimeVoiceVerbs.displayName)
         guard let only = heard.apps.first else { return Decision(outcome: .noAppHeard, heardApps: [], tier: nil) }
-        // Two apps said ("open Chrome and open LinkedIn"), and this call opens or
-        // focuses one of them: that call is not ambiguous. A word that fits two
-        // apps ("code") still is.
+        // Two apps said ("open Chrome and open LinkedIn", "minimize Xcode and open Calendar"), and this call names one
+        // of them: whatever it does there, the owner named that app, so it is not ambiguous. A word that fits two apps
+        // ("code") still is. Live 2026-11-03: open_app Calendar passed and press_keys in Xcode was refused, so the
+        // request was half done and the owner was asked which of the two apps he had just named.
         // Unless the owner put the named app INSIDE the other one: "open terminal
         // in cursor" is Cursor's terminal, never a launch of Terminal (review 2026-10-01).
         func words(of url: URL) -> [[String]] {
@@ -672,18 +696,61 @@ nonisolated enum RealtimeHeardCheck {
         let otherWords = Set(heard.apps.filter { !namedPaths.contains(path($0)) }.flatMap(words).joined()
             .filter { !genericNameWords.contains($0) })
         let spoken = RealtimeVoiceVerbs.foldedTokens(transcript)
-        let opensOneOfThem = [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.focusAppName].contains(toolName)
-            && !heard.ambiguousWord && heard.apps.contains { namedPaths.contains(path($0)) }
+        let namesOneOfThem = !heard.ambiguousWord && heard.apps.contains { namedPaths.contains(path($0)) }
             && !placesInside(namedNames + namedNames.joined().filter { $0.count >= 4 && !genericNameWords.contains($0) }.map { [$0] },
                              containerWords: otherWords, spoken: spoken)
-        guard (heard.apps.count == 1 && !heard.ambiguousWord) || opensOneOfThem else {
+        guard (heard.apps.count == 1 && !heard.ambiguousWord) || namesOneOfThem else {
             return Decision(outcome: .ambiguousApp, heardApps: heardNames, tier: heard.tier)
         }
-        let agrees = opensOneOfThem || namedPaths.contains(path(only))
+        let agrees = namesOneOfThem || namedPaths.contains(path(only))
         if agrees, afterHeardRefusal, heard.tier?.confirmsARetry != true {
             return Decision(outcome: .unconfirmedRetry, heardApps: heardNames, tier: heard.tier)
         }
         return Decision(outcome: agrees ? .match : .heardNamedMismatch, heardApps: heardNames, tier: heard.tier)
+    }
+
+    // MARK: Two actions in one request (pure)
+
+    /// Words that begin an action. ponytail: a hand list of what an owner asks a Mac to do; a verb missing here only leaves
+    /// the request with the voice model, as before. Wrong the other way costs only a slower route: the task runner does it.
+    static let actionVerbs: Set<String> = [
+        "open", "close", "quit", "minimize", "minimise", "maximize", "maximise", "hide", "launch", "start", "switch", "focus", "go", "navigate",
+        "click", "press", "tap", "type", "write", "enter", "paste", "copy", "cut", "move", "rename", "delete", "remove", "save", "send", "post",
+        "search", "scroll", "turn", "set", "create", "make", "add", "read", "summarise", "summarize", "tell", "zoom", "mute", "unmute", "play",
+        "drag", "select", "print", "download", "upload", "schedule", "remind", "fill", "submit", "reply", "forward", "install", "show", "bring"]
+    /// Between "and" and a verb: "and then open", "and also please close".
+    static let actionJoinWords: Set<String> = ["and", "then", "also", "after", "that", "plus", "please", "just", "you", "can", "could", "next", "finally"]
+    /// "go ahead and open", "try and open": one action.
+    static let oneActionLeadIns: [[String]] = [["go", "ahead", "and"], ["try", "and"], ["come", "and"]]
+
+    /// The owner's words name two actions: a verb, and a verb again right after "and" or "then". Live 2026-11-03:
+    /// "Minimize Xcode and open Calendar", with the prompt saying do_task, went to Gemini's own tools; it opened
+    /// Calendar first and stranded the minimise. "open safari and notes" is one verb, so it stays a tool call.
+    /// The owner's words only, never the model's goal (the guard rule of 2026-10-03).
+    static func namesTwoActions(_ transcript: String) -> Bool {
+        var spoken = RealtimeVoiceVerbs.foldedTokens(transcript)
+        for leadIn in oneActionLeadIns {
+            while let start = spoken.indices.first(where: { spoken[$0...].starts(with: leadIn) }) {
+                spoken.removeSubrange(start..<(start + leadIn.count))
+            }
+        }
+        var clauseStarts = 0
+        var inClauseOne = true
+        var index = 0
+        while index < spoken.count {
+            let word = spoken[index]
+            if word == "and" || word == "then" {
+                var next = index + 1
+                while next < spoken.count, actionJoinWords.contains(spoken[next]) { next += 1 }
+                if next < spoken.count, actionVerbs.contains(spoken[next]) { clauseStarts += 1 }
+                inClauseOne = false
+                index = next
+                continue
+            }
+            if inClauseOne, actionVerbs.contains(word) { clauseStarts += 1; inClauseOne = false }
+            index += 1
+        }
+        return clauseStarts >= 2
     }
 
     // MARK: Web-app shims are sites (2026-10-08)
