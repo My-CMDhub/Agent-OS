@@ -168,7 +168,7 @@ struct CascadeVoicePipelineTests {
         let listen = CascadeDeepgram.listenURL(sampleRate: 16_000, keyterms: ["Cursor", "Google Chrome"]).absoluteString
         #expect(listen.contains("model=nova-3") && listen.contains("sample_rate=16000") && listen.contains("keyterm=Google%20Chrome"))
         let speak = CascadeDeepgram.speakURL(sampleRate: VoiceStackChoice.outputSampleRate).absoluteString
-        #expect(speak.contains("/v2/speak") && speak.contains("model=flux-colin-en") && speak.contains("speed=1.2")
+        #expect(speak.contains(CascadeDeepgram.speakPath()) && speak.contains("model=\(CascadeDeepgram.voice)") && speak.contains("speed=\(CascadeDeepgram.speed)")
             && speak.contains("encoding=linear16") && speak.contains("sample_rate=24000"))
     }
 
@@ -271,12 +271,21 @@ struct CascadeVoicePipelineTests {
         #expect(blocks(2)[1]["cache_control"] != nil)
     }
 
+    @Test func auraEndsASentenceOnFlushedAndLivesOnV1() {
+        #expect(CascadeDeepgram.endsASentence(["type": "Flushed"], voice: "aura-2-draco-en"))
+        #expect(!CascadeDeepgram.endsASentence(["type": "Metadata"], voice: "aura-2-draco-en"))
+        #expect(CascadeDeepgram.speakPath(voice: "aura-2-draco-en") == "/v1/speak")
+        #expect(ConfirmationClips.speakURL(voice: "aura-2-draco-en").path == "/v1/speak")
+        #expect(CascadeDeepgram.speakPath(voice: "flux-colin-en") == "/v2/speak")
+    }
+
     @Test func fluxEndsASentenceOnItsMetadataNotFlushed() {
-        #expect(CascadeDeepgram.endsASentence(["type": "SpeechMetadata"]))
-        #expect(!CascadeDeepgram.endsASentence(["type": "Flushed"]))
-        #expect(!CascadeDeepgram.endsASentence(["type": "SpeechStarted"]))
-        #expect(CascadeDeepgram.endsASentence(["type": "Warning", "code": "NO_SYNTHESIZABLE_TEXT"]))
-        #expect(!CascadeDeepgram.endsASentence(["type": "Warning", "code": "INPUT_MARKUP_STRIPPED"]))
+        let flux = "flux-tanner-en"
+        #expect(CascadeDeepgram.endsASentence(["type": "SpeechMetadata"], voice: flux))
+        #expect(!CascadeDeepgram.endsASentence(["type": "Flushed"], voice: flux))
+        #expect(!CascadeDeepgram.endsASentence(["type": "SpeechStarted"], voice: flux))
+        #expect(CascadeDeepgram.endsASentence(["type": "Warning", "code": "NO_SYNTHESIZABLE_TEXT"], voice: flux))
+        #expect(!CascadeDeepgram.endsASentence(["type": "Warning", "code": "INPUT_MARKUP_STRIPPED"], voice: flux))
     }
 
     @Test func aToolResultIsAMessagesAPIBlockAndScrubbed() {

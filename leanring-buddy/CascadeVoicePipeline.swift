@@ -71,11 +71,14 @@ nonisolated enum CascadeDeepgram {
         configuration.httpCookieStorage = nil
         return URLSession(configuration: configuration)
     }()
-    /// The owner's choice, Flux TTS (`/v2/speak`, a different model family from Aura): British, male, "warm, friendly, trustworthy,
-    /// confident, authoritative" (developers.deepgram.com/docs/flux-tts/voices, read 2026-11-03). Speed is 0.5-1.5 in 0.05 steps and a connection parameter;
-    /// 1.0 -> 1.2 took one long line from 13.1 s to 9.0-10.6 s, live. REST `/v2/speak` takes the same JWT and these two values.
-    static let voice = "flux-colin-en"
-    static let speed = "1.2"
+    /// The same two sentences, same socket shape, from Sydney (2026-11-03, 5 lines x 2 + 3 x 9): Flux streams at exactly real time, so ~2 frames a reply
+    /// reach the player after it ran dry, and Colin holds 1-8 s of dead air (one 12-word line: 4.8-12.9 s). Aura-2 streams 1.9x real time: no gaps, no held
+    /// silence, 95 ms to first audio, $0.030 per 1k characters against $0.045. British, male, "warm, approachable, trustworthy, baritone". Either family works here: change these two.
+    /// The owner's ear overrules this: docs/ops/voice-samples/ holds the same line in each.
+    static let voice = "aura-2-draco-en"
+    static let speed = "1.1"
+    /// Aura lives on `/v1/speak`, Flux on `/v2/speak`; they take the same parameters and the same JWT.
+    static func speakPath(voice: String = voice) -> String { voice.hasPrefix("flux") ? "/v2/speak" : "/v1/speak" }
     /// Measured 2026-11-03 from Sydney over 150 handshakes each: AU 106 ms median, 199 ms worst; global 633 ms, 2,666 ms.
     /// Release -> final 41-84 ms against 190-470. The worker's JWT, granted globally, is accepted on both.
     static let host = "api.au.deepgram.com"
@@ -90,7 +93,7 @@ nonisolated enum CascadeDeepgram {
     static let finalWaitSeconds: TimeInterval = 1.0
     /// A retry's own handshake, on the far host: its worst measured, 2,666 ms.
     static let retryHandshakeSeconds: TimeInterval = 3
-    /// The server's turn-end that never comes must not hold the turn. Quiet, not total: Flux streams at about real time,
+    /// The server's turn-end that never comes must not hold the turn. Quiet, not total: Flux streams at real time,
     /// so a long answer's end lands as late as its length.
     static let speechQuietSeconds: TimeInterval = 5
     /// Spare sockets live this long after a turn; past it the next press pays the handshake.
@@ -124,9 +127,11 @@ nonisolated enum CascadeDeepgram {
         return retried ? .giveUp : .retry
     }
 
-    /// Flux TTS's end of one Speak + Flush. `Flushed` lands at once and proves no audio; `SpeechMetadata` closes the turn
-    /// ("every audio frame arrives between", developers.deepgram.com/docs/flux-tts/server-messages). A sentence that never becomes a turn warns instead.
-    static func endsASentence(_ message: [String: Any]) -> Bool {
+    /// The end of one Speak + Flush. Flux's `Flushed` lands at once and proves no audio; `SpeechMetadata` closes the turn
+    /// ("every audio frame arrives between", developers.deepgram.com/docs/flux-tts/server-messages), and a sentence that never
+    /// becomes a turn warns instead. Aura sends its audio first and `Flushed` after the last frame.
+    static func endsASentence(_ message: [String: Any], voice: String = voice) -> Bool {
+        guard voice.hasPrefix("flux") else { return message["type"] as? String == "Flushed" }
         switch message["type"] as? String {
         case "SpeechMetadata", "SpeechInterrupted": return true
         case "Warning": return ["NO_SYNTHESIZABLE_TEXT", "NO_ACTIVE_SPEECH"].contains(message["code"] as? String ?? "")
@@ -164,7 +169,7 @@ nonisolated enum CascadeDeepgram {
 
     /// PCM16 mono at the session player's rate.
     static func speakURL(sampleRate: Int) -> URL {
-        var components = URLComponents(string: "wss://\(host)/v2/speak")!
+        var components = URLComponents(string: "wss://\(host)\(speakPath())")!
         components.queryItems = [
             URLQueryItem(name: "model", value: voice), URLQueryItem(name: "encoding", value: "linear16"),
             URLQueryItem(name: "sample_rate", value: String(sampleRate)), URLQueryItem(name: "speed", value: speed)
@@ -944,7 +949,7 @@ final class CascadeVoicePipeline {
         if !audio.isEmpty { onAudio(audio, arrival) }
     }
 
-    /// Each sentence is its own Flux turn: audio starts at the first, while Claude still writes the rest.
+    /// Each sentence is its own Speak + Flush: audio starts at the first, while Claude still writes the rest.
     private func speak(_ sentence: String, marks: RealtimeTurnMarks) {
         let text = SecretScanner.redact(CascadeSentenceSplitter.spoken(sentence))
         guard !text.isEmpty else { return }

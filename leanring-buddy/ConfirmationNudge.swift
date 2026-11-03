@@ -10,7 +10,7 @@
 //     step's (`RealtimeVoiceSession.taskCardOpened`). Live 2026-10-31 12:14:26Z: a
 //     local line spoke at 2 s while the model sat on its held call, then the model
 //     asked after the answer: two voices.
-//  2. Otherwise a pre-rendered Deepgram Flux clip of a generic line (`ConfirmationClips`):
+//  2. Otherwise a pre-rendered Deepgram clip of a generic line (`ConfirmationClips`):
 //     a socket's card, no live session, the owner mid-speech, or a voice silent for
 //     `voiceGraceSeconds`. Our fixed words, never an app's or a model's. No session
 //     and no network needed once cached.
@@ -83,7 +83,7 @@ nonisolated enum ConfirmationNudge {
     }
 }
 
-/// The fallback voice: Deepgram Flux clips of the generic lines, rendered once and kept on disk, so a card
+/// The fallback voice: Deepgram clips of the generic lines, rendered once and kept on disk, so a card
 /// needs neither a live session nor the network. The token comes from the worker (no key in the app).
 nonisolated enum ConfirmationClips {
     static func directory() -> URL {
@@ -91,18 +91,17 @@ nonisolated enum ConfirmationClips {
             .appendingPathComponent("Clicky/card-voice", isDirectory: true)
     }
 
-    /// The owner's pace for this voice (2026-11-03). `speed` is not "yet supported in all languages": a refusal logs its reason.
-    static let speed = "1.2"
+    static let speed = CascadeDeepgram.speed
 
     /// Named for its voice, pace and words: any change renders afresh.
     static func fileName(line: String, voice: String) -> String {
         "\(voice)-\(speed)-" + line.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).joined(separator: "-") + ".wav"
     }
 
-    /// developers.deepgram.com/reference/speak/v-2/audio/generate, read 2026-11-03: POST, Flux models only, Bearer JWT accepted,
-    /// linear16 goes in a wav container.
+    /// POST, Bearer JWT accepted, linear16 goes in a wav container: Flux's `/v2/speak` (developers.deepgram.com/reference/speak/v-2/audio/generate)
+    /// and Aura's `/v1/speak` alike (both 200 with the worker's JWT, live 2026-11-03).
     static func speakURL(voice: String) -> URL {
-        var components = URLComponents(string: "https://api.deepgram.com/v2/speak")!
+        var components = URLComponents(string: "https://api.deepgram.com\(CascadeDeepgram.speakPath(voice: voice))")!
         components.queryItems = [URLQueryItem(name: "model", value: voice), URLQueryItem(name: "encoding", value: "linear16"),
                                  URLQueryItem(name: "container", value: "wav"), URLQueryItem(name: "sample_rate", value: "24000"),
                                  URLQueryItem(name: "speed", value: speed)]
