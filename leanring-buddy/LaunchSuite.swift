@@ -162,7 +162,10 @@ extension GeneralitySuite {
                       let truth = await wifiNetworkTruth()
                       return networkVerdict(spoken: spoken, truth: truth?.name, source: truth?.source)
                   },
-        SuiteTask(id: "L04", pattern: "read the newest download", words: "what did I last download?", apps: [finder]) { spoken, _ in
+        SuiteTask(id: "L04", pattern: "read the newest download", words: "what did I last download?", apps: [finder], pre: {
+                      // Launch 2026-10-31T03-57-29Z: FAILED with "truth unread", having re-sorted the owner's Downloads to find out.
+                      skipsUserFolders ? [skipReasonKey: "no truth to judge by: --generality-no-files leaves ~/Downloads unread"] : [:]
+                  }) { spoken, _ in
                       guard !skipsUserFolders else { return verdict(false, ["truth": "unread (--generality-no-files)"]) }
                       let downloads = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
                       guard let newest = await read({ newestItem(in: downloads) }) ?? nil else { return verdict(false, ["truth": "unreadable or empty ~/Downloads"]) }

@@ -75,7 +75,11 @@ enum GeneralitySuite {
                       return verdict(list == true, ["downloadsWindowInListView": list as Any? ?? NSNull()])
                   },
         SuiteTask(id: "G03", pattern: "read a count from a list", words: "how many items are in my Downloads folder?",
-                  apps: [finder]) { spoken, _ in
+                  // Generality 2026-10-31T03-37-32Z: "65 items" was FAILED with no truth to hold it against, after a model call and a
+                  // View > as List on the owner's Downloads. A run that cannot judge a task does not spend it.
+                  apps: [finder], pre: {
+                      truthArgument("downloads") == nil ? [skipReasonKey: "no truth to judge by: pass --generality-truth-downloads=<n>"] : [:]
+                  }) { spoken, _ in
                       // No truth, no pass: V03 once "passed" by finding "?" in its own answer (run 20-25-47Z).
                       guard let count = truthArgument("downloads") else { return verdict(false, ["truth": "missing: pass --generality-truth-downloads=<n>"]) }
                       return answer(spoken, has: [count], truth: count)

@@ -422,3 +422,14 @@ struct LaunchSuiteSlice3Tests {
         #expect(Suite.screenVerdict(looks: ["handOver"], secureInputBefore: true, spoken: "Safari is showing Harbour Bank.")["passed"] as? Bool == false)
     }
 }
+
+/// Generality 2026-10-31T03-37-32Z: a task no run could judge was recorded as FAILED, after spending a model call.
+struct SuiteUnjudgeableTaskTests {
+    @MainActor @Test func aCountWithNoTruthSkipsBeforeTheAgentRuns() async {
+        guard let task = GeneralitySuite.tasks.first(where: { $0.id == "G03" }), let pre = task.pre else {
+            Issue.record("G03 has no pre-read")
+            return
+        }
+        #expect(await pre()[GeneralitySuite.skipReasonKey] is String)
+    }
+}
