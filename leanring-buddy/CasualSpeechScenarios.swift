@@ -166,6 +166,33 @@ extension ScenarioCatalog {
         return CasualSpeechClaim.outOfTheWay(windowOpen: now.targetOpen, minimised: now.targetMinimised, hidden: now.hidden, running: now.running)
     }
 
+    /// A force-quit TextEdit relaunches with every window it had, and K's windows reached 13 across one baseline (K02 and K16 then judged
+    /// a machine nobody has). So its empty Untitled windows, all this run's or an earlier run's, close before the quit; a window holding text is left alone.
+    static func closeEmptyTextEditWindows(_: ScenarioContext) async -> [String: Any] {
+        await Task.detached { () -> [String: Any] in
+            guard let application = NSRunningApplication.runningApplications(withBundleIdentifier: textEdit).first else { return [:] }
+            application.unhide()
+            Thread.sleep(forTimeInterval: 0.3)
+            let element = AXUIElementCreateApplication(application.processIdentifier)
+            var value: AnyObject?
+            guard AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &value) == .success else { return ["closed": 0, "note": "windows unread"] }
+            var closed = 0, left = 0
+            for window in value as? [AXUIElement] ?? [] {
+                let text = ScenarioRunnerAX.nodes(window, processIdentifier: application.processIdentifier).first { $0.role == "AXTextArea" }?.value?.raw
+                guard ScenarioRunnerAX.windowTitle(window)?.hasPrefix("Untitled") == true, text?.isEmpty != false else { left += 1; continue }
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                var button: AnyObject?
+                guard AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &button) == .success, let button,
+                      CFGetTypeID(button) == AXUIElementGetTypeID() else { left += 1; continue }
+                let press = AccessibilityActionPerformer.perform(kAXPressAction, on: button as! AXUIElement)
+                HarnessServer.auditDirectClose(tool: "CasualSpeech.closeEmptyTextEditWindows", processIdentifier: application.processIdentifier, windowNumber: nil,
+                                               why: "run cleanup: an empty Untitled window, before the quit", closed: press.error == .success)
+                closed += 1
+            }
+            return ["closed": closed, "left": left]
+        }.value
+    }
+
     /// One scenario: `done` reads the machine, polled like a person glancing back; `answer` judges a read's words.
     static func casual(_ id: String, start: RunnerScenario.Start, earlier: [String] = [], quit: [String] = [], prepare: (@MainActor (ScenarioContext) async -> Void)? = nil,
                        done: (@MainActor (ScenarioContext) async -> Bool)? = nil, answer: (@MainActor (ScenarioContext, ScenarioOutcome) async -> Bool)? = nil,
@@ -179,13 +206,20 @@ extension ScenarioCatalog {
             if isDone, let answer { isDone = await answer(context, outcome) }
             let all = (outcome.earlier.map(\.said) + [outcome.transcript]).joined(separator: " ")
             let claim = CasualSpeechClaim.claim(outcome.transcript)
+            let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unread"
+            var seen: [String: Any] = ["frontmost": front]
+            for app in [textEdit, calculatorApp] where !NSRunningApplication.runningApplications(withBundleIdentifier: app).isEmpty {
+                let now = await state(app, context)
+                seen[app] = ["windows": now.windows ?? -1, "hidden": now.hidden, "targetOpen": now.targetOpen ?? NSNull(),
+                             "targetMinimised": now.targetMinimised, "targetFullScreen": now.targetFullScreen] as [String: Any]
+            }
             return verdict(isDone, "the outcome did not happen; it said: \(outcome.transcript.prefix(160))", [
                 "turns": outcome.earlier.count + 1, "questions": CasualSpeechClaim.questions(all).count,
                 "clarifyingQuestions": CasualSpeechClaim.clarifying(all, done: isDone), "claim": claim.rawValue,
                 "disagreement": answer == nil && CasualSpeechClaim.disagrees(claim, done: isDone), "heard": outcome.marks?.heardText ?? NSNull(),
-                "said": outcome.transcript
+                "said": outcome.transcript, "machine": seen
             ])
-        }, never: never, goal: done, undo: undo)
+        }, never: never, goal: done, undo: undo ?? (quit.contains(textEdit) ? closeEmptyTextEditWindows : nil))
         scenario.earlier = earlier
         return scenario
     }
