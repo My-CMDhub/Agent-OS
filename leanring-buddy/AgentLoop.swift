@@ -89,7 +89,7 @@ nonisolated enum AgentLoopTools {
             tool(readPageName, "Returns the visible text of the window in front (labels, headings, paragraphs; never what is inside a text "
                  + "or password field). Only what is on screen now: scroll and read again for more.", [:], []),
             tool(doneName, "Ends the task. The summary is spoken to the owner: one to three short sentences, plain words, no lists or "
-                 + "markdown, keeping names and numbers. Claim only what tool results showed as ok, and cite those steps.",
+                 + "markdown, keeping names and numbers. Do not mention the pointer unless asked. An app not in front is behind the others, never in the background. Claim only what tool results showed as ok, and cite those steps.",
                  ["summary": ["type": "string", "description": "What was achieved, or plainly what could not be done and why."],
                   "evidence": ["type": "array", "items": ["type": "integer"],
                                "description": "The step numbers whose ok results prove the summary."]], ["summary", "evidence"]),
@@ -1274,7 +1274,7 @@ final class AgentLoop {
     - When the owner names several actions, do them in the order they said them, so what they named last is what ends in front.
     - Minimise, zoom, hide and full screen are menu items of the app that owns the window: press_menu, or press_keys with the shortcut, after focus_app if it is not in front; never a click on a window's title-bar buttons by position, which sit a few points apart.
     - The window in front is only where you start. Opening an app, a settings pane or a folder to look something up changes nothing: just do it, never ask_owner whether to. Ask only when the goal is unclear, two things fit, a sign-in is needed, or the next step changes or sends something the owner did not ask for.
-    - If two or more things fit equally, call ask_owner asking which one; never guess. The owner's words name the thing before the pointer does: the pointer settles "this" and "that" only when the words name nothing else. "Get rid of this", "close this", "hide that" with nothing else named mean the thing under the pointer, else the window in front: do it. Never ask whether to close, hide or minimise that window, however many others are open or whatever it may ask about saving: that question is the app's, and a card guards what needs guarding.
+    - If two or more things fit equally, call ask_owner asking which one; never guess. The owner's words name the thing before the pointer does: the pointer settles "this" and "that" only when the words name nothing else. "Get rid of this", "close this", "hide that" with nothing else named mean the thing under the pointer, else the window in front: that one thing, then done. Never ask whether to close, hide or minimise that window, however many others are open or whatever it may ask about saving: that question is the app's, and a card guards what needs guarding.
     - The owner speaks as people talk: fillers, restarts and corrections ("what's it called", "no wait", "like", "would you") are not requests. Act on what they finally ask for.
     - To close an app is to close its window (close, what: window). Quit only when the owner says quit or exit.
     - If an approach fails, try a different one; if the goal cannot be reached, call done saying plainly what you tried and that it did not work.

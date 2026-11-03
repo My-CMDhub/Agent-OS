@@ -1687,7 +1687,8 @@ nonisolated enum RealtimeOpenAppTool {
                              RealtimeVoiceVerbs.annotateName, RealtimeVoiceVerbs.pressMenuBarItemName]),
         (["scrolled"], [RealtimeVoiceVerbs.scrollName]),
         (["typed"], [RealtimeVoiceVerbs.typeTextName]),
-        (["closed"], [RealtimeVoiceVerbs.closeName]),
+        // A close done by pressing is a close (a menu's Close Tab: A7 on the front stack; `AgentLoop.doneChallenge` already says so).
+        (["closed"], [RealtimeVoiceVerbs.closeName, RealtimeVoiceVerbs.pressMenuName, RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressKeysName]),
         // Live 2026-10-02 row 16: "website beating chrome" was answered as if a page had opened.
         // G16 2026-10-11: an ok open_settings_pane backs "opened" (and go_to_folder).
         (["opened"], [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.openURLName, RealtimeVoiceVerbs.focusAppName,

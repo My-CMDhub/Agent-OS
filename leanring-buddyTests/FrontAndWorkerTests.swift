@@ -269,3 +269,21 @@ struct FrontScenarioRuleTests {
         #expect(!(await ScenarioRunner.namedAHandOff.violated(context, outcome)))
     }
 }
+
+struct SettingsWordsTests {
+    @Test func openSettingsNamesTheMacsAndNoSitesDoes() {
+        func spoken(_ text: String) -> [String] { RealtimeVoiceVerbs.foldedTokens(text) }
+        #expect(RealtimeHeardCheck.saysOnlySettings(spoken("open settings")))
+        #expect(RealtimeHeardCheck.saysOnlySettings(spoken("uh could you open settings, please")))
+        #expect(!RealtimeHeardCheck.saysOnlySettings(spoken("open the settings")))
+        #expect(!RealtimeHeardCheck.saysOnlySettings(spoken("open the settings page on this site")))
+        #expect(!RealtimeHeardCheck.saysOnlySettings(spoken("change this site's settings")))
+    }
+}
+
+struct ClosedClaimTests {
+    @Test func aCloseDoneByPressingIsBacked() {
+        #expect(!RealtimeOpenAppTool.claimedWithoutReceipt(transcript: "I have closed the tab.", okToolNames: [RealtimeVoiceVerbs.pressMenuName]))
+        #expect(RealtimeOpenAppTool.claimedWithoutReceipt(transcript: "I have closed the tab.", okToolNames: [RealtimeVoiceVerbs.findOnScreenName]))
+    }
+}

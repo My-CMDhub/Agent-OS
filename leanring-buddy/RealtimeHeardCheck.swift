@@ -308,6 +308,13 @@ nonisolated enum RealtimeHeardCheck {
     /// (`ownNameEverydayWords`); and System Settings for a settings word beside
     /// a pane word ("the privacy settings", `namesASettingsPane`). A third-party
     /// app still needs its cue, and a different app heard is refused by `decide`.
+    /// "open settings": the bare name of a thing to open, and nothing else named, is the Mac's (A10 on the front stack, a card to open it). "open THE
+    /// settings" stays what ruling R1's test holds it to: on a page it is the page's, and a card asks.
+    static func saysOnlySettings(_ spoken: [String]) -> Bool {
+        let words = spoken.filter { $0 == "the" || !spokenFillers.contains($0) && !["please", "up", "can", "could", "you", "would", "just"].contains($0) }
+        return words == ["open", "settings"]
+    }
+
     static func wordsNameTheApp(transcript: String?, named: String, among names: [RealtimeVoiceVerbs.AppName]) -> Bool {
         guard let transcript, case .resolved(let url) = RealtimeVoiceVerbs.resolveApp(named: named, among: names) else { return false }
         let spoken = RealtimeVoiceVerbs.foldedTokens(withoutWebAddresses(transcript))
@@ -326,7 +333,7 @@ nonisolated enum RealtimeHeardCheck {
         // Owner's ruling R1 (2026-10-06): a built-in app is the default for its own noun.
         // Finder lives in CoreServices, not /System/Applications, and is just as built in.
         let builtIn = path(url).hasPrefix("/System/Applications/") || path(url) == "/System/Library/CoreServices/Finder.app"
-        if builtIn, url.lastPathComponent == "System Settings.app", namesASettingsPane(spoken) || saysAPanesOwnName(spoken) { return true }
+        if builtIn, url.lastPathComponent == "System Settings.app", namesASettingsPane(spoken) || saysAPanesOwnName(spoken) || saysOnlySettings(spoken) { return true }
         if builtIn, let nouns = builtInTaskNouns[url.lastPathComponent], !Set(nouns.flatMap(forms)).isDisjoint(with: Set(spoken)) { return true }
         if builtIn, url.lastPathComponent == "Finder.app" {
             let others = names.filter { path($0.url) != path(url) }.map { RealtimeVoiceVerbs.foldedTokens($0.name) }.filter { !$0.isEmpty }
