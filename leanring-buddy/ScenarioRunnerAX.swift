@@ -347,6 +347,29 @@ nonisolated enum ScenarioRunnerAX {
         return nodes(window as! AXUIElement, processIdentifier: application.processIdentifier).first { $0.role == "AXTextArea" }?.value?.raw
     }
 
+    /// TextEdit's windows and how each stands. Untitled documents come back at the next launch, so a run that quits leaves them
+    /// for the next one (2 -> 13 windows over a few runs, 2026-11-03): `closingEmpty` closes those holding no text, and never one
+    /// that holds any. Returns the windows left, minimised or not.
+    static func textEditWindows(closingEmpty: Bool = false) -> (minimised: Int, visible: Int) {
+        guard let application = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.TextEdit").first else { return (0, 0) }
+        let element = AXUIElementCreateApplication(application.processIdentifier)
+        AXUIElementSetMessagingTimeout(element, 0.5)
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &value) == .success, let windows = value as? [AXUIElement] else { return (0, 0) }
+        var minimised = 0, visible = 0
+        for window in windows {
+            if closingEmpty, let area = nodes(window, processIdentifier: application.processIdentifier).first(where: { $0.role == "AXTextArea" }),
+               area.value?.raw.isEmpty ?? true {
+                var button: AnyObject?
+                if AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &button) == .success, let button,
+                   CFGetTypeID(button) == AXUIElementGetTypeID(), AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString) == .success { continue }
+            }
+            var flag: AnyObject?
+            if AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &flag) == .success, flag as? Bool == true { minimised += 1 } else { visible += 1 }
+        }
+        return (minimised, visible)
+    }
+
     /// Files under `directory` changed since `since` that contain `needle` — the
     /// fake key must reach no log (C1). Reads, never prints, what it finds.
     static func filesContaining(_ needle: String, under directories: [URL], since: Date) -> [String] {

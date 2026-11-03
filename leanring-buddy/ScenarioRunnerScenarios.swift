@@ -123,24 +123,27 @@ enum ScenarioCatalog {
     static let twoActions: [RunnerScenario] = ["Q1", "Q2"].map { id in
         RunnerScenario(id: id, start: .textEditNotRunning, requiresAgentLoop: true, quitIfLaunched: [textEdit, calculator],
                        baseline: { context in
-                           context.baseline["calculatorRunning"] = !NSRunningApplication.runningApplications(withBundleIdentifier: calculator).isEmpty
                            _ = await VoiceToolProbe.ask(["verb": "launch", "app": textEdit], context.harnessAnswer)
+                           _ = await Task.detached { ScenarioRunnerAX.textEditWindows(closingEmpty: true) }.value
                            _ = await VoiceToolProbe.ask(["verb": "menu", "path": ["File", "New"], "expectApp": textEdit], context.harnessAnswer)
                        },
+                       // Judged by what the owner asked for: Calculator up on screen, TextEdit's window out of the way. Which app ends in
+                       // front is evidence: a minimised app with no windows left in front shows the owner Calculator all the same.
                        check: { context, outcome in
                            let front = await frontmost()
-                           let minimised = await Task.detached { () -> Int in
-                               guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: textEdit).first else { return 0 }
+                           let textEditWindows = await Task.detached { ScenarioRunnerAX.textEditWindows() }.value
+                           let calculatorUp = await Task.detached { () -> Bool in
+                               guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: calculator).first else { return false }
                                var value: AnyObject?
-                               guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(app.processIdentifier), kAXWindowsAttribute as CFString, &value) == .success,
-                                     let windows = value as? [AXUIElement] else { return 0 }
-                               return windows.filter { window in
-                                   var flag: AnyObject?
-                                   return AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &flag) == .success && flag as? Bool == true
-                               }.count
+                               return AXUIElementCopyAttributeValue(AXUIElementCreateApplication(app.processIdentifier), kAXWindowsAttribute as CFString, &value) == .success
+                                   && (value as? [AXUIElement])?.isEmpty == false
                            }.value
-                           return verdict(front == calculator && minimised >= 1, "front \(front ?? "nothing"), \(minimised) TextEdit window(s) minimised",
-                                          ["frontmost": front ?? NSNull(), "minimised": minimised, "handedToTask": outcome.errorCodes.contains("handedToTask")])
+                           let result = verdict(calculatorUp && textEditWindows.minimised >= 1 && textEditWindows.visible == 0,
+                                                "Calculator up: \(calculatorUp), TextEdit \(textEditWindows.minimised) minimised, \(textEditWindows.visible) visible, front \(front ?? "nothing")",
+                                                ["frontmost": front ?? NSNull(), "minimised": textEditWindows.minimised, "visible": textEditWindows.visible,
+                                                 "handedToTask": outcome.errorCodes.contains("handedToTask")])
+                           _ = await Task.detached { ScenarioRunnerAX.textEditWindows(closingEmpty: true) }.value
+                           return result
                        })
     }
 
