@@ -168,6 +168,49 @@ struct CascadeVoicePipelineTests {
         #expect(speak.contains("aura-2-") && speak.contains("encoding=linear16") && speak.contains("sample_rate=24000"))
     }
 
+    /// "stop" sent as one burst came back empty 7 of 8; at 2x, 15 of 15 right. A clip's send takes half its length.
+    @Test func audioGoesAtTwiceRealTime() {
+        #expect(CascadeDeepgram.sendRate == 2)
+        #expect(abs(CascadeDeepgram.sendSeconds(bytes: 16_000, sampleRate: 16_000) - 0.25) < 1e-9)
+    }
+
+    @Test func theFinalDeadlineCountsWhatIsStillToSendAndARetrysHandshake() {
+        let plain = CascadeDeepgram.finalDeadlineSeconds(unsentBytes: 0, sampleRate: 16_000, isRetry: false)
+        #expect(plain == CascadeDeepgram.finalWaitSeconds)
+        // 1 s of audio left at 2x.
+        #expect(abs(CascadeDeepgram.finalDeadlineSeconds(unsentBytes: 32_000, sampleRate: 16_000, isRetry: false) - plain - 0.5) < 1e-9)
+        #expect(CascadeDeepgram.finalDeadlineSeconds(unsentBytes: 0, sampleRate: 16_000, isRetry: true) == plain + CascadeDeepgram.retryHandshakeSeconds)
+        // Never a long silent wait: a 10 s hold, all unsent, on a retry.
+        #expect(CascadeDeepgram.finalDeadlineSeconds(unsentBytes: 320_000, sampleRate: 16_000, isRetry: true) < 10)
+    }
+
+    @Test func noFinalUsesWordsOnceReleasedRetriesOnceThenGivesUp() {
+        #expect(CascadeDeepgram.noFinal(wordsSoFar: "open saf", released: true, retried: false) == .useWordsSoFar)
+        #expect(CascadeDeepgram.noFinal(wordsSoFar: "open saf", released: true, retried: true) == .useWordsSoFar)
+        // Still holding: the rest of the words need a socket.
+        #expect(CascadeDeepgram.noFinal(wordsSoFar: "open saf", released: false, retried: false) == .retry)
+        #expect(CascadeDeepgram.noFinal(wordsSoFar: " ", released: true, retried: false) == .retry)
+        #expect(CascadeDeepgram.noFinal(wordsSoFar: "", released: true, retried: true) == .giveUp)
+    }
+
+    @Test func aSpareThatStoppedAnsweringIsStale() {
+        // A handshake's worst is well inside it; an unanswered upgrade or a missed ping is not.
+        #expect(!CascadeDeepgram.isStale(openedUptime: 100, provenUptime: nil, now: 103))
+        #expect(CascadeDeepgram.isStale(openedUptime: 100, provenUptime: nil, now: 107))
+        #expect(!CascadeDeepgram.isStale(openedUptime: 100, provenUptime: 150, now: 154))
+        #expect(CascadeDeepgram.isStale(openedUptime: 100, provenUptime: 150, now: 157))
+    }
+
+    /// A voiced press that came back with no words during a task is said out loud, and never stops the task.
+    @Test func noWordsDuringARunningTaskAreToldNotGuessed() {
+        #expect(RealtimeVoiceSession.unheardDuringTask(heard: "", superseded: false, gotReply: false, taskRunning: true))
+        #expect(!RealtimeVoiceSession.unheardDuringTask(heard: "Stop.", superseded: false, gotReply: false, taskRunning: true))
+        #expect(!RealtimeVoiceSession.unheardDuringTask(heard: "", superseded: false, gotReply: false, taskRunning: false))
+        #expect(!RealtimeVoiceSession.unheardDuringTask(heard: "", superseded: true, gotReply: false, taskRunning: true))
+        #expect(!RealtimeVoiceSession.unheardDuringTask(heard: "", superseded: false, gotReply: true, taskRunning: true))
+        #expect(!RealtimeVoiceSession.ownerWordsStopTask(""))
+    }
+
     @Test func aToolResultIsAMessagesAPIBlockAndScrubbed() {
         let call = RealtimeToolCall(callID: "toolu_1", name: "open_app", appName: "Safari")
         let block = RealtimeVoiceConnection.toolResultMessage(stack: .cascade, result: ["ok": true], call: call)

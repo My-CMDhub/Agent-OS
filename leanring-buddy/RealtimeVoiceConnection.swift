@@ -236,6 +236,8 @@ final class RealtimeVoiceConnection {
     private var turnInputAudioBytes = 0
     /// Cascade only: its three legs in place of the provider socket.
     private var cascade: CascadeVoicePipeline?
+    /// Cascade only: asks the model the moment the words are complete, so a poll on them would land after the request left.
+    var contextForHeardWords: ((RealtimeTurnMarks) -> String?)?
 
     /// Probe only: replaces the app name of every `open_app` call, so a forced
     /// failure (an app that does not exist) runs the real harness path.
@@ -342,6 +344,7 @@ final class RealtimeVoiceConnection {
                     from: RealtimeVoiceVerbs.installedAppNames(),
                     runningPaths: Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.standardizedFileURL.path })))
             pipeline.currentTurn = { [weak self] in self?.turn }
+            pipeline.contextForHeardWords = { [weak self] marks in self?.contextForHeardWords?(marks) }
             pipeline.onAudio = { [weak self] audio, arrival in self?.receivedAudio(audio, arrivalUptime: arrival) }
             pipeline.onToolCalls = { [weak self] calls, arrival in self?.receivedToolCalls(calls, arrivalUptime: arrival) }
             pipeline.onTurnDone = { [weak self] arrival, givingUp in self?.receivedTurnDone(arrivalUptime: arrival, givingUpOnFollowUp: givingUp) }
@@ -468,7 +471,7 @@ final class RealtimeVoiceConnection {
         case .geminiLive:
             try await socket?.sendJSON(["realtimeInput": ["audio": ["mimeType": "audio/pcm;rate=16000", "data": pcmData.base64EncodedString()]]])
         case .cascade:
-            try await cascade?.sendAudio(pcmData)
+            cascade?.sendAudio(pcmData)
         }
     }
 
@@ -484,7 +487,7 @@ final class RealtimeVoiceConnection {
         case .geminiLive:
             try await socket?.sendJSON(["realtimeInput": ["activityEnd": [String: Any]()]])
         case .cascade:
-            try await cascade?.endOwnerTurn(marks: turn)
+            cascade?.endOwnerTurn(marks: turn)
         }
     }
 

@@ -11,8 +11,13 @@
 //  A socket pair per turn, taken at `beginTurn` (once the speech gate heard words):
 //  a barge-in closes them, which is what makes a cut-off answer's audio impossible
 //  to credit to the new turn. Opening is what costs (measured 2026-11-03 from
-//  Sydney: token 0.5-1.0 s, handshake 0.6-1.0 s), so a spare pair is kept warm for
-//  `warmSeconds` after each turn; a silent press sends them no audio and no words.
+//  Sydney: token 0.5-1.0 s, handshake 106 ms median in AU, 633 ms global), so a spare
+//  pair is kept warm for `warmSeconds` after each turn; a silent press sends them no audio and no words.
+//
+//  The owner's words are the one thing a turn cannot lose, so nothing here waits on the
+//  network: the turn's audio is kept (`turnAudio`) and pumped out beside the turn, and the
+//  release starts a clock (`finalWaitSeconds`). A socket that stalls or hears nothing is
+//  replaced once and hears it all again; after that the turn fails out loud.
 //  No key is in the app: Deepgram gets the worker's 60 s JWT, valid only to open a socket.
 //
 //  History rule (Haiku 5.5's preserved thinking: a replayed thinking block after a
@@ -66,16 +71,54 @@ nonisolated enum CascadeDeepgram {
     }()
     /// Aura-2's British baritone (developers.deepgram.com/docs/tts-models, read 2026-11-03).
     static let voice = "aura-2-draco-en"
+    /// Measured 2026-11-03 from Sydney over 150 handshakes each: AU 106 ms median, 199 ms worst; global 633 ms, 2,666 ms.
+    /// Release -> final 41-84 ms against 190-470. The worker's JWT, granted globally, is accepted on both.
+    static let host = "api.au.deepgram.com"
+    /// Where a retry goes: if the near host is what stalled, the same host is the wrong place to ask again.
+    static let fallbackHost = "api.deepgram.com"
     static let tokenMaximumAgeSeconds: TimeInterval = 45
-    /// `from_finalize` is "not guaranteed if there is no significant amount of audio" (docs/finalize, read
-    /// 2026-11-03), so the turn goes on with what it has. ponytail: guessed, tune from `cascadeSttFinalMs`.
-    static let finalizeDeadlineSeconds: TimeInterval = 1.5
-    /// Flushed that never comes must not hold the turn (20 flushes per 60 s is the documented limit; past it no Flushed).
-    static let flushDeadlineSeconds: TimeInterval = 10
+    /// Audio goes at most this much faster than real time. Nova-3 answers a Finalize with what it has decoded, so a
+    /// backlog sent as one burst (all the gate held, which for a short word is all of it) comes back short or empty:
+    /// "stop" empty 7 of 8 burst, 0 of 15 at 2x; "open safari" -> "Open" cold. 4x still lost tails ("...the word ship"), 2x none in 40.
+    static let sendRate = 2.0
+    /// Release -> Finalize answered, once the backlog is out: 41-84 ms in AU (worst of ~120: 610). Past this the socket is not coming back.
+    static let finalWaitSeconds: TimeInterval = 1.0
+    /// A retry's own handshake, on the far host: its worst measured, 2,666 ms.
+    static let retryHandshakeSeconds: TimeInterval = 3
+    /// The server's turn-end that never comes must not hold the turn. Quiet, not total: a long answer's end lands as late as its generation.
+    static let speechQuietSeconds: TimeInterval = 5
     /// Spare sockets live this long after a turn; past it the next press pays the handshake.
     /// ponytail: a conversation's gap, guessed. Idle costs a KeepAlive every 4 s (Deepgram drops a silent listen socket at 10 s).
     static let warmSeconds: TimeInterval = 120
     static let keepAliveSeconds: Double = 4
+    /// A spare that has not answered a ping for this long is replaced. A ping costs 20 ms in AU, one tick is 4 s, and a handshake
+    /// takes 2.7 s at worst, so a live socket always clears this. A stalled upgrade answered nothing for 45 s (A5, 2026-11-03).
+    static let warmStaleSeconds: TimeInterval = 6
+
+    static func isStale(openedUptime: TimeInterval, provenUptime: TimeInterval?, now: TimeInterval) -> Bool {
+        now - (provenUptime ?? openedUptime) > warmStaleSeconds
+    }
+
+    /// How long this much audio takes to send at `sendRate`. PCM16 mono.
+    static func sendSeconds(bytes: Int, sampleRate: Int) -> TimeInterval {
+        Double(bytes) / Double(2 * sampleRate) / sendRate
+    }
+
+    /// The release -> final deadline: what is still to be sent, then the wait.
+    static func finalDeadlineSeconds(unsentBytes: Int, sampleRate: Int, isRetry: Bool) -> TimeInterval {
+        sendSeconds(bytes: unsentBytes, sampleRate: sampleRate) + finalWaitSeconds + (isRetry ? retryHandshakeSeconds : 0)
+    }
+
+    enum NoFinal: Equatable { case useWordsSoFar, retry, giveUp }
+
+    /// The socket gave no final by the deadline, or ended first. Words already heard are the bounded answer once the owner has
+    /// let go; before that the audio still has somewhere to go.
+    static func noFinal(wordsSoFar: String, released: Bool, retried: Bool) -> NoFinal {
+        if released, wordsSoFar.contains(where: { $0.isLetter || $0.isNumber }) { return .useWordsSoFar }
+        return retried ? .giveUp : .retry
+    }
+
+    static func endsASentence(_ message: [String: Any]) -> Bool { message["type"] as? String == "Flushed" }
 
     struct Piece: Equatable {
         let transcript: String
@@ -92,8 +135,8 @@ nonisolated enum CascadeDeepgram {
 
     /// The bench's parameters, plus the installed app names as Nova-3 keyterms: the heard check needs
     /// "Cursor", not "Kasa" (the OpenAI stack's transcription prompt does the same).
-    static func listenURL(sampleRate: Int, keyterms: [String]) -> URL {
-        var components = URLComponents(string: "wss://api.deepgram.com/v1/listen")!
+    static func listenURL(sampleRate: Int, keyterms: [String], host: String = host) -> URL {
+        var components = URLComponents(string: "wss://\(host)/v1/listen")!
         components.queryItems = [
             URLQueryItem(name: "model", value: "nova-3"), URLQueryItem(name: "encoding", value: "linear16"),
             URLQueryItem(name: "sample_rate", value: String(sampleRate)), URLQueryItem(name: "channels", value: "1"),
@@ -104,7 +147,7 @@ nonisolated enum CascadeDeepgram {
 
     /// PCM16 mono at the session player's rate.
     static func speakURL(sampleRate: Int) -> URL {
-        var components = URLComponents(string: "wss://api.deepgram.com/v1/speak")!
+        var components = URLComponents(string: "wss://\(host)/v1/speak")!
         components.queryItems = [
             URLQueryItem(name: "model", value: voice), URLQueryItem(name: "encoding", value: "linear16"),
             URLQueryItem(name: "sample_rate", value: String(sampleRate))
@@ -255,6 +298,27 @@ nonisolated enum CascadeClaude {
 
 // MARK: - The legs
 
+/// A spare socket and the last proof it is alive. A ping's pong needs the receive loop `start` runs, and costs nothing.
+@MainActor
+private final class WarmSocket {
+    let socket: VoiceBenchWebSocket
+    let openedUptime = ProcessInfo.processInfo.systemUptime
+    var provenUptime: TimeInterval?
+
+    init(_ socket: VoiceBenchWebSocket) { self.socket = socket }
+
+    var isStale: Bool {
+        CascadeDeepgram.isStale(openedUptime: openedUptime, provenUptime: provenUptime, now: ProcessInfo.processInfo.systemUptime)
+    }
+
+    func ping() {
+        socket.task.sendPing { [weak self] error in
+            guard error == nil else { return }
+            Task { @MainActor in self?.provenUptime = ProcessInfo.processInfo.systemUptime }
+        }
+    }
+}
+
 @MainActor
 final class CascadeVoicePipeline {
     // Set once by the connection: all it needs to know of a reply.
@@ -263,6 +327,8 @@ final class CascadeVoicePipeline {
     var onToolCalls: ([RealtimeToolCall], TimeInterval) -> Void = { _, _ in }
     var onTurnDone: (_ arrival: TimeInterval, _ givingUpOnFollowUp: Bool) -> Void = { _, _ in }
     var onFailed: (String) -> Void = { _ in }
+    /// The owner's words are complete and the model is about to be asked: what they just changed goes in with them.
+    var contextForHeardWords: (RealtimeTurnMarks) -> String? = { _ in nil }
 
     private let system: String
     private let tools: [[String: Any]]
@@ -275,8 +341,16 @@ final class CascadeVoicePipeline {
     /// Whose words `stt` is hearing: a warm socket is opened before its turn exists.
     private weak var sttMarks: RealtimeTurnMarks?
     private var finals: [String] = []
-    private var warmListening: VoiceBenchWebSocket?
-    private var warmSpeaking: VoiceBenchWebSocket?
+    /// All the owner has said this turn, so a socket that stalls or hears nothing can be replaced.
+    private var turnAudio: [Data] = []
+    private var sentChunks = 0
+    private var nextSendUptime: TimeInterval?
+    private var sttPump: Task<Void, Never>?
+    private var sttReleased = false
+    private var sttRetried = false
+    private var finalDeadline: Task<Void, Never>?
+    private var warmListening: WarmSocket?
+    private var warmSpeaking: WarmSocket?
     private var warmKeeper: Task<Void, Never>?
     private var tts: VoiceBenchWebSocket?
     private var ttsSends: Task<Void, Never>?
@@ -297,7 +371,8 @@ final class CascadeVoicePipeline {
     /// Text of the request in flight, nil once it finished: what a barge-in keeps of it.
     private var partialText: String?
     private var sentenceCount = 0
-    private var flushedCount = 0
+    private var sentencesEnded = 0
+    private var lastSpeechUptime: TimeInterval = 0
     private var modelDone = false
     private var givingUp = false
 
@@ -317,36 +392,54 @@ final class CascadeVoicePipeline {
 
     func close() {
         cancelReply()
-        stt?.close()
-        stt = nil
+        closeListening()
         closeWarm()
     }
 
     private func closeWarm() {
         warmKeeper?.cancel()
         warmKeeper = nil
-        warmListening?.close()
+        warmListening?.socket.close()
         warmListening = nil
-        warmSpeaking?.close()
+        warmSpeaking?.socket.close()
         warmSpeaking = nil
     }
 
-    /// A spare pair for the next turn, and the deadline restarted.
+    /// A spare pair for the next turn, and the deadline restarted. A send never holds this loop:
+    /// one on a socket whose upgrade stalled does not return, and that is the socket to replace.
     private func warmUp() {
         warmKeeper?.cancel()
         warmKeeper = Task { @MainActor [weak self] in
-            guard let self, let token = try? await self.validToken(), !Task.isCancelled else { return }
-            if self.warmListening == nil { self.warmListening = self.openListening(token: token) }
-            if self.warmSpeaking == nil { self.warmSpeaking = self.openSpeech(token: token) }
+            guard let self else { return }
             let deadline = self.uptime + CascadeDeepgram.warmSeconds
             while self.uptime < deadline {
+                await self.openMissingWarm()
+                guard !Task.isCancelled else { return }
+                self.warmListening?.ping()
+                self.warmSpeaking?.ping()
+                if let listening = self.warmListening?.socket { Task { try? await listening.sendJSON(["type": "KeepAlive"]) } }
                 try? await Task.sleep(for: .seconds(CascadeDeepgram.keepAliveSeconds))
                 guard !Task.isCancelled else { return }
-                try? await self.warmListening?.sendJSON(["type": "KeepAlive"])
             }
             self.warmKeeper = nil
             self.closeWarm()
         }
+    }
+
+    private func openMissingWarm() async {
+        if warmListening?.isStale == true {
+            currentTurn()?.events.append(("stt.warmStale", uptime))
+            warmListening?.socket.close()
+            warmListening = nil
+        }
+        if warmSpeaking?.isStale == true {
+            currentTurn()?.events.append(("tts.warmStale", uptime))
+            warmSpeaking?.socket.close()
+            warmSpeaking = nil
+        }
+        guard warmListening == nil || warmSpeaking == nil, let token = try? await validToken(), !Task.isCancelled else { return }
+        if warmListening == nil { warmListening = WarmSocket(openListening(token: token)) }
+        if warmSpeaking == nil { warmSpeaking = WarmSocket(openSpeech(token: token)) }
     }
 
     private func validToken() async throws -> String {
@@ -375,11 +468,19 @@ final class CascadeVoicePipeline {
         if stt != nil {
             pendingImages = []
             pendingContext = []
-            stt?.close()
-            stt = nil
         }
+        closeListening()
         cancelReply()
         warmUp()
+    }
+
+    private func closeListening() {
+        finalDeadline?.cancel()
+        finalDeadline = nil
+        sttPump?.cancel()
+        sttPump = nil
+        stt?.close()
+        stt = nil
     }
 
     private func cancelReply() {
@@ -396,7 +497,7 @@ final class CascadeVoicePipeline {
         oddByte = nil
         splitter = CascadeSentenceSplitter()
         sentenceCount = 0
-        flushedCount = 0
+        sentencesEnded = 0
         modelDone = false
         givingUp = false
     }
@@ -405,80 +506,166 @@ final class CascadeVoicePipeline {
 
     func beginOwnerTurn(marks: RealtimeTurnMarks) async throws {
         cancelReply()
-        stt?.close()
-        stt = nil
+        closeListening()
         finals = []
         sttMarks = marks
-        let listening: VoiceBenchWebSocket
-        if let warm = warmListening {
-            listening = warm
-            warmListening = nil
-        } else {
-            listening = openListening(token: try await validToken())
-        }
-        stt = listening
+        turnAudio = []
+        sentChunks = 0
+        nextSendUptime = nil
+        sttReleased = false
+        sttRetried = false
+        let warm = warmListening.flatMap { $0.isStale ? nil : $0 }
+        if warm == nil { warmListening?.socket.close() }
+        warmListening = nil
+        if let warm { stt = warm.socket } else { stt = openListening(token: try await validToken()) }
+        armOpenDeadline(marks: marks)
         tts = try await takeSpeech()
     }
 
     private func takeSpeech() async throws -> VoiceBenchWebSocket {
         oddByte = nil
-        if let warm = warmSpeaking {
-            warmSpeaking = nil
-            return warm
-        }
+        let warm = warmSpeaking.flatMap { $0.isStale ? nil : $0 }
+        if warm == nil { warmSpeaking?.socket.close() }
+        warmSpeaking = nil
+        if let warm { return warm.socket }
         return openSpeech(token: try await validToken())
     }
 
-    private func openListening(token: String) -> VoiceBenchWebSocket {
-        let listening = deepgramSocket(CascadeDeepgram.listenURL(sampleRate: inputSampleRate, keyterms: keyterms), token: token)
+    private func openListening(token: String, host: String = CascadeDeepgram.host) -> VoiceBenchWebSocket {
+        let listening = deepgramSocket(CascadeDeepgram.listenURL(sampleRate: inputSampleRate, keyterms: keyterms, host: host), token: token)
         listening.start(onMessage: { [weak self] message, arrival in
             guard let self, self.stt === listening, let marks = self.sttMarks, let piece = CascadeDeepgram.piece(from: message) else { return }
             if piece.isFinal, !piece.transcript.isEmpty { self.finals.append(piece.transcript) }
             // Partials too, as Gemini's pieces: "stop" stops a task while the owner still says it.
             marks.heardText = (self.finals + (piece.isFinal ? [] : [piece.transcript])).joined(separator: " ")
-            if piece.fromFinalize { self.heardAll(marks: marks, arrival: arrival) }
-        }, onEnd: { [weak self] error in
-            guard let self else { return }
-            if self.warmListening === listening { self.warmListening = nil }
-            guard self.stt === listening else { return }
-            if let marks = self.sttMarks, marks.lastAudioSentUptime != nil {
-                self.heardAll(marks: marks, arrival: self.uptime)
-            } else {
-                self.onFailed(listening.failureKind(for: error, stage: "cascade:stt"))
+            guard piece.fromFinalize else { return }
+            // Nothing heard in a press the gate heard a voice in: it may be noise, or the words may be lost. Asked once more.
+            if !marks.heardText.contains(where: { $0.isLetter || $0.isNumber }), !self.sttRetried {
+                return self.retryListening(marks: marks, why: "empty")
             }
+            self.heardAll(marks: marks, arrival: arrival)
+        }, onEnd: { [weak self] _ in
+            guard let self else { return }
+            if self.warmListening?.socket === listening { self.warmListening = nil }
+            guard self.stt === listening, let marks = self.sttMarks else { return }
+            self.noFinal(marks: marks, why: "socketEnded")
         })
         return listening
     }
 
-    /// Queued by the socket until its handshake is done, in order.
-    func sendAudio(_ pcmChunk: Data) async throws {
-        try await stt?.task.send(.data(pcmChunk))
+    /// Never waits on the network: the first send's completion waits for the upgrade, and an upgrade can stall for
+    /// 45 s (A5, 2026-11-03; a 60 s timeout once in ~170 sockets from the bench). The turn's own loop must not be behind that.
+    func sendAudio(_ pcmChunk: Data) {
+        turnAudio.append(pcmChunk)
+        pumpAudio()
     }
 
-    /// The release. `marks.lastAudioSentUptime` is set: the clock runs.
-    func endOwnerTurn(marks: RealtimeTurnMarks) async throws {
-        guard let listening = stt else { return heardAll(marks: marks, arrival: uptime) }
-        try await listening.sendJSON(["type": "Finalize"])
+    /// `turnAudio` in order, at `sendRate` from when the socket opens; then the Finalize, if the owner has let go.
+    private func pumpAudio() {
+        guard sttPump == nil, let listening = stt else { return }
+        sttPump = Task { @MainActor [weak self] in
+            while let self, self.stt === listening, !Task.isCancelled {
+                guard self.sentChunks < self.turnAudio.count else {
+                    self.sttPump = nil
+                    if self.sttReleased { Task { try? await listening.sendJSON(["type": "Finalize"]) } }
+                    return
+                }
+                let chunk = self.turnAudio[self.sentChunks]
+                self.sentChunks += 1
+                // The socket's end is the receive loop's to report (`noFinal`).
+                guard (try? await listening.task.send(.data(chunk))) != nil else { return }
+                if self.nextSendUptime == nil { self.sttMarks?.events.append(("stt.opened", self.uptime)) }
+                let next = max(self.nextSendUptime ?? 0, self.uptime) + CascadeDeepgram.sendSeconds(bytes: chunk.count, sampleRate: self.inputSampleRate)
+                self.nextSendUptime = next
+                if next > self.uptime { try? await Task.sleep(for: .seconds(next - self.uptime)) }
+            }
+        }
+    }
+
+    /// The release. `marks.lastAudioSentUptime` is set: the clock runs, and it bounds the owner's words from here.
+    func endOwnerTurn(marks: RealtimeTurnMarks) {
+        sttReleased = true
+        if sttPump == nil, let listening = stt { Task { try? await listening.sendJSON(["type": "Finalize"]) } }
+        armFinalDeadline(marks: marks)
+    }
+
+    /// A long hold must not wait for its release to find the socket never opened.
+    private func armOpenDeadline(marks: RealtimeTurnMarks) {
+        finalDeadline?.cancel()
+        finalDeadline = Task { @MainActor [weak self, weak marks] in
+            try? await Task.sleep(for: .seconds(CascadeDeepgram.retryHandshakeSeconds))
+            guard !Task.isCancelled, let self, let marks, self.nextSendUptime == nil else { return }
+            self.noFinal(marks: marks, why: "noOpen")
+        }
+    }
+
+    private func armFinalDeadline(marks: RealtimeTurnMarks) {
+        // Unsent behind a socket that never opened is not time owed: the wait alone, then a socket that works.
+        let unsent = nextSendUptime == nil ? 0 : turnAudio[min(sentChunks, turnAudio.count)...].reduce(0) { $0 + $1.count }
+        let seconds = CascadeDeepgram.finalDeadlineSeconds(unsentBytes: unsent, sampleRate: inputSampleRate, isRetry: sttRetried)
+        finalDeadline?.cancel()
+        finalDeadline = Task { @MainActor [weak self, weak marks] in
+            try? await Task.sleep(for: .seconds(seconds))
+            guard !Task.isCancelled, let self, let marks else { return }
+            self.noFinal(marks: marks, why: "timeout")
+        }
+    }
+
+    /// No final by the deadline, or the socket ended first.
+    private func noFinal(marks: RealtimeTurnMarks, why: String) {
+        guard currentTurn() === marks, !marks.supersededByPress, marks.heardCompleteUptime == nil else { return }
+        switch CascadeDeepgram.noFinal(wordsSoFar: marks.heardText, released: sttReleased, retried: sttRetried) {
+        case .useWordsSoFar:
+            marks.events.append(("stt.partialUsed:\(why)", uptime))
+            heardAll(marks: marks, arrival: uptime)
+        case .retry:
+            retryListening(marks: marks, why: why)
+        case .giveUp:
+            marks.events.append(("stt.gaveUp:\(why)", uptime))
+            onFailed("cascade:stt:noFinal")
+        }
+    }
+
+    /// One more socket, on the far host, hears everything from the start.
+    private func retryListening(marks: RealtimeTurnMarks, why: String) {
+        marks.events.append(("stt.retry:\(why)", uptime))
+        sttRetried = true
+        closeListening()
+        finals = []
+        marks.heardText = ""
+        sentChunks = 0
+        nextSendUptime = nil
+        if sttReleased { armFinalDeadline(marks: marks) } else { armOpenDeadline(marks: marks) }
         Task { @MainActor [weak self, weak marks] in
-            try? await Task.sleep(for: .seconds(CascadeDeepgram.finalizeDeadlineSeconds))
-            guard let self, let marks, self.stt === listening else { return }
-            marks.events.append(("stt.noFinalize", self.uptime))
-            self.heardAll(marks: marks, arrival: self.uptime)
+            guard let self, let marks else { return }
+            do {
+                let token = try await self.validToken()
+                guard self.currentTurn() === marks, !marks.supersededByPress, marks.heardCompleteUptime == nil else { return }
+                self.stt = self.openListening(token: token, host: CascadeDeepgram.fallbackHost)
+                self.pumpAudio()
+            } catch {
+                self.onFailed((error as? VoiceBenchFailure)?.kind ?? VoiceBenchRun.errorKind(for: error, stage: "cascade:stt"))
+            }
         }
     }
 
     /// The owner's words are in: the heard check can read them, and the model is asked.
     private func heardAll(marks: RealtimeTurnMarks, arrival: TimeInterval) {
-        guard let listening = stt else { return }
+        let listening = stt
+        finalDeadline?.cancel()
+        finalDeadline = nil
+        sttPump?.cancel()
+        sttPump = nil
         stt = nil
-        Task { try? await listening.sendJSON(["type": "CloseStream"]); listening.close() }
+        turnAudio = []
+        Task { try? await listening?.sendJSON(["type": "CloseStream"]); listening?.close() }
         marks.heardCompleteUptime = arrival
         marks.cascadeSttFinalUptime = arrival
         marks.events.append(("stt.final", arrival))
         guard currentTurn() === marks, !marks.supersededByPress else { return }
         let words = SecretScanner.redact(marks.heardText.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !words.isEmpty else {
-            // The gate heard a voice and Deepgram no words: nothing to ask; the notch says "No reply".
+            // The gate heard a voice and Deepgram no words, twice: nothing to ask; the notch says "No reply", and a running task is told aloud (`RealtimeVoiceSession`).
             marks.events.append(("stt.empty", arrival))
             pendingImages = []
             pendingContext = []
@@ -486,6 +673,7 @@ final class CascadeVoicePipeline {
             warmUp()
             return onTurnDone(arrival, false)
         }
+        if let line = contextForHeardWords(marks) { pendingContext.append(SecretScanner.redact(line)) }
         beginHistoryTurn(lastText: words)
         startRequest(marks: marks)
     }
@@ -578,6 +766,10 @@ final class CascadeVoicePipeline {
             WorkerConfiguration.attachClientKey(to: &request)
             // Sorted: the same tools and system are the same bytes, which is what the prompt cache matches.
             request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+            // `scripts/cascade-claude-bench.py` replays these. Holds the turn's screenshot: only on request, and fixture pages only.
+            if let folder = CommandLine.arguments.first(where: { $0.hasPrefix("--cascade-dump-bodies=") })?.dropFirst("--cascade-dump-bodies=".count) {
+                try? request.httpBody?.write(to: URL(fileURLWithPath: "\(folder)/\(UUID().uuidString.prefix(8))-r\(requestsThisTurn).json"))
+            }
             let (bytes, response) = try await VoiceStackBenchmark.benchURLSession.bytes(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             guard (200...299).contains(status) else {
@@ -664,21 +856,20 @@ final class CascadeVoicePipeline {
         let speaking = deepgramSocket(CascadeDeepgram.speakURL(sampleRate: VoiceStackChoice.outputSampleRate), token: token)
         speaking.start(onMessage: { [weak self] message, arrival in
             guard let self, self.tts === speaking else { return }
-            switch message["type"] as? String {
-            case "Flushed":
-                self.flushedCount += 1
-                self.finishIfSpoken(arrival: arrival)
-            case "Warning":
+            if message["type"] as? String == "Warning" {
                 self.currentTurn()?.events.append(("tts.warning:\(message["code"] as? String ?? "-")", arrival))
-            default: break
+            }
+            if CascadeDeepgram.endsASentence(message) {
+                self.sentencesEnded += 1
+                self.finishIfSpoken(arrival: arrival)
             }
         }, onEnd: { [weak self] error in
             guard let self else { return }
-            if self.warmSpeaking === speaking { self.warmSpeaking = nil }
+            if self.warmSpeaking?.socket === speaking { self.warmSpeaking = nil }
             guard self.tts === speaking else { return }
             // Idle through a long hold or a card: Deepgram may close it, and the next sentence opens another.
             self.tts = nil
-            if self.flushedCount < self.sentenceCount { self.onFailed(speaking.failureKind(for: error, stage: "cascade:tts")) }
+            if self.sentencesEnded < self.sentenceCount { self.onFailed(speaking.failureKind(for: error, stage: "cascade:tts")) }
         }, onBinary: { [weak self] audio, arrival in
             guard let self, self.tts === speaking else { return }
             self.receivedSpeech(audio, arrival: arrival)
@@ -687,6 +878,7 @@ final class CascadeVoicePipeline {
     }
 
     private func receivedSpeech(_ frame: Data, arrival: TimeInterval) {
+        lastSpeechUptime = arrival
         var audio = Data(capacity: frame.count + 1)
         if let oddByte { audio.append(oddByte) }
         audio.append(frame)
@@ -723,21 +915,27 @@ final class CascadeVoicePipeline {
         finishIfSpoken(arrival: uptime)
         guard modelDone else { return }
         let speaking = tts
+        lastSpeechUptime = uptime
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(CascadeDeepgram.flushDeadlineSeconds))
+            while let self {
+                let quietUntil = self.lastSpeechUptime + CascadeDeepgram.speechQuietSeconds
+                if quietUntil <= self.uptime { break }
+                try? await Task.sleep(for: .seconds(quietUntil - self.uptime))
+                guard self.tts === speaking, self.modelDone else { return }
+            }
             guard let self, self.tts === speaking, self.modelDone else { return }
-            marks.events.append(("tts.noFlushed", self.uptime))
+            marks.events.append(("tts.noEnd", self.uptime))
             // Not one sample of what it was asked to say: that is a failed leg, never a silent turn.
             if marks.firstAudioUptime == nil { return self.onFailed("cascade:tts:noAudio") }
             self.givingUp = self.givingUp || !marks.toolCalls.isEmpty
-            self.flushedCount = self.sentenceCount
+            self.sentencesEnded = self.sentenceCount
             self.finishIfSpoken(arrival: self.uptime)
         }
     }
 
     /// The model is done and every sentence's audio has arrived: the turn is over.
     private func finishIfSpoken(arrival: TimeInterval) {
-        guard modelDone, flushedCount >= sentenceCount else { return }
+        guard modelDone, sentencesEnded >= sentenceCount else { return }
         let speaking = tts
         let gaveUp = givingUp
         tts = nil
@@ -750,8 +948,7 @@ final class CascadeVoicePipeline {
 
     /// The turn failed: the connection fails it on the shared path. Nothing is left running.
     func stopAfterFailure() {
-        stt?.close()
-        stt = nil
+        closeListening()
         cancelReply()
         warmUp()
     }

@@ -551,13 +551,15 @@ final class RealtimeVoiceSession {
     private func watchForStopWords(in marks: RealtimeTurnMarks) {
         guard agentLoop?.isRunning == true else { return }
         let deadline = uptime + 120
+        // Live B8, cascade, 2026-11-03: "Stop." stopped the task, but the request had left before this poll's line, and the
+        // voice answered "I have no way to halt the task". The words' last moment gets the same stop, in the same tick.
+        connection?.contextForHeardWords = { [weak self] marks in self?.stopTaskIfOwnerSaidSo(marks) }
         Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self, self.agentLoop?.isRunning == true, self.uptime < deadline else { return }
                 if Self.ownerWordsStopTask(marks.heardText) {
-                    guard let stoppedAt = self.stopAgentLoop() else { return }
                     // Live B8 2026-10-08: stopped mid-turn, the voice still read "running" and tried to press; tell THIS turn.
-                    let line = AgentLoop.stoppedContextLine(step: stoppedAt)
+                    guard let line = self.stopTaskIfOwnerSaidSo(marks) else { return }
                     if let connection = self.connection, connection.turn === marks {
                         try? await connection.sendContextText(line)
                     } else {
@@ -569,6 +571,12 @@ final class RealtimeVoiceSession {
                 try? await Task.sleep(for: .milliseconds(50))
             }
         }
+    }
+
+    /// The line telling the voice, when the owner's words so far stopped a running task.
+    private func stopTaskIfOwnerSaidSo(_ marks: RealtimeTurnMarks) -> String? {
+        guard agentLoop?.isRunning == true, Self.ownerWordsStopTask(marks.heardText), let stoppedAt = stopAgentLoop() else { return nil }
+        return AgentLoop.stoppedContextLine(step: stoppedAt)
     }
 
     /// The owner said stop: the running task stops before its next tool call,
@@ -921,11 +929,13 @@ final class RealtimeVoiceSession {
             if !probeMode, let liveTurn, self.liveTurn === liveTurn, let marks = liveTurn.marks, connection.turn === marks, !marks.supersededByPress {
                 await afterReply(liveTurn, marks: marks, connection: connection)
             }
+            tellOwnerIfUnheardDuringTask(liveTurn)
             if self.liveTurn === liveTurn { writeLiveTurnLine() }
         } catch {
             print("❌ realtime: turn failed: \(error)")
             // A barge-in already wrote this turn's line and owns the state now.
             guard self.liveTurn === liveTurn, liveTurn != nil else { return }
+            tellOwnerIfUnheardDuringTask(liveTurn)
             let errorKind = (error as? VoiceBenchFailure)?.kind ?? VoiceBenchRun.errorKind(for: error, stage: selectedStack.rawValue)
             writeLiveTurnLine(errorKind: errorKind)
             // A refusal by the voice service says so on the notch, never a silent idle.
@@ -969,6 +979,21 @@ final class RealtimeVoiceSession {
         marks.ownerFocus = note
         if let target { marks.keyDownPointer = target }
         JarvisNotch.shared.handle(.focusShown(name: note.notchName))
+    }
+
+    /// The gate heard a voice, a task is running, and no words came back. It may have been "stop": the task
+    /// must not run on unnoticed, and it must not be cancelled on a guess. B8, cascade, 2026-11-03: empty, silent, task done.
+    private func tellOwnerIfUnheardDuringTask(_ liveTurn: LiveTurn?) {
+        guard Self.unheardDuringTask(heard: liveTurn?.marks?.heardText ?? "", superseded: liveTurn?.marks?.supersededByPress ?? false,
+                                     gotReply: liveTurn?.marks.map { $0.firstAudioUptime != nil || !$0.toolCalls.isEmpty } ?? false,
+                                     taskRunning: agentLoop?.isRunning == true) else { return }
+        enqueueAgentSpeech(Self.unheardDuringTaskLine, final: true)
+    }
+
+    nonisolated static let unheardDuringTaskLine = "in one short sentence, say \"I didn't catch that, sir.\" and nothing else. call no tool."
+
+    nonisolated static func unheardDuringTask(heard: String, superseded: Bool, gotReply: Bool, taskRunning: Bool) -> Bool {
+        taskRunning && !superseded && !gotReply && !heard.contains(where: { $0.isLetter || $0.isNumber })
     }
 
     /// A press the gate heard no words in: no turn, no model call. The barge-in
