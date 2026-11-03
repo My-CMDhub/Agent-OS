@@ -165,7 +165,8 @@ struct CascadeVoicePipelineTests {
         let listen = CascadeDeepgram.listenURL(sampleRate: 16_000, keyterms: ["Cursor", "Google Chrome"]).absoluteString
         #expect(listen.contains("model=nova-3") && listen.contains("sample_rate=16000") && listen.contains("keyterm=Google%20Chrome"))
         let speak = CascadeDeepgram.speakURL(sampleRate: VoiceStackChoice.outputSampleRate).absoluteString
-        #expect(speak.contains("aura-2-") && speak.contains("encoding=linear16") && speak.contains("sample_rate=24000"))
+        #expect(speak.contains("/v2/speak") && speak.contains("model=flux-colin-en") && speak.contains("speed=1.2")
+            && speak.contains("encoding=linear16") && speak.contains("sample_rate=24000"))
     }
 
     /// `smart_format` fused "open linkedin dot com" into "Openlinkedin.com.", which the heard check rightly refuses.
@@ -219,6 +220,14 @@ struct CascadeVoicePipelineTests {
         #expect(!RealtimeVoiceSession.unheardDuringTask(heard: "", superseded: true, gotReply: false, taskRunning: true))
         #expect(!RealtimeVoiceSession.unheardDuringTask(heard: "", superseded: false, gotReply: true, taskRunning: true))
         #expect(!RealtimeVoiceSession.ownerWordsStopTask(""))
+    }
+
+    @Test func fluxEndsASentenceOnItsMetadataNotFlushed() {
+        #expect(CascadeDeepgram.endsASentence(["type": "SpeechMetadata"]))
+        #expect(!CascadeDeepgram.endsASentence(["type": "Flushed"]))
+        #expect(!CascadeDeepgram.endsASentence(["type": "SpeechStarted"]))
+        #expect(CascadeDeepgram.endsASentence(["type": "Warning", "code": "NO_SYNTHESIZABLE_TEXT"]))
+        #expect(!CascadeDeepgram.endsASentence(["type": "Warning", "code": "INPUT_MARKUP_STRIPPED"]))
     }
 
     @Test func aToolResultIsAMessagesAPIBlockAndScrubbed() {
