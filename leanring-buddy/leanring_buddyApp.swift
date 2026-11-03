@@ -237,6 +237,17 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // One spoken ask per real card (`CardAskProbe`): a do_task card with a live Gemini session, then with none.
+        // Same gate as the runner. Cards are denied, never allowed. Quits.
+        if CommandLine.arguments.contains("--card-ask-probe") {
+            confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
+            Task { @MainActor in
+                await CardAskProbe.run(harness: self.harnessServer, confirmations: self.confirmations)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // The "what is in front" line across desktop / Finder window / minimised (FrontStateProbe), then quits.
         if CommandLine.arguments.contains("--front-state-probe") {
             Task { @MainActor in
