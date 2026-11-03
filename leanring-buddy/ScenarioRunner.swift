@@ -55,6 +55,8 @@ struct ScenarioOutcome {
     var voiceDecisions: [RealtimeToolDecision] = []
     /// agent-loop.log step lines this turn's task wrote.
     var agentSteps: [[String: Any]] = []
+    /// Turns spoken before this one in the same session (section K's "that one", "yeah do it").
+    var earlier: [(said: String, decisions: [RealtimeToolDecision])] = []
     var transcript: String { marks?.transcript ?? "" }
     var decisions: [RealtimeToolDecision] { marks?.decisions ?? [] }
     /// Every error code a tool result or heard check carried.
@@ -118,6 +120,8 @@ struct RunnerScenario {
         case googleSearch(String)
         /// TextEdit must not be running (B4): a running one holds the owner's documents.
         case textEditNotRunning
+        /// None of these may be running (one that is holds the owner's windows: skipped), Finder in front.
+        case appsNotRunning([String])
         /// Section R: Cursor's window on this repo in front, opened by the run if none is
         /// visible; skipped when Cursor is not running or the window holds unsaved edits.
         case cursorRepo
@@ -152,6 +156,10 @@ struct RunnerScenario {
     var doneNeedsAnswer = false
     /// What a person takes (benchmark.md's "human estimate").
     var humanEstimate: String? = nil
+    /// Undoes what the turn may have made beyond an app it launched (a Finder window); reported under cleanup.
+    var undo: (@MainActor (ScenarioContext) async -> [String: Any])? = nil
+    /// Fixtures spoken first in the same session, each answered and heard out before the next.
+    var earlier: [String] = []
 
     var fixtureID: String { utterance ?? id }
 }
@@ -208,7 +216,7 @@ enum ScenarioRunner {
         let wanted = CommandLine.arguments.first { $0.hasPrefix("--scenario-ids=") }
             .map { $0.dropFirst("--scenario-ids=".count).split(separator: ",").map(String.init) }
         let stacks = stacksArgument()
-        let scenarios = wanted.map { ids in ids.compactMap { id in (ScenarioCatalog.catalog + ScenarioCatalog.taskStatus).first { $0.id == id } } }
+        let scenarios = wanted.map { ids in ids.compactMap { id in (ScenarioCatalog.catalog + ScenarioCatalog.taskStatus + ScenarioCatalog.casualSpeech).first { $0.id == id } } }
             ?? ScenarioCatalog.all
         let utterances = loadUtterances()
         meta["scenarios"] = scenarios.map(\.id)
@@ -258,7 +266,7 @@ enum ScenarioRunner {
                 }
                 var loaded: [String: (clip16k: VoiceBenchPCMClip, clip24k: VoiceBenchPCMClip)] = [:]
                 var fixtureProblem: String?
-                for fixtureID in [scenario.prelude?.utterance, scenario.fixtureID].compactMap({ $0 }) {
+                for fixtureID in [scenario.prelude?.utterance, scenario.fixtureID].compactMap({ $0 }) + scenario.earlier {
                     switch clips(for: fixtureID, utterances: utterances) {
                     case .success(let pair): loaded[fixtureID] = pair
                     case .failure(let failure): fixtureProblem = "\(fixtureID): \(failure.kind)"
@@ -270,7 +278,7 @@ enum ScenarioRunner {
                     results.append(result)
                     continue
                 }
-                turns += 1
+                turns += 1 + scenario.earlier.count
                 let (scenarioResult, spent, answers, abort) = await runScenario(
                     scenario, stack: stack, clips: loaded, harnessAnswer: harnessAnswer, confirmations: confirmations)
                 result.merge(scenarioResult) { _, new in new }
@@ -472,6 +480,7 @@ enum ScenarioRunner {
         if let window = context.window {
             cleanup["window"] = await Task.detached { ScenarioRunnerAX.close(window) }.value
         }
+        if let undo = scenario.undo { cleanup["undo"] = await undo(context) }
         // Windows that carry the run's nonce and were never recorded (the start gave up
         // waiting for them): closed by that identity, each by its own close button.
         if let nonce = context.nonce, context.window == nil {
@@ -594,6 +603,7 @@ enum ScenarioRunner {
             "firstAudioMs": line?.firstAudioMs ?? NSNull(),
             "releaseToSpokenResultMs": line?.releaseToSpokenResultMs ?? NSNull(),
             "turnDoneMs": line?.turnDoneMs ?? NSNull(),
+            "replyAudioEndMs": line?.replyAudioEndMs ?? NSNull(),
             "sessionWasWarm": line?.sessionWasWarm ?? NSNull(),
             "turnEndReason": line?.turnEndReason ?? NSNull(),
             "errorKind": line?.errorKind ?? NSNull(),
@@ -641,6 +651,10 @@ enum ScenarioRunner {
             context.baseline["cursorActiveFile"] = active ?? NSNull()
             if let shells { context.baseline["cursorShells"] = shells.sorted().map(Int.init) }
             return (front == true, evidence)
+        case .appsNotRunning(let bundleIdentifiers):
+            let running = bundleIdentifiers.filter { !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty }
+            guard running.isEmpty else { return (false, ["skip": "already running, so the owner's: \(running.joined(separator: ", "))"]) }
+            return await setStart(.finderFront, context: context)
         case .textEditNotRunning:
             let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.TextEdit").isEmpty
             return (!running, ["textEditRunning": running])
@@ -778,6 +792,28 @@ enum ScenarioRunner {
             _ = await speak(prelude.utterance)
             let until = uptime + prelude.seconds
             while uptime < until, session.agentLoop == nil { watch(); try? await Task.sleep(for: .milliseconds(100)) }
+        }
+        for fixtureID in scenario.earlier {
+            guard let id = await speak(fixtureID) else { continue }
+            let until = uptime + turnTimeoutSeconds
+            while uptime < until, box.lines[id] == nil { watch(); try? await Task.sleep(for: .milliseconds(100)) }
+            var said = box.marks[id]?.transcript ?? ""
+            var decisions = box.marks[id]?.decisions ?? []
+            if decisions.contains(where: { $0.call.name == RealtimeVoiceVerbs.doTaskName && $0.dispatch?.harnessConfirmed == true }) {
+                let taskUntil = uptime + AgentLoop.maximumSeconds + 40
+                while uptime < taskUntil, box.agentReport == nil { watch(); try? await Task.sleep(for: .milliseconds(100)) }
+                if let report = box.agentReport {
+                    said += " " + report.spoken
+                    decisions += report.decisions
+                }
+                box.agentReport = nil
+                box.agentReportUptime = nil
+            }
+            box.outcome.earlier.append((said, decisions))
+            // A person hears the reply out: a press here would be a barge-in, a different scenario.
+            let heardOut = uptime + 30
+            while uptime < heardOut, session.isReplyAudioPlaying { watch(); try? await Task.sleep(for: .milliseconds(100)) }
+            try? await Task.sleep(for: .seconds(1))
         }
         let turnID = await speak(scenario.fixtureID)
         let release = uptime

@@ -257,3 +257,45 @@ import Testing
     }
 }
 
+
+struct CasualSpeechClaimTests {
+    @Test func aPromiseIsNotAResultAndTheReportWins() {
+        #expect(CasualSpeechClaim.claim("Opening Safari now.") == .none)
+        #expect(CasualSpeechClaim.claim("I'll close it now, sir.") == .none)
+        #expect(CasualSpeechClaim.claim("Opening Safari now. Safari is open and in front, sir.") == .success)
+        #expect(CasualSpeechClaim.claim("On it, sir. I couldn't find that window.") == .failure)
+        #expect(CasualSpeechClaim.claim("Which one, sir?") == .none)
+    }
+
+    @Test func aDisagreementIsOnlyAClaimAgainstTheOutcome() {
+        #expect(CasualSpeechClaim.disagrees(.success, done: false))
+        #expect(CasualSpeechClaim.disagrees(.failure, done: true))
+        #expect(!CasualSpeechClaim.disagrees(.success, done: true))
+        #expect(!CasualSpeechClaim.disagrees(.failure, done: false))
+        #expect(!CasualSpeechClaim.disagrees(.none, done: false))
+    }
+
+    @Test func aQuestionAfterADoneTaskIsMannersUnlessItAsksWhich() {
+        #expect(CasualSpeechClaim.clarifying("Safari is ready, sir. What will you be needing?", done: true) == 0)
+        #expect(CasualSpeechClaim.clarifying("Which window, sir?", done: true) == 1)
+        #expect(CasualSpeechClaim.clarifying("Shall I minimise it, sir?", done: false) == 1)
+        #expect(CasualSpeechClaim.questions("Done. Anything else? Fine.") == ["Anything else?"])
+    }
+
+    @Test func anyRouteOutOfTheWayCountsAndAFailedReadDoesNot() {
+        #expect(CasualSpeechClaim.outOfTheWay(windowsBefore: 1, windows: 1, minimised: 1, hidden: false, running: true))
+        #expect(CasualSpeechClaim.outOfTheWay(windowsBefore: 2, windows: 1, minimised: 0, hidden: false, running: true))
+        #expect(CasualSpeechClaim.outOfTheWay(windowsBefore: 1, windows: 0, minimised: 0, hidden: false, running: false))
+        #expect(!CasualSpeechClaim.outOfTheWay(windowsBefore: 1, windows: 1, minimised: 0, hidden: false, running: true))
+        #expect(!CasualSpeechClaim.outOfTheWay(windowsBefore: 1, windows: nil, minimised: 0, hidden: false, running: true))
+    }
+
+    /// A scenario whose fixture has no line fails at run time as fixtureProblem, once per stack: caught here for nothing.
+    @MainActor @Test func everyCasualScenarioHasItsWords() {
+        let words = ScenarioRunner.loadUtterances()
+        for scenario in ScenarioCatalog.casualSpeech {
+            for fixture in scenario.earlier + [scenario.fixtureID] { #expect(words[fixture] != nil, "\(fixture)") }
+        }
+        #expect(ScenarioCatalog.casualSpeech.count == 20)
+    }
+}

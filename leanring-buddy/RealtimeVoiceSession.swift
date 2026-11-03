@@ -1078,6 +1078,8 @@ final class RealtimeVoiceSession {
             line.releaseToSpokenResultMs = Self.milliseconds(
                 from: released, to: marks.toolCalls.isEmpty ? marks.firstAudioUptime : marks.followUpFirstAudioUptime)
             line.turnDoneMs = bargedIn || errorKind != nil ? nil : Self.milliseconds(from: released, to: uptime)
+            // Done is when the provider finished sending; this is when the owner hears the last of it. A stack that streams faster than real time separates the two.
+            line.replyAudioEndMs = replyAudioEndsUptime > 0 ? Self.milliseconds(from: released, to: replyAudioEndsUptime) : nil
             // Negative: a completion that arrived while the key was still held was credited to this turn.
             line.finishedMs = Self.milliseconds(from: marks.lastAudioSentUptime, to: marks.finishedUptime)
             line.staleCompletionsIgnored = marks.staleCompletionsIgnored
@@ -1227,6 +1229,7 @@ nonisolated struct RealtimeLiveTurnLine {
     var followUpFirstAudioMs: Int?
     var releaseToSpokenResultMs: Int?
     var turnDoneMs: Int?
+    var replyAudioEndMs: Int?
     var bargedIn = false
     var errorKind: String?
     /// spoke | toolAnswered | silent | error | bargedIn | noSpeech (never sent) — how it really ended.
@@ -1294,7 +1297,7 @@ nonisolated struct RealtimeLiveTurnLine {
             "freshLook": value(freshLook), "freshLookMs": value(freshLookMs),
             "freshLookArrivedAfterSpeechStartMs": value(freshLookArrivedAfterSpeechStartMs),
             "followUpFirstAudioMs": value(followUpFirstAudioMs), "releaseToSpokenResultMs": value(releaseToSpokenResultMs),
-            "turnDoneMs": value(turnDoneMs), "bargedIn": bargedIn, "errorKind": value(errorKind),
+            "turnDoneMs": value(turnDoneMs), "replyAudioEndMs": value(replyAudioEndMs), "bargedIn": bargedIn, "errorKind": value(errorKind),
             "turnEndReason": value(turnEndReason), "watchdogFired": watchdogFired, "finishedMs": value(finishedMs), "staleCompletionsIgnored": staleCompletionsIgnored,
             "bargedInPreviousTurnId": value(bargedInPreviousTurnID), "previousAudioWasPlaying": previousAudioWasPlaying,
             "eventTrail": eventTrail, "notchTransitions": notchTransitions, "claimedWithoutReceipt": claimedWithoutReceipt,

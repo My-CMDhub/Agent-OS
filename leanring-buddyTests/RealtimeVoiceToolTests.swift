@@ -332,7 +332,7 @@ struct RealtimeVoiceToolTests {
         #expect(Set(parsed.keys) == [
             "kind", "stack", "turnId", "sessionWasWarm", "sessionSetupMs", "holdMs", "firstAudioMs", "toolCalled",
             "toolName", "toolCallMs", "harnessMs", "harnessStatus", "harnessError", "freshLook", "freshLookMs", "freshLookArrivedAfterSpeechStartMs",
-            "followUpFirstAudioMs", "releaseToSpokenResultMs", "turnDoneMs", "bargedIn", "errorKind", "notchTransitions",
+            "followUpFirstAudioMs", "releaseToSpokenResultMs", "replyAudioEndMs", "turnDoneMs", "bargedIn", "errorKind", "notchTransitions",
             "turnEndReason", "watchdogFired", "finishedMs", "staleCompletionsIgnored", "bargedInPreviousTurnId", "previousAudioWasPlaying", "eventTrail",
             "claimedWithoutReceipt", "internalWordsSpoken", "receiptCorrectionSent", "pointedWhenTelling",
             "speechVoicedMs", "speechLoudestDb", "speechQuietestDb",
