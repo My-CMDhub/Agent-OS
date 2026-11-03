@@ -491,6 +491,7 @@ final class AgentLoop {
     /// `questionUnread` asked once; a second done after it stands.
     private var challengedUnanswered = false
     private var sameRefusal: (error: String, count: Int)?
+    private var noProgress = AgentNoProgressGuard()
     private var lastError: String?
     private var webUsed: [String: Int] = [:]
     /// The owner denied a card this task: it acts no further, it reads, asks or reports.
@@ -535,6 +536,8 @@ final class AgentLoop {
         guard phase != .cancelled, let paused = pausedAsk else { return .failed(reason: "no task was waiting for an answer") }
         pausedAsk = nil
         heard = words
+        // The owner has spoken: "try it again" is theirs to ask.
+        noProgress = AgentNoProgressGuard()
         if let carry = liveCarry {
             carry.heard = words
             carry.readOnly = Self.isReadOnlyTask(words: words)
@@ -1127,6 +1130,12 @@ final class AgentLoop {
                 if phase == .waitingForCard { move(to: .acting) }
                 let ok = result["ok"] as? Bool == true
                 let error = ok ? nil : ((result["error"] as? String) ?? "failed")
+                // A hover acts on nothing, so it is the one acting tool never counted.
+                let noProgressVerdict = call.flatMap { call -> AgentNoProgressGuard.Verdict? in
+                    guard RealtimeVoiceVerbs.isActingTool(call.name), call.name != RealtimeVoiceVerbs.pointAtName else { return nil }
+                    return noProgress.record(key: AgentNoProgressGuard.key(for: call), ok: ok, error: error,
+                                             verification: result["verification"] as? String)
+                } ?? .carryOn
                 // App-shown text only: a page read, never the model's own arguments.
                 if ok, let text = Self.appShownText(toolName: kind, result: result) {
                     // Seen before the task changed anything, it was there already: never the task's.
@@ -1148,7 +1157,7 @@ final class AgentLoop {
                                         moreBelow: ok && toolName == AgentLoopTools.readPageName && result["moreBelow"] as? Bool == true,
                                         targets: call.flatMap(Self.itemTargets)))
                 var fields: [String: Any] = ["tool": isMember ? "computer.\(toolName)" : toolName, "args": args, "ok": ok, "error": error ?? NSNull(), "harnessMs": harnessMs,
-                                             "waitedForConfirmation": waited]
+                                             "waitedForConfirmation": waited, "verification": result["verification"] ?? NSNull()]
                 if !(web is NSNull) { fields["web"] = web }
                 traced(fields)
                 var shown = result.merging(["step": step]) { current, _ in current }
@@ -1159,6 +1168,7 @@ final class AgentLoop {
                         + "route: find_on_screen to see what is there, a menu item from the App verbs (most clicks have a menu twin), "
                         + "or another way in"
                 }
+                if case .hint(let hint) = noProgressVerdict, shown["repeatedRefusal"] == nil { shown["repeatedCall"] = hint }
                 answer(shown, image: image)
                 if Self.readingTools.contains(kind), readInBatch == nil { readInBatch = "this reply's \(toolName)" }
                 if !Self.readingTools.contains(kind), kind != RealtimeVoiceVerbs.pointAtName { acted = true }
@@ -1169,9 +1179,11 @@ final class AgentLoop {
                         lastProgress = progress
                         heldProgress = "step \(step): \(progress)"
                     }
+                    if case .end(let reason) = noProgressVerdict { return finish(.failed(reason: reason)) }
                 } else if let error {
                     sameRefusal = sameRefusal?.error == error ? (error, sameRefusal!.count + 1) : (error, 1)
                     if sameRefusal!.count >= Self.maximumSameRefusals { return finish(.refusals(error: error)) }
+                    if case .end(let reason) = noProgressVerdict { return finish(.failed(reason: reason)) }
                     skipReason = "\(toolName) before it did not succeed (\(error))"
                     skippedForFailure = true
                     continue

@@ -258,6 +258,35 @@ struct AgentLoopTests {
         #expect(script.executed.count == 5)
     }
 
+    /// E12 2026-10-14T23-16-36Z: the same press, notVerified each time, a read between. An ok read cleared the refusal count.
+    @MainActor @Test func theSameDeadPressEndsTheTaskEvenWithReadsBetween() async {
+        let press = toolUse("press_element", ["name": "Add Reminder"])
+        let read = toolUse("find_on_screen", ["words": "add"])
+        let script = Script([press, read, press, read, press, read, press])
+        let outcome = await loop(script, execute: { call in
+            call.name == "find_on_screen" ? dispatch(ok: true) : dispatch(ok: false, error: "notVerified")
+        }).run(goal: "add a reminder")
+        #expect(outcome == .failed(reason: "the same step showed no change 3 times"))
+        #expect(script.executed.filter { $0.name == "press_element" }.count == 3)
+        let secondAnswer = String(describing: script.bodies[3]["messages"] ?? "")
+        #expect(secondAnswer.contains("repeatedCall"))
+        #expect(script.traces.first { $0["tool"] as? String == "press_element" }?.keys.contains("verification") == true)
+    }
+
+    /// The owner's answer clears the count: "try it again" is theirs to ask.
+    @MainActor @Test func theOwnersAnswerClearsTheNoProgressCount() async {
+        let press = toolUse("press_element", ["name": "Add Reminder"])
+        let script = Script([press, toolUse("find_on_screen", ["words": "add"]), press, toolUse("ask_owner", ["question": "Try again?"]),
+                             press, toolUse("ask_owner", ["question": "It still shows no change. Stop?"])])
+        let task = loop(script, execute: { call in
+            call.name == "find_on_screen" ? dispatch(ok: true) : dispatch(ok: false, error: "notVerified")
+        })
+        #expect(await task.run(goal: "add a reminder").name == "askOwner")
+        let after = await task.resume(answer: "yes, try again", words: "add a reminder yes, try again")
+        #expect(after.name == "askOwner", "the third press in the task is the first since the answer")
+        #expect(script.executed.filter { $0.name == "press_element" }.count == 3)
+    }
+
     @MainActor @Test func aDoneWithoutReceiptsIsChallengedOnceThenFails() async {
         let script = Script([toolUse("done", ["summary": "I pressed Post.", "evidence": [1]], id: "first"),
                              toolUse("done", ["summary": "I pressed Post.", "evidence": [Int]()])])
