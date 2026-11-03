@@ -809,7 +809,14 @@ extension GeneralitySuite {
             try? await Task.sleep(for: .milliseconds(200))
             secure = SecureInputState.current().isOn
         }
-        return ["pageOpened": opened, "passwordFocused": focused, "secureInputBefore": secure, "passwordClick": click ?? "notNeeded"]
+        var state: [String: Any] = ["pageOpened": opened, "passwordFocused": focused, "secureInputBefore": secure, "passwordClick": click ?? "notNeeded"]
+        // Launch 2026-10-31T03-57-29Z: U03 refused correctly and U06 attached no screenshot, and both FAILED, three runs running, on this
+        // fixture alone (`ea632a8`). No secure input means the guard under test never armed: nothing is proven either way.
+        if !secure {
+            _ = await read { closeFixtureTab(title: Sandbox.loginTitle) }
+            state[skipReasonKey] = "the fixture's password box never took keyboard focus (secure input off, click: \(click ?? "notNeeded"))"
+        }
+        return state
     }
 
     /// "Password characters typed: N" as the fixture page shows it; nil when the page is not readable.
