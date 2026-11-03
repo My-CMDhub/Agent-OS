@@ -5090,7 +5090,7 @@ final class HarnessServer {
             // 71 ms, the new reminder's field took focus ~300 ms later, typing was refused 3/3).
             let settledAt = Date()
             let settled = ActionVerifier.settle(
-                read: { AccessibilityMenu.pressReading(item: element, application: application).focused },
+                read: { AccessibilityMenu.pressReading(item: element, application: application, windowDetail: false).focused },
                 quietSeconds: 0.25, capSeconds: 1.5, interval: 0.05,
                 now: { Date().timeIntervalSince1970 }, sleep: { Thread.sleep(forTimeInterval: $0) })
             response["focusSettle"] = ["held": settled.held, "milliseconds": Int(Date().timeIntervalSince(settledAt) * 1000)]

@@ -1292,16 +1292,47 @@ enum AccessibilityMenu {
         return windows.count
     }
 
+    /// One round trip per window, at most `windowStatesReadLimit` windows; a window list that does not read is nil,
+    /// never "no windows". ponytail: a change in a window past the limit is not seen.
+    static let windowStatesReadLimit = 12
+
+    static func windowStates(of applicationElement: AXUIElement) -> [AccessibilityElementKey: ActionVerifier.WindowState]? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(applicationElement, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return nil }
+        let attributes = [kAXMinimizedAttribute, "AXFullScreen", kAXPositionAttribute, kAXSizeAttribute] as CFArray
+        var states: [AccessibilityElementKey: ActionVerifier.WindowState] = [:]
+        for window in windows.prefix(windowStatesReadLimit) {
+            var batch: CFArray?
+            guard AXUIElementCopyMultipleAttributeValues(window, attributes, AXCopyMultipleAttributeOptions(), &batch) == .success,
+                  let read = batch as? [AnyObject], read.count == 4 else { continue }
+            var point = CGPoint.zero, size = CGSize.zero
+            let hasPoint = CFGetTypeID(read[2]) == AXValueGetTypeID() && AXValueGetValue(read[2] as! AXValue, .cgPoint, &point)
+            let hasSize = CFGetTypeID(read[3]) == AXValueGetTypeID() && AXValueGetValue(read[3] as! AXValue, .cgSize, &size)
+            states[AccessibilityElementKey(element: window)] = ActionVerifier.WindowState(
+                minimised: read[0] as? Bool, fullScreen: read[1] as? Bool,
+                frame: hasPoint && hasSize ? CGRect(origin: point, size: size) : nil)
+        }
+        return states
+    }
+
     /// What `ActionVerifier.menuPressEvidence` compares, read fresh. A closed
     /// menu item's mark reads fine (measured 2026-09-25, probe 7D6CDDBB) but
     /// LAGS the press until AppKit re-validates, so it is polled, never read once.
-    static func pressReading(item: AXUIElement, application: NSRunningApplication) -> ActionVerifier.MenuPressReading {
+    /// `windowDetail` false reads only what `settle` needs.
+    static func pressReading(item: AXUIElement, application: NSRunningApplication, windowDetail: Bool = true) -> ActionVerifier.MenuPressReading {
         func copy(_ element: AXUIElement, _ attribute: String) -> (AXError, AnyObject?) {
             var value: AnyObject?
             let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
             return (error, value)
         }
         var reading = ActionVerifier.MenuPressReading(windows: windowCount(for: application))
+        if windowDetail {
+            let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
+            let (hiddenError, hiddenValue) = copy(applicationElement, kAXHiddenAttribute)
+            if hiddenError == .success { reading.hidden = hiddenValue as? Bool }
+            reading.windowStates = windowStates(of: applicationElement)
+        }
         switch copy(item, markCharAttribute) {
         case (.success, let value): reading.marked = (value as? String).map { !$0.isEmpty } ?? false
         // "empty or absent when unmarked": absence is an answer, any other error is not.

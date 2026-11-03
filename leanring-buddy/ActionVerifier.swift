@@ -137,12 +137,41 @@ enum ActionVerifier {
         var focused: AccessibilityElementKey?
         /// That element's `AXSelectedTextRange` as [location, length].
         var selection: [Int]?
+        /// Each window's state. `kAXWindows` still lists a minimised window, so the count cannot see Minimise, Zoom or
+        /// Full Screen: live 2026-11-03 Xcode's Window > Minimize read windows 1 -> 1 and came back notVerified.
+        var windowStates: [AccessibilityElementKey: WindowState]?
+        /// The app's `AXHidden`.
+        var hidden: Bool?
+    }
+
+    /// nil is a read that failed, never a "no".
+    struct WindowState: Equatable {
+        var minimised: Bool?
+        var fullScreen: Bool?
+        var frame: CGRect?
+    }
+
+    /// What moved in one window's state, in the owner's words; nil when nothing did.
+    static func windowStateEvidence(before: WindowState, now: WindowState) -> String? {
+        if let was = before.minimised, let isNow = now.minimised, was != isNow { return isNow ? "the window was minimised" : "the window was restored" }
+        if let was = before.fullScreen, let isNow = now.fullScreen, was != isNow { return isNow ? "the window went full screen" : "the window left full screen" }
+        if let was = before.frame, let isNow = now.frame,
+           abs(was.minX - isNow.minX) > 1 || abs(was.minY - isNow.minY) > 1 || abs(was.width - isNow.width) > 1 || abs(was.height - isNow.height) > 1 {
+            return "the window moved or changed size"
+        }
+        return nil
     }
 
     /// The first thing that moved between two readings, or nil. Only two
     /// successful reads are compared: a failed read is never evidence.
     static func menuPressEvidence(before: MenuPressReading, now: MenuPressReading) -> String? {
         if let was = before.windows, let isNow = now.windows, was != isNow { return "the window count changed" }
+        if let was = before.hidden, let isNow = now.hidden, was != isNow { return isNow ? "the app was hidden" : "the app was shown again" }
+        if let was = before.windowStates, let isNow = now.windowStates {
+            for (window, state) in was {
+                if let after = isNow[window], let evidence = windowStateEvidence(before: state, now: after) { return evidence }
+            }
+        }
         if let was = before.marked, let isNow = now.marked, was != isNow { return "the menu item's check mark changed" }
         if let was = before.focused, let isNow = now.focused, was != isNow { return "the focused element changed" }
         if let was = before.focused, was == now.focused, let wasRange = before.selection, let range = now.selection, wasRange != range {

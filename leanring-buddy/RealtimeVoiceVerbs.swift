@@ -513,9 +513,34 @@ nonisolated enum RealtimeVoiceVerbs {
     /// never finds "shown". Add a stemmer if a replay shows a real miss.
     static func tokensMatch(_ first: String, _ second: String) -> Bool {
         if first == second { return true }
+        // Every spelling pair shares its first letter; this runs per token of up to 800 menu items.
+        guard first.first == second.first else { return false }
+        let first = spellingFolded(first), second = spellingFolded(second)
+        if first == second { return true }
         let (shorter, longer) = first.count <= second.count ? (first, second) : (second, first)
         return shorter.count >= 3 && longer.hasPrefix(shorter)
     }
+
+    /// One spelling for British and American forms, so "minimize" finds an en-AU menu's "Minimise" (live 2026-11-01:
+    /// notFound in Finder) and "color" finds "Colour". Only ever compared with another folded word, so "noise" becoming
+    /// "noize" merges nothing. ponytail: the families menus and settings use, plus a short list; extend the list on a real miss.
+    static func spellingFolded(_ token: String) -> String {
+        if let whole = britishSpellings[token] { return whole }
+        for (british, american) in britishSpellingStems where token.hasPrefix(british) {
+            return american + token.dropFirst(british.count)
+        }
+        // -ise, -ised, -ising, -isation... (and -yse) with at least three letters before: "raise", "rise" stay.
+        for ending in ["e", "es", "ed", "er", "ers", "ing", "ation", "ations"] where token.hasSuffix("s" + ending) {
+            let stem = token.dropLast(ending.count + 1)
+            if stem.count >= 4, stem.last == "i" || stem.last == "y" { return String(stem) + "z" + ending }
+        }
+        return token
+    }
+    static let britishSpellings: [String: String] = ["grey": "gray", "centre": "center", "centred": "centered", "centres": "centers",
+                                                     "licence": "license", "programme": "program", "catalogue": "catalog", "dialogue": "dialog"]
+    static let britishSpellingStems: [(String, String)] = [
+        ("colour", "color"), ("favour", "favor"), ("behaviour", "behavior"), ("flavour", "flavor"), ("honour", "honor"), ("neighbour", "neighbor"),
+        ("labour", "labor"), ("cancell", "cancel"), ("labell", "label"), ("travell", "travel"), ("modell", "model")]
 
     /// Open Recent, Recent Items, Recent Folders, Go > Recents: their children
     /// are the owner's file, folder and server names. Dropped before matching,
