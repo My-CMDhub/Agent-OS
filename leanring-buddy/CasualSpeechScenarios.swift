@@ -150,7 +150,24 @@ extension ScenarioCatalog {
             try? await Task.sleep(for: .milliseconds(600))
             await noteTarget(textEdit, context)
             context.baseline["textEditWindows"] = await state(textEdit).windows ?? NSNull()
+            parkPointer(on: textEdit, context)
         }
+    }
+
+    /// "this" may be what the owner's pointer rests on, and in a run that is wherever they left it: K06 2026-11-03, "make this take up the
+    /// whole screen" with the pointer over the owner's own Xcode put Xcode in full screen. So the pointer waits on the test's window, and
+    /// goes back at the check. Moved without an event, so it counts as no owner input.
+    static func parkPointer(on bundleIdentifier: String, _ context: ScenarioContext) {
+        guard let application = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first else { return }
+        var window: AnyObject?, position: AnyObject?, size: AnyObject?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(application.processIdentifier), kAXFocusedWindowAttribute as CFString, &window) == .success,
+              let window, CFGetTypeID(window) == AXUIElementGetTypeID(),
+              AXUIElementCopyAttributeValue(window as! AXUIElement, kAXPositionAttribute as CFString, &position) == .success,
+              AXUIElementCopyAttributeValue(window as! AXUIElement, kAXSizeAttribute as CFString, &size) == .success else { return }
+        var origin = CGPoint.zero, extent = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &origin), AXValueGetValue(size as! AXValue, .cgSize, &extent) else { return }
+        context.notes["pointerBefore"] = CGEvent(source: nil)?.location
+        CGWarpMouseCursorPosition(CGPoint(x: origin.x + extent.width / 2, y: origin.y + extent.height / 2))
     }
 
     static func calculatorOpen() -> @MainActor (ScenarioContext) async -> Void {
@@ -158,6 +175,7 @@ extension ScenarioCatalog {
             _ = await VoiceToolProbe.ask(["verb": "launch", "app": calculatorApp], context.harnessAnswer)
             try? await Task.sleep(for: .milliseconds(400))
             await noteTarget(calculatorApp, context)
+            parkPointer(on: calculatorApp, context)
         }
     }
 
@@ -217,6 +235,7 @@ extension ScenarioCatalog {
                 seen[app] = ["windows": now.windows ?? -1, "hidden": now.hidden, "targetOpen": now.targetOpen ?? NSNull(),
                              "targetMinimised": now.targetMinimised, "targetFullScreen": now.targetFullScreen] as [String: Any]
             }
+            if let before = context.notes["pointerBefore"] as? CGPoint { CGWarpMouseCursorPosition(before) }
             return verdict(isDone, "the outcome did not happen; it said: \(outcome.transcript.prefix(160))", [
                 "turns": outcome.earlier.count + 1, "questions": CasualSpeechClaim.questions(all).count,
                 "clarifyingQuestions": CasualSpeechClaim.clarifying(all, done: isDone), "claim": claim.rawValue,

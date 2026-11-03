@@ -73,7 +73,7 @@ nonisolated enum RealtimeVoiceVerbs {
     static let dragItemName = "drag_item"
     static let pressKeysName = "press_keys"
     /// Declared to the agent loop only: the voice hands a multi-step request to do_task.
-    static let agentOnlyToolNames: Set<String> = [findMenuBarItemsName, pressMenuBarItemName, listOpenAppsName]
+    static let agentOnlyToolNames: Set<String> = [findMenuBarItemsName, pressMenuBarItemName]
     /// Declared to the voice model only, never to the agent loop: session text is model text a page may have
     /// steered, so it is spoken to the owner and never becomes a step's input.
     static let voiceOnlyToolNames: Set<String> = [briefSessionsName]
@@ -366,7 +366,7 @@ nonisolated enum RealtimeVoiceVerbs {
                         + "shows the owner a card first; the app may still ask to save, and that answer is the owner's.",
                     parameters: [Parameter(name: "what", description: "tab, window, or app (quit it).", options: RealtimeHandsVerbs.closeTargets),
                                  appInFront])
-        ] + (agent ? menuBarDeclarations : [])
+        , listOpenAppsDeclaration] + (agent ? menuBarDeclarations : [])
     }
 
     private static let menuBarDeclarations = [
@@ -379,11 +379,15 @@ nonisolated enum RealtimeVoiceVerbs {
                     description: "Presses one menu-bar icon, as find_menu_bar_items named it. A Control Centre icon opens its panel in front: "
                         + "then find_on_screen and press_element act in that panel. Pressing the same icon again closes it.",
                     parameters: [Parameter(name: "name", description: "The icon's name exactly as find_menu_bar_items listed it.")]),
-        Declaration(name: listOpenAppsName,
-                    description: "Lists the apps open (running) on this Mac, which one is in front, and how many windows each has on "
-                        + "this desktop. Use it for \"which apps are open\" and \"how many windows does Chrome have\". Changes nothing.",
-                    parameters: [])
     ]
+
+    /// The voice too (section K, 2026-11-03): with no way to look, "is Xcode open" brought Xcode forward or came back "I cannot
+    /// determine", and "how many TextEdit windows" was guessed from the screenshot.
+    private static let listOpenAppsDeclaration = Declaration(
+        name: listOpenAppsName,
+        description: "Lists the apps open (running) on this Mac, which one is in front, and how many windows each has on "
+            + "this desktop. Use it for \"which apps are open\", \"is Xcode open\" and \"how many windows does Chrome have\". Changes nothing.",
+        parameters: [])
 
     /// The voice model's only planner hand-off. Never offered to the agent loop itself.
     private static let doTaskDeclaration = Declaration(

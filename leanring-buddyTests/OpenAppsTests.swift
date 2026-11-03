@@ -183,9 +183,9 @@ struct OpenAppsTests {
         #expect(OpenApps.minimisedCount(read) == nil && OpenApps.standardWindowCount(read) == nil, "a role that did not read is unknown")
     }
 
-    @MainActor @Test func listOpenAppsIsAnAgentOnlyReadingToolWithNoArguments() {
+    @MainActor @Test func listOpenAppsIsAReadingToolForBothVoiceAndTask() {
         #expect(RealtimeVoiceVerbs.allToolNames.contains("list_open_apps"))
-        #expect(RealtimeVoiceVerbs.agentOnlyToolNames.contains("list_open_apps"))
+        #expect(!RealtimeVoiceVerbs.agentOnlyToolNames.contains("list_open_apps"))
         #expect(!RealtimeVoiceVerbs.isActingTool("list_open_apps"))
         #expect(AgentLoop.readingTools.contains("list_open_apps") && AgentPlan.isReading("list_open_apps"))
         #expect(!AgentPlan.isActing("list_open_apps"))
@@ -197,6 +197,6 @@ struct OpenAppsTests {
         let declared = RealtimeVoiceVerbs.anthropicDeclarations().first { $0["name"] as? String == "list_open_apps" }
         #expect((declared?["input_schema"] as? [String: Any])?["required"] as? [String] == [])
         let voice = RealtimeVoiceVerbs.openAIDeclarations.compactMap { $0["name"] as? String }
-        #expect(!voice.contains("list_open_apps"))
+        #expect(voice.contains("list_open_apps"))
     }
 }
