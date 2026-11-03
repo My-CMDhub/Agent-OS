@@ -131,7 +131,13 @@ enum GeneralitySuite {
                       return result
                   },
         SuiteTask(id: "G11", pattern: "read a toolbar value (IDE)", words: "which scheme is selected in Xcode?",
-                  apps: [xcode]) { spoken, _ in answer(spoken, has: ["leanring-buddy", "leanring buddy", "learning buddy", "leanring"], truth: "leanring-buddy") },
+                  // Generality 2026-10-31T03-37-32Z PASSED saying "no project loaded, so there is no scheme", because the answer listed
+                  // recent projects and one contains the word. Launched cold, Xcode has no scheme to read. ponytail: running is not
+                  // the same as a project open; read the toolbar here if that one comes up.
+                  apps: [xcode], pre: {
+                      NSRunningApplication.runningApplications(withBundleIdentifier: xcode).isEmpty
+                          ? [skipReasonKey: "Xcode is not running, so no scheme is selected to read"] : [:]
+                  }) { spoken, _ in answer(spoken, has: ["leanring-buddy", "leanring buddy", "learning buddy", "leanring"], truth: "leanring-buddy") },
         SuiteTask(id: "G12", pattern: "search field + list (held out)", words: "how many styles does the Helvetica family have in Font Book?",
                   apps: [fontBook], heldOut: true) { spoken, _ in
                       let count = NSFontManager.shared.availableMembers(ofFontFamily: "Helvetica")?.count ?? -1
