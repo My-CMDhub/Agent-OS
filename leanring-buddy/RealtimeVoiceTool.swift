@@ -252,11 +252,11 @@ nonisolated enum RealtimeOpenAppTool {
     /// 2026-09-30: the key-down frontmost-app line (`frontmostAppContextLine`)
     /// is ground truth over the screenshot, which read Cursor as VS Code.
     static let systemPrompt = """
-    you are J.A.R.V.I.S., the owner's assistant on their mac. they speak by push-to-talk; you see their screen; replies are spoken.
+    you are J.A.R.V.I.S., the owner's assistant on their mac. they speak english by push-to-talk; you see their screen; replies are spoken, in english.
 
-    manner: composed, slightly formal, dry understatement, never servile. address the owner as "sir", at most once per reply and not in every reply. one or two short sentences unless asked to explain. no lists, symbols or markdown.
+    manner: composed, slightly formal, dry understatement, never servile. address the owner as "sir", at most once per reply and not in every reply. one or two short sentences unless asked to explain. no lists, symbols or markdown. speak as a colleague who just gets on with it: end on a question only when you cannot go on without the answer, never "anything else?", "what next?" or "shall I?". when one thing is plainly meant, act on it without asking: the exact name said, the app in front for "this window", what the owner just asked about for "it" or "that one". a few words after your question or a failed step, such as an app's name, carry on the same request: do it with that, never as a new request.
 
-    evidence: a line naming the app in front comes from the system and is true, even when the screenshot looks like another app; forks look alike. never say something happened unless its tool result says ok true. if ok is false, or the result says notObserved, say it didn't take and give the reason in a few words. if unsure what is on screen, say so. after a tool call, report only the verified outcome, briefly; do not describe the new screen until you have been given a view of it.
+    evidence: a line naming the app in front comes from the system and is true, even when the screenshot looks like another app; forks look alike. never say something happened unless its tool result says ok true. if ok is false, say it didn't take and give the reason in a few words; but notVerified means it was sent and no change could be read: say you sent it and can't confirm it, never that it failed. if unsure what is on screen, say so. after a tool call, report only the verified outcome, briefly; do not describe the new screen until you have been given a view of it.
 
     plain words: a tool's name, a parameter's name and an error code are yours, never the owner's: never say one aloud; say what it means. lines that begin "system context" or "system event" are for you alone: never read them out, quote or imitate them. a result with ok false did not happen: never say typed, pressed, opened or done about it.
 
@@ -764,7 +764,8 @@ nonisolated enum RealtimeOpenAppTool {
         }
         // A kernel refusal's reason lives under `kernel.reason` (scenarios A9/C2
         // 2026-10-03: the model heard `message: null` and said "the system blocked me").
-        let message = ((response["message"] as? String) ?? kernelReasonMessage(response)).map { String($0.prefix(300)) }
+        var message = ((response["message"] as? String) ?? kernelReasonMessage(response)).map { String($0.prefix(300)) }
+        if response["error"] as? String == "notVerified" { message = (message.map { $0 + ". " } ?? "") + notVerifiedAdvice }
         return [
             "ok": response["ok"] as? Bool ?? false,
             "status": (response["status"] as? String) ?? NSNull(),
@@ -774,6 +775,13 @@ nonisolated enum RealtimeOpenAppTool {
             "verification": ((response["verification"] as? [String: Any])?["status"] as? String) ?? NSNull()
         ]
     }
+
+    /// Evidence that is silent is not evidence of failure. Live 2026-11-03: Xcode's Window > Minimize came back notVerified
+    /// and Gemini said "its window didn't minimize" and offered to try again; 11-02 the same press had worked. So the model is
+    /// told what was seen, and not to turn it into either claim.
+    static let notVerifiedAdvice = "It was sent, and no change could be read, which does not show it failed: it may have worked in a way that "
+        + "cannot be read. Tell the owner just that, that you sent it and cannot confirm it took; never say it failed or didn't work, never say it "
+        + "worked, and do not send it again unless they ask."
 
     /// The kernel's own reason, and for typing into what takes no text — most
     /// often a page with no field focused — the way that works instead. The
@@ -1193,7 +1201,7 @@ nonisolated enum RealtimeOpenAppTool {
             result["error"] = "notVerified"
             result["verification"] = "notObserved"
             result["message"] = "the \(action) was sent, and nothing that can be seen changed: no window appeared or went, the pixels round "
-                + "the point stayed the same and the app in front stayed. Look at the screen again before repeating it"
+                + "the point stayed the same and the app in front stayed. Look at the screen again before repeating it. " + notVerifiedAdvice
             return result
         }
         result["verification"] = "confirmed"
@@ -1494,6 +1502,14 @@ nonisolated enum RealtimeOpenAppTool {
         return places.count == 1 ? places.first : nil
     }
 
+    /// Said beside a find whose matches share a name when the owner's words pick one by order: the press's own rule
+    /// (`liveTarget`) resolves it, so the model has only to press. nil otherwise.
+    static func ordinalHint(heard: String?, found: [RealtimeScreenCandidate]?) -> String? {
+        guard let found, let name = Dictionary(grouping: found, by: \.name).first(where: { $0.value.count > 1 })?.key,
+              heardOrdinalPick(found.filter { $0.name == name }, heard: heard) != nil else { return nil }
+        return "the owner's words already say which by order: call press_element now with the name \(UntrustedText(name).forDisplay); the order picks it. do not ask which one."
+    }
+
     /// The candidate at the heard place in the numbered order — never one that ties
     /// its neighbour's height (side by side has no "first"), never past the end.
     /// The owner's transcript only: the model's arguments never pick (owner ruling 2026-10-03).
@@ -1521,11 +1537,45 @@ nonisolated enum RealtimeOpenAppTool {
     /// `underPointerNotSaid`, and both times the model asked the owner instead of retrying.
     /// Nothing else aimed (a press, a point, a typing): still refused in `resolveScreenTarget`.
     static func droppingUnsaidPointer(_ call: RealtimeToolCall, heard: String?) -> RealtimeToolCall {
+        // A typing with nothing else aimed falls to the field the owner named, or the focused one (A9, C5 2026-11-03: refused,
+        // and Gemini told the owner "I am unable to type there"; the tool's own schema says no aim means the focused field).
         guard call.underPointer, let heard, !heardPointsAtSomething(heard),
-              call.elementName != nil || (call.x != nil && call.y != nil) || call.name == RealtimeVoiceVerbs.scrollName else { return call }
+              call.elementName != nil || (call.x != nil && call.y != nil) || call.name == RealtimeVoiceVerbs.scrollName
+                  || call.name == RealtimeVoiceVerbs.typeTextName else { return call }
         var dropped = call
         dropped.underPointer = false
         return dropped
+    }
+
+    /// "in the search box", "into the post field": the words naming a field, without the box word. nil when none is named.
+    static func fieldWords(inHeard heard: String?) -> [String]? {
+        guard let heard else { return nil }
+        let tokens = RealtimeVoiceVerbs.foldedTokens(heard)
+        let lead: Set<String> = ["in", "into", "on", "to"], skip: Set<String> = ["the", "this", "that", "my", "a"]
+        let boxes: Set<String> = ["box", "field", "bar", "area", "input", "textbox", "searchbox", "composer"]
+        guard let box = tokens.indices.first(where: { boxes.contains(tokens[$0]) }),
+              let start = tokens[..<box].lastIndex(where: lead.contains) else { return nil }
+        let words = tokens[(start + 1)..<box].filter { !skip.contains($0) }
+        // "searchbox" is its own word; "the box" names only a box.
+        return Array(words) + (tokens[box] == "searchbox" ? ["search"] : [])
+    }
+
+    /// The field those words pick: the one whose name is exactly them, else the only one holding them all, else, with a
+    /// box named and no word fitting, the page's one field ("the post box": the composer is "Text editor for creating
+    /// content"). `all` includes a browser's address bar, `inPage` does not. Two that fit equally pick nothing: the call
+    /// types into what has focus or is refused, never into a guess.
+    static func fieldPicked(by words: [String], all: [String], inPage: [String]) -> String? {
+        func tokens(_ name: String) -> [String] { RealtimeVoiceVerbs.foldedTokens(name) }
+        func unique(_ names: [String]) -> String? { Set(names).count == 1 ? names.first : nil }
+        if !words.isEmpty {
+            let exact = all.filter { tokens($0) == words }
+            if !exact.isEmpty { return unique(exact) }
+            let holding = inPage.filter { name in words.allSatisfy { word in tokens(name).contains { RealtimeVoiceVerbs.tokensMatch(word, $0) } } }
+            if !holding.isEmpty { return unique(holding) }
+            let holdingAnywhere = all.filter { name in words.allSatisfy { word in tokens(name).contains { RealtimeVoiceVerbs.tokensMatch(word, $0) } } }
+            if !holdingAnywhere.isEmpty { return unique(holdingAnywhere) }
+        }
+        return unique(inPage)
     }
 
     /// The live screen's answer for a name: a forModel snapshot of the app in

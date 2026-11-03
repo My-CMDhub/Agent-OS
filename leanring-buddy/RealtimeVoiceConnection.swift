@@ -285,6 +285,9 @@ final class RealtimeVoiceConnection {
         Double(pcmBytes) / (2 * 24_000) / 60 * openAITranscriptionUSDPerMinute
     }
     static let geminiVoice = "Charon"
+    /// The owner speaks English. Left to automatic detection Gemini's transcription named a tap "¿Qué es eso?" (live 2026-11-01)
+    /// and "open settings" "¿Qué es el número de serie?" (A10 2026-11-03), and the guards and the reply followed it.
+    static let ownerLanguageCodes = ["en-AU"]
 
     init(stack: VoiceStackChoice, harnessAnswer: @escaping @Sendable (String) -> String) {
         self.stack = stack
@@ -375,7 +378,7 @@ final class RealtimeVoiceConnection {
                     "outputAudioTranscription": [String: Any](),
                     // What the OWNER said, for the heard-vs-named check (the bench's since 2026-09-23).
                     // No `customVocabulary`: documented, accepted, and still "Kasa" 8/8 (probes C92505CE, B59C0B0F).
-                    "inputAudioTranscription": [String: Any]()
+                    "inputAudioTranscription": ["languageCodes": Self.ownerLanguageCodes]
                 ]
             ])
         }
@@ -1136,6 +1139,21 @@ final class RealtimeVoiceConnection {
         return RealtimeOpenAppTool.unaimedTypingHint(fieldNames: fields)
     }
 
+    /// The visible field the owner's words pick (`RealtimeOpenAppTool.fieldPicked`), or nil: the call then types into what has focus.
+    private static func pageFieldNamed(by words: [String], app: String?, display: CGRect?,
+                                       harnessAnswer: @escaping @Sendable (String) -> String) async -> String? {
+        guard case .success(let line) = RealtimeOpenAppTool.harnessRequestLine(
+            for: RealtimeToolCall(callID: "fields", name: RealtimeVoiceVerbs.findOnScreenName, appName: app, words: "field")) else { return nil }
+        let screens = NSScreen.screens.map(\.frame)
+        return await Task.detached { () -> String? in
+            let response = RealtimeOpenAppTool.harnessResponseObject(harnessAnswer(line))
+            return RealtimeOpenAppTool.fieldPicked(by: words, all: RealtimeScreenVerbs.visibleTextFieldNames(fromSnapshotResponse: response, screens: screens,
+                                                                                                           screenshotDisplay: display),
+                                                   inPage: RealtimeScreenVerbs.visiblePageFieldNames(fromSnapshotResponse: response, screens: screens,
+                                                                                                     screenshotDisplay: display))
+        }.value
+    }
+
     /// One tool call through every guard the live turn has: the offers, the heard
     /// check (against `turn.heardText`), the site check, the screen-target
     /// resolution, the notch, `RealtimeOpenAppTool.dispatch` with its tickets, the
@@ -1178,6 +1196,12 @@ final class RealtimeVoiceConnection {
         // The owner's words, once complete (the check above waited for them).
         let heardWords = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime) != nil ? turn.heardText : nil
         var call = RealtimeOpenAppTool.droppingUnsaidPointer(resolvedCall, heard: heardWords)
+        // "Type hello in the search box" with no aim: the field the owner's own words name, read off the live screen.
+        // Gemini sent no aim, or an unsaid pointer, and then asked which field (A5, A9, C5 2026-11-03).
+        if !turn.isAgentStep, call.name == RealtimeVoiceVerbs.typeTextName, call.elementName == nil, call.x == nil, call.y == nil, !call.underPointer,
+           let words = RealtimeOpenAppTool.fieldWords(inHeard: heardWords) {
+            call.elementName = await pageFieldNamed(by: words, app: call.appName, display: turn.screenshotDisplayFrame, harnessAnswer: harnessAnswer)
+        }
         // create_reminder's due is the owner's words, never the model's: always replaced, waited for like the site check's.
         // read_calendar's range is read from the same words, before the model's `when`.
         if RealtimeVoiceVerbs.eventKitWriterNames.contains(call.name) || call.name == RealtimeVoiceVerbs.readCalendarName {
@@ -1402,6 +1426,12 @@ final class RealtimeVoiceConnection {
         }
         turn.dispatches.append(dispatch)
         turn.decisions[decisionIndex].dispatch = dispatch
+        // "Delete the first draft": the find lists three Deletes and the owner's words already said which (C4 2026-11-03: Gemini asked).
+        if !turn.isAgentStep, call.name == RealtimeVoiceVerbs.findOnScreenName, let hint = RealtimeOpenAppTool.ordinalHint(heard: heardWords, found: dispatch.screenOffer?.candidates) {
+            dispatch.result["ownersOrder"] = hint
+            turn.dispatches[turn.dispatches.count - 1] = dispatch
+            turn.decisions[decisionIndex].dispatch = dispatch
+        }
         // A find that finished after the owner pressed again answered nobody:
         // the model never got its result, so it is no offer to press or confirm.
         if let offer = dispatch.menuOffer, isCurrent() {

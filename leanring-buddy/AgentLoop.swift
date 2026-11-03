@@ -336,6 +336,9 @@ final class AgentLoop {
         case done(summary: String)
         case askOwner(question: String)
         case failed(reason: String)
+        /// The task ended and its report still claims something its receipts do not show. Not a failure: of the 38 tasks that
+        /// ended this way 2026-10-20..11-03 most answers were right. Said with the doubt, never as "it did not work".
+        case unconfirmed(summary: String, challenge: String)
         case cancelled
         /// `left`: why the wrap-up turn's done did not stand, for the voice.
         case stepCap(left: String? = nil)
@@ -347,6 +350,7 @@ final class AgentLoop {
             case .done: return "done"
             case .askOwner: return "askOwner"
             case .failed: return "failed"
+            case .unconfirmed: return "unconfirmed"
             case .cancelled: return "cancelled"
             case .stepCap: return "stepCap"
             case .timeCap: return "timeCap"
@@ -943,7 +947,7 @@ final class AgentLoop {
                         continue
                     }
                     let challenge = summary.isEmpty ? "the summary is empty"
-                        : Self.doneChallenge(summary: summary, evidence: evidence, receipts: receipts, currentStep: step, seenNow: seenNow)
+                        : Self.doneChallenge(summary: summary, evidence: evidence, receipts: receipts, currentStep: step, seenNow: seenNow, readOnly: readOnly)
                     // The reason is local code's sentence (names quoted from the summary, redacted): why a done was refused.
                     traced(["tool": toolName, "args": args, "ok": challenge == nil, "error": challenge == nil ? NSNull() : "doneUnbacked",
                             "challenge": challenge.map(SecretScanner.redact) ?? NSNull(),
@@ -960,7 +964,7 @@ final class AgentLoop {
                     }
                     // No turn is left to act on a challenge: the honest end is the cap, with why.
                     if wrappingUp { return finish(.stepCap(left: challenge)) }
-                    if challengedDone { return finish(.failed(reason: "its summary claimed what no result of this task shows")) }
+                    if challengedDone { return finish(.unconfirmed(summary: summary, challenge: challenge)) }
                     challengedDone = true
                     answer(["ok": false, "error": "doneUnbacked",
                             "message": "your receipts do not show this: \(challenge). Call done again claiming only what ok results showed, "
@@ -1534,7 +1538,12 @@ final class AgentLoop {
     /// own step when nothing ran there (`currentStep`): R2 980FBC67 cited it and
     /// paid a second model call to drop it. A close done by pressing (a menu's
     /// Close, a panel's kill button) is a close: the same run's second done.
-    static func doneChallenge(summary: String, evidence citedSteps: [Int], receipts: [Receipt], currentStep: Int? = nil, seenNow: String? = nil) -> String? {
+    /// `readOnly`: every acting step of this task was refused by construction (`readOnlyGuardedAnswer`), so an effect word in
+    /// its report is something it read, not something it did: "the song most recently added", "the date each app was added", a
+    /// quoted author's "written". Owner's live 2026-11-01: a right answer about a post was refused twice and spoken as "an issue
+    /// with that task". First-person claims still need a receipt.
+    static func doneChallenge(summary: String, evidence citedSteps: [Int], receipts: [Receipt], currentStep: Int? = nil, seenNow: String? = nil,
+                              readOnly: Bool = false) -> String? {
         // The done's own step is never a plan position (review 2026-10-27: citing it remapped to an earlier step's plan).
         let evidence = citedSteps.map { $0 == currentStep ? $0 : citedStepOrAction($0, receipts: receipts) }
         // Backed by the steps it CITES (review of e98f476): an old ok result elsewhere in the run is no receipt.
@@ -1547,7 +1556,7 @@ final class AgentLoop {
         // What a page says, quoted, is no deed of the task's (unseen H28 2026-10-25: the headline "…barrister sent
         // 'disgusting' messages…" read as a claim to have sent something, refused twice).
         let unquoted = Self.withoutQuotedText(summary, seen: receipts.compactMap { $0.ok ? $0.shown : nil } + [seenNow].compactMap { $0 })
-        for receiptsNeeded in RealtimeOpenAppTool.firstPersonClaims(unquoted) + effectClaims(unquoted).map(Optional.some) {
+        for receiptsNeeded in RealtimeOpenAppTool.firstPersonClaims(unquoted) + (readOnly ? [] : effectClaims(unquoted).map(Optional.some)) {
             if var needed = receiptsNeeded {
                 if needed.contains(RealtimeVoiceVerbs.closeName) { needed.formUnion(pressTools) }
                 if needed == [RealtimeOpenAppTool.toggleReceipt], !okTools.contains(RealtimeOpenAppTool.toggleReceipt) {
@@ -1956,6 +1965,10 @@ final class AgentLoop {
         case .failed(let reason):
             return "system event, not the owner's words: the task stopped without finishing: \(reason).\(progress) "
                 + "tell the owner briefly that it did not work and why; claim nothing else. call no tool."
+        case .unconfirmed(let summary, let challenge):
+            return "system event, not the owner's words: the task has ended. its report is below, but its steps' results do not show one part of it "
+                + "(\(challenge)). tell the owner in one to three short sentences what it reports, keeping every name and number, and say plainly "
+                + "that you could not confirm that part. do not say the task failed or did not work, and do not say it is confirmed. its report: \(summary) call no tool."
         case .stepCap(let left):
             return "system event, not the owner's words: the task stopped after \(maximumSteps) steps without finishing.\(progress) "
                 + (left.map { "its last report could not be confirmed: \($0). " } ?? "")
@@ -2069,7 +2082,9 @@ final class AgentLoop {
         case .cancelled: stateWords = "stopped: the owner said to stop; nothing more is being done"
         case .interrupted: stateWords = "interrupted: J.A.R.V.I.S. quit while it ran; nothing has been done since"
         case .done:
-            if case .done(let summary)? = outcome { stateWords = "done: \(summary)" } else { stateWords = "done" }
+            if case .done(let summary)? = outcome { stateWords = "done: \(summary)" }
+            else if case .unconfirmed(let summary, let challenge)? = outcome { stateWords = "ended, reporting (not confirmed: \(challenge)): \(summary)" }
+            else { stateWords = "done" }
         case .failed, .timedOut:
             let name = outcome?.name ?? phase.rawValue
             stateWords = "did not finish (\(name))\(outcome.flatMap(finalReason).map { ": \($0)" } ?? "")"

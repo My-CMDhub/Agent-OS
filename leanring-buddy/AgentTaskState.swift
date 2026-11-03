@@ -38,7 +38,7 @@ enum AgentTaskPhase: String, Codable, CaseIterable, Sendable {
 
     static func ended(_ outcome: AgentLoop.Outcome) -> AgentTaskPhase {
         switch outcome {
-        case .done: return .done
+        case .done, .unconfirmed: return .done
         case .askOwner: return .waitingForOwner
         case .cancelled: return .cancelled
         case .timeCap: return .timedOut

@@ -287,11 +287,12 @@ struct AgentLoopTests {
         #expect(script.executed.filter { $0.name == "press_element" }.count == 3)
     }
 
-    @MainActor @Test func aDoneWithoutReceiptsIsChallengedOnceThenFails() async {
+    @MainActor @Test func aDoneWithoutReceiptsIsChallengedOnceThenEndsUnconfirmed() async {
         let script = Script([toolUse("done", ["summary": "I pressed Post.", "evidence": [1]], id: "first"),
                              toolUse("done", ["summary": "I pressed Post.", "evidence": [Int]()])])
         let outcome = await loop(script).run(goal: "post it")
-        #expect(outcome == .failed(reason: "its summary claimed what no result of this task shows"))
+        guard case .unconfirmed(let summary, _) = outcome else { Issue.record("not unconfirmed: \(outcome)"); return }
+        #expect(summary == "I pressed Post.")
         let second = script.bodies[1]["messages"] as? [[String: Any]]
         let challenge = (second?.last?["content"] as? [[String: Any]])?.first
         #expect(challenge?["tool_use_id"] as? String == "first")

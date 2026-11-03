@@ -300,6 +300,13 @@ nonisolated enum RealtimeScreenVerbs {
             .filter { textInputRoles.contains($0.role) }.map(\.name)
     }
 
+    /// `visibleTextFieldNames` inside the page: never a browser's own address bar. In an app with no web page, none.
+    static func visiblePageFieldNames(fromSnapshotResponse response: [String: Any], screens: [CGRect], screenshotDisplay: CGRect? = nil) -> [String] {
+        let elements = response["elements"] as? [[String: Any]] ?? []
+        return visiblePool(fromSnapshotResponse: response, screens: screens, screenshotDisplay: screenshotDisplay).pool
+            .filter { textInputRoles.contains($0.role) && inPage($0, elements: elements) }.map(\.name)
+    }
+
     /// The visible search results of a web page, in tree order: a heading inside a
     /// link (within three levels), in the page — the A8 checker's own definition.
     static func resultHeadings(fromSnapshotResponse response: [String: Any], screens: [CGRect],
