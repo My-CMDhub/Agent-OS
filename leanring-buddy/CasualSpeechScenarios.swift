@@ -307,7 +307,7 @@ extension ScenarioCatalog {
                    prepare: { context in context.baseline["xcodeRunning"] = !NSRunningApplication.runningApplications(withBundleIdentifier: xcode).isEmpty },
                    answer: { context, outcome in
                        let running = context.baseline["xcodeRunning"] as? Bool == true
-                       let denies = said(outcome, anyOf: ["isn't", "is not", "not open", "not running", "no,"])
+                       let denies = said(outcome, anyOf: ["isn't open", "is not open", "isn't running", "is not running", "not open", "not running", "no,"])
                        return said(outcome, anyOf: ["xcode", "x code"]) && (running ? !denies : denies)
                    },
                    never: [never("Xcode launched or quit by a question") { context, _ in
