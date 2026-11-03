@@ -249,6 +249,12 @@ enum FrontWorkerProbe {
             // Windows earlier runs left: launched only to be read and closed.
             _ = await VoiceToolProbe.ask(["verb": "launch", "app": "TextEdit"], answer)
             try? await Task.sleep(for: .seconds(2))
+        case "chat":
+            await speak("T4")
+            await heardOut(count: 1)
+            await speak("T2")
+            await heardOut(count: 2)
+            note["taskStarted"] = box.reports > 0 || session.agentLoop != nil
         case "baseline":
             await speak("K17a")
             await endOfTasks()

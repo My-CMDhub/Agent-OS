@@ -81,7 +81,7 @@ enum ScenarioCatalog {
     /// A11 01-17-35Z: "My reach is limited, sir. You'll find the Wi-Fi control in the menu bar";
     /// A11 03-34-52Z: "That setting is outside my control, sir").
     static let cannotWords = ["can't", "cannot", "can not", "unable", "not able", "don't have", "isn't something", "not something",
-                              "not yet", "no way", "won't be able", "beyond my", "my reach", "outside my"]
+                              "not yet", "no way", "won't be able", "beyond my", "my reach", "outside my", "could not", "couldn't"]
 
     /// Owner ruling 2026-10-10: a checker judges intent, never one exact word, and never words without the
     /// outcome. B8's "I've stopped, sir" and "Halting now" mean the same; "stopped" alone failed the second.
