@@ -72,9 +72,9 @@ nonisolated enum CasualSpeechClaim {
     }
 
     /// Out of the way, by any route a person would accept: minimised, hidden, closed, or the app quit.
-    static func outOfTheWay(windowsBefore: Int, windows: Int?, minimised: Int, hidden: Bool, running: Bool) -> Bool {
-        if !running || hidden || minimised > 0 { return true }
-        return windows.map { $0 < windowsBefore } ?? false
+    /// `windowOpen` is the scenario's own window by identity; nil is a failed read, never "closed".
+    static func outOfTheWay(windowOpen: Bool?, minimised: Bool, hidden: Bool, running: Bool) -> Bool {
+        !running || hidden || minimised || windowOpen == false
     }
 }
 
@@ -90,13 +90,16 @@ extension ScenarioCatalog {
         let hidden: Bool
         /// nil: the read failed, which is never "no windows".
         let windows: Int?
-        let minimised: Int
-        let fullScreen: Int
+        /// Of the window `target` names, by identity. A force-quit TextEdit relaunches with its earlier windows, minimised ones
+        /// included: a count called K04 done 80 ms after the release, before anything was asked of the machine.
+        let targetOpen: Bool?
+        let targetMinimised: Bool
+        let targetFullScreen: Bool
     }
 
-    nonisolated static func windowState(_ bundleIdentifier: String) -> WindowState {
+    nonisolated static func windowState(_ bundleIdentifier: String, target: AXUIElement?) -> WindowState {
         guard let application = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first else {
-            return WindowState(running: false, hidden: false, windows: 0, minimised: 0, fullScreen: 0)
+            return WindowState(running: false, hidden: false, windows: 0, targetOpen: false, targetMinimised: false, targetFullScreen: false)
         }
         let element = AXUIElementCreateApplication(application.processIdentifier)
         AXUIElementSetMessagingTimeout(element, 0.5)
@@ -108,30 +111,45 @@ extension ScenarioCatalog {
         var value: AnyObject?
         let read = AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &value)
         guard read == .success || read == .noValue else {
-            return WindowState(running: true, hidden: hidden, windows: nil, minimised: 0, fullScreen: 0)
+            return WindowState(running: true, hidden: hidden, windows: nil, targetOpen: nil, targetMinimised: false, targetFullScreen: false)
         }
         let windows = value as? [AXUIElement] ?? []
-        return WindowState(running: true, hidden: hidden, windows: windows.count,
-                           minimised: windows.filter { flag($0, kAXMinimizedAttribute) }.count,
-                           fullScreen: windows.filter { flag($0, "AXFullScreen") }.count)
+        let open = target.map { target in windows.contains { CFEqual($0, target) } }
+        return WindowState(running: true, hidden: hidden, windows: windows.count, targetOpen: open,
+                           targetMinimised: target.map { flag($0, kAXMinimizedAttribute) } ?? false,
+                           targetFullScreen: target.map { flag($0, "AXFullScreen") } ?? false)
     }
 
-    static func state(_ bundleIdentifier: String) async -> WindowState {
-        await Task.detached { windowState(bundleIdentifier) }.value
+    static func state(_ bundleIdentifier: String, _ context: ScenarioContext? = nil) async -> WindowState {
+        let target = context?.notes["target"].map { $0 as! AXUIElement }
+        return await Task.detached { [target] in windowState(bundleIdentifier, target: target) }.value
     }
 
     static func isFront(_ bundleIdentifier: String) -> Bool {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleIdentifier
     }
 
-    /// TextEdit launched by the run, with `documents` new empty documents, in front.
+    /// The app's focused window: what "this" and "it" mean, and all the checkers look at.
+    static func noteTarget(_ bundleIdentifier: String, _ context: ScenarioContext) async {
+        let found = await Task.detached { () -> AXUIElement? in
+            guard let application = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first else { return nil }
+            var window: AnyObject?
+            guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(application.processIdentifier), kAXFocusedWindowAttribute as CFString, &window) == .success,
+                  let window, CFGetTypeID(window) == AXUIElementGetTypeID() else { return nil }
+            return (window as! AXUIElement)
+        }.value
+        if let found { context.notes["target"] = found }
+        context.baseline["targetWindowFound"] = found != nil
+    }
+
+    /// TextEdit launched by the run, with `documents` new empty documents, the last in front.
     static func textEditOpen(documents: Int = 1) -> @MainActor (ScenarioContext) async -> Void {
         { context in
             _ = await VoiceToolProbe.ask(["verb": "launch", "app": textEdit], context.harnessAnswer)
             for _ in 0..<documents { _ = await VoiceToolProbe.ask(["verb": "menu", "path": ["File", "New"], "expectApp": textEdit], context.harnessAnswer) }
             try? await Task.sleep(for: .milliseconds(600))
-            let opened = await state(textEdit)
-            context.baseline["textEditWindows"] = opened.windows ?? NSNull()
+            await noteTarget(textEdit, context)
+            context.baseline["textEditWindows"] = await state(textEdit).windows ?? NSNull()
         }
     }
 
@@ -139,15 +157,13 @@ extension ScenarioCatalog {
         { context in
             _ = await VoiceToolProbe.ask(["verb": "launch", "app": calculatorApp], context.harnessAnswer)
             try? await Task.sleep(for: .milliseconds(400))
-            let opened = await state(calculatorApp)
-            context.baseline["calculatorWindows"] = opened.windows ?? NSNull()
+            await noteTarget(calculatorApp, context)
         }
     }
 
-    static func gone(_ context: ScenarioContext, _ bundleIdentifier: String, baselineKey: String) async -> Bool {
-        let now = await state(bundleIdentifier)
-        return CasualSpeechClaim.outOfTheWay(windowsBefore: context.baseline[baselineKey] as? Int ?? 0, windows: now.windows,
-                                             minimised: now.minimised, hidden: now.hidden, running: now.running)
+    static func gone(_ context: ScenarioContext, _ bundleIdentifier: String) async -> Bool {
+        let now = await state(bundleIdentifier, context)
+        return CasualSpeechClaim.outOfTheWay(windowOpen: now.targetOpen, minimised: now.targetMinimised, hidden: now.hidden, running: now.running)
     }
 
     /// One scenario: `done` reads the machine, polled like a person glancing back; `answer` judges a read's words.
@@ -184,9 +200,9 @@ extension ScenarioCatalog {
     }
 
     static var casualSpeech: [RunnerScenario] {
-        let textEditGone: @MainActor (ScenarioContext) async -> Bool = { context in await gone(context, textEdit, baselineKey: "textEditWindows") }
-        let calculatorGone: @MainActor (ScenarioContext) async -> Bool = { context in await gone(context, calculatorApp, baselineKey: "calculatorWindows") }
-        let textEditMinimised: @MainActor (ScenarioContext) async -> Bool = { _ in await state(textEdit).minimised > 0 }
+        let textEditGone: @MainActor (ScenarioContext) async -> Bool = { context in await gone(context, textEdit) }
+        let calculatorGone: @MainActor (ScenarioContext) async -> Bool = { context in await gone(context, calculatorApp) }
+        let textEditMinimised: @MainActor (ScenarioContext) async -> Bool = { context in await state(textEdit, context).targetMinimised }
         let bothApps = RunnerScenario.Start.appsNotRunning([textEdit, calculatorApp])
         return [
             // Two actions, either order.
@@ -200,7 +216,7 @@ extension ScenarioCatalog {
             casual("K04", start: .appsNotRunning([textEdit]), quit: [textEdit], prepare: textEditOpen(), done: textEditGone),
             casual("K05", start: .appsNotRunning([textEdit]), quit: [textEdit], prepare: textEditOpen(), done: textEditGone),
             casual("K06", start: .appsNotRunning([textEdit]), quit: [textEdit], prepare: textEditOpen(),
-                   done: { _ in await state(textEdit).fullScreen > 0 }),
+                   done: { context in await state(textEdit, context).targetFullScreen }),
             casual("K07", start: .appsNotRunning([textEdit]), quit: [textEdit], prepare: textEditOpen(),
                    done: { _ in await state(textEdit).hidden }),
             casual("K08", start: .appsNotRunning([textEdit]), quit: [textEdit], prepare: textEditOpen(), done: textEditMinimised),
@@ -250,7 +266,7 @@ extension ScenarioCatalog {
                        outcome.earlier.contains { $0.decisions.contains { RealtimeVoiceVerbs.isActingTool($0.call.name) && $0.dispatch?.harnessConfirmed == true } }
                    }]),
             casual("K19", start: .appsNotRunning([calculatorApp]), earlier: ["K19a"], quit: [calculatorApp],
-                   done: { _ in let now = await state(calculatorApp); return !now.running || now.windows == 0 || now.minimised > 0 || now.hidden }),
+                   done: { _ in let now = await state(calculatorApp); return !now.running || now.windows == 0 || now.hidden }),
             // Casual words must still ask: a destructive press raises a card, and the runner denies it.
             casual("K20", start: .pages(["drafts.html"]),
                    done: nil,

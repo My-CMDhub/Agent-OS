@@ -283,11 +283,12 @@ struct CasualSpeechClaimTests {
     }
 
     @Test func anyRouteOutOfTheWayCountsAndAFailedReadDoesNot() {
-        #expect(CasualSpeechClaim.outOfTheWay(windowsBefore: 1, windows: 1, minimised: 1, hidden: false, running: true))
-        #expect(CasualSpeechClaim.outOfTheWay(windowsBefore: 2, windows: 1, minimised: 0, hidden: false, running: true))
-        #expect(CasualSpeechClaim.outOfTheWay(windowsBefore: 1, windows: 0, minimised: 0, hidden: false, running: false))
-        #expect(!CasualSpeechClaim.outOfTheWay(windowsBefore: 1, windows: 1, minimised: 0, hidden: false, running: true))
-        #expect(!CasualSpeechClaim.outOfTheWay(windowsBefore: 1, windows: nil, minimised: 0, hidden: false, running: true))
+        #expect(CasualSpeechClaim.outOfTheWay(windowOpen: true, minimised: true, hidden: false, running: true))
+        #expect(CasualSpeechClaim.outOfTheWay(windowOpen: false, minimised: false, hidden: false, running: true))
+        #expect(CasualSpeechClaim.outOfTheWay(windowOpen: true, minimised: false, hidden: true, running: true))
+        #expect(CasualSpeechClaim.outOfTheWay(windowOpen: false, minimised: false, hidden: false, running: false))
+        #expect(!CasualSpeechClaim.outOfTheWay(windowOpen: true, minimised: false, hidden: false, running: true))
+        #expect(!CasualSpeechClaim.outOfTheWay(windowOpen: nil, minimised: false, hidden: false, running: true))
     }
 
     /// A scenario whose fixture has no line fails at run time as fixtureProblem, once per stack: caught here for nothing.
