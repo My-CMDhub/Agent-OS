@@ -28,6 +28,8 @@
 //
 
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 // MARK: - Pure pieces
 
@@ -70,7 +72,7 @@ nonisolated enum CascadeDeepgram {
         return URLSession(configuration: configuration)
     }()
     /// The owner's choice, Flux TTS (`/v2/speak`, a different model family from Aura): British, male, "warm, friendly, trustworthy,
-    /// confident, authoritative" (docs/flux-tts/voices, read 2026-11-03). Speed is 0.5-1.5 in 0.05 steps and a connection parameter;
+    /// confident, authoritative" (developers.deepgram.com/docs/flux-tts/voices, read 2026-11-03). Speed is 0.5-1.5 in 0.05 steps and a connection parameter;
     /// 1.0 -> 1.2 took one long line from 13.1 s to 9.0-10.6 s, live. REST `/v2/speak` takes the same JWT and these two values.
     static let voice = "flux-colin-en"
     static let speed = "1.2"
@@ -123,7 +125,7 @@ nonisolated enum CascadeDeepgram {
     }
 
     /// Flux TTS's end of one Speak + Flush. `Flushed` lands at once and proves no audio; `SpeechMetadata` closes the turn
-    /// ("every audio frame arrives between", docs/flux-tts/server-messages). A sentence that never becomes a turn warns instead.
+    /// ("every audio frame arrives between", developers.deepgram.com/docs/flux-tts/server-messages). A sentence that never becomes a turn warns instead.
     static func endsASentence(_ message: [String: Any]) -> Bool {
         switch message["type"] as? String {
         case "SpeechMetadata", "SpeechInterrupted": return true
@@ -309,6 +311,40 @@ nonisolated enum CascadeClaude {
     static func imageBlock(_ jpeg: Data) -> [String: Any] {
         ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": jpeg.base64EncodedString()]]
     }
+
+    /// Replayed 2026-11-03, same turn, 6 interleaved runs: 1920 -> 1024 on the long edge took first text 1,795 ms -> 1,395, 3,351 -> 1,235
+    /// input tokens, with output unchanged (so the cost was decoding, not thinking; 1280 gained nothing). Small print still read back
+    /// word for word and a press aimed the same (x 0.47, y 0.405 and 0.403): positions are fractions of the image, so no map moves.
+    static let imageLongEdge = 1024
+    static let imageQuality = 0.85
+
+    /// Above `imageLongEdge`, smaller; anything else (a pointer close-up, a focus crop) as it came. A failure keeps the original.
+    static func voiceImage(_ jpeg: Data) -> Data {
+        guard let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int, let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              max(width, height) > imageLongEdge else { return jpeg }
+        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: imageLongEdge,
+                                        kCGImageSourceCreateThumbnailWithTransform: true]
+        let out = NSMutableData()
+        guard let small = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+              let destination = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { return jpeg }
+        CGImageDestinationAddImage(destination, small, [kCGImageDestinationLossyCompressionQuality: imageQuality] as CFDictionary)
+        return CGImageDestinationFinalize(destination) ? out as Data : jpeg
+    }
+
+    /// One breakpoint on the owner turn's last block: a tool round then reads the turn's image from the cache (replayed: 3,783 -> 456
+    /// uncached tokens, first text 1,352 -> 1,203 ms). Earlier turns' come off: the API allows four, and they never hit again.
+    static func movingBreakpoint(toLastBlockOf messages: [[String: Any]]) -> [[String: Any]] {
+        messages.enumerated().map { index, message in
+            guard var content = message["content"] as? [[String: Any]], !content.isEmpty else { return message }
+            for block in content.indices { content[block]["cache_control"] = nil }
+            if index == messages.count - 1 { content[content.count - 1]["cache_control"] = ["type": "ephemeral"] }
+            var message = message
+            message["content"] = content
+            return message
+        }
+    }
 }
 
 // MARK: - The legs
@@ -474,7 +510,7 @@ final class CascadeVoicePipeline {
 
     // MARK: Context
 
-    func add(image jpeg: Data) { pendingImages.append(jpeg) }
+    func add(image jpeg: Data) { pendingImages.append(CascadeClaude.voiceImage(jpeg)) }
     func add(context text: String) { pendingContext.append(text) }
 
     /// The press (before anything of the new turn arrives): the reply stops here. What the cut-off turn
@@ -714,7 +750,8 @@ final class CascadeVoicePipeline {
         pendingImages = []
         pendingContext = []
         requestsThisTurn = 0
-        history = AgentLoop.keepingLatestImage(CascadeClaude.trimmed(CascadeClaude.strippingThinking(history) + [["role": "user", "content": content]]))
+        history = CascadeClaude.movingBreakpoint(toLastBlockOf: AgentLoop.keepingLatestImage(
+            CascadeClaude.trimmed(CascadeClaude.strippingThinking(history) + [["role": "user", "content": content]])))
         turnStartIndex = history.count - 1
     }
 
@@ -781,7 +818,7 @@ final class CascadeVoicePipeline {
             WorkerConfiguration.attachClientKey(to: &request)
             // Sorted: the same tools and system are the same bytes, which is what the prompt cache matches.
             request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
-            // `scripts/cascade-claude-bench.py` replays these. Holds the turn's screenshot: only on request, and fixture pages only.
+            // For replaying a request outside the app, one variable at a time. Holds the turn's screenshot: only on request, and fixture pages only.
             if let folder = CommandLine.arguments.first(where: { $0.hasPrefix("--cascade-dump-bodies=") })?.dropFirst("--cascade-dump-bodies=".count) {
                 try? request.httpBody?.write(to: URL(fileURLWithPath: "\(folder)/\(UUID().uuidString.prefix(8))-r\(requestsThisTurn).json"))
             }

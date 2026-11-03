@@ -7,7 +7,10 @@
 //
 
 import Foundation
+import CoreGraphics
+import ImageIO
 import Testing
+import UniformTypeIdentifiers
 @testable import Clicky
 
 struct CascadeVoicePipelineTests {
@@ -220,6 +223,42 @@ struct CascadeVoicePipelineTests {
         #expect(!RealtimeVoiceSession.unheardDuringTask(heard: "", superseded: true, gotReply: false, taskRunning: true))
         #expect(!RealtimeVoiceSession.unheardDuringTask(heard: "", superseded: false, gotReply: true, taskRunning: true))
         #expect(!RealtimeVoiceSession.ownerWordsStopTask(""))
+    }
+
+    @Test func aScreenshotGoesSmallerAndACloseUpAsItCame() throws {
+        func jpeg(_ width: Int, _ height: Int) throws -> Data {
+            let context = try #require(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                                 space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+            context.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            let image = try #require(context.makeImage())
+            let data = NSMutableData()
+            let destination = try #require(CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil))
+            CGImageDestinationAddImage(destination, image, nil)
+            #expect(CGImageDestinationFinalize(destination))
+            return data as Data
+        }
+        func size(_ data: Data) throws -> (Int, Int) {
+            let source = try #require(CGImageSourceCreateWithData(data as CFData, nil))
+            let properties = try #require(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+            return (try #require(properties[kCGImagePropertyPixelWidth] as? Int), try #require(properties[kCGImagePropertyPixelHeight] as? Int))
+        }
+        let small = try size(CascadeClaude.voiceImage(jpeg(1920, 1200)))
+        #expect(small.0 == CascadeClaude.imageLongEdge && small.1 == 640)   // The aspect holds: positions are fractions of the image.
+        let closeUp = try jpeg(320, 200)
+        #expect(CascadeClaude.voiceImage(closeUp) == closeUp)
+        #expect(CascadeClaude.voiceImage(Data("not an image".utf8)) == Data("not an image".utf8))
+    }
+
+    @Test func theCacheBreakpointMovesToTheNewTurnsLastBlock() {
+        let old: [String: Any] = ["role": "user", "content": [["type": "text", "text": "a", "cache_control": ["type": "ephemeral"]]]]
+        let reply: [String: Any] = ["role": "assistant", "content": [["type": "text", "text": "b"]]]
+        let new: [String: Any] = ["role": "user", "content": [["type": "image"], ["type": "text", "text": "c"]]]
+        let moved = CascadeClaude.movingBreakpoint(toLastBlockOf: [old, reply, new])
+        func blocks(_ index: Int) -> [[String: Any]] { moved[index]["content"] as? [[String: Any]] ?? [] }
+        #expect(blocks(0)[0]["cache_control"] == nil)
+        #expect(blocks(2)[0]["cache_control"] == nil)
+        #expect(blocks(2)[1]["cache_control"] != nil)
     }
 
     @Test func fluxEndsASentenceOnItsMetadataNotFlushed() {
