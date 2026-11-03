@@ -166,8 +166,9 @@ extension ScenarioCatalog {
         return CasualSpeechClaim.outOfTheWay(windowOpen: now.targetOpen, minimised: now.targetMinimised, hidden: now.hidden, running: now.running)
     }
 
-    /// A force-quit TextEdit relaunches with every window it had, and K's windows reached 13 across one baseline (K02 and K16 then judged
-    /// a machine nobody has). So its empty Untitled windows, all this run's or an earlier run's, close before the quit; a window holding text is left alone.
+    /// A force-quit TextEdit relaunches with every window it had, and K's windows reached 20 (K16 then judged a machine nobody has). Pressing their
+    /// close buttons alone did not stop it: "closed 13, left 0", then the next launch read 14, because the runner's force-quit came before TextEdit wrote
+    /// its state. So: its empty Untitled windows close, a window holding text is left alone, and only an app with no windows left quits normally here.
     static func closeEmptyTextEditWindows(_: ScenarioContext) async -> [String: Any] {
         await Task.detached { () -> [String: Any] in
             guard let application = NSRunningApplication.runningApplications(withBundleIdentifier: textEdit).first else { return [:] }
@@ -189,7 +190,10 @@ extension ScenarioCatalog {
                                                why: "run cleanup: an empty Untitled window, before the quit", closed: press.error == .success)
                 closed += 1
             }
-            return ["closed": closed, "left": left]
+            let empty = HarnessHands.waitUntil(seconds: 5) { windowState(textEdit, target: nil).windows == 0 }
+            guard left == 0, empty else { return ["closed": closed, "left": left, "windowsNow": windowState(textEdit, target: nil).windows ?? -1] }
+            application.terminate()
+            return ["closed": closed, "left": 0, "windowsNow": 0, "quitNormally": HarnessHands.waitUntil(seconds: 3) { application.isTerminated }]
         }.value
     }
 
@@ -242,8 +246,12 @@ extension ScenarioCatalog {
             // Two actions, either order.
             casual("K01", start: bothApps, quit: [textEdit, calculatorApp], prepare: textEditOpen(),
                    done: { context in await textEditMinimised(context) && isFront(calculatorApp) }),
+            // Minimised last, so TextEdit may rightly stay in front: Calculator only has to be open (both stacks did this and were failed for it).
             casual("K02", start: bothApps, quit: [textEdit, calculatorApp], prepare: textEditOpen(),
-                   done: { context in await textEditMinimised(context) && isFront(calculatorApp) }),
+                   done: { context in
+                       let calculatorWindows = await state(calculatorApp).windows ?? 0
+                       return await textEditMinimised(context) && calculatorWindows > 0
+                   }),
             casual("K03", start: bothApps, quit: [textEdit, calculatorApp], prepare: textEditOpen(),
                    done: { _ in await state(textEdit).hidden && isFront(calculatorApp) }),
             // Window verbs, said the long way round, on a window the run opened.
