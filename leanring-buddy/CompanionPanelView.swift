@@ -180,6 +180,7 @@ struct CompanionPanelView: View {
         case .intent(let title): return (.openArc, title)
         case .needsYou: return (.arcDown, approvalsWaiting(max(1, pendingApprovals)))
         case .didntTake: return (.brokenRing, "Didn\u{2019}t take")
+        case .unconfirmed: return (.openArc, "Sent, couldn\u{2019}t confirm")
         case .focus(let name): return (.orbit, "Focus: \(name)")
         }
     }

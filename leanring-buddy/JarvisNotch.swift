@@ -50,6 +50,8 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
     case proof(subject: String)
     case needsYou
     case didntTake(reason: String)
+    /// Sent, and no change could be read (`notVerified`): not a failure, and never shown as one while the voice says it could not confirm.
+    case unconfirmed(subject: String)
     /// The turn ended and nothing came back: no words, no tool call.
     case noReply
     /// Just after the release, briefly: what "this" means this turn (`OwnerFocusNote.notchName`,
@@ -66,6 +68,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .proof: return "proof"
         case .needsYou: return "needsYou"
         case .didntTake: return "didntTake"
+        case .unconfirmed: return "unconfirmed"
         case .noReply: return "noReply"
         case .focus: return "focus"
         }
@@ -75,7 +78,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         switch self {
         case .idle: return .idle
         case .listening, .thinking, .speaking: return .compact
-        case .intent, .proof, .needsYou, .didntTake, .noReply, .focus: return .expanded
+        case .intent, .proof, .needsYou, .didntTake, .unconfirmed, .noReply, .focus: return .expanded
         }
     }
 
@@ -83,7 +86,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
     var holdSeconds: Double? {
         switch self {
         case .proof: return 1.8
-        case .didntTake: return 2.5
+        case .didntTake, .unconfirmed: return 2.5
         case .noReply: return 2
         case .focus: return 1.2
         default: return nil
@@ -97,6 +100,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .proof(let subject): return subject
         case .needsYou: return "Needs your approval"
         case .didntTake: return "Didn\u{2019}t take"
+        case .unconfirmed(let subject): return subject.isEmpty ? "Sent" : subject
         case .noReply: return "No reply"
         case .focus(let name): return "Focus: \(name)"
         default: return nil
@@ -108,6 +112,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .proof: return " \u{2014} verified"
         case .needsYou: return " \u{2014} on the card"
         case .didntTake(let reason): return " \u{2014} \(reason)"
+        case .unconfirmed: return " \u{2014} couldn\u{2019}t confirm"
         case .noReply: return " \u{2014} say it again"
         default: return nil
         }
@@ -119,6 +124,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .proof(let subject): return "\(subject) verified"
         case .needsYou: return "Needs your approval. On the card."
         case .didntTake(let reason): return "Didn\u{2019}t take. \(reason)"
+        case .unconfirmed(let subject): return "\(subject.isEmpty ? "Sent" : subject). Couldn\u{2019}t confirm."
         case .noReply: return "No reply. Say it again."
         default: return nil
         }
@@ -145,6 +151,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .harnessAnswered(let ok, let subject, let error):
             switch self {
             case .intent, .needsYou:
+                if error == "notVerified" { return .unconfirmed(subject: subject) }
                 return ok ? .proof(subject: subject) : .didntTake(reason: JarvisNotchReason.plain(forErrorCode: error, subject: subject))
             default:
                 return nil
@@ -1013,6 +1020,8 @@ private struct JarvisNotchView: View {
             JVGlyph(kind: .arcDown, size: 14)
         case .didntTake:
             JVGlyph(kind: .brokenRing, size: 14)
+        case .unconfirmed:
+            JVGlyph(kind: .ellipsis, size: 14)
         case .noReply:
             JVGlyph(kind: .ellipsis, size: 14)
         case .idle:
