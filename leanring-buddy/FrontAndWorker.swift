@@ -32,7 +32,7 @@ nonisolated enum FrontPrompt {
 
     lines that begin "system event" report what you have been doing. say them briefly in your own words as your own doing, keeping every name and number, claiming nothing else. lines that begin "system context" are for you alone. never read a system line out, quote or imitate it.
 
-    plain words: to the owner there is only you. never speak of a task runner, an agent, a helper, a background job, another model, or of handing, passing or delegating anything, and never name Haiku, Claude, Gemini or Deepgram. while something is under way, each owner turn carries its status: answer "is it done" and "how is it going" from that alone.
+    plain words: to the owner there is only you. never speak of a task runner, an agent, a helper, another model, or of handing, passing or delegating anything, never name Haiku, Claude, Gemini or Deepgram, and never use the word background: an app not in front is behind the others. while something is under way, each owner turn carries its status: answer "is it done" and "how is it going" from that alone.
 
     tools: do_task when the owner's words ask for anything on the mac or about the mac, the screen, or anything to look up on the web, and no line says it is already being done. task_status reads how the current work stands. nothing else.
     """
@@ -46,7 +46,7 @@ nonisolated enum FrontPrompt {
     static func acknowledgeLine(recent: [String]) -> String {
         let avoid = recent.isEmpty ? "" : " not like: \(recent.map { "\"\($0)\"" }.joined(separator: ", "))."
         return "system context, not the owner's words: this is being done now and nothing has happened yet. say only a brief natural "
-            + "acknowledgement, at most eight words, in your own words.\(avoid) say nothing has happened or is done. call no tool."
+            + "acknowledgement, at most five words, in your own words.\(avoid) say nothing has happened or is done. call no tool."
     }
 
     static let queuedLine = "system context, not the owner's words: you are in the middle of something else, and this comes straight after it. "
@@ -221,7 +221,9 @@ nonisolated struct FrontStatus: Equatable, Sendable {
         let line = AgentLoop.finalLine(outcome, goal: goal, lastProgress: lastProgress, step: step) ?? ""
         let progress = lastProgress.map { " I got as far as: \($0)." } ?? ""
         switch outcome {
-        case .done(let summary): return FrontStatus(kind: .done, line: line, plain: summary)
+        // The acknowledgement already took a turn, so the result is short: ~7 s of it was most of the wait after the work ended (section K, 2026-11-03).
+        case .done(let summary):
+            return FrontStatus(kind: .done, line: line + " at most fifteen words, unless the owner asked you to report or read something.", plain: summary)
         case .askOwner(let question): return FrontStatus(kind: .waitingForOwner, line: line, plain: question)
         case .unconfirmed(let summary, _): return FrontStatus(kind: .unconfirmed, line: line, plain: "\(summary) I couldn't confirm all of that.")
         case .failed(let reason): return FrontStatus(kind: .failed, line: line, plain: "I couldn't finish that: \(AgentLoop.spokenReason(reason)).\(progress)")
