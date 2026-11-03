@@ -19,6 +19,16 @@ import Foundation
 
 nonisolated enum RealtimeHandsVerbs {
     static let closeTargets = ["tab", "window", "app"]
+    /// Words that ask for an app to go, not a window. The model picked "app" for "close that calculator thing", "put that away" and
+    /// "hide text edit would you", raising a Quit card (3 of 3 in the casual-speech runs, 2026-11-03); closing a window is the undoable
+    /// reading, and the owner can still say quit. "completely close the Claude application" (live 10-26) stays a quit.
+    static let quitWords: Set<String> = ["quit", "exit", "terminate", "kill", "shut", "app", "apps", "application", "applications", "completely", "entirely", "fully"]
+
+    /// `what`, held to the owner's words: an app only when they asked for that.
+    static func closeTarget(what: String?, heard: String?) -> String? {
+        guard what == "app", let heard, !RealtimeVoiceVerbs.foldedTokens(heard).contains(where: quitWords.contains) else { return what }
+        return "window"
+    }
 
     /// How long a quit is given before "still running" is said. Review
     /// 2026-10-01: Xcode and Chrome take seconds to tear down, so 3 s reported

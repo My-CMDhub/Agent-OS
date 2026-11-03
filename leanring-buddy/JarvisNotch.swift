@@ -232,6 +232,7 @@ nonisolated enum JarvisNotchReason {
         "dryRun": "dry run, nothing was done",
         // The menu and focus verbs (2026-09-25).
         "notVerified": "no change was seen",
+        "questionOnly": "a question: nothing moved",
         "targetIsSubmenu": "that item opens a submenu",
         "noMenuBar": "that app has no menu bar",
         "noFrontmostApplication": "nothing is in front",

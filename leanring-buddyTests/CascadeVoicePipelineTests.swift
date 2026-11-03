@@ -175,7 +175,7 @@ struct CascadeVoicePipelineTests {
     /// `smart_format` fused "open linkedin dot com" into "Openlinkedin.com.", which the heard check rightly refuses.
     @Test func theOwnersWordsAreNotReformattedIntoAnAddress() {
         let listen = CascadeDeepgram.listenURL(sampleRate: 16_000, keyterms: []).absoluteString
-        #expect(!listen.contains("smart_format") && listen.contains("punctuate=true") && listen.contains("numerals=true"))
+        #expect(!listen.contains("smart_format") && listen.contains("punctuate=true") && !listen.contains("numerals"))
         // The guard itself did not move: words inside a word never name a site, spoken words do.
         #expect(RealtimeHeardCheck.siteRefusal(transcript: "Openlinkedin.com.", url: "https://www.linkedin.com") != nil)
         #expect(RealtimeHeardCheck.siteRefusal(transcript: "Open linkedin dot com.", url: "https://www.linkedin.com") == nil)

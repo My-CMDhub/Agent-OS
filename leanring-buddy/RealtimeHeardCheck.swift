@@ -753,6 +753,28 @@ nonisolated enum RealtimeHeardCheck {
         return clauseStarts >= 2
     }
 
+    // MARK: A question moves nothing (pure)
+
+    static let questionLeadWords: Set<String> = ["is", "are", "was", "were", "am", "do", "does", "did", "has", "have", "isn", "aren"]
+    static let spokenFillers: Set<String> = ["um", "uh", "er", "hmm", "okay", "ok", "so", "and", "well", "hey", "jarvis", "like", "yes", "yeah", "no", "right", "a", "the"]
+    /// "can I", "is it possible to": a polite request, not a question about the state of things.
+    static let politeRequestWords: Set<String> = ["can", "could", "would", "possible", "able", "please", "mind"]
+
+    /// "is xcode open right now?": a yes-or-no question. K15 2026-11-03: Gemini brought the owner's Xcode to the front to answer it.
+    static func isYesNoQuestion(_ transcript: String) -> Bool {
+        let spoken = RealtimeVoiceVerbs.foldedTokens(transcript)
+        guard let first = spoken.first(where: { !spokenFillers.contains($0) }), questionLeadWords.contains(first) else { return false }
+        return !spoken.contains(where: politeRequestWords.contains) && !namesTwoActions(transcript)
+    }
+
+    /// What open_app or focus_app gets instead of moving the owner's windows to answer a question.
+    static func questionRefusal(named: String, isRunning: Bool) -> [String: Any] {
+        let shown = UntrustedText(named).forDisplay
+        return ["ok": false, "status": NSNull(), "error": "questionOnly", "named": named, "running": isRunning,
+                "message": "the owner asked a question, so nothing was opened or brought forward. \(shown) is \(isRunning ? "" : "not ")running. "
+                    + "Answer from that in a few words; do not open or focus anything unless they ask."]
+    }
+
     // MARK: Web-app shims are sites (2026-10-08)
 
     /// Measured 2026-10-08 on this Mac: Safari's "Add to Dock" apps (LinkedIn, Gmail,

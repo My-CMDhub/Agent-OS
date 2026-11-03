@@ -155,14 +155,15 @@ nonisolated enum CascadeDeepgram {
     /// The installed app names as Nova-3 keyterms: the heard check needs "Cursor", not "Kasa" (the OpenAI stack's
     /// transcription prompt does the same). No `smart_format`: it rewrites what was said into the address it guesses was meant,
     /// fusing the word before it ("Openlinkedin.com.", "emailtest@example.com"), and the heard check then rightly finds no site in
-    /// the owner's words. `punctuate` and `numerals` are the parts of it the model reads.
+    /// the owner's words. `punctuate` is the part of it the model reads. No `numerals` either: "hide that one" came back "hide that 1"
+    /// and the model pressed Delete to remove the last digit (K17 2026-11-03), stopped only by the card. Dictated numbers reach the
+    /// model as words ("slice two"), which it types as it sees fit; the worse failure was an ordinary word becoming a digit.
     static func listenURL(sampleRate: Int, keyterms: [String], host: String = host) -> URL {
         var components = URLComponents(string: "wss://\(host)/v1/listen")!
         components.queryItems = [
             URLQueryItem(name: "model", value: "nova-3"), URLQueryItem(name: "encoding", value: "linear16"),
             URLQueryItem(name: "sample_rate", value: String(sampleRate)), URLQueryItem(name: "channels", value: "1"),
-            URLQueryItem(name: "interim_results", value: "true"), URLQueryItem(name: "punctuate", value: "true"),
-            URLQueryItem(name: "numerals", value: "true")
+            URLQueryItem(name: "interim_results", value: "true"), URLQueryItem(name: "punctuate", value: "true")
         ] + keyterms.prefix(40).map { URLQueryItem(name: "keyterm", value: $0) }
         return components.url!
     }

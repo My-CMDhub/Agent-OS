@@ -173,6 +173,54 @@ struct VoiceReliabilityTests {
         #expect(RealtimeOpenAppTool.ordinalHint(heard: "delete the first draft", found: nil) == nil)
     }
 
+    // MARK: Section K, 2026-11-03
+
+    @Test func closeIsAWindowUntilTheOwnerSaysQuit() {
+        for words in ["could you close that calculator thing, yeah, just, close it", "um, actually, put that away", "High text edit would you?", "close the calculator"] {
+            #expect(RealtimeHandsVerbs.closeTarget(what: "app", heard: words) == "window", "\(words)")
+        }
+        for words in ["quit xcode", "Can you quit Xcode?", "You can completely close the Claude desktop application", "close the app", "exit chrome"] {
+            #expect(RealtimeHandsVerbs.closeTarget(what: "app", heard: words) == "app", "\(words)")
+        }
+        #expect(RealtimeHandsVerbs.closeTarget(what: "tab", heard: "close this") == "tab")
+        // No words in time: as sent, and a quit still shows its card.
+        #expect(RealtimeHandsVerbs.closeTarget(what: "app", heard: nil) == "app")
+    }
+
+    @Test func aQuestionMovesNothing() {
+        for words in ["is, uh, x code open right now", "Is A X Code open right now?", "okay is safari running", "are my notes open", "does xcode have a window open"] {
+            #expect(RealtimeHeardCheck.isYesNoQuestion(words), "\(words)")
+        }
+        for words in ["open xcode", "can I get the calculator up", "is it possible to open safari", "could you open notes", "where did my downloads go", "pull up my calendar"] {
+            #expect(!RealtimeHeardCheck.isYesNoQuestion(words), "\(words)")
+        }
+        let refused = RealtimeHeardCheck.questionRefusal(named: "Xcode", isRunning: true)
+        #expect(refused["error"] as? String == "questionOnly")
+        #expect((refused["message"] as? String)?.contains("is running") == true)
+        #expect((RealtimeHeardCheck.questionRefusal(named: "Xcode", isRunning: false)["message"] as? String)?.contains("not running") == true)
+    }
+
+    @Test func anUnmappedShortcutGoesToTheLiveMenuBar() {
+        let call = RealtimeToolCall(callID: "1", name: RealtimeVoiceVerbs.pressMenuName, appName: "TextEdit", shortcut: "cmd+m")
+        let refused = RealtimeToolRefusal(error: "shortcutNotMapped", message: "m")
+        #expect(RealtimeOpenAppTool.shortcutFallback(call, refusal: refused)?.name == RealtimeVoiceVerbs.pressKeysName)
+        #expect(RealtimeOpenAppTool.shortcutFallback(call, refusal: refused)?.shortcut == "cmd+m")
+        #expect(RealtimeOpenAppTool.shortcutFallback(call, refusal: RealtimeToolRefusal(error: "shortcutAmbiguous", message: "m")) == nil)
+    }
+
+    @Test func aSpokenForPathFindsItsListedSpelling() {
+        let listed = [RealtimeMenuCandidate(path: ["Window", "Minimise"], shortcut: "\u{2318}M"), RealtimeMenuCandidate(path: ["Window", "Minimise All"], shortcut: nil)]
+        #expect(RealtimeOpenAppTool.offeredPath(matching: ["Window", "Minimize"], among: listed) == ["Window", "Minimise"])
+        #expect(RealtimeOpenAppTool.offeredPath(matching: ["Window", "Minimise"], among: listed) == ["Window", "Minimise"])
+        #expect(RealtimeOpenAppTool.offeredPath(matching: ["Window", "Zoom"], among: listed) == nil)
+    }
+
+    @Test func theCascadeSpeaksIntentOnlyBeforeASlowTool() {
+        let line = RealtimeOpenAppTool.cascadeIntentLine
+        #expect(line.contains("before open_app, open_url or open_settings_pane"))
+        #expect(line.contains("before any other tool say nothing"))
+    }
+
     // MARK: The task's report
 
     private func receipt(_ tool: String, ok: Bool = true, step: Int = 1, shown: String? = nil, typed: String? = nil, awaitsCommit: Bool = false) -> AgentLoop.Receipt {

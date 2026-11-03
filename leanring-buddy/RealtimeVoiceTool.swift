@@ -290,11 +290,13 @@ nonisolated enum RealtimeOpenAppTool {
 
     /// The prompt for a pointing format (`RealtimePointFormat`): only the
     /// position sentence differs, and it says what the schema says.
-    /// Cascade only: nothing else is spoken until the tool's answer has come back from a second model call (3.4-7 s, live
-    /// 2026-11-03). Waits that long gain from a filler; a 1.5 s one does not, so only a reply about to call a tool says it.
+    /// Cascade only. Replies were twice Gemini's length (102 vs 52 chars, section K 2026-11-03) and that was most of the slow finish:
+    /// intent, then the same thing again as the result. Only the tools that normally take about 2 s or more get an intent line
+    /// (voice-decisions.log medians: open_settings_pane 2,192 ms, open_url 1,730, open_app 1,688 with p90 3,384; press_element 340,
+    /// type_text 195). A wait for do_task is its own few words.
     static let cascadeIntentLine = """
 
-    before the first tool call of a reply, say two to five words of what you are about to do, in the same reply, ending in a full stop: it is spoken while the tool runs. intent only, as an -ing word or "let me": never a word saying it happened. if you answer from the screen with no tool, say nothing extra.
+    before open_app, open_url or open_settings_pane, say two to five words of what you are about to do, in the same reply, ending in a full stop: it is spoken while the tool runs. intent only, as an -ing word or "let me": never a word saying it happened. before any other tool say nothing. after a result, at most eight words, never repeating what you already said, with nothing the result does not show.
     """
 
     static func systemPrompt(pointFormat: RealtimePointFormat, stack: VoiceStackChoice) -> String {
@@ -2144,6 +2146,25 @@ nonisolated enum RealtimeOpenAppTool {
             resolved.path = path
             return resolved
         }
+    }
+
+    /// The App verbs belong to whichever app was in front when they were read, so after a focus inside a plan "cmd+m" was refused
+    /// as not mapped, and the task went clicking title-bar buttons (K01, K02 2026-11-03). A shortcut that no mapped item owns goes to
+    /// press_keys, which asks the live menu bar who owns it, and judges anything else. nil: the refusal stands.
+    static func shortcutFallback(_ call: RealtimeToolCall, refusal: RealtimeToolRefusal) -> RealtimeToolCall? {
+        guard refusal.error == "shortcutNotMapped", let keys = call.shortcut, HarnessKeys.parse(keys) != nil else { return nil }
+        return RealtimeToolCall(callID: call.callID, name: RealtimeVoiceVerbs.pressKeysName, appName: call.appName, shortcut: keys)
+    }
+
+    /// The listed item a spoken-for path means, spelling aside ("Window > Minimize" is "Window > Minimise" on this Mac). Same depth, every step's words match.
+    static func offeredPath(matching path: [String], among candidates: [RealtimeMenuCandidate]) -> [String]? {
+        if candidates.contains(where: { $0.path == path }) { return path }
+        func same(_ first: String, _ second: String) -> Bool {
+            let (a, b) = (RealtimeVoiceVerbs.foldedTokens(first), RealtimeVoiceVerbs.foldedTokens(second))
+            return a.count == b.count && zip(a, b).allSatisfy { RealtimeVoiceVerbs.spellingFolded($0) == RealtimeVoiceVerbs.spellingFolded($1) }
+        }
+        let matches = candidates.filter { $0.path.count == path.count && zip($0.path, path).allSatisfy(same) }
+        return matches.count == 1 ? matches[0].path : nil
     }
 
     /// A mapped path the app no longer has: the map is stale, rebuilt at the next look.

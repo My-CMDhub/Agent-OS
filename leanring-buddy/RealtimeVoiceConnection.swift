@@ -1174,6 +1174,10 @@ final class RealtimeVoiceConnection {
         switch RealtimeOpenAppTool.withShortcutResolved(unresolvedCall, map: turn.affordanceMenuOffer) {
         case .success(let resolved): resolvedCall = resolved
         case .failure(let refusal):
+            if let keys = RealtimeOpenAppTool.shortcutFallback(unresolvedCall, refusal: refusal) {
+                resolvedCall = keys
+                break
+            }
             let refused = RealtimeToolDispatch(result: RealtimeOpenAppTool.toolResult(for: refusal), harnessMilliseconds: 0,
                                                waitedForConfirmation: false, harnessResponse: nil)
             turn.dispatches.append(refused)
@@ -1182,7 +1186,7 @@ final class RealtimeVoiceConnection {
         }
         // Read now, after the previous call finished: a find and a press sent
         // in one batch must still press what that find offered.
-        let thisTurnOffer = turn.latestMenuOffer
+        var thisTurnOffer = turn.latestMenuOffer
         let thisTurnScreenOffer = turn.latestScreenOffer
         turn.decisions[decisionIndex].offeredBeforeCall = thisTurnOffer?.candidates
         turn.decisions[decisionIndex].offeredElementsBeforeCall = thisTurnScreenOffer?.elements
@@ -1196,10 +1200,29 @@ final class RealtimeVoiceConnection {
         // The owner's words, once complete (the check above waited for them).
         let heardWords = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime) != nil ? turn.heardText : nil
         var call = RealtimeOpenAppTool.droppingUnsaidPointer(resolvedCall, heard: heardWords)
+        // The owner's words hold what the item says, and it was never looked up: look it up here rather than tell the owner it cannot
+        // be done (K17 2026-11-03: "hide that one", press_menu Calculator > Hide Calculator refused notOffered, "I can't hide the
+        // calculator"). The listing is the live menu bar's, with its privacy filter; the kernel still judges the press.
+        if isCurrent(), call.name == RealtimeVoiceVerbs.pressMenuName, let path = call.path, let label = path.last, heardWords != nil,
+           RealtimeDecisionTrace.heardOverlapsLabel(heard: heardWords, path: path) == true,
+           RealtimeOpenAppTool.pressOffer(path: path, thisTurn: thisTurnOffer, previousTurn: turn.previousTurnMenuOffer,
+                                          followUpConfirmed: heard?.followUpConfirmed, confirmedByYes: heard?.confirmedByYes == true,
+                                          affordanceMap: turn.affordanceMenuOffer, now: ProcessInfo.processInfo.systemUptime).offer == nil {
+            let find = RealtimeToolCall(callID: call.callID, name: RealtimeVoiceVerbs.findMenuItemsName, appName: call.appName, words: label)
+            let found = await RealtimeOpenAppTool.dispatch(find, answer: harnessAnswer, confirmationWaitSeconds: confirmationWaitSeconds, onConfirmationRequired: {})
+            if let offer = found.menuOffer, let real = RealtimeOpenAppTool.offeredPath(matching: path, among: offer.candidates) {
+                thisTurnOffer = RealtimeStandingOffer(candidates: offer.candidates, app: found.appCheck?["resolvedBundleId"] as? String,
+                                                      uptime: ProcessInfo.processInfo.systemUptime)
+                turn.latestMenuOffer = thisTurnOffer
+                call.path = real
+            }
+        }
+        // "close that calculator thing" is a window; a quit is for when the owner says so (a Quit card is theirs to answer, and asking is the cost).
+        if call.name == RealtimeVoiceVerbs.closeName { call.what = RealtimeHandsVerbs.closeTarget(what: call.what, heard: heardWords) }
         // "Type hello in the search box": the field the owner's own words name, read off the live screen, outranks the model's
         // aim. Gemini sent no aim, an unsaid pointer, or the page itself as the name, then told the owner the box could not be
         // typed in (A5, A9, C5 2026-11-03). "this box" with the pointer stays the pointer's; no field picked, the model's aim stands.
-        if !turn.isAgentStep, call.name == RealtimeVoiceVerbs.typeTextName, !call.underPointer,
+        if isCurrent(), !turn.isAgentStep, call.name == RealtimeVoiceVerbs.typeTextName, !call.underPointer,
            let words = RealtimeOpenAppTool.fieldWords(inHeard: heardWords),
            let field = await pageFieldNamed(by: words, app: call.appName, display: turn.screenshotDisplayFrame, harnessAnswer: harnessAnswer) {
             call.elementName = field
@@ -1219,6 +1242,12 @@ final class RealtimeVoiceConnection {
             siteRefusal = RealtimeHeardCheck.siteRefusal(
                 transcript: await turn.waitForHeard(until: released + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds),
                 url: call.url)
+        }
+        // "is xcode open?" is answered, not acted on: a read must not move the owner's windows (K15 2026-11-03).
+        if !turn.isAgentStep, siteRefusal == nil, heard?.refusal == nil, [RealtimeVoiceVerbs.focusAppName, RealtimeOpenAppTool.name].contains(call.name),
+           let words = heardWords, RealtimeHeardCheck.isYesNoQuestion(words), let named = call.appName {
+            let running = await Task.detached { RealtimeVoiceVerbs.isRunning(named: named) }.value
+            siteRefusal = RealtimeHeardCheck.questionRefusal(named: named, isRunning: running)
         }
         // Which offer the notOffered gate judges by: this turn's, or the previous
         // turn's when the owner's own words name the item. The trace records it.
