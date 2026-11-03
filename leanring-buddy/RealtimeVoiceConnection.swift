@@ -1196,11 +1196,15 @@ final class RealtimeVoiceConnection {
         // The owner's words, once complete (the check above waited for them).
         let heardWords = turn.heardCompletedUptime(now: ProcessInfo.processInfo.systemUptime) != nil ? turn.heardText : nil
         var call = RealtimeOpenAppTool.droppingUnsaidPointer(resolvedCall, heard: heardWords)
-        // "Type hello in the search box" with no aim: the field the owner's own words name, read off the live screen.
-        // Gemini sent no aim, or an unsaid pointer, and then asked which field (A5, A9, C5 2026-11-03).
-        if !turn.isAgentStep, call.name == RealtimeVoiceVerbs.typeTextName, call.elementName == nil, call.x == nil, call.y == nil, !call.underPointer,
-           let words = RealtimeOpenAppTool.fieldWords(inHeard: heardWords) {
-            call.elementName = await pageFieldNamed(by: words, app: call.appName, display: turn.screenshotDisplayFrame, harnessAnswer: harnessAnswer)
+        // "Type hello in the search box": the field the owner's own words name, read off the live screen, outranks the model's
+        // aim. Gemini sent no aim, an unsaid pointer, or the page itself as the name, then told the owner the box could not be
+        // typed in (A5, A9, C5 2026-11-03). "this box" with the pointer stays the pointer's; no field picked, the model's aim stands.
+        if !turn.isAgentStep, call.name == RealtimeVoiceVerbs.typeTextName, !call.underPointer,
+           let words = RealtimeOpenAppTool.fieldWords(inHeard: heardWords),
+           let field = await pageFieldNamed(by: words, app: call.appName, display: turn.screenshotDisplayFrame, harnessAnswer: harnessAnswer) {
+            call.elementName = field
+            call.x = nil
+            call.y = nil
         }
         // create_reminder's due is the owner's words, never the model's: always replaced, waited for like the site check's.
         // read_calendar's range is read from the same words, before the model's `when`.

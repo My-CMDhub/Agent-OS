@@ -836,7 +836,8 @@ enum ScenarioRunner {
         // own caps bound it), still denying cards, then judge the whole of it.
         box.outcome.voiceDecisions = turnID.flatMap { box.marks[$0]?.decisions } ?? []
         if let turnID, let marks = box.marks[turnID],
-           followsTask(turnStartedOne: marks.decisions.contains(where: { $0.call.name == RealtimeVoiceVerbs.doTaskName && $0.dispatch?.harnessConfirmed == true }),
+           // `taskStarted` too: a turn whose words name two actions starts the task from its first acting call, no do_task in sight.
+           followsTask(turnStartedOne: marks.taskStarted || marks.decisions.contains(where: { $0.call.name == RealtimeVoiceVerbs.doTaskName && $0.dispatch?.harnessConfirmed == true }),
                        hasPrelude: scenario.prelude != nil, taskRunningOrReported: session.agentLoop != nil || box.agentReport != nil) {
             let agentDeadline = uptime + AgentLoop.maximumSeconds + 40
             while uptime < agentDeadline, box.agentReport == nil {

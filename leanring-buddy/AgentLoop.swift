@@ -336,7 +336,7 @@ final class AgentLoop {
         case done(summary: String)
         case askOwner(question: String)
         case failed(reason: String)
-        /// The task ended and its report still claims something its receipts do not show. Not a failure: of the 38 tasks that
+        /// The task ended and its report still claims something its receipts do not show. Not a failure: of the 37 tasks that
         /// ended this way 2026-10-20..11-03 most answers were right. Said with the doubt, never as "it did not work".
         case unconfirmed(summary: String, challenge: String)
         case cancelled
