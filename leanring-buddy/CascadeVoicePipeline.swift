@@ -853,6 +853,12 @@ final class CascadeVoicePipeline {
             marks.cascadeFirstTextUptime = arrival
             marks.events.append(("claude.firstText", arrival))
         }
+        // A new request's words are a new sentence of the reply ("Opening Safari now. There it is."): the honesty checks read whole words.
+        if partialText?.isEmpty == true, !marks.transcript.isEmpty {
+            marks.transcript += " "
+            // `followUpFirstAudio` can be the intent line's tail, still streaming; this is when the result's words began.
+            marks.events.append(("claude.followUpText", arrival))
+        }
         partialText = (partialText ?? "") + text
         marks.transcript += text
         for sentence in splitter.add(text) { speak(sentence, marks: marks) }

@@ -250,6 +250,16 @@ struct CascadeVoicePipelineTests {
         #expect(CascadeClaude.voiceImage(Data("not an image".utf8)) == Data("not an image".utf8))
     }
 
+    @Test func onlyTheCascadeIsAskedForAnIntentLine() {
+        for format in [RealtimePointFormat.live, .native, .fractions] {
+            #expect(RealtimeOpenAppTool.systemPrompt(pointFormat: format, stack: .cascade).contains("intent only"))
+            #expect(!RealtimeOpenAppTool.systemPrompt(pointFormat: format, stack: .geminiLive).contains("intent only"))
+        }
+        // It claims nothing the honesty checks would read as done.
+        #expect(!RealtimeOpenAppTool.claimsCompletion("Pressing that now."))
+        #expect(RealtimeOpenAppTool.firstPersonClaims("Typing it in, sir.").isEmpty)
+    }
+
     @Test func theCacheBreakpointMovesToTheNewTurnsLastBlock() {
         let old: [String: Any] = ["role": "user", "content": [["type": "text", "text": "a", "cache_control": ["type": "ephemeral"]]]]
         let reply: [String: Any] = ["role": "assistant", "content": [["type": "text", "text": "b"]]]

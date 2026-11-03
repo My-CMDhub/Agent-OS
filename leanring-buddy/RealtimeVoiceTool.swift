@@ -290,7 +290,15 @@ nonisolated enum RealtimeOpenAppTool {
 
     /// The prompt for a pointing format (`RealtimePointFormat`): only the
     /// position sentence differs, and it says what the schema says.
+    /// Cascade only: nothing else is spoken until the tool's answer has come back from a second model call (3.4-7 s, live
+    /// 2026-11-03). Waits that long gain from a filler; a 1.5 s one does not, so only a reply about to call a tool says it.
+    static let cascadeIntentLine = """
+
+    before the first tool call of a reply, say two to five words of what you are about to do, in the same reply, ending in a full stop: it is spoken while the tool runs. intent only, as an -ing word or "let me": never a word saying it happened. if you answer from the screen with no tool, say nothing extra.
+    """
+
     static func systemPrompt(pointFormat: RealtimePointFormat, stack: VoiceStackChoice) -> String {
+        let systemPrompt = stack == .cascade ? systemPrompt + cascadeIntentLine : systemPrompt
         guard pointFormat == .native else { return systemPrompt }
         let wording = stack == .geminiLive
             ? "by the element's position in the screenshot as a point [y, x], each normalized from 0 to 1000 (0,0 is the top-left of the image)"
