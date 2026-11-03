@@ -187,7 +187,17 @@ extension ScenarioCatalog {
     /// A force-quit TextEdit relaunches with every window it had, and K's windows reached 20 (K16 then judged a machine nobody has). Pressing their
     /// close buttons alone did not stop it: "closed 13, left 0", then the next launch read 14, because the runner's force-quit came before TextEdit wrote
     /// its state. So: its empty Untitled windows close, a window holding text is left alone, and only an app with no windows left quits normally here.
+    /// The run's own document from a fixture (B4's list, B13's order number): nothing else's text is ever emptied, and an emptied Untitled closes as an empty one does.
+    nonisolated static func heldOnlyRunText(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        return lowered.count < 200 && ((lowered.contains("milk") && lowered.contains("eggs")) || lowered.contains("a7-48213"))
+    }
+
     static func closeEmptyTextEditWindows(_: ScenarioContext) async -> [String: Any] {
+        await closeRunTextEditWindows()
+    }
+
+    static func closeRunTextEditWindows() async -> [String: Any] {
         await Task.detached { () -> [String: Any] in
             guard let application = NSRunningApplication.runningApplications(withBundleIdentifier: textEdit).first else { return [:] }
             application.unhide()
@@ -197,8 +207,15 @@ extension ScenarioCatalog {
             guard AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &value) == .success else { return ["closed": 0, "note": "windows unread"] }
             var closed = 0, left = 0
             for window in value as? [AXUIElement] ?? [] {
-                let text = ScenarioRunnerAX.nodes(window, processIdentifier: application.processIdentifier).first { $0.role == "AXTextArea" }?.value?.raw
-                guard ScenarioRunnerAX.windowTitle(window)?.hasPrefix("Untitled") == true, text?.isEmpty != false else { left += 1; continue }
+                let area = ScenarioRunnerAX.nodes(window, processIdentifier: application.processIdentifier).first { $0.role == "AXTextArea" }
+                var text = area?.value?.raw
+                let untitled = ScenarioRunnerAX.windowTitle(window)?.hasPrefix("Untitled") == true
+                if untitled, let held = text, heldOnlyRunText(held), let element = area?.accessibilityElement,
+                   AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, "" as CFString) == .success {
+                    Thread.sleep(forTimeInterval: 0.2)
+                    text = ""
+                }
+                guard untitled, text?.isEmpty != false else { left += 1; continue }
                 AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
                 var button: AnyObject?
                 guard AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &button) == .success, let button,
@@ -316,7 +333,9 @@ extension ScenarioCatalog {
             casual("K16", start: .appsNotRunning([textEdit]), quit: [textEdit], prepare: textEditOpen(documents: 2),
                    answer: { context, outcome in
                        let count = await state(textEdit).windows ?? -1
-                       let words = [1: ["one", "1 "], 2: ["two", "2 "], 3: ["three", "3 "], 4: ["four", "4 "]][count] ?? []
+                       let names = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+                       // Counted at the check, so a window an earlier scenario left is still the right answer's window.
+                       let words = (1...names.count).contains(count) ? [names[count - 1], "\(count) "] : []
                        return said(outcome, anyOf: words)
                    }),
             // Across turns: the same session, the reply heard out before the next press.

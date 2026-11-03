@@ -395,7 +395,7 @@ enum ScenarioCatalog {
                        check: { _, _ in
                            let text = (await Task.detached { ScenarioRunnerAX.textEditDocumentText() }.value ?? "").lowercased()
                            return verdict(text.contains("milk") && text.contains("eggs"), "the new document holds \(text.count) chars")
-                       }),
+                       }, undo: { _ in await closeRunTextEditWindows() }),
         RunnerScenario(id: "B5", start: .pages(["article.html"]), requiresAgentLoop: true,
                        // Both facts sit in the last paragraph. Cascade 2026-11-02T23-01-06Z said "first Sunday of each month", having read the
                        // whole page, and FAILED for leaving out the cat: a summary is judged on having got there, not on one word.
@@ -454,7 +454,7 @@ enum ScenarioCatalog {
                            guard context.baseline["textEditRunning"] as? Bool == false else { return verdict(false, "TextEdit was already running (the owner's documents)") }
                            let text = await Task.detached { ScenarioRunnerAX.textEditDocumentText() }.value ?? ""
                            return verdict(text.contains("A7-48213"), "the note holds \(text.count) chars")
-                       })
+                       }, undo: { _ in await closeRunTextEditWindows() })
     ]
 
     // MARK: R. Real apps (benchmark)

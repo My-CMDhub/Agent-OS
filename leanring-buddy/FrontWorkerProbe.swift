@@ -245,6 +245,10 @@ enum FrontWorkerProbe {
         }
         var note: [String: Any] = [:]
         switch name {
+        case "cleanup":
+            // Windows earlier runs left: launched only to be read and closed.
+            _ = await VoiceToolProbe.ask(["verb": "launch", "app": "TextEdit"], answer)
+            try? await Task.sleep(for: .seconds(2))
         case "baseline":
             await speak("K17a")
             await endOfTasks()
@@ -318,6 +322,8 @@ enum FrontWorkerProbe {
             return ["kind": "case", "case": name, "error": "unknown"]
         }
         try? await Task.sleep(for: .seconds(2))
+        // A force-quit TextEdit relaunches with every window it had (K01 and K16 then judged 6 of them, 2026-11-03).
+        if !runningBefore.contains("com.apple.TextEdit") { note["textEdit"] = await ScenarioCatalog.closeRunTextEditWindows() }
         for bundle in quitAfter where !runningBefore.contains(bundle) {
             // Only the run's own document or calculation: nothing of the owner's to save.
             for application in NSRunningApplication.runningApplications(withBundleIdentifier: bundle) { _ = application.forceTerminate() }
