@@ -403,6 +403,7 @@ enum ScenarioRunner {
     ) async -> (result: [String: Any], spentUSD: Double, answers: [String: Any], abort: String?) {
         var result: [String: Any] = [:]
         let context = ScenarioContext(harnessAnswer: harnessAnswer)
+        let machineBefore = await Task.detached { SuiteSideEffects.snapshot() }.value
         let chromeSurfacesBefore = VoiceToolProbe.windowServerSurfaces(bundleIdentifier: chromeBundleIdentifier) ?? []
         let chromeWindowsBefore = Set(chromeSurfacesBefore.map(\.number))
         let runningBefore = Set(scenario.quitIfLaunched.filter { !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty })
@@ -505,6 +506,8 @@ enum ScenarioRunner {
         cleanup["ownerWindowCheck"] = check.record
         if !leftOpen.isEmpty { cleanup["newChromeSurfacesLeftOpen"] = leftOpen.count }
         result["cleanup"] = cleanup
+        result["sideEffects"] = SuiteSideEffects.report(before: machineBefore, after: await Task.detached { SuiteSideEffects.snapshot() }.value,
+                                                        declaredApps: Set(scenario.quitIfLaunched), mayChange: [])
         var abort = missing.isEmpty ? nil : "\(missing.count) Chrome window(s) that existed before \(scenario.id) are gone — stopped at once"
         // The runner's window was not seen and a surface it opened is still there: it is
         // open somewhere the run cannot reach (another Space). Stop rather than pile up more.

@@ -491,6 +491,7 @@ enum GeneralitySuite {
             try? await Task.sleep(for: .seconds(1))
             var state = before(task.apps)
             state.files = await Task.detached { userFolderEntries() }.value
+            let machineBefore = await Task.detached { SuiteSideEffects.snapshot() }.value
             let created = task.created
             var countBefore: Int?? = nil
             if let created { countBefore = .some(await countBeforeLaunchingIfNeeded(created.bundle, created.match)) }
@@ -545,11 +546,17 @@ enum GeneralitySuite {
             // Files are reported, never removed: the owner decides (G15 left two on the Desktop unseen).
             let files = cleanup["filesCreated"] as? [String] ?? [], left = cleanup["newWindowsLeft"] as? [String] ?? []
             if !files.isEmpty { filesCreated[task.id] = files }
+            // A moment for what cleanup quit to be gone. Beside the verdict, never in it.
+            try? await Task.sleep(for: .seconds(1))
+            let machineAfter = await Task.detached { SuiteSideEffects.snapshot() }.value
+            let sideEffects = SuiteSideEffects.report(before: machineBefore, after: machineAfter, declaredApps: Set(task.apps),
+                                                      mayChange: SuiteSideEffects.mayChange[task.id] ?? [])
+            result["sideEffects"] = sideEffects
             results.append(result)
             save()
             print("🧭 \(task.id): \(result["status"] ?? "?") \(run["outcome"] ?? "?") \(run["wallMs"] ?? "?") ms"
-                  + (files.isEmpty ? "" : " | files created: \(files)") + (left.isEmpty ? "" : " | windows left: \(left)"))
-            try? await Task.sleep(for: .seconds(1))
+                  + (files.isEmpty ? "" : " | files created: \(files)") + (left.isEmpty ? "" : " | windows left: \(left)")
+                  + (sideEffects["clean"] as? Bool == true ? "" : " | side effects: \(sideEffects)"))
         }
         if meta["outcome"] == nil { meta["outcome"] = "ran" }
     }

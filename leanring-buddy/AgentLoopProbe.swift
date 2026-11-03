@@ -53,8 +53,13 @@ enum AgentLoopProbe {
         if let words = CommandLine.arguments.last(where: { $0.hasPrefix(goalArgument) }).map({ String($0.dropFirst(goalArgument.count)) }),
            !words.isEmpty {
             // `--agent-route-memory`: this one run keeps and recalls routes, in the probe's own file.
-            results = [await goalRun(words: words, harness: harness, confirmations: confirmations,
-                                     routeMemory: CommandLine.arguments.contains("--agent-route-memory") ? .probe : nil)]
+            let machineBefore = await Task.detached { SuiteSideEffects.snapshot() }.value
+            var run = await goalRun(words: words, harness: harness, confirmations: confirmations,
+                                    routeMemory: CommandLine.arguments.contains("--agent-route-memory") ? .probe : nil)
+            // One goal has no cleanup and declares no apps: whatever it opened and left is said.
+            run["sideEffects"] = SuiteSideEffects.report(before: machineBefore, after: await Task.detached { SuiteSideEffects.snapshot() }.value,
+                                                         declaredApps: [], mayChange: [])
+            results = [run]
             meta["outcome"] = "ran"
             return
         }
@@ -398,6 +403,8 @@ enum AgentLoopProbe {
         line["target"] = target.map { String($0.prefix(80)) } ?? NSNull()
         line["text"] = call.text.map { String($0.prefix(60)) } ?? NSNull()
         line["error"] = dispatch?.result["error"] ?? NSNull()
+        // An ok alone hid this from every audit: what the harness saw, not only that nothing refused.
+        line["verification"] = dispatch?.result["verification"] ?? NSNull()
         // Which refusal: clickTargetObscured alone hid six different causes (2026-10-05).
         if line["ok"] as? Bool != true { line["message"] = (dispatch?.result["message"] ?? dispatch?.harnessResponse?["message"]) ?? NSNull() }
         // search_help: what it searched for and what it returned, for G07's outcome check.
