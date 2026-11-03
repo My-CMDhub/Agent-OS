@@ -168,6 +168,16 @@ struct CascadeVoicePipelineTests {
         #expect(speak.contains("aura-2-") && speak.contains("encoding=linear16") && speak.contains("sample_rate=24000"))
     }
 
+    /// `smart_format` fused "open linkedin dot com" into "Openlinkedin.com.", which the heard check rightly refuses.
+    @Test func theOwnersWordsAreNotReformattedIntoAnAddress() {
+        let listen = CascadeDeepgram.listenURL(sampleRate: 16_000, keyterms: []).absoluteString
+        #expect(!listen.contains("smart_format") && listen.contains("punctuate=true") && listen.contains("numerals=true"))
+        // The guard itself did not move: words inside a word never name a site, spoken words do.
+        #expect(RealtimeHeardCheck.siteRefusal(transcript: "Openlinkedin.com.", url: "https://www.linkedin.com") != nil)
+        #expect(RealtimeHeardCheck.siteRefusal(transcript: "Open linkedin dot com.", url: "https://www.linkedin.com") == nil)
+        #expect(RealtimeHeardCheck.siteRefusal(transcript: "Open evil dot com.", url: "https://www.linkedin.com") != nil)
+    }
+
     /// "stop" sent as one burst came back empty 7 of 8; at 2x, 15 of 15 right. A clip's send takes half its length.
     @Test func audioGoesAtTwiceRealTime() {
         #expect(CascadeDeepgram.sendRate == 2)

@@ -133,14 +133,17 @@ nonisolated enum CascadeDeepgram {
                      isFinal: message["is_final"] as? Bool == true, fromFinalize: message["from_finalize"] as? Bool == true)
     }
 
-    /// The bench's parameters, plus the installed app names as Nova-3 keyterms: the heard check needs
-    /// "Cursor", not "Kasa" (the OpenAI stack's transcription prompt does the same).
+    /// The installed app names as Nova-3 keyterms: the heard check needs "Cursor", not "Kasa" (the OpenAI stack's
+    /// transcription prompt does the same). No `smart_format`: it rewrites what was said into the address it guesses was meant,
+    /// fusing the word before it ("Openlinkedin.com.", "emailtest@example.com"), and the heard check then rightly finds no site in
+    /// the owner's words. `punctuate` and `numerals` are the parts of it the model reads.
     static func listenURL(sampleRate: Int, keyterms: [String], host: String = host) -> URL {
         var components = URLComponents(string: "wss://\(host)/v1/listen")!
         components.queryItems = [
             URLQueryItem(name: "model", value: "nova-3"), URLQueryItem(name: "encoding", value: "linear16"),
             URLQueryItem(name: "sample_rate", value: String(sampleRate)), URLQueryItem(name: "channels", value: "1"),
-            URLQueryItem(name: "interim_results", value: "true"), URLQueryItem(name: "smart_format", value: "true")
+            URLQueryItem(name: "interim_results", value: "true"), URLQueryItem(name: "punctuate", value: "true"),
+            URLQueryItem(name: "numerals", value: "true")
         ] + keyterms.prefix(40).map { URLQueryItem(name: "keyterm", value: $0) }
         return components.url!
     }
