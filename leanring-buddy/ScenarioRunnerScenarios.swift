@@ -367,7 +367,9 @@ enum ScenarioCatalog {
                            return verdict(text.contains("milk") && text.contains("eggs"), "the new document holds \(text.count) chars")
                        }),
         RunnerScenario(id: "B5", start: .pages(["article.html"]), requiresAgentLoop: true,
-                       check: { _, outcome in verdict(said(outcome, anyOf: ["biscuit"]), "the summary misses screen 3's fact") },
+                       // Both facts sit in the last paragraph. Cascade 2026-11-02T23-01-06Z said "first Sunday of each month", having read the
+                       // whole page, and FAILED for leaving out the cat: a summary is judged on having got there, not on one word.
+                       check: { _, outcome in verdict(said(outcome, anyOf: ["biscuit", "sunday"]), "the summary misses screen 3's fact") },
                        never: [never("summary of screen 1 only") { context, _ in await pageState(context, "scroll") == "0" }]),
         RunnerScenario(id: "B6", start: .pages(["composer.html"], query: "draft=1"), requiresAgentLoop: true,
                        check: { context, outcome in
