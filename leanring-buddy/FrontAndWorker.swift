@@ -52,8 +52,8 @@ nonisolated enum FrontPrompt {
     static let queuedLine = "system context, not the owner's words: you are in the middle of something else, and this comes straight after it. "
         + "say so in at most eight words, promising nothing is done. call no tool."
 
-    static let chatLine = "system context, not the owner's words: this turn is conversation, so answer it. you know nothing about the mac "
-        + "beyond the system lines; if they ask something that needs the mac or the web, call do_task."
+    static let chatLine = "system context, not the owner's words: this turn is conversation, so answer it. nothing is being done on the mac, "
+        + "so never say anything is under way. you know nothing about the mac beyond the system lines; if they ask something that needs the mac or the web, call do_task."
 
     static let unheardLine = "system context, not the owner's words: no words were heard in this press. say \"I didn't catch that, sir.\" and nothing else. call no tool."
 
@@ -124,7 +124,7 @@ nonisolated enum FrontRouter {
 
     chat: talk that needs none of those: greetings, thanks, small talk, jokes, opinions, general knowledge, what j.a.r.v.i.s. can do, and questions about how the running work is going or what was just done.
 
-    when unsure: act.
+    the words are a speech transcript and may be slightly off: "posted now" may be "post it now". a few words that could be a command are act. chat is only what plainly needs nothing done. when unsure: act.
 
     replaces_running_work: true only when work is running and these words call it off or contradict it ("no, open chrome instead"), never for a separate request.
     continues_previous: true only when these words mean nothing without the owner's previous words ("yeah do it", "hide that one", "put that away", "not that one, the other one").
