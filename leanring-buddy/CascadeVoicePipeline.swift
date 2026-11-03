@@ -122,9 +122,10 @@ nonisolated enum CascadeDeepgram {
 
     /// The socket gave no final by the deadline, or ended first. Words already heard are the bounded answer once the owner has
     /// let go; before that the audio still has somewhere to go.
-    static func noFinal(wordsSoFar: String, released: Bool, retried: Bool) -> NoFinal {
+    /// `earOnly`: another ear is on the same audio, so a released turn takes that one now rather than wait out a retry.
+    static func noFinal(wordsSoFar: String, released: Bool, retried: Bool, earOnly: Bool = false) -> NoFinal {
         if released, wordsSoFar.contains(where: { $0.isLetter || $0.isNumber }) { return .useWordsSoFar }
-        return retried ? .giveUp : .retry
+        return retried || (earOnly && released) ? .giveUp : .retry
     }
 
     /// The end of one Speak + Flush. Flux's `Flushed` lands at once and proves no audio; `SpeechMetadata` closes the turn
@@ -386,6 +387,11 @@ final class CascadeVoicePipeline {
     var onFailed: (String) -> Void = { _ in }
     /// The owner's words are complete and the model is about to be asked: what they just changed goes in with them.
     var contextForHeardWords: (RealtimeTurnMarks) -> String? = { _ in nil }
+    /// The front's ear (`.frontAndWorker`): no model, no reply. The words go up here, and speech only when asked (`speakPlain`).
+    /// Empty words are an answer: Nova-3 heard nothing. `onEarFailed` is the other kind: no answer came at all.
+    var earOnly = false
+    var onHeard: (RealtimeTurnMarks, TimeInterval) -> Void = { _, _ in }
+    var onEarFailed: (RealtimeTurnMarks, String) -> Void = { _, _ in }
 
     private let system: String
     private let tools: [[String: Any]]
@@ -494,9 +500,9 @@ final class CascadeVoicePipeline {
             warmSpeaking?.socket.close()
             warmSpeaking = nil
         }
-        guard warmListening == nil || warmSpeaking == nil, let token = try? await validToken(), !Task.isCancelled else { return }
+        guard warmListening == nil || (warmSpeaking == nil && !earOnly), let token = try? await validToken(), !Task.isCancelled else { return }
         if warmListening == nil { warmListening = WarmSocket(openListening(token: token)) }
-        if warmSpeaking == nil { warmSpeaking = WarmSocket(openSpeech(token: token)) }
+        if warmSpeaking == nil, !earOnly { warmSpeaking = WarmSocket(openSpeech(token: token)) }
     }
 
     private func validToken() async throws -> String {
@@ -576,7 +582,7 @@ final class CascadeVoicePipeline {
         warmListening = nil
         if let warm { stt = warm.socket } else { stt = openListening(token: try await validToken()) }
         armOpenDeadline(marks: marks)
-        tts = try await takeSpeech()
+        if !earOnly { tts = try await takeSpeech() }
     }
 
     private func takeSpeech() async throws -> VoiceBenchWebSocket {
@@ -619,7 +625,7 @@ final class CascadeVoicePipeline {
 
     /// `turnAudio` in order, at `sendRate` from when the socket opens; then the Finalize, if the owner has let go.
     private func pumpAudio() {
-        guard sttPump == nil, let listening = stt else { return }
+        guard sttPump == nil, !ignoresAudioForProbe, let listening = stt else { return }
         sttPump = Task { @MainActor [weak self] in
             while let self, self.stt === listening, !Task.isCancelled {
                 guard self.sentChunks < self.turnAudio.count else {
@@ -671,7 +677,7 @@ final class CascadeVoicePipeline {
     /// No final by the deadline, or the socket ended first.
     private func noFinal(marks: RealtimeTurnMarks, why: String) {
         guard currentTurn() === marks, !marks.supersededByPress, marks.heardCompleteUptime == nil else { return }
-        switch CascadeDeepgram.noFinal(wordsSoFar: marks.heardText, released: sttReleased, retried: sttRetried) {
+        switch CascadeDeepgram.noFinal(wordsSoFar: marks.heardText, released: sttReleased, retried: sttRetried, earOnly: earOnly) {
         case .useWordsSoFar:
             marks.events.append(("stt.partialUsed:\(why)", uptime))
             heardAll(marks: marks, arrival: uptime)
@@ -679,6 +685,7 @@ final class CascadeVoicePipeline {
             retryListening(marks: marks, why: why)
         case .giveUp:
             marks.events.append(("stt.gaveUp:\(why)", uptime))
+            if earOnly { return giveUpListening(marks: marks, why: why) }
             onFailed("cascade:stt:noFinal")
         }
     }
@@ -701,10 +708,22 @@ final class CascadeVoicePipeline {
                 self.stt = self.openListening(token: token, host: CascadeDeepgram.fallbackHost)
                 self.pumpAudio()
             } catch {
-                self.onFailed((error as? VoiceBenchFailure)?.kind ?? VoiceBenchRun.errorKind(for: error, stage: "cascade:stt"))
+                let kind = (error as? VoiceBenchFailure)?.kind ?? VoiceBenchRun.errorKind(for: error, stage: "cascade:stt")
+                if self.earOnly { return self.giveUpListening(marks: marks, why: kind) }
+                self.onFailed(kind)
             }
         }
     }
+
+    /// The ear is done with this turn and has no words: its socket goes, and the audio with it.
+    private func giveUpListening(marks: RealtimeTurnMarks, why: String) {
+        closeListening()
+        turnAudio = []
+        onEarFailed(marks, why)
+    }
+
+    /// Stands in for a broken socket (`--front-probe`): nothing is sent, so only the deadlines can end the turn.
+    var ignoresAudioForProbe = false
 
     /// The owner's words are in: the heard check can read them, and the model is asked.
     private func heardAll(marks: RealtimeTurnMarks, arrival: TimeInterval) {
@@ -720,6 +739,10 @@ final class CascadeVoicePipeline {
         marks.cascadeSttFinalUptime = arrival
         marks.events.append(("stt.final", arrival))
         guard currentTurn() === marks, !marks.supersededByPress else { return }
+        if earOnly {
+            warmUp()
+            return onHeard(marks, arrival)
+        }
         let words = SecretScanner.redact(marks.heardText.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !words.isEmpty else {
             // The gate heard a voice and Deepgram no words, twice: nothing to ask; the notch says "No reply", and a running task is told aloud (`RealtimeVoiceSession`).
@@ -743,6 +766,14 @@ final class CascadeVoicePipeline {
         guard currentTurn() === marks else { return }
         beginHistoryTurn(lastText: text)
         startRequest(marks: marks)
+    }
+
+    /// The ear's other half: these exact words through Aura, with no model. The front's voice stands in here when Gemini cannot speak.
+    func speakPlain(_ text: String, marks: RealtimeTurnMarks) {
+        cancelReply()
+        marks.transcript += (marks.transcript.isEmpty ? "" : " ") + text
+        speak(text, marks: marks)
+        modelFinished(marks: marks)
     }
 
     // MARK: History

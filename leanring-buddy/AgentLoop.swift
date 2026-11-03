@@ -143,6 +143,12 @@ actor AgentLoopModel {
     private var openAITask: String?
     /// A Haiku step that was missing, refused or slow moved this task to Sonnet 5.5; the next task starts on Haiku.
     private var sonnetTask: String?
+    /// Haiku's step moved to the stronger model. The session's watchdog counts that as the task doing something.
+    private var onFallback: (@Sendable () -> Void)?
+    func setOnFallback(_ notice: @escaping @Sendable () -> Void) { onFallback = notice }
+    /// `--front-probe`: every model call stalls this long first. Cancelled with its task, as a real stalled call is.
+    private var stallForProbeSeconds: Double = 0
+    func stallForProbe(seconds: Double) { stallForProbeSeconds = seconds }
 
     init(provider: AgentModelProvider = .configured) {
         self.provider = provider
@@ -181,6 +187,7 @@ actor AgentLoopModel {
     /// `timeout`: the task's time left; a fallback retry gets only what remains of it.
     /// `task`: the run id, so a fallback to OpenAI lasts that task only.
     func send(_ body: [String: Any], timeout: TimeInterval, task: String? = nil) async throws -> AgentModelReply {
+        if stallForProbeSeconds > 0 { try await Task.sleep(for: .seconds(stallForProbeSeconds)) }
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         if provider == .openai { return try await openAI(body, model: model, deadline: deadline) }
         if provider == .gemini {
@@ -211,6 +218,7 @@ actor AgentLoopModel {
                                               toFileNamed: AgentLoop.traceFileName, rotatingAtBytes: HarnessServer.auditLogRotationBytes)
             print("🤖 agent loop: \(model) answered \(status), retrying this task on \(Self.preferred)")
             sonnetTask = task
+            onFallback?()
             return try await post(Self.completed(body, model: Self.preferred), timeout: deadline - ProcessInfo.processInfo.systemUptime)
         } catch let error as AgentModelError where error.isModelNotFound && model != Self.fallback {
             MeasurementLogFile.appendJSONLine(["kind": "modelFallback", "from": model, "to": Self.fallback, "status": error.status],
@@ -461,6 +469,13 @@ final class AgentLoop {
     private(set) var lastProgress: String?
     private(set) var modelUsed: String?
     private var lastNarrationUptime: TimeInterval = -.infinity
+    /// When this task last did anything: a phase, a step, a log line. The front's watchdog reads how long ago that was.
+    private(set) var lastActivityUptime: TimeInterval = 0
+    /// When this run began, its earlier active time counted in.
+    private(set) var startedUptime: TimeInterval?
+    func noteActivity() { lastActivityUptime = dependencies.uptime() }
+    /// A dropped connection is about to be tried again.
+    var onRetrying: (@MainActor () -> Void)?
     /// False only for the speed probe's screen-only baseline.
     var webToolsEnabled = true
     /// Which tool list the request carries: Anthropic's web tools for Claude,
@@ -557,6 +572,7 @@ final class AgentLoop {
 
     /// Moves the phase if the table allows it; the same phase is no move.
     func move(to next: AgentTaskPhase) {
+        noteActivity()
         // The same phase is no move, but a new step in it is news for the notch and the checkpoint.
         guard next != phase else {
             if step != announcedStep {
@@ -637,7 +653,9 @@ final class AgentLoop {
     private func proceed() async -> Outcome {
         isRunning = true
         lastOutcome = nil
+        noteActivity()
         let started = dependencies.uptime() - activeSeconds
+        startedUptime = started
         let goalHash = Self.goalHash(goal)
         let goal = self.goal, heard = self.heard
         /// The last batch's progress line, said once the next reply shows the task goes on.
@@ -657,7 +675,7 @@ final class AgentLoop {
                                        "uptime": MeasurementLogFile.roundedUptime(dependencies.uptime())]
             if case .refusals(let error) = outcome { line["error"] = error }
             if wrappingUp { line["wrapUp"] = true }
-            dependencies.trace(line)
+            noteActivity(); dependencies.trace(line)
             return outcome
         }
 
@@ -685,18 +703,18 @@ final class AgentLoop {
                 if let resumedFrom { content.append(["type": "text", "text": Self.resumedNote(resumedFrom)]) }
                 if let notes = dependencies.ownerNotes() {
                     content.append(["type": "text", "text": notes])
-                    dependencies.trace(["kind": "ownerNotes", "run": runID, "characters": notes.count,
+                    noteActivity(); dependencies.trace(["kind": "ownerNotes", "run": runID, "characters": notes.count,
                                         "uptime": MeasurementLogFile.roundedUptime(dependencies.uptime())])
                 }
                 // A resumed task's words are "continue …": no route of another task fits them.
                 if resumedFrom == nil, let hint = dependencies.routeHint(heard ?? goal) {
                     content.append(["type": "text", "text": hint.text])
-                    dependencies.trace(["kind": "routeHint", "run": runID, "goalHash": goalHash, "score": (hint.score * 100).rounded() / 100,
+                    noteActivity(); dependencies.trace(["kind": "routeHint", "run": runID, "goalHash": goalHash, "score": (hint.score * 100).rounded() / 100,
                                         "stepsHinted": hint.steps, "uptime": MeasurementLogFile.roundedUptime(dependencies.uptime())])
                 }
                 if let ownerFocus {
                     content += Self.focusBlocks(ownerFocus, observation: observation)
-                    dependencies.trace(["kind": "ownerFocus", "run": runID, "rung": ownerFocus.rung.rawValue, "crop": ownerFocus.crop != nil,
+                    noteActivity(); dependencies.trace(["kind": "ownerFocus", "run": runID, "rung": ownerFocus.rung.rawValue, "crop": ownerFocus.crop != nil,
                                         "uptime": MeasurementLogFile.roundedUptime(dependencies.uptime())])
                 }
             }
@@ -720,6 +738,7 @@ final class AgentLoop {
                     reply = try await dependencies.model(body, remaining())
                 } catch where Self.isTransientNetworkError(error) && remaining() > 3 && !Task.isCancelled {
                     // Unseen R08/R10 2026-10-24: one dropped connection (-1005) ended two tasks mid-way. Once more.
+                    onRetrying?()
                     try? await Task.sleep(for: .seconds(1))
                     reply = try await dependencies.model(body, remaining())
                 }
@@ -742,7 +761,7 @@ final class AgentLoop {
             func traced(_ fields: [String: Any]) {
                 line.merge(fields) { _, new in new }
                 line["uptime"] = MeasurementLogFile.roundedUptime(dependencies.uptime())
-                dependencies.trace(line)
+                noteActivity(); dependencies.trace(line)
             }
             if stopReason == "refusal" {
                 traced(["error": "modelRefusal"])
@@ -854,7 +873,7 @@ final class AgentLoop {
                     }
                     line.merge(fields) { _, new in new }
                     line["uptime"] = MeasurementLogFile.roundedUptime(dependencies.uptime())
-                    dependencies.trace(line)
+                    noteActivity(); dependencies.trace(line)
                 }
                 func answer(_ result: [String: Any], image: Data? = nil) {
                     if planID != nil {
@@ -957,7 +976,7 @@ final class AgentLoop {
                         // Only a backed done keeps its route; counts only in the trace.
                         if resumedFrom == nil, !Self.reportsFailure(summary), let steps = Self.routeSteps(receipts),
                            dependencies.recordRoute(heard ?? goal, steps, step) {
-                            dependencies.trace(["kind": "routeRecorded", "run": runID, "goalHash": goalHash, "steps": steps.count,
+                            noteActivity(); dependencies.trace(["kind": "routeRecorded", "run": runID, "goalHash": goalHash, "steps": steps.count,
                                                 "uptime": MeasurementLogFile.roundedUptime(dependencies.uptime())])
                         }
                         return finish(.done(summary: summary))
@@ -1235,7 +1254,7 @@ final class AgentLoop {
     // MARK: Pure parts
 
     static let systemPrompt = """
-    You are the task runner inside J.A.R.V.I.S., a voice assistant on the owner's Mac. The owner gave one goal; you reach it by calling tools. Each turn brings the result of your last tool, a line naming the app in front, and a fresh screenshot of the whole screen when one could be taken.
+    You are J.A.R.V.I.S., a voice assistant on the owner's Mac, at work on a task. The owner gave one goal; you reach it by calling tools. Each turn brings the result of your last tool, a line naming the app in front, and a fresh screenshot of the whole screen when one could be taken.
 
     - Reply with plan: every step you can name now from the screenshot, the App verbs and earlier results, up to 6, ending with done when the steps before it act and their ok results will prove the goal. A single tool only for a read you must see first (read_page, find_on_screen, find_menu_items, search_help, web_lookup). A plan's steps run in order, each checked on its own, and it stops at the first refusal, failure, approval card, notObserved, change of the app in front, or read, the rest coming back as skipped; only then comes a fresh screenshot. Several tool calls in one reply (up to 4 tool calls) run the same way. A position (x and y, or a coordinate) may aim only the first step; aim later ones by name.
     - The App verbs list the menu items of the app in front, as the app names them: press_menu takes one as its path (split at " > "), or the shortcut the line shows, with no find_menu_items first. An item may be disabled until an earlier step enables it (Get Info after selecting a file); a press of a disabled one is refused.
@@ -1957,15 +1976,15 @@ final class AgentLoop {
         let progress = lastProgress.map { " it got as far as: \($0)." } ?? " it made no progress."
         switch outcome {
         case .done(let summary):
-            return "system event, not the owner's words: the task you started is finished; each step was checked by the task runner. "
-                + "tell the owner in one to three short sentences, in your own manner, keeping every name and number: \(summary) call no tool."
+            return "system event, not the owner's words: what you were doing is finished; each step was checked. "
+                + "tell the owner in one to three short sentences, in your own manner, keeping every name and number, and end there, asking nothing: \(summary) call no tool."
         case .askOwner(let question):
             return "system event, not the owner's words: the task paused because it needs the owner;\(progress) ask them briefly: \(question) "
                 + "if their next words answer that question, call do_task with their answer: the paused task resumes where it stopped. "
                 + "if they ask how the task is going or what was done, answer from the task status line; never call do_task for that. "
                 + "call no tool now."
         case .failed(let reason):
-            return "system event, not the owner's words: the task stopped without finishing: \(reason).\(progress) "
+            return "system event, not the owner's words: the task stopped without finishing: \(spokenReason(reason)).\(progress) "
                 + "tell the owner briefly that it did not work and why; claim nothing else. call no tool."
         case .unconfirmed(let summary, let challenge):
             return "system event, not the owner's words: the task has ended. its report is below, but its steps' results do not show one part of it "
@@ -1984,6 +2003,13 @@ final class AgentLoop {
         case .cancelled:
             return nil
         }
+    }
+
+    /// A failure's reason as the owner may hear it: to them there is one voice, and no model behind it (`FrontVoiceWords`).
+    static func spokenReason(_ reason: String) -> String {
+        let lowered = reason.lowercased()
+        guard lowered.contains("model") else { return reason }
+        return lowered.contains("declined") ? "I can't help with that one" : "the connection dropped and I could not get it back"
     }
 
     /// A receipt in the checkpoint's words: lengths and hosts, never a name, a page's text or what was typed.

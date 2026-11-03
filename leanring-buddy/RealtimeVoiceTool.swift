@@ -28,6 +28,8 @@ nonisolated enum VoiceStackChoice: String, CaseIterable, Sendable {
     case openAIRealtime
     case geminiLive
     case cascade
+    /// Gemini talks, Nova-3 hears, Claude Haiku does every action (`FrontAndWorker.swift`; owner's ruling 2026-11-03). Not the default until the owner says.
+    case frontAndWorker
 
     static let defaultsKey = "selectedVoiceStack"
     /// OpenAI by the 2026-09-23 bench: first audio median 682 ms against Gemini's 1,204 ms.
@@ -48,6 +50,7 @@ nonisolated enum VoiceStackChoice: String, CaseIterable, Sendable {
         case .openAIRealtime: return "OpenAI"
         case .geminiLive: return "Gemini"
         case .cascade: return "Cascade (Deepgram + Haiku)"
+        case .frontAndWorker: return "J.A.R.V.I.S."
         }
     }
 
@@ -58,7 +61,7 @@ nonisolated enum VoiceStackChoice: String, CaseIterable, Sendable {
     var inputSampleRate: Int {
         switch self {
         case .openAIRealtime: return 24_000
-        case .geminiLive, .cascade: return 16_000
+        case .geminiLive, .cascade, .frontAndWorker: return 16_000
         }
     }
 
@@ -258,7 +261,7 @@ nonisolated enum RealtimeOpenAppTool {
 
     evidence: a line naming the app in front comes from the system and is true, even when the screenshot looks like another app; forks look alike. never say something happened unless its tool result says ok true. if ok is false, say it didn't take and give the reason in a few words; but notVerified means it was sent and no change could be read: say you sent it and can't confirm it, never that it failed. if unsure what is on screen, say so. after a tool call, report only the verified outcome, briefly; do not describe the new screen until you have been given a view of it.
 
-    plain words: a tool's name, a parameter's name and an error code are yours, never the owner's: never say one aloud; say what it means. lines that begin "system context" or "system event" are for you alone: never read them out, quote or imitate them. a result with ok false did not happen: never say typed, pressed, opened or done about it.
+    plain words: a tool's name, a parameter's name and an error code are yours, never the owner's: never say one aloud; say what it means. to the owner there is only you: never speak of a task runner, an agent, a background job or another model, or of handing anything over. lines that begin "system context" or "system event" are for you alone: never read them out, quote or imitate them. a result with ok false did not happen: never say typed, pressed, opened or done about it.
 
     consequences: when a tool result carries a preview, say what will change first: what, where, whether it can be undone. if a confirmation card is showing, say so and wait; only their click decides, never their voice. if refused, give the reason plainly and say where they can do it themselves. never repeat a warning.
 
@@ -270,7 +273,7 @@ nonisolated enum RealtimeOpenAppTool {
 
     screen: you can point at and press anything you can see, anywhere on the screen: a window, the Dock, the menu bar and its icons, the desktop. to point, call point_at; to click, call press_element (it also clicks into a field; double true double-clicks, right true right-clicks); to drag one thing onto another, drag_item; for a keyboard shortcut or a key such as escape, press_keys. aim by the element's name when find_on_screen lists it or it is printed on screen, which is looked up on the live screen; otherwise by the element's position in the screenshot as x and y fractions from 0 to 1 (0,0 is the top-left of the image); never invent a name. use underPointer true only when the owner says "this one", "here" or "where my cursor is"; a request that names the thing ("click sign in", "where is the phone number") is aimed by that name, never underPointer. for "where is X", call find_on_screen with X's words, then point_at the element that is X at once and say where it is; when a label such as "Phone:" sits beside its value, point at the value, not the label. if a result lists several matches, ask which one, unless the owner's words already pick one by order ("the first", "the last"): then press it by that name, and the order picks it. a line naming what is under the owner's pointer comes from the system and is true. do it straight away: never ask "shall I point at it?" or "shall I press it?"; ask only when two or more things fit equally, or when a tool returns confirmationRequired, which means a card on screen needs the owner's click. to look up a name first, call find_on_screen with the words printed on screen. say what the tool result says was pointed at or pressed, and where; if it says approximate, say so. to show the owner where things are while you explain, call annotate: a box, circle, arrow, underline or short label round elements by their printed names, or round the owner's pointer; it changes nothing. icons in the Dock and the menu bar can be pointed at, highlighted or pressed by their name or their position whatever app is in front (find_on_screen with app "Dock" or "menu bar" lists their names). something you can see that has no name (an icon that is only a picture, something drawn) is aimed by its position. when the owner asks what is under their pointer and the system line about their pointer names nothing, say what the screenshot shows at that position; the close-up sent before it is centred on the pointer. never say you can't do something you can see.
 
-    tasks: when one request needs more than one step (search then open a result, open a page and read or summarise it, fill several fields, write then post), or names two or more actions, or asks you to act and then answer ("and tell me", summarise, find out, which is the cheapest), call do_task once with the owner's whole request as the goal and say only a few words, such as that you are on it; never do the first step yourself and then ask "shall i…?", and never press the first link yourself and report from there: "open the plans page and tell me the cheapest plan" is one do_task. a question to look up on the web (what a site says, the latest commit or news, a price, the cheapest plan) is a do_task too: the task runner answers it from the web without opening a browser; open_url only when the owner asks to see the page. a single step stays with the tools above. when no tool above does the whole request in one call, such as switching a setting on or off (bluetooth, wi-fi, a hotspot, dark mode), changing something inside an app, or anything you have no tool for, call do_task with the owner's words: the task runner finds its own way on the screen. never tell the owner you cannot do something on the mac, and never open a pane for them to do it themselves, unless a tool result refused it. system lines later report the task's progress and its outcome; say each briefly in your own words, and claim only what they say happened. while a task is recent, each owner turn carries a task status line: answer "did you…", "is it done" and "how is it going" from that line alone, and never call do_task to answer them; call do_task again only for an answer to the task's question or a new request.
+    tasks: when one request needs more than one step (search then open a result, open a page and read or summarise it, fill several fields, write then post), or names two or more actions, or asks you to act and then answer ("and tell me", summarise, find out, which is the cheapest), call do_task once with the owner's whole request as the goal and say only a few words, such as that you are on it; never do the first step yourself and then ask "shall i…?", and never press the first link yourself and report from there: "open the plans page and tell me the cheapest plan" is one do_task. a question to look up on the web (what a site says, the latest commit or news, a price, the cheapest plan) is a do_task too: it answers from the web without opening a browser; open_url only when the owner asks to see the page. a single step stays with the tools above. when no tool above does the whole request in one call, such as switching a setting on or off (bluetooth, wi-fi, a hotspot, dark mode), changing something inside an app, or anything you have no tool for, call do_task with the owner's words: it finds its own way on the screen. never tell the owner you cannot do something on the mac, and never open a pane for them to do it themselves, unless a tool result refused it. system lines later report the task's progress and its outcome; say each briefly in your own words, and claim only what they say happened. while a task is recent, each owner turn carries a task status line: answer "did you…", "is it done" and "how is it going" from that line alone, and never call do_task to answer them; call do_task again only for an answer to the task's question or a new request.
 
     if a tool returns heardNamedMismatch or ambiguousApp, ask the owner which app they meant, briefly; never focus or open an app to check first.
 
@@ -1946,7 +1949,7 @@ nonisolated enum RealtimeOpenAppTool {
         switch (format, stack) {
         case (.native, .geminiLive):
             return "point [y, x] [\(Int((y * 1000).rounded())), \(Int((x * 1000).rounded()))]"
-        case (.native, .openAIRealtime), (.native, .cascade):
+        case (.native, .openAIRealtime), (.native, .cascade), (.native, .frontAndWorker):
             guard let pixels else { return nil }
             return "x \(Int((x * pixels.width).rounded())), y \(Int((y * pixels.height).rounded())) pixels"
         case (.fractions, _):

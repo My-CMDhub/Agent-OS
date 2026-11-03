@@ -76,10 +76,12 @@ nonisolated enum RealtimeVoiceVerbs {
     static let agentOnlyToolNames: Set<String> = [findMenuBarItemsName, pressMenuBarItemName]
     /// Declared to the voice model only, never to the agent loop: session text is model text a page may have
     /// steered, so it is spoken to the owner and never becomes a step's input.
-    static let voiceOnlyToolNames: Set<String> = [briefSessionsName]
+    static let voiceOnlyToolNames: Set<String> = [briefSessionsName, taskStatusName]
+    /// The front's read of how the work stands (`.frontAndWorker`): voice only, changes nothing.
+    static let taskStatusName = "task_status"
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName, searchHelpName,
                                             findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
-                                            openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName, goToFolderName,
+                                            openURLName, doTaskName, taskStatusName, annotateName, SettingsPaneLinks.toolName, goToFolderName,
                                             findFileName, renameItemName, moveItemsName, setValueName, createReminderName,
                                             createEventName, findMenuBarItemsName, pressMenuBarItemName, listOpenAppsName,
                                             briefSessionsName, readCalendarName, dragItemName, pressKeysName]
@@ -392,8 +394,8 @@ nonisolated enum RealtimeVoiceVerbs {
     /// The voice model's only planner hand-off. Never offered to the agent loop itself.
     private static let doTaskDeclaration = Declaration(
         name: doTaskName,
-        description: "Hands a request that needs more than one step (search then open a result, open a page and read or summarise it, "
-            + "fill several fields, write then post) to the task runner, which looks, acts, checks and repeats until it is done. "
+        description: "Works through a request that needs more than one step (search then open a result, open a page and read or summarise it, "
+            + "fill several fields, write then post): it looks, acts, checks and repeats until it is done. "
             + "Use it for every request with two or more actions, and for any that acts and then asks for an answer (\"and tell me\", "
             + "summarise, find out): never do the first action yourself. Also every question to look up on the web (\"what does "
             + "this site say\", \"the latest\", \"the cheapest\"): it answers from the web without opening a browser. "
@@ -478,6 +480,14 @@ nonisolated enum RealtimeVoiceVerbs {
             ]
         }
     }
+
+    /// The front's whole table on Gemini: it starts the work and reads how it stands, and does nothing itself. do_task takes no argument:
+    /// there is nothing a model could write that the worker would read (`RealtimeVoiceConnection.frontGoal`).
+    static let frontGeminiDeclaration: [String: Any] = ["functionDeclarations": [
+        ["name": doTaskName, "description": "Gets the owner's request done on the mac, in the owner's own words. Use it for anything on or about "
+            + "the mac, the screen, or the web. Returns at once; what happens comes later in system lines."],
+        ["name": taskStatusName, "description": "Reads how the current work stands: what it is on, what it has done. Changes nothing."]
+    ]]
 
     /// Gemini Live `setup.tools` entry: one object holding every function.
     static var geminiDeclaration: [String: Any] { geminiDeclaration(pointFormat: .live) }
@@ -949,7 +959,7 @@ nonisolated enum RealtimeVoiceVerbs {
     static func isActingTool(_ toolName: String) -> Bool {
         toolName != findMenuItemsName && toolName != findOnScreenName && toolName != doTaskName && toolName != annotateName
             && toolName != searchHelpName && toolName != findFileName && toolName != findMenuBarItemsName && toolName != listOpenAppsName
-            && toolName != briefSessionsName && toolName != readCalendarName
+            && toolName != briefSessionsName && toolName != readCalendarName && toolName != taskStatusName
     }
 }
 
@@ -991,7 +1001,7 @@ nonisolated enum RealtimePointFormat: String, CaseIterable, Sendable {
         case .geminiLive:
             guard let point, point.count == 2 else { return (nil, nil) }
             return (point[1] / 1000, point[0] / 1000)
-        case .openAIRealtime, .cascade:
+        case .openAIRealtime, .cascade, .frontAndWorker:
             guard let x, let y, let size = screenshotPixels, size.width > 0, size.height > 0 else { return (nil, nil) }
             return (x / Double(size.width), y / Double(size.height))
         }

@@ -237,6 +237,26 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Who should decide a turn on the front-and-worker stack, then the stack under fault injection (`FrontWorkerProbe`). Quit.
+        if CommandLine.arguments.contains("--route-probe") {
+            Task { @MainActor in
+                await FrontWorkerProbe.runRouteProbe()
+                if CommandLine.arguments.contains("--route-probe-gemini") {
+                    await FrontWorkerProbe.runGeminiRouteProbe(answer: { [harnessServer] line in harnessServer.answer(line: line) })
+                }
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+        if CommandLine.arguments.contains("--front-probe") {
+            confirmationCardWindowManager = ConfirmationCardWindowManager(confirmations: confirmations)
+            Task { @MainActor in
+                await FrontWorkerProbe.runFrontProbe(harness: self.harnessServer, confirmations: self.confirmations)
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
         // One spoken ask per real card (`CardAskProbe`): a do_task card with a live Gemini session, then with none.
         // Same gate as the runner. Cards are denied, never allowed. Quits.
         if CommandLine.arguments.contains("--card-ask-probe") {

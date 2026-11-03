@@ -16,6 +16,7 @@ typeset -A STYLE=(
   K08 "Eddy (English (UK)):-" K09 "Karen:tail" K10 "Samantha:-" K11 "Moira:noise" K12 "Daniel:quiet" K13 "Karen:fast"
   K14 "Reed (English (UK)):-" K15 "Karen:-" K16 "Rishi:quiet" K17a "Karen:-" K17 "Karen:-" K18a "Daniel:-" K18 "Daniel:tail"
   K19a "Moira:-" K19 "Moira:noise" K20 "Karen:noise"
+  T1 "Samantha:-" T2 "Samantha:-" T3 "Samantha:-" T4 "Samantha:-" T5 "Samantha:-" T6 "Samantha:-"
 )
 
 # What the room does, into $2 from $1.

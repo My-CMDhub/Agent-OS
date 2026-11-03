@@ -72,3 +72,10 @@ K18	-	yeah do it
 K19a	-	open the calculator
 K19	-	um, actually, put that away
 K20	-	just trash that first draft for me would you
+# Conversation, for the front-and-worker stack's routing: nothing here needs the Mac.
+T1	-	how are you this morning
+T2	-	thanks, that was quick
+T3	-	tell me a joke
+T4	-	what's the capital of France
+T5	-	what can you do
+T6	-	who built you

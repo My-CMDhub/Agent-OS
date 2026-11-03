@@ -154,6 +154,23 @@ final class RealtimeTurnMarks {
     var cascadeFirstSpeakUptime: TimeInterval?
     var cascadeUsage: [String: Int] = [:]
     var cascadeThinkingBlocks = 0
+    /// Front and worker only: what Gemini's own ear made of this turn, beside `heardText` (Nova-3's): for the register, never authority.
+    var geminiHeardText = ""
+    var geminiHeardPieceUptimes: [TimeInterval] = []
+    /// Nova-3 gave no answer, so Gemini's ear stands in for this turn (`frontEarFailed`).
+    var heardFallback = false
+    /// How this turn was routed (`FrontVerdict`): act | chat | queued | unheard, who said so, and what that took.
+    var frontRoute: String?
+    var frontRouteSource: String?
+    var frontRouteMilliseconds: Int?
+    /// What to say in exact words if Gemini cannot say this turn (`frontUnreachable`).
+    var frontPlain: String?
+    /// gemini | deepgram: who actually spoke it.
+    var frontVia: String?
+    /// This press opened an activity on Gemini's socket; it may still be owed an end.
+    var frontActivityOpen = false
+    /// That socket is gone, or never was: Gemini has not heard this turn, whatever has come back since.
+    var frontActivityLost = false
     let finished = VoiceBenchWaiter<TimeInterval>()
 
     /// Each event with its arrival in ms after the release, negative before it.
@@ -214,7 +231,7 @@ final class RealtimeVoiceConnection {
     let stack: VoiceStackChoice
     private let harnessAnswer: @Sendable (String) -> String
     private var socket: VoiceBenchWebSocket?
-    private let readyWaiter = VoiceBenchWaiter<TimeInterval>()
+    private var readyWaiter = VoiceBenchWaiter<TimeInterval>()
     private(set) var isOpen = false
     private(set) var turn = RealtimeTurnMarks()
     /// OpenAI only: `response.create` while a response is live is refused
@@ -238,6 +255,27 @@ final class RealtimeVoiceConnection {
     private var cascade: CascadeVoicePipeline?
     /// Cascade only: asks the model the moment the words are complete, so a poll on them would land after the request left.
     var contextForHeardWords: ((RealtimeTurnMarks) -> String?)?
+
+    // Front and worker only (`FrontAndWorker.swift`). `isOpen` is the ear's and this object's; Gemini comes and goes under it,
+    // and a turn survives that: the words are Nova-3's and the exact-words voice is Deepgram's.
+    /// Gemini's socket is up and its setup acknowledged.
+    private(set) var frontIsUp = false
+    /// Nova-3's final is in: who answers this turn, and what Gemini is told. The session starts the worker inside this.
+    var onFrontTurn: ((RealtimeTurnMarks, _ frontUp: Bool) async -> FrontTurnPlan)?
+    var onTaskStatus: (() -> String?)?
+    /// Gemini's socket went or came: dropped:why, up, up:resumed, reconnectFailed.
+    var onFrontSocket: ((String) -> Void)?
+    /// Gemini's session handle: a reconnect keeps the conversation (`sessionResumptionUpdate`).
+    private var frontResumeHandle: String?
+    private var frontKeeper: Task<Void, Never>?
+    /// `--front-probe`: Gemini answers nothing (silent, not gone), and its reconnects fail.
+    var frontDeafForProbe = false
+    var frontUnreachableForProbe = false
+    func killFrontForProbe() { socket?.task.cancel(with: .goingAway, reason: nil) }
+    func breakEarForProbe() { cascade?.ignoresAudioForProbe = true }
+
+    /// What can speak in the conversation's voice right now.
+    var speaksInOwnVoice: Bool { stack == .frontAndWorker ? frontIsUp : isOpen }
 
     /// Probe only: replaces the app name of every `open_app` call, so a forced
     /// failure (an app that does not exist) runs the real harness path.
@@ -358,32 +396,197 @@ final class RealtimeVoiceConnection {
             try await pipeline.connect()
             cascade = pipeline
             readyWaiter.settle(.success(uptime))
+        case .frontAndWorker:
+            // The ear must exist; Gemini may arrive after it (`keepFrontUp`), and a press meanwhile goes by Deepgram's voice.
+            let pipeline = CascadeVoicePipeline(
+                system: "", tools: [], inputSampleRate: stack.inputSampleRate,
+                keyterms: RealtimeHeardCheck.transcriptionVocabulary(
+                    from: RealtimeVoiceVerbs.installedAppNames(),
+                    runningPaths: Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.standardizedFileURL.path })))
+            pipeline.earOnly = true
+            pipeline.currentTurn = { [weak self] in self?.turn }
+            pipeline.onHeard = { [weak self] marks, _ in self?.frontHeard(marks) }
+            pipeline.onEarFailed = { [weak self] marks, why in self?.frontEarFailed(marks, why: why) }
+            pipeline.onAudio = { [weak self] audio, arrival in self?.receivedAudio(audio, arrivalUptime: arrival) }
+            pipeline.onTurnDone = { [weak self] arrival, _ in self?.receivedTurnDone(arrivalUptime: arrival, givingUpOnFollowUp: true) }
+            pipeline.onFailed = { [weak self, weak pipeline] kind in
+                pipeline?.stopAfterFailure()
+                self?.turn.finished.settle(.failure(VoiceBenchFailure(kind: kind)))
+            }
+            try await pipeline.connect()
+            cascade = pipeline
+            isOpen = true
+            keepFrontUp()
+            await waitForFront(seconds: FrontWatchdog.frontReconnectSeconds)
+            return
         case .geminiLive:
-            let tokenResponse = try await VoiceStackBenchmark.fetchWorkerJSON(routePath: "/gemini-live-token", stage: "geminiToken")
-            guard let ephemeralToken = tokenResponse["token"] as? String else { throw VoiceBenchFailure(kind: "geminiToken:noToken") }
-            var components = URLComponents(string: VoiceStackBenchmark.geminiLiveConstrainedURL)!
-            components.queryItems = [URLQueryItem(name: "access_token", value: ephemeralToken)]
-            try await open(URLRequest(url: components.url!))
-            try await socket?.sendJSON([
-                "setup": [
-                    "model": "models/\(VoiceStackBenchmark.geminiLiveModel)",
-                    "generationConfig": [
-                        "responseModalities": ["AUDIO"], "thinkingConfig": ["thinkingLevel": "MINIMAL"],
-                        "speechConfig": ["voiceConfig": ["prebuiltVoiceConfig": ["voiceName": Self.geminiVoice]]]
-                    ],
-                    "systemInstruction": ["parts": [["text": RealtimeOpenAppTool.systemPrompt(pointFormat: pointFormat, stack: stack)]]],
-                    "tools": [RealtimeVoiceVerbs.geminiDeclaration(pointFormat: pointFormat)],
-                    "realtimeInputConfig": ["automaticActivityDetection": ["disabled": true]],
-                    // What the model said, for the probe's answers file and the honesty check.
-                    "outputAudioTranscription": [String: Any](),
-                    // What the OWNER said, for the heard-vs-named check (the bench's since 2026-09-23).
-                    // No `customVocabulary`: documented, accepted, and still "Kasa" 8/8 (probes C92505CE, B59C0B0F).
-                    "inputAudioTranscription": ["languageCodes": Self.ownerLanguageCodes]
-                ]
+            try await openGemini(setup: [
+                "systemInstruction": ["parts": [["text": RealtimeOpenAppTool.systemPrompt(pointFormat: pointFormat, stack: stack)]]],
+                "tools": [RealtimeVoiceVerbs.geminiDeclaration(pointFormat: pointFormat)]
             ])
         }
         _ = try await readyWaiter.value(timeoutSeconds: 10, timeoutKind: "\(stack.rawValue):setupTimeout")
         isOpen = true
+    }
+
+    /// Token, socket, setup. `setup`: what differs between Gemini's two stacks.
+    private func openGemini(setup: [String: Any]) async throws {
+        let tokenResponse = try await VoiceStackBenchmark.fetchWorkerJSON(routePath: "/gemini-live-token", stage: "geminiToken")
+        guard let ephemeralToken = tokenResponse["token"] as? String else { throw VoiceBenchFailure(kind: "geminiToken:noToken") }
+        var components = URLComponents(string: VoiceStackBenchmark.geminiLiveConstrainedURL)!
+        components.queryItems = [URLQueryItem(name: "access_token", value: ephemeralToken)]
+        try await open(URLRequest(url: components.url!))
+        let common: [String: Any] = [
+            "model": "models/\(VoiceStackBenchmark.geminiLiveModel)",
+            "generationConfig": [
+                "responseModalities": ["AUDIO"], "thinkingConfig": ["thinkingLevel": "MINIMAL"],
+                "speechConfig": ["voiceConfig": ["prebuiltVoiceConfig": ["voiceName": Self.geminiVoice]]]
+            ],
+            "realtimeInputConfig": ["automaticActivityDetection": ["disabled": true]],
+            // What the model said, for the probe's answers file and the honesty check.
+            "outputAudioTranscription": [String: Any](),
+            // What the OWNER said, for the heard-vs-named check (the bench's since 2026-09-23).
+            // No `customVocabulary`: documented, accepted, and still "Kasa" 8/8 (probes C92505CE, B59C0B0F).
+            "inputAudioTranscription": ["languageCodes": Self.ownerLanguageCodes]
+        ]
+        try await socket?.sendJSON(["setup": common.merging(setup) { _, new in new }])
+    }
+
+    // MARK: Front and worker
+
+    /// Gemini's half of the front: a resumable session with no tool that acts. `contextWindowCompression` because a session
+    /// without it ends at 15 minutes of audio; the resumption handle carries the conversation across the ~10 minute connection cap.
+    private func openFront() async throws {
+        guard !frontUnreachableForProbe else { throw VoiceBenchFailure(kind: "front:unreachableForProbe") }
+        readyWaiter = VoiceBenchWaiter()
+        try await openGemini(setup: [
+            "systemInstruction": ["parts": [["text": FrontPrompt.system]]],
+            "tools": [RealtimeVoiceVerbs.frontGeminiDeclaration],
+            "sessionResumption": frontResumeHandle.map { ["handle": $0] } ?? [String: Any](),
+            "contextWindowCompression": ["slidingWindow": [String: Any]()]
+        ])
+        _ = try await readyWaiter.value(timeoutSeconds: 10, timeoutKind: "front:setupTimeout")
+        frontIsUp = true
+        turn.events.append((frontResumeHandle == nil ? "front.up" : "front.up:resumed", uptime))
+        onFrontSocket?(frontResumeHandle == nil ? "up" : "up:resumed")
+    }
+
+    /// While this connection lives, Gemini is reconnecting or up. One at a time; a failure backs off, and never fails anything else.
+    private func keepFrontUp() {
+        guard frontKeeper == nil, isOpen else { return }
+        frontKeeper = Task { @MainActor [weak self] in
+            var attempt = 0
+            while let self, self.isOpen, !self.frontIsUp, !Task.isCancelled {
+                let wait = FrontWatchdog.reconnectBackoff[min(attempt, FrontWatchdog.reconnectBackoff.count - 1)]
+                if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+                attempt += 1
+                do { try await self.openFront() } catch {
+                    self.turn.events.append(("front.reconnectFailed", self.uptime))
+                    self.onFrontSocket?("reconnectFailed")
+                }
+            }
+            self?.frontKeeper = nil
+        }
+    }
+
+    private func waitForFront(seconds: TimeInterval) async {
+        let deadline = uptime + seconds
+        while !frontIsUp, uptime < deadline { try? await Task.sleep(for: .milliseconds(100)) }
+    }
+
+    /// Gemini is gone, or as good as: whatever it owed the current turn is said another way, and the reconnect starts.
+    private func frontDropped(why: String) {
+        frontIsUp = false
+        let gone = socket
+        socket = nil
+        gone?.close()
+        turn.frontActivityLost = true
+        readyWaiter.settle(.failure(VoiceBenchFailure(kind: "front:\(why)")))
+        turn.events.append(("front.dropped:\(why)", uptime))
+        onFrontSocket?("dropped:\(why)")
+        frontUnreachable(turn)
+        keepFrontUp()
+    }
+
+    /// The turn Gemini was to speak, if it has not. A press still held or a route still out needs nothing:
+    /// both read `frontIsUp` when they get there. An owner turn already speaking just ends; a status is the owner's to hear whole.
+    private func frontUnreachable(_ marks: RealtimeTurnMarks) {
+        guard marks.frontVia == "gemini", marks.finishedUptime == nil, !marks.supersededByPress else { return }
+        let say = marks.isSystemTurn || marks.firstAudioUptime == nil ? marks.frontPlain : nil
+        guard let say else { return receivedTurnDone(arrivalUptime: uptime, givingUpOnFollowUp: true) }
+        marks.frontVia = "deepgram"
+        marks.events.append(("front.plain", uptime))
+        cascade?.speakPlain(say, marks: marks)
+    }
+
+    /// No first audio inside the bound: Gemini is treated as gone, not waited on.
+    private func armFrontSilence(_ marks: RealtimeTurnMarks) {
+        Task { @MainActor [weak self, weak marks] in
+            try? await Task.sleep(for: .seconds(FrontWatchdog.frontSilentSeconds))
+            guard let self, let marks, self.turn === marks, !marks.supersededByPress, marks.firstAudioUptime == nil, marks.toolCalls.isEmpty,
+                  marks.finishedUptime == nil, self.frontIsUp else { return }
+            self.frontDropped(why: "silent")
+        }
+    }
+
+    /// Nova-3's final: stop words first, then who answers, then Gemini's turn may end. Until now it has had no `activityEnd`, so it
+    /// cannot have answered: there is one answer to a turn. A press since then owns everything.
+    private func frontHeard(_ marks: RealtimeTurnMarks) {
+        guard turn === marks, !marks.supersededByPress else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let line = self.contextForHeardWords?(marks) { try? await self.sendContextText(line) }
+            let plan = await self.onFrontTurn?(marks, self.frontIsUp && !marks.frontActivityLost) ?? FrontTurnPlan(lines: [], plain: nil)
+            guard self.turn === marks, !marks.supersededByPress else { return }
+            marks.frontPlain = plan.plain
+            for line in plan.lines where self.frontIsUp && !marks.frontActivityLost { try? await self.sendContextText(line) }
+            self.endFrontActivity(marks)
+        }
+    }
+
+    /// The turn goes to Gemini to answer, or if it cannot, to the exact words.
+    private func endFrontActivity(_ marks: RealtimeTurnMarks) {
+        guard frontIsUp, !marks.frontActivityLost else {
+            guard let plain = marks.frontPlain else { return receivedTurnDone(arrivalUptime: uptime, givingUpOnFollowUp: true) }
+            marks.frontVia = "deepgram"
+            return cascade?.speakPlain(plain, marks: marks) ?? ()
+        }
+        marks.frontVia = "gemini"
+        Task { try? await socket?.sendJSON(["realtimeInput": ["activityEnd": [String: Any]()]]) }
+        armFrontSilence(marks)
+    }
+
+    /// Nova-3 gave no answer. Gemini's ear stands in for this turn and it decides as a plain Gemini turn does: never blocked, and the
+    /// line in voice-live.log says so. Words Nova-3 said it did NOT hear are a different thing (`FrontPrompt.unheardLine`): room
+    /// noise is what Gemini's ear imagines words in, 10 of 10 (register).
+    private func frontEarFailed(_ marks: RealtimeTurnMarks, why: String) {
+        guard turn === marks, !marks.supersededByPress else { return }
+        marks.events.append(("ear.failed:\(why)", uptime))
+        marks.heardFallback = true
+        marks.heardText = marks.geminiHeardText
+        marks.heardPieceUptimes = marks.geminiHeardPieceUptimes
+        if marks.lastAudioSentUptime != nil { finishEarlessTurn(marks) }
+    }
+
+    private func finishEarlessTurn(_ marks: RealtimeTurnMarks) {
+        guard frontIsUp, !marks.frontActivityLost else {
+            // No ear and no voice: nothing to act on, and it says so rather than go quiet.
+            return turn.finished.settle(.failure(VoiceBenchFailure(kind: "front:noEarNoVoice")))
+        }
+        marks.frontRoute = "fallback"
+        marks.frontRouteSource = "geminiEar"
+        marks.frontPlain = FrontPrompt.plainLostChat
+        Task { @MainActor [weak self] in
+            guard let self, self.turn === marks else { return }
+            try? await self.sendContextText(FrontPrompt.earFailedLine)
+            self.endFrontActivity(marks)
+        }
+    }
+
+    /// Context about the machine: the front has no eyes (`FrontAndWorker.swift`), so on that stack it stays with the worker.
+    func sendMachineContext(_ text: String) async throws {
+        guard stack != .frontAndWorker else { return }
+        try await sendContextText(text)
     }
 
     private func open(_ request: URLRequest) async throws {
@@ -394,6 +597,11 @@ final class RealtimeVoiceConnection {
         }, onEnd: { [weak self] error in
             guard let self else { return }
             let failureKind = socket.failureKind(for: error, stage: self.stack.rawValue)
+            if self.stack == .frontAndWorker {
+                // A socket already replaced (a swap, `close`) ended as it should.
+                if self.socket === socket { self.frontDropped(why: failureKind) }
+                return
+            }
             self.isOpen = false
             self.readyWaiter.settle(.failure(VoiceBenchFailure(kind: failureKind)))
             self.turn.finished.settle(.failure(VoiceBenchFailure(kind: failureKind)))
@@ -403,6 +611,8 @@ final class RealtimeVoiceConnection {
 
     func close() {
         isOpen = false
+        frontIsUp = false
+        frontKeeper?.cancel()
         socket?.close()
         socket = nil
         cascade?.close()
@@ -417,6 +627,8 @@ final class RealtimeVoiceConnection {
         switch stack {
         case .cascade:
             cascade?.add(image: jpegData)
+        case .frontAndWorker:
+            break   // No eyes: its words about the machine come only from the worker.
         case .openAIRealtime:
             try await socket?.sendJSON([
                 "type": "conversation.item.create",
@@ -458,10 +670,21 @@ final class RealtimeVoiceConnection {
         if stack == .geminiLive, !previous.isSystemTurn, previous.lastAudioSentUptime != nil, previous.heardCompletedUptime(now: uptime) == nil {
             turn.staleHeardPiecesUntilUptime = uptime + Self.geminiStaleHeardPieceSeconds
         }
+        if stack == .frontAndWorker { turn.staleHeardPiecesUntilUptime = uptime + Self.geminiStaleHeardPieceSeconds }
         switch stack {
         case .openAIRealtime: try await socket?.sendJSON(["type": "input_audio_buffer.clear"])
         case .geminiLive: try await socket?.sendJSON(["realtimeInput": ["activityStart": [String: Any]()]])
         case .cascade: try await cascade?.beginOwnerTurn(marks: turn)
+        case .frontAndWorker:
+            // Neither half's failure stops the other: Gemini's socket reports its own end, and an ear that cannot open has `frontEarFailed`.
+            if frontIsUp {
+                turn.frontActivityOpen = true
+                try? await socket?.sendJSON(["realtimeInput": ["activityStart": [String: Any]()]])
+            } else {
+                turn.frontActivityLost = true
+                keepFrontUp()
+            }
+            do { try await cascade?.beginOwnerTurn(marks: turn) } catch { frontEarFailed(turn, why: "beginTurn") }
         }
     }
 
@@ -474,6 +697,9 @@ final class RealtimeVoiceConnection {
         case .geminiLive:
             try await socket?.sendJSON(["realtimeInput": ["audio": ["mimeType": "audio/pcm;rate=16000", "data": pcmData.base64EncodedString()]]])
         case .cascade:
+            cascade?.sendAudio(pcmData)
+        case .frontAndWorker:
+            try? await socket?.sendJSON(["realtimeInput": ["audio": ["mimeType": "audio/pcm;rate=16000", "data": pcmData.base64EncodedString()]]])
             cascade?.sendAudio(pcmData)
         }
     }
@@ -491,6 +717,9 @@ final class RealtimeVoiceConnection {
             try await socket?.sendJSON(["realtimeInput": ["activityEnd": [String: Any]()]])
         case .cascade:
             cascade?.endOwnerTurn(marks: turn)
+        case .frontAndWorker:
+            // No `activityEnd` yet: `frontHeard` sends it once the words are routed.
+            if turn.heardFallback { finishEarlessTurn(turn) } else { cascade?.endOwnerTurn(marks: turn) }
         }
     }
 
@@ -513,6 +742,8 @@ final class RealtimeVoiceConnection {
     func supersedeForPress() {
         turn.supersededByPress = true
         cancelResponse()
+        // A status cut off here has nothing more to wait for; its queue must not sit out a timeout behind it.
+        if stack == .frontAndWorker, turn.isSystemTurn { turn.finished.settle(.success(uptime)) }
     }
 
     /// Context the model reads and is not asked to answer: OpenAI, a user text
@@ -531,7 +762,7 @@ final class RealtimeVoiceConnection {
         case .openAIRealtime:
             return ["type": "conversation.item.create",
                     "item": ["type": "message", "role": "user", "content": [["type": "input_text", "text": text]]]]
-        case .geminiLive:
+        case .geminiLive, .frontAndWorker:
             return ["realtimeInput": ["text": text]]
         case .cascade:
             return ["type": "text", "text": text]
@@ -548,9 +779,9 @@ final class RealtimeVoiceConnection {
             return [contextTextMessage(stack: stack, text: text), ["type": "response.create"]]
         case (.openAIRealtime, _):
             return [contextTextMessage(stack: stack, text: text)]
-        case (.geminiLive, .clientContent):
+        case (.geminiLive, .clientContent), (.frontAndWorker, .clientContent):
             return [["clientContent": ["turns": [["role": "user", "parts": [["text": text]]]], "turnComplete": true]]]
-        case (.geminiLive, _), (.cascade, _):
+        case (.geminiLive, _), (.cascade, _), (.frontAndWorker, _):
             return [contextTextMessage(stack: stack, text: text)]
         }
     }
@@ -562,7 +793,8 @@ final class RealtimeVoiceConnection {
     /// (review 2026-10-02: a correction between "find X" and "yes, that one" lost
     /// the offer), and takes no heard piece: the owner said nothing in it, so a
     /// late Gemini piece is the owner turn's.
-    func beginSystemTurn(text: String, variant: RealtimeSystemTurnVariant, speechOnly: Bool = false) async throws {
+    /// `plain`: front and worker only, the same news as exact words, for when Gemini cannot say it.
+    func beginSystemTurn(text: String, variant: RealtimeSystemTurnVariant, speechOnly: Bool = false, plain: String? = nil) async throws {
         let previous = turn
         turn = RealtimeTurnMarks()
         turn.isSystemTurn = true
@@ -573,6 +805,22 @@ final class RealtimeVoiceConnection {
         turn.staleHeardPiecesUntilUptime = .infinity
         turn.lastAudioSentUptime = uptime   // nothing after this is "before the release"
         if stack == .cascade { return try await cascade?.beginSystemTurn(text: SecretScanner.redact(text), marks: turn) ?? () }
+        if stack == .frontAndWorker {
+            let marks = turn
+            marks.frontPlain = plain
+            // A dropped socket gets a few seconds to come back, and the line then goes as it would have.
+            if !frontIsUp {
+                keepFrontUp()
+                await waitForFront(seconds: FrontWatchdog.frontReconnectSeconds)
+                guard turn === marks, !marks.supersededByPress else { return marks.finished.settle(.success(uptime)) }
+            }
+            guard frontIsUp else {
+                marks.events.append(("front.plain", uptime))
+                return endFrontActivity(marks)
+            }
+            marks.frontVia = "gemini"
+            armFrontSilence(marks)
+        }
         for message in Self.systemTurnMessages(stack: stack, text: text, variant: variant) {
             if message["type"] as? String == "response.create" {
                 try await sendResponseCreate(for: turn)
@@ -602,6 +850,13 @@ final class RealtimeVoiceConnection {
         switch stack {
         case .openAIRealtime: handleOpenAI(message, arrivalUptime: arrivalUptime)
         case .geminiLive: handleGemini(message, arrivalUptime: arrivalUptime)
+        case .frontAndWorker:
+            if message["setupComplete"] != nil { return handleGemini(message, arrivalUptime: arrivalUptime) }
+            guard !frontDeafForProbe else { return }
+            if let update = message["sessionResumptionUpdate"] as? [String: Any], update["resumable"] as? Bool == true,
+               let handle = update["newHandle"] as? String { frontResumeHandle = handle }
+            if message["goAway"] != nil { frontGoingAway() }
+            handleGemini(message, arrivalUptime: arrivalUptime)
         case .cascade: break   // Its legs call back directly (`connect`).
         }
     }
@@ -714,8 +969,15 @@ final class RealtimeVoiceConnection {
         }
         if let heardPiece = (serverContent["inputTranscription"] as? [String: Any])?["text"] as? String,
            arrivalUptime >= turn.staleHeardPiecesUntilUptime ?? -.infinity {
-            turn.heardText += heardPiece
-            turn.heardPieceUptimes.append(arrivalUptime)
+            // On the front Gemini's ear is logged beside Nova-3's and gives no authority, unless Nova-3 gave no answer.
+            if stack == .frontAndWorker {
+                turn.geminiHeardText += heardPiece
+                turn.geminiHeardPieceUptimes.append(arrivalUptime)
+            }
+            if stack != .frontAndWorker || turn.heardFallback {
+                turn.heardText += heardPiece
+                turn.heardPieceUptimes.append(arrivalUptime)
+            }
         }
         if let parts = (serverContent["modelTurn"] as? [String: Any])?["parts"] as? [[String: Any]] {
             for part in parts where !isStale {
@@ -732,6 +994,12 @@ final class RealtimeVoiceConnection {
                 turn.geminiInterruptedUptime = nil
                 turn.staleCompletionsIgnored += 1
                 return ignoreStale("turnComplete", arrivalUptime: arrivalUptime)
+            }
+            // Gemini ended the turn with no word: on the front what it owed is said another way, never skipped.
+            if stack == .frontAndWorker, turn.firstAudioUptime == nil, turn.toolCalls.isEmpty, let plain = turn.frontPlain {
+                turn.events.append(("front.emptyTurn", arrivalUptime))
+                turn.frontVia = "deepgram"
+                return cascade?.speakPlain(plain, marks: turn) ?? ()
             }
             receivedTurnDone(arrivalUptime: arrivalUptime)
         }
@@ -760,6 +1028,26 @@ final class RealtimeVoiceConnection {
     /// measured `interrupted` -> `turnComplete` gap (286 ms, 20 of 20 barge-ins,
     /// 2026-09-29); an answer's first audio comes >= 906 ms after the release.
     static let geminiInterruptedStaleSeconds: Double = 1.5
+
+    /// The server says this connection is ending soon (`goAway`, ~1 minute's notice). Replace it between answers, so no line goes into it.
+    /// ponytail: 30 s is a bound on one answer, not measured; past it the swap happens anyway and `frontUnreachable` covers the turn.
+    private func frontGoingAway() {
+        let leaving = socket
+        turn.events.append(("front.goAway", uptime))
+        Task { @MainActor [weak self] in
+            let deadline = ProcessInfo.processInfo.systemUptime + 30
+            while let self, self.socket === leaving, ProcessInfo.processInfo.systemUptime < deadline, self.frontAnswering {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            guard let self, self.socket === leaving else { return }
+            self.frontDropped(why: "goAway")
+        }
+    }
+
+    /// A press is open or its answer is still to finish.
+    private var frontAnswering: Bool {
+        (turn.frontVia != nil || turn.frontActivityOpen) && turn.finishedUptime == nil && !turn.supersededByPress
+    }
 
     private func geminiEventIsThisTurns(arrivalUptime: TimeInterval) -> Bool {
         guard !turn.supersededByPress, turn.lastAudioSentUptime != nil else { return false }
@@ -877,6 +1165,7 @@ final class RealtimeVoiceConnection {
 
     /// do_task: the session starts the agent loop and answers at once
     /// (`RealtimeVoiceSession`), given the goal and the OWNER's own words.
+    /// On the front the goal IS the owner's words: the model's never reaches the worker (`frontGoal`).
     var onDoTask: ((_ goal: String, _ heard: String, _ startBundle: String?, _ focus: OwnerFocusNote?) -> [String: Any])?
     /// Whether a task is running: then no system turn may call a tool.
     var isAgentLoopRunning: () -> Bool = { false }
@@ -894,8 +1183,8 @@ final class RealtimeVoiceConnection {
     nonisolated static func turnRefusal(toolName: String, isSystemTurn: Bool, speechOnly: Bool, agentLoopRunning: Bool,
                                         heard: String?, taskStartedThisTurn: Bool = false) -> RealtimeToolRefusal? {
         if taskStartedThisTurn {
-            return RealtimeToolRefusal(error: "taskStarted", message: "the task runner is doing this request now, so nothing more was done "
-                + "in this turn; say only a few words, and let the task report its progress")
+            return RealtimeToolRefusal(error: "taskStarted", message: "this request is under way now, so nothing more was done "
+                + "in this turn; say only a few words, and progress comes in later system lines")
         }
         if isSystemTurn, speechOnly || agentLoopRunning || toolName == RealtimeVoiceVerbs.doTaskName {
             return RealtimeToolRefusal(error: "systemTurnCannotAct", message: "this turn was not the owner speaking, so nothing was done; "
@@ -950,7 +1239,8 @@ final class RealtimeVoiceConnection {
                     turn.decisions[decisionIndex].dispatch = dispatch
                 } else if let refusal = Self.turnRefusal(
                     toolName: call.name, isSystemTurn: turn.isSystemTurn, speechOnly: turn.speechOnly,
-                    agentLoopRunning: self?.isAgentLoopRunning() ?? false,
+                    // A second request beside a running task queues on the front (`startOrQueueFront`): no second planner.
+                    agentLoopRunning: self?.stack != .frontAndWorker && self?.isAgentLoopRunning() == true,
                     heard: call.name == RealtimeVoiceVerbs.doTaskName && !turn.isSystemTurn && !turn.taskStarted
                         ? await turn.waitForHeard(until: (turn.lastAudioSentUptime ?? ProcessInfo.processInfo.systemUptime)
                                                     + RealtimeHeardCheck.transcriptDeadlineAfterReleaseSeconds) : nil,
@@ -968,10 +1258,16 @@ final class RealtimeVoiceConnection {
                     // judged against the owner's words (`turnRefusal` waited for them).
                     let refusal = RealtimeToolRefusal(error: "missingGoal", message: "do_task needs the owner's request as its goal")
                     let heard = turn.heardText
-                    let result = call.goal.flatMap { goal in self?.onDoTask?(goal, heard, turn.keyDownFrontBundle, turn.ownerFocus) }
+                    let goal = self?.stack == .frontAndWorker ? Self.frontGoal(modelGoal: call.goal, heard: heard) : call.goal
+                    let result = goal.flatMap { goal in self?.onDoTask?(goal, heard, turn.keyDownFrontBundle, turn.ownerFocus) }
                         ?? RealtimeOpenAppTool.toolResult(for: refusal)
                     if result["ok"] as? Bool == true { turn.taskStarted = true }
                     dispatch = RealtimeToolDispatch(result: result, harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: nil)
+                    turn.dispatches.append(dispatch)
+                    turn.decisions[decisionIndex].dispatch = dispatch
+                } else if call.name == RealtimeVoiceVerbs.taskStatusName {
+                    let status = self?.onTaskStatus?() ?? "nothing is under way, and nothing has been done recently"
+                    dispatch = RealtimeToolDispatch(result: ["ok": true, "status": status], harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: nil)
                     turn.dispatches.append(dispatch)
                     turn.decisions[decisionIndex].dispatch = dispatch
                 } else {
@@ -1018,7 +1314,13 @@ final class RealtimeVoiceConnection {
         }
     }
 
-    /// The first acting call of a turn whose words name two actions starts the task runner on those words instead, so
+    /// What the worker is given on the front: the owner's words as heard, whatever the model wrote (spec requirement 1).
+    nonisolated static func frontGoal(modelGoal: String?, heard: String) -> String? {
+        let words = heard.trimmingCharacters(in: .whitespacesAndNewlines)
+        return words.isEmpty ? nil : words
+    }
+
+    /// The first acting call of a turn whose words name two actions starts the task on those words instead, so
     /// the voice model cannot half-do the request in the wrong order (`RealtimeHeardCheck.namesTwoActions`). A look still
     /// runs: it changes nothing. nil: this call runs as it is. Not a new authority: the task runs on the owner's own words,
     /// through every guard its steps meet. No runner here (a probe), or one that refuses: the call runs.
@@ -1034,8 +1336,8 @@ final class RealtimeVoiceConnection {
     }
 
     static let handedToTaskRefusal = RealtimeToolRefusal(
-        error: "handedToTask", message: "this call did nothing: the owner's request names more than one action, so the task runner is doing "
-            + "the whole of it now, in the owner's order. Say only a few words; progress and the outcome come as system lines")
+        error: "handedToTask", message: "this call did nothing by itself: the owner's request names more than one action, so all of it is under way "
+            + "now, in the owner's order. Say only a few words; progress and the outcome come as system lines")
 
     // MARK: Approval cards (owner's live test 2026-10-31)
 
@@ -1705,7 +2007,7 @@ final class RealtimeVoiceConnection {
             let output = String(decoding: (try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])) ?? Data("{}".utf8), as: UTF8.self)
             return ["type": "conversation.item.create",
                     "item": ["type": "function_call_output", "call_id": call.callID, "output": output]]
-        case .geminiLive:
+        case .geminiLive, .frontAndWorker:
             return ["toolResponse": ["functionResponses": [["id": call.callID, "name": call.name, "response": result]]]]
         case .cascade:
             let output = String(decoding: (try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])) ?? Data("{}".utf8), as: UTF8.self)
@@ -1738,7 +2040,7 @@ final class RealtimeVoiceConnection {
                 turn.toolResultSentUptime = uptime
                 turn.followUpFirstAudioUptime = nil
                 try await sendResponseCreate(for: turn)
-            case .geminiLive:
+            case .geminiLive, .frontAndWorker:
                 turn.toolsInFlight -= 1
                 guard requestingReply else { return ignoreStale("toolResult", arrivalUptime: uptime, in: turn) }
                 turn.toolResultSentUptime = uptime

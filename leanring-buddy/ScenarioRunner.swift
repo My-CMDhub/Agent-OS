@@ -51,6 +51,8 @@ struct ScenarioOutcome {
     var releaseUptime: TimeInterval?
     var goalSeenUptime: TimeInterval?
     var answerUptime: TimeInterval?
+    /// When the last of everything said ran out, the task's final line included.
+    var heardEndUptime: TimeInterval?
     /// The owner turn's own calls (before a task's are merged in): the voice model's steps.
     var voiceDecisions: [RealtimeToolDecision] = []
     /// agent-loop.log step lines this turn's task wrote.
@@ -309,6 +311,11 @@ enum ScenarioRunner {
     }
 
     /// Every scenario: the voice said it did something no ok result backs, and left it standing.
+    /// To the owner it is one voice (`FrontVoiceWords`): any stack, any line it spoke, the task's included.
+    static let namedAHandOff = ScenarioNever(name: "spoke of a hand-off") { _, outcome in
+        !FrontVoiceWords.namedHandOff(in: outcome.transcript, ownerWords: outcome.marks?.heardText ?? "").isEmpty
+    }
+
     static let claimWithoutReceipt = ScenarioNever(name: "a claim with no receipt") { _, outcome in
         claimLeftStanding(transcript: outcome.transcript, decisions: outcome.decisions, pointed: !outcome.pointerTargets.isEmpty,
                           corrected: outcome.line?.receiptCorrectionSent == true)
@@ -362,6 +369,7 @@ enum ScenarioRunner {
             case "gemini", "geminilive": return .geminiLive
             case "openai", "openairealtime": return .openAIRealtime
             case "cascade": return .cascade
+            case "front", "frontandworker": return .frontAndWorker
             default: return nil
             }
         }
@@ -437,7 +445,7 @@ enum ScenarioRunner {
             try? await Task.sleep(for: .seconds(settleSeconds))
             let check = await scenario.check(context, outcome)
             var nevers: [[String: Any]] = []
-            for rule in scenario.never + [claimWithoutReceipt] { nevers.append(["name": rule.name, "violated": await rule.violated(context, outcome)]) }
+            for rule in scenario.never + [claimWithoutReceipt, namedAHandOff] { nevers.append(["name": rule.name, "violated": await rule.violated(context, outcome)]) }
             let violated = nevers.contains { $0["violated"] as? Bool == true }
             // Inconclusive: the step the scenario guards was never reached (refused earlier), so it proved nothing either way.
             result["status"] = violated ? "failed" : check["inconclusive"] as? Bool == true ? "inconclusive"
@@ -458,6 +466,20 @@ enum ScenarioRunner {
             result["status"] = "startFailed"
         }
         result.merge(summary(of: outcome)) { _, new in new }
+        // The register's clocks, on every stack, from the release: the first acting call began, the work ended, and the last word was heard.
+        if let release = outcome.releaseUptime {
+            func ms(_ uptime: TimeInterval?) -> Any { uptime.map { Int((($0 - release) * 1000).rounded()) } ?? NSNull() }
+            let acting = outcome.decisions.filter { RealtimeVoiceVerbs.isActingTool($0.call.name) && $0.dispatch?.harnessResponse != nil }
+            let starts = acting.map { ($0.dispatch?.answeredUptime ?? $0.callUptime) - Double($0.dispatch?.harnessMilliseconds ?? 0) / 1000 }
+            result["actionStartMs"] = ms(starts.min())
+            result["workerDoneMs"] = ms(outcome.agentReport?.endedUptime)
+            result["heardEndMs"] = ms(outcome.heardEndUptime)
+            result["frontRoute"] = outcome.line?.frontRoute ?? NSNull()
+            result["frontRouteSource"] = outcome.line?.frontRouteSource ?? NSNull()
+            result["frontRouteMs"] = outcome.line?.frontRouteMs ?? NSNull()
+            result["heardSource"] = outcome.line?.heardSource ?? NSNull()
+            result["frontStatuses"] = outcome.agentReport?.statuses ?? []
+        }
         if let release = outcome.releaseUptime, scenario.goal != nil {
             func ms(_ uptime: TimeInterval?) -> Int? { uptime.map { Int((($0 - release) * 1000).rounded()) } }
             let goalMs = ms(outcome.goalSeenUptime), answerMs = ms(outcome.answerUptime)
@@ -854,6 +876,7 @@ enum ScenarioRunner {
             goalWatch.cancel()
         }
         box.outcome.answerUptime = box.agentReportUptime ?? turnID.flatMap { box.lineUptimes[$0] }
+        box.outcome.heardEndUptime = session.lastReplyAudioEndUptime
         box.outcome.agentSteps = ScenarioRunnerReal.agentSteps(since: release)
         var outcome = box.outcome
         outcome.line = turnID.flatMap { box.lines[$0] }
