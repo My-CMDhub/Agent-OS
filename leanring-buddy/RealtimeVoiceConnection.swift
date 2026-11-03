@@ -1037,7 +1037,8 @@ final class RealtimeVoiceConnection {
     ]
 
     /// The system line with the card's answer: what happened, from the harness's own result.
-    nonisolated static func cardAnsweredText(result: [String: Any]) -> String {
+    /// `say: false`: a task's card, whose own lines report what comes next.
+    nonisolated static func cardAnsweredText(result: [String: Any], say: Bool = true) -> String {
         let outcome: String
         switch result["error"] as? String {
         case "confirmationDenied": outcome = "the owner denied it on the card, so nothing was done"
@@ -1049,7 +1050,7 @@ final class RealtimeVoiceConnection {
         let json = String(decoding: (try? JSONSerialization.data(withJSONObject: SecretScanner.scrub(result), options: [.sortedKeys])) ?? Data("{}".utf8),
                           as: UTF8.self)
         return "system context, not the owner's words: \(outcome). The result: \(json). The card is gone: never ask for approval "
-            + "again. Say what happened in one short sentence, from the result only."
+            + "again. " + (say ? "Say what happened in one short sentence, from the result only." : "The task's own lines report what comes next.")
     }
 
     /// "allowed" | "denied" | "expired" | "failed": the card's answer as the outcome line records it.
@@ -1062,11 +1063,11 @@ final class RealtimeVoiceConnection {
     }
 
     /// The card is up: the model gets `cardHandOffResult` as the call's result now and asks in its own
-    /// voice; the canned nudge stands back (`ConfirmationNudger.voiceAskedUptime`).
+    /// voice; the fallback clip stands back (`ConfirmationNudger.voiceAsked`).
     private func handCardToVoice(_ call: RealtimeToolCall, decisionIndex: Int, in turn: RealtimeTurnMarks) async {
         turn.cardAskedUptime = uptime
         turn.cardsAwaitingOwner += 1
-        ConfirmationNudger.voiceAskedUptime = uptime
+        ConfirmationNudger.voiceAsked(.voiceTurn, turn: turn)
         turn.decisions[decisionIndex].dispatch = RealtimeToolDispatch(
             result: Self.cardHandOffResult, harnessMilliseconds: Int(((uptime - turn.decisions[decisionIndex].callUptime) * 1000).rounded()),
             waitedForConfirmation: true, harnessResponse: nil)

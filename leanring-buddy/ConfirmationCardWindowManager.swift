@@ -133,7 +133,7 @@ final class ConfirmationCardWindowManager {
     private var generation = 0
     /// Every ticket the card has already shown — one chime per ticket, ever.
     private var announcedTicketIDs: Set<String> = []
-    /// The spoken nudge after the chime (`ConfirmationNudge`).
+    /// The spoken ask's fallback after the chime (`ConfirmationNudge`).
     private let nudger = ConfirmationNudger()
     /// J.A.R.V.I.S.'s reply audio playing, so the nudge waits for the end of its sentence.
     var replyAudioIsPlaying: () -> Bool {
@@ -158,10 +158,18 @@ final class ConfirmationCardWindowManager {
     /// The process's card (one per process): where `AgentLoop` sets `activity`.
     private(set) static weak var current: ConfirmationCardWindowManager?
 
+    /// The newest pending ticket's headline, as the card draws it: what the voice names when it asks.
+    var newestPendingQuestion: String? {
+        let now = Date()
+        return confirmations.tickets.filter { HarnessConfirmations.status(of: $0, now: now) == .pending }
+            .max { $0.createdAt < $1.createdAt }?.cardLines.first { $0.kind == .question }?.text
+    }
+
     init(confirmations: HarnessConfirmations) {
         self.confirmations = confirmations
         Self.current = self
         nudger.isPending = { [weak self] in self?.isPresented ?? false }
+        ConfirmationClips.ensureCached()
         chimeEngine.attach(chimeNode)
         chimeEngine.connect(chimeNode, to: chimeEngine.mainMixerNode, format: chimeFormat)
         // `receive(on: DispatchQueue.main)` delivers on the NEXT run-loop turn,

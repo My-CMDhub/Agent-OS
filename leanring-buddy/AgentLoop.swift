@@ -470,6 +470,9 @@ final class AgentLoop {
     var ownerFocus: OwnerFocusNote?
     /// The live run's carry (the tabs it opened), for a probe to clean up by identity.
     private(set) var liveCarry: MarksCarry?
+    /// The session's: a step's card is up / was answered (`RealtimeVoiceSession.taskCardOpened`). nil: no voice to tell.
+    var onCardOpened: (@MainActor () -> Void)?
+    var onCardAnswered: (@MainActor ([String: Any]) -> Void)?
 
     // The task session (2026-10-08): kept across an ask_owner, so the owner's
     // answer resumes the SAME task — history, receipts, step count, opened tabs.
@@ -2235,7 +2238,11 @@ extension AgentLoop {
             mouseLocation: { NSEvent.mouseLocation }
         ))
         carry.runID = loop.runID
-        carry.onCardOpened = { [weak loop] in loop?.noteCardPending() }
+        carry.onCardOpened = { [weak loop] in
+            loop?.noteCardPending()
+            loop?.onCardOpened?()
+        }
+        carry.onCardAnswered = { [weak loop] in loop?.onCardAnswered?($0) }
         carry.heard = heard
         carry.readOnly = isReadOnlyTask(words: heard)
         loop.readOnly = carry.readOnly
@@ -2268,6 +2275,7 @@ extension AgentLoop {
         var heard = ""
         /// A ticket opened for this step's call: the loop's `waitingForCard`.
         var onCardOpened: (@MainActor () -> Void)?
+        var onCardAnswered: (@MainActor ([String: Any]) -> Void)?
         /// Pages this task opened, by browser and host: what a checkpoint keeps of `taskTabs`.
         var tabHosts: [AgentTaskCheckpoint.Opened] = []
         /// The app in front's affordance map at the last look, nil when none (refused, unreadable, hand-over).
@@ -2826,12 +2834,17 @@ extension AgentLoop {
         let filled = await RealtimeOpenAppTool.withFrontmostApp(call)
         marks.toolCalls = [filled]
         marks.decisions = [RealtimeToolDecision(call: filled, callUptime: now)]
+        var cardOpened = false
         let dispatch = await RealtimeVoiceConnection.runToolCall(filled, decisionIndex: 0, in: marks, harnessAnswer: answer,
                                                                  checksSite: checksSite,
                                                                  confirmationWaitSeconds: min(RealtimeOpenAppTool.confirmationWaitSeconds,
                                                                                               max(1, confirmationWaitSeconds)),
-                                                                 onConfirmationRequired: carry.onCardOpened,
+                                                                 onConfirmationRequired: {
+                                                                     cardOpened = true
+                                                                     carry.onCardOpened?()
+                                                                 },
                                                                  isCurrent: { !Task.isCancelled })
+        if cardOpened { carry.onCardAnswered?(dispatch?.result ?? [:]) }
         if let dispatch, let bundle = ownerAllowedUnnamedApp(dispatch) { carry.allowedBundles.insert(bundle) }
         if let dispatch, let bundle = openedBundle(by: filled.name, confirmed: dispatch.harnessConfirmed, response: dispatch.harnessResponse,
                                                     error: dispatch.result["error"] as? String) {

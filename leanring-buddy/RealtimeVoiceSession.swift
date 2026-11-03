@@ -364,6 +364,48 @@ final class RealtimeVoiceSession {
         }
     }
 
+    /// The ask for a task's card, queued with the agent's lines (nil once answered), and the turn saying it.
+    private var taskCardAsk: Task<Void, Never>?
+    private var taskCardAskTurn: RealtimeTurnMarks?
+    /// The answered card's outcome, waiting for the next system line or owner turn.
+    private var taskCardOutcomeLine: String?
+
+    /// A do_task step raised a card: the conversation's model asks, in its own voice, as a speech-only system
+    /// line: the task holds no owner turn open for it, so this cannot orphan a call. It waits out what is
+    /// still being said (`speakForAgent`); not reachable or the owner mid-speech, the nudger's clip takes it.
+    private func taskCardOpened() {
+        let reachable = connection?.isOpen == true
+        let ownerSpeaking = JarvisNotch.shared.state == .listening
+        guard ConfirmationNudge.asker(source: .agentLoop, sessionReachable: reachable, ownerSpeaking: ownerSpeaking, clipCached: false) == .voice else {
+            ConfirmationNudger.voiceDeclined(.agentLoop, reason: ownerSpeaking ? "ownerSpeaking" : "sessionNotReachable")
+            return
+        }
+        let text = ConfirmationNudge.askText(question: ConfirmationCardWindowManager.current?.newestPendingQuestion)
+        // Held back from now: the ask may wait out a sentence first.
+        ConfirmationNudger.voiceAsked(.agentLoop, turn: nil)
+        let previous = agentSpeech
+        let ask = Task { @MainActor [weak self] in
+            await previous?.value
+            await self?.speakForAgent(text, final: true, cardAsk: true)
+        }
+        taskCardAsk = ask
+        agentSpeech = ask
+    }
+
+    /// That card was answered: an ask not yet begun is dropped and what still plays of one stops. The model hears
+    /// the outcome with the next thing it is told, so it never asks again. Not at once: on Gemini `realtimeInput`
+    /// text between turns is answered aloud (live 2026-11-03: "the request was denied, sir" over the task's own line).
+    private func taskCardAnswered(_ result: [String: Any]) {
+        taskCardAsk?.cancel()
+        taskCardAsk = nil
+        if let turn = taskCardAskTurn, connection?.turn === turn {
+            turn.replyMuted = true
+            stopPlayback()
+        }
+        taskCardAskTurn = nil
+        taskCardOutcomeLine = RealtimeVoiceConnection.cardAnsweredText(result: result, say: false)
+    }
+
     // MARK: Agent loop
 
     /// The owner's words of a task that ended asking them something: their
@@ -446,6 +488,8 @@ final class RealtimeVoiceSession {
             }
             loop.ownerFocus = focus
         }
+        loop.onCardOpened = { [weak self] in self?.taskCardOpened() }
+        loop.onCardAnswered = { [weak self] in self?.taskCardAnswered($0) }
         let setAside = paused != nil && !resuming
         if setAside { paused?.cancel() }
         // Planning from this moment: do_task's reply and the next turn's status read it, never a guess.
@@ -569,10 +613,11 @@ final class RealtimeVoiceSession {
     /// on until answered so the next line never collides with it.
     /// `forCard`: a card's outcome (`cardAnswered`) — never one of the task's spoken lines, and a line that
     /// cannot be spoken still reaches the model as context, so it never asks for the answered card again.
-    private func speakForAgent(_ text: String, final: Bool, forCard: Bool = false) async {
+    /// `cardAsk`: a task card's ask (`taskCardOpened`): it waits no longer than the clip would, and never follows a clip.
+    private func speakForAgent(_ text: String, final: Bool, forCard: Bool = false, cardAsk: Bool = false) async {
         agentSpeechBusy = true
         defer { agentSpeechBusy = false }
-        let deadline = uptime + (final ? 15 : 0)
+        let deadline = uptime + (cardAsk ? ConfirmationNudge.voiceGraceSeconds : final ? 15 : 0)
         func tellOnly() async {
             guard forCard else { return }
             try? await connection?.sendContextText(text)
@@ -588,11 +633,23 @@ final class RealtimeVoiceSession {
             }
         }
         guard let connection = try? await readyConnection(), liveTurn == nil, !Task.isCancelled else { return await tellOnly() }
+        if cardAsk {
+            guard !ConfirmationNudger.clipSpoke else { return }
+            // Its grace runs from here, so the turn below is never overtaken by a clip.
+            ConfirmationNudger.voiceAskedUptime = uptime
+        }
+        let told = cardAsk ? nil : taskCardOutcomeLine
+        if !cardAsk { taskCardOutcomeLine = nil }
         do {
-            try await connection.beginSystemTurn(text: text, variant: RealtimeOpenAppTool.systemTurnVariant(for: connection.stack),
-                                                 speechOnly: true)
+            try await connection.beginSystemTurn(text: told.map { $0 + " " + text } ?? text,
+                                                 variant: RealtimeOpenAppTool.systemTurnVariant(for: connection.stack), speechOnly: true)
             let turn = connection.turn
-            if !forCard { agentSpokenTurns.append(turn) }
+            if cardAsk {
+                ConfirmationNudger.voiceAskTurn = turn
+                taskCardAskTurn = turn
+            } else if !forCard {
+                agentSpokenTurns.append(turn)
+            }
             _ = try? await turn.finished.value(timeoutSeconds: 20, timeoutKind: "agentSpeech")
             // The audio it scheduled plays out before the next line may start.
             while isReplyAudioPlaying, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(100)) }
@@ -776,8 +833,10 @@ final class RealtimeVoiceSession {
             marks.screenshotGuard = (try? screenshotResult.get())?.secretGuard?.outcome ?? withheld?.outcome
             // Beside the audio, never ahead of it; before the release, so on Gemini
             // it stays inside the owner's activity. Not into a turn that replaced this one.
-            let stoppedLine = agentStoppedLine
+            let toldParts = [agentStoppedLine, taskCardOutcomeLine].compactMap { $0 }
+            let stoppedLine = toldParts.isEmpty ? nil : toldParts.joined(separator: " ")
             agentStoppedLine = nil
+            taskCardOutcomeLine = nil
             let taskStatusLine = agentStatusLine()
             // What the voice was told, as agent-loop.log keeps it (phase and step, no words): a reply is judged against it.
             if taskStatusLine != nil {
@@ -1096,6 +1155,12 @@ final class RealtimeVoiceSession {
         tickNode.scheduleBuffer(buffer, at: nil, options: .interrupts)
         if !tickNode.isPlaying { tickNode.play() }
     }
+
+    /// `CardAskProbe` only: the reply heard for real, so the system-audio witness can count voices.
+    func playRepliesAloudForProbe() { playerNode.volume = 1 }
+
+    /// `CardAskProbe` only: the session's do_task, without the voice turn around it.
+    func startTaskForProbe(goal: String) { _ = startAgentLoop(goal: goal, heard: goal, startBundle: nil) }
 
     private func stopPlayback() {
         playerNode.stop()
