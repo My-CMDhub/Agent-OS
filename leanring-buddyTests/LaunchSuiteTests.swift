@@ -106,6 +106,11 @@ struct LaunchSuiteSandboxTests {
         #expect(GeneralitySuite.shoppingPre(nil)[GeneralitySuite.skipReasonKey] is String)
         #expect(GeneralitySuite.shoppingPre((nil, "Shopping", []))[GeneralitySuite.skipReasonKey] is String)
         #expect(GeneralitySuite.shoppingPre((nil, nil, []))["shoppingBefore"] is NSNull)
+        // 2026-10-31T03-57-29Z: items in the list with another list on screen is no clean start; an empty list is.
+        #expect(GeneralitySuite.shoppingPre((3, "Reminders", []))[GeneralitySuite.skipReasonKey] is String)
+        #expect(GeneralitySuite.shoppingPre((3, nil, []))[GeneralitySuite.skipReasonKey] is String)
+        #expect(GeneralitySuite.shoppingPre((0, "Reminders", []))[GeneralitySuite.skipReasonKey] is NSNull)
+        #expect(GeneralitySuite.shoppingPre((1, "Shopping", ["Bread"]))[GeneralitySuite.skipReasonKey] is NSNull)
         let counted = GeneralitySuite.shoppingPre((0, "Reminders", []))
         #expect(counted["shoppingBefore"] as? Int == 0 && counted[GeneralitySuite.skipReasonKey] is NSNull)
         #expect(GeneralitySuite.shoppingPre((3, "Shopping", ["Milk", "Eggs"]))[GeneralitySuite.skipReasonKey] is String)

@@ -343,6 +343,11 @@ extension GeneralitySuite {
         guard let before, let count = before.count else {
             return ["shoppingBefore": NSNull(), skipReasonKey: "Reminders' list counts could not be read before the run (unreadable truth)"]
         }
+        // Launch 2026-10-31T03-57-29Z, no EventKit grant, another list on screen: count 3, items unseen. They were last run's milk and
+        // eggs; the agent said so, correctly, and FAILED because the count did not grow. Items unseen is no clean start.
+        if count > 0, before.shown?.lowercased() != shoppingListName {
+            return ["shoppingBefore": count, skipReasonKey: "Shopping holds \(count) item(s) this read cannot name (left for the owner); adding may not be the only honest answer"]
+        }
         return ["shoppingBefore": count, skipReasonKey: shoppingSkipReason(shown: before.shown, items: before.items) as Any? ?? NSNull()]
     }
 
