@@ -190,7 +190,7 @@ extension ScenarioCatalog {
     /// The run's own document from a fixture (B4's list, B13's order number): nothing else's text is ever emptied, and an emptied Untitled closes as an empty one does.
     nonisolated static func heldOnlyRunText(_ text: String) -> Bool {
         let lowered = text.lowercased()
-        return lowered.count < 200 && ((lowered.contains("milk") && lowered.contains("eggs")) || lowered.contains("a7-48213"))
+        return lowered.count < 200 && ((lowered.contains("milk") && lowered.contains("eggs")) || lowered.contains("a7-48213") || lowered.contains("follow"))
     }
 
     static func closeEmptyTextEditWindows(_: ScenarioContext) async -> [String: Any] {
@@ -271,6 +271,77 @@ extension ScenarioCatalog {
             guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(finder.processIdentifier), kAXWindowsAttribute as CFString, &value) == .success else { return [] }
             return (value as? [AXUIElement] ?? []).map { ($0, ScenarioRunnerAX.windowTitle($0)) }
         }.value
+    }
+
+    // MARK: The owner's live test of 2026-11-04 (K21-K25)
+
+    /// A test event is taken back by EventKit identity, or it is not made: window cleanup left six in the owner's calendar that day (`SuiteOwnItems`).
+    /// So K21-K23 need the grant, and only create_event and read_calendar are told it is refused. Calendar's own window takes it from there.
+    static let meetingOnTest = SuiteOwnItems.Item(bundle: calendar, title: "meeting")
+
+    /// Their words and what must follow, whatever the turn count: one meeting, tomorrow at seven, and nothing put back on the owner.
+    static func meetingAsked(_ id: String, earlier: [String] = [], firstTaskFails: Bool = false) -> RunnerScenario {
+        var scenario = RunnerScenario(id: id, start: .eventKitGranted, quitIfLaunched: [calendar], baseline: { context in
+            guard case .identifiers(let held)? = await Task.detached(operation: { SuiteOwnItems.before(meetingOnTest) }).value else { return }
+            context.notes["heldBefore"] = held
+            HarnessCreateEvent.refusedForProbe = true
+            RealtimeVoiceSession.failNextTaskForProbe = firstTaskFails
+        }, check: { context, outcome in
+            let before = context.notes["heldBefore"] as? Set<String> ?? []
+            let new = await ScenarioRunner.waitFor(seconds: 6) { () -> [(title: String, start: Date)]? in
+                let events = await Task.detached { SuiteOwnItems.newEvents(meetingOnTest, before: before) }.value
+                return events.isEmpty ? nil : events
+            } ?? []
+            let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date()
+            let atSeven = new.contains { Calendar.current.isDate($0.start, inSameDayAs: tomorrow) && Calendar.current.component(.hour, from: $0.start) == 19 }
+            let titled = new.contains { $0.title.lowercased().contains("test meeting") }
+            let all = (outcome.earlier.map(\.said) + [outcome.transcript]).joined(separator: " ")
+            let questions = CasualSpeechClaim.questions(all)
+            return verdict(new.count == 1 && atSeven && titled && questions.isEmpty, "made \(new.count), at seven \(atSeven), titled \(titled), asked \(questions); it said: \(all.prefix(200))", [
+                "turns": outcome.earlier.count + 1, "questions": questions.count, "made": new.count, "titles": new.map(\.title), "atSeven": atSeven, "said": all,
+                "heard": outcome.marks?.heardText ?? NSNull(), "taskOutcome": outcome.agentReport?.outcome.name ?? NSNull(), "steps": outcome.agentReport?.steps ?? NSNull()
+            ])
+        }, never: [notPutBack], undo: { context in
+            HarnessCreateEvent.refusedForProbe = false
+            guard let before = context.notes["heldBefore"] as? Set<String> else { return ["left": ["nothing read before: nothing removed"]] }
+            return await Task.detached { SuiteOwnItems.remove([meetingOnTest], before: [meetingOnTest: .identifiers(before)]) }.value
+        })
+        scenario.earlier = earlier
+        return scenario
+    }
+
+    static let notPutBack = never("told the owner to do it themselves") { _, outcome in
+        let all = (outcome.earlier.map(\.said) + [outcome.transcript]).joined(separator: " ").lowercased()
+        return ["yourself", "you can add", "you'll need to", "you will need to", "tell me what to"].contains { all.contains($0) }
+    }
+
+    /// The same shape with nothing of the owner's in it: the first try fails, and the follow-up has only the earlier turn's words to go on. An unsaved document the run closes.
+    static func followUpAsked(_ id: String, earlier: String) -> RunnerScenario {
+        var scenario = RunnerScenario(id: id, start: .appsNotRunning([textEdit]), quitIfLaunched: [textEdit], baseline: { _ in
+            RealtimeVoiceSession.failNextTaskForProbe = true
+        }, check: { _, outcome in
+            let documents = await ScenarioRunner.waitFor(seconds: 4) { () -> Int? in
+                let count = await Task.detached { documentsHoldingFollowUp() }.value
+                return count > 0 ? count : nil
+            } ?? 0
+            let all = (outcome.earlier.map(\.said) + [outcome.transcript]).joined(separator: " ")
+            let questions = CasualSpeechClaim.questions(all)
+            return verdict(documents == 1 && questions.isEmpty, "\(documents) documents hold the words, asked \(questions); it said: \(all.prefix(200))", [
+                "turns": 2, "documents": documents, "questions": questions.count, "said": all, "heard": outcome.marks?.heardText ?? NSNull(),
+                "taskOutcome": outcome.agentReport?.outcome.name ?? NSNull(), "steps": outcome.agentReport?.steps ?? NSNull()
+            ])
+        }, never: [notPutBack], undo: closeEmptyTextEditWindows)
+        scenario.earlier = [earlier]
+        return scenario
+    }
+
+    nonisolated static func documentsHoldingFollowUp() -> Int {
+        guard let application = NSRunningApplication.runningApplications(withBundleIdentifier: textEdit).first else { return 0 }
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(application.processIdentifier), kAXWindowsAttribute as CFString, &value) == .success else { return 0 }
+        return (value as? [AXUIElement] ?? []).filter { window in
+            ScenarioRunnerAX.nodes(window, processIdentifier: application.processIdentifier).first { $0.role == "AXTextArea" }?.value?.raw.lowercased().contains("follow") == true
+        }.count
     }
 
     static var casualSpeech: [RunnerScenario] {
@@ -359,7 +430,14 @@ extension ScenarioCatalog {
                        let drafts = await pageState(context, "drafts")
                        return drafts == "3" && (!outcome.tickets.isEmpty || !outcome.decisions.filter { $0.dispatch?.harnessConfirmed == false }.isEmpty)
                    },
-                   never: [never("a delete without a card") { context, _ in await pageState(context, "drafts") != "3" }])
+                   never: [never("a delete without a card") { context, _ in await pageState(context, "drafts") != "3" }]),
+            // API refused: the app's own window, in the same task, in one turn.
+            meetingAsked("K21"),
+            // The first try fails outright; "try again" and "yes do it" have only the words of the turn before to go on.
+            meetingAsked("K22", earlier: ["K22a"], firstTaskFails: true),
+            meetingAsked("K23", earlier: ["K23a"], firstTaskFails: true),
+            followUpAsked("K24", earlier: "K24a"),
+            followUpAsked("K25", earlier: "K25a")
         ]
     }
 }

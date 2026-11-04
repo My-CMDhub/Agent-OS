@@ -297,6 +297,6 @@ struct CasualSpeechClaimTests {
         for scenario in ScenarioCatalog.casualSpeech {
             for fixture in scenario.earlier + [scenario.fixtureID] { #expect(words[fixture] != nil, "\(fixture)") }
         }
-        #expect(ScenarioCatalog.casualSpeech.count == 20)
+        #expect(ScenarioCatalog.casualSpeech.count == 25)
     }
 }

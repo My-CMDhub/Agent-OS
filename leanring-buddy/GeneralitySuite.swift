@@ -16,11 +16,11 @@
 //  spoken fixtures (`--scenario-run --scenario-ids=V01,…`), which also
 //  measures delegation: whether the voice model handed the task to do_task.
 //
-//  Safety: may CREATE "JARVIS test …" items (a note, a reminder, a TextEdit file)
-//  and leave them; never sends, posts, invites or deletes. Afterwards it closes
-//  only windows that appeared during the task (window-server numbers, any Space,
-//  never an AX window seen before, never an edited one) and quits only apps the
-//  task launched; new files in ~/Desktop and ~/Documents are listed, never removed.
+//  Safety: may CREATE "JARVIS test …" items (a note, a reminder, a TextEdit file in
+//  ~/JARVIS-sandbox); what it made goes again (`SuiteOwnItems`). Never sends, posts or
+//  invites. Afterwards it closes only windows that appeared during the task (window-server
+//  numbers, any Space, never an AX window seen before, never an edited one) and quits only
+//  apps the task launched; a new file in ~/Desktop or ~/Documents is listed, never removed.
 //  Same start gate as the runner: 120 s owner idle; stops when the owner returns.
 //  Report: ~/Library/Logs/Clicky/generality/<ts>/results.json (0600).
 //
@@ -157,10 +157,11 @@ enum GeneralitySuite {
                       let dark = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
                       return answer(spoken, has: [dark ? "dark" : "light"], truth: dark ? "dark" : "light")
                   },
-        SuiteTask(id: "G15", pattern: "text entry + save dialog", words: "make a new TextEdit document that says JARVIS test 3 and save it to the Desktop named JARVIS test 3",
-                  apps: [textEdit]) { _, _ in
-                      let saved = await read { documentURLs(textEdit).contains { $0.contains("Desktop/JARVIS%20test%203") } }
-                      return verdict(saved == true, ["savedOnDesktop": saved as Any? ?? NSNull()])
+        SuiteTask(id: "G15", pattern: "text entry + save dialog", words: "make a new TextEdit document that says JARVIS test 3 and save it in the JARVIS-sandbox folder in my home folder named JARVIS test 3",
+                  // The suite's own folder (2026-11-04: every run left a file on the owner's Desktop).
+                  apps: [textEdit], sandbox: ["JARVIS test 3.rtf"]) { _, run in
+                      let saved = (run["sandboxAfter"] as? [String: String])?.keys.contains("JARVIS test 3.rtf") == true
+                      return verdict(saved, ["savedInSandbox": saved])
                   },
         SuiteTask(id: "G16", pattern: "scroll a long list to an off-screen row", words: "open the Privacy and Security settings",
                   apps: [settings]) { _, _ in
@@ -509,6 +510,19 @@ enum GeneralitySuite {
                 }
                 sandboxBefore = listing
             }
+            // Counted before the goal, the app launched behind if it is quit: what is new afterwards is this task's (`SuiteOwnItems`).
+            // What the task makes goes again (`SuiteOwnItems`); if it could not, the task does not run. Notes reads through its window, launched behind if it is quit.
+            let ownItems = SuiteOwnItems.byTask[task.id] ?? []
+            if let reason = SuiteOwnItems.needsGrant(ownItems) {
+                result["status"] = "skipped"
+                result["reason"] = reason
+                results.append(result)
+                save()
+                print("🧭 \(task.id): skipped — \(reason)")
+                continue
+            }
+            var ownBefore: [SuiteOwnItems.Item: SuiteOwnItems.Before] = [:]
+            for item in ownItems { ownBefore[item] = await readLaunchingIfNeeded(item.bundle) { SuiteOwnItems.before(item) } }
             let pre = await task.pre?() ?? [:]
             // A pre-read that cannot make the task provable stops it BEFORE the agent acts (E01/E02, 2026-10-14).
             if let reason = pre[skipReasonKey] as? String {
@@ -536,6 +550,11 @@ enum GeneralitySuite {
             }
             result["check"] = await task.check(spoken, checked)
             result["status"] = (result["check"] as? [String: Any])?["passed"] as? Bool == true ? "passed" : "failed"
+            if !ownItems.isEmpty {
+                // Its app may be quit by now, or may have been running behind: read, removed, then closed as usual.
+                let before = ownBefore
+                result["ownItems"] = await readLaunchingIfNeeded(ownItems[0].bundle) { SuiteOwnItems.remove(ownItems, before: before) } ?? ["left": ["unreadable"]]
+            }
             let cleanup = await undo(state, apps: task.apps)
             result["cleanup"] = cleanup
             if let asked = task.sandbox {

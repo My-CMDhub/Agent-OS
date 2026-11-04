@@ -79,3 +79,12 @@ T3	-	tell me a joke
 T4	-	what's the capital of France
 T5	-	what can you do
 T6	-	who built you
+K21	-	all right now, set a test meeting with Jarvis at seven pm tomorrow
+K22a	-	all right now, set a test meeting with Jarvis at seven pm tomorrow
+K22	-	try to add it again
+K23a	-	set a test meeting with Jarvis at seven pm tomorrow
+K23	-	yes do it
+K24a	-	make a new text edit document that says JARVIS follow up
+K24	-	try to do it again
+K25a	-	make a new text edit document that says JARVIS follow up
+K25	-	yes do it

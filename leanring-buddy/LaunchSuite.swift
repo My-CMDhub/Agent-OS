@@ -106,8 +106,6 @@ extension GeneralitySuite {
                   }) { _, run in
                       var result = createdVerdict(before: run["meetingsBefore"] as? Int, after: await testMeetingsTomorrow())
                       result["truthSource"] = truthSource(.event)
-                      // Never deleted: an event in the owner's calendar syncs, and removing one is the owner's call.
-                      if result["passed"] as? Bool == true { result["leftForOwner"] = "\(meetingTitle), \(tomorrowDay()) 3:00 pm" }
                       return result
                   },
         // No list named Shopping existed on this Mac (2026-10-13), so the owner's words alone ask for
@@ -935,7 +933,7 @@ extension GeneralitySuite {
         /// Every name this suite owns: the manifest plus what any task is asked to create.
         /// Set-up clears a crashed run's leftovers among these, and nothing else.
         nonisolated static var knownNames: Set<String> {
-            Set(manifest.keys).union(["report-final.txt", "Receipts", "Receipts/invoice-a.pdf", "Receipts/invoice-b.pdf", "Receipts.zip",
+            Set(manifest.keys).union(["JARVIS test 3.rtf", "report-final.txt", "Receipts", "Receipts/invoice-a.pdf", "Receipts/invoice-b.pdf", "Receipts.zip",
                                        "Paid", "Paid/invoice-a.pdf", "Paid/invoice-b.pdf"])
                 .union(pages.keys)
         }
