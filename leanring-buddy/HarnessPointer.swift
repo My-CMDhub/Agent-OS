@@ -114,6 +114,9 @@ enum HarnessPointer {
                                      || (ownBundle != nil && $0.bundle == ownBundle) }) {
             return ("targetIsHarnessItself", HarnessServer.harnessItselfMessage)
         }
+        if owners.contains(where: { HarnessPolicy.isSystemPrompt($0.bundle) }) {
+            return ("systemPrompt", HarnessPolicy.systemPromptMessage)
+        }
         if owners.contains(where: { CredentialGuard.isPasswordManager($0.bundle) }) {
             return ("passwordManager", "that point belongs to a password manager — credentials are the owner's alone; nothing was done")
         }

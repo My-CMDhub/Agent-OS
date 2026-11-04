@@ -1165,6 +1165,13 @@ enum HarnessPolicy {
         return nil
     }
 
+    /// A permission or password prompt from the system is the owner's alone: its "Allow" carries no word the kernel would stop at.
+    /// Live 2026-11-04: a TCC prompt on screen read as an ordinary allowed button under `pointer`, and as the front app to every name verb.
+    nonisolated static func isSystemPrompt(_ bundleIdentifier: String?) -> Bool {
+        ["com.apple.UserNotificationCenter", "com.apple.SecurityAgent", "com.apple.coreservices.uiagent"].contains(bundleIdentifier ?? "")
+    }
+    nonisolated static let systemPromptMessage = "a system permission or password prompt is there, and it is the owner's to answer; nothing was done. Tell the owner it is waiting for them."
+
     /// `snapshot` / `menus` with `forModel`: the voice loop's reads, whose names
     /// go to a remote model. A policy `refuse` is "do not touch this app", and
     /// handing its names to a model counts, as a photograph does for `look`.
@@ -2193,6 +2200,10 @@ final class HarnessServer {
         if Self.isHarnessItself(bundleIdentifier: bundleIdentifier) {
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: "targetIsHarnessItself", startedAt: startedAt)
             return ["ok": false, "error": "targetIsHarnessItself", "message": Self.harnessItselfMessage]
+        }
+        if HarnessPolicy.isSystemPrompt(bundleIdentifier) {
+            audit(request, dryRun: dryRun, kernel: "n/a", outcome: "systemPrompt", startedAt: startedAt)
+            return ["ok": false, "error": "systemPrompt", "message": HarnessPolicy.systemPromptMessage]
         }
         guard let expected = request.expectApp,
               !HarnessPolicy.appMatches(expected: expected, bundleIdentifier: bundleIdentifier, name: name)
