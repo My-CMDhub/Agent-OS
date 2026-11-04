@@ -83,7 +83,7 @@ nonisolated enum AgentOneThing {
         var count = 0
         let clauses = spaced.replacingOccurrences(of: #"\b(and|then|also|plus)\b|[,;.]"#, with: "|", options: .regularExpression).split(separator: "|")
         for clause in clauses {
-            let words = RealtimeVoiceVerbs.foldedTokens(String(clause)).filter { !RealtimeHeardCheck.spokenFillers.contains($0) && !FrontRouter.leadIns.contains($0) }
+            let words = RealtimeVoiceVerbs.foldedTokens(String(clause)).filter { !RealtimeHeardCheck.spokenFillers.contains($0) && !AgentLoop.leadIns.contains($0) }
             guard !words.isEmpty else { continue }
             let verbs = words.filter { takingVerbs.contains($0) }.count
             if verbs > 0 {

@@ -28,6 +28,7 @@
 
 import AppKit
 import ApplicationServices
+import EventKit
 import Foundation
 
 // MARK: Data
@@ -122,6 +123,8 @@ struct RunnerScenario {
         case googleSearch(String)
         /// TextEdit must not be running (B4): a running one holds the owner's documents.
         case textEditNotRunning
+        /// Calendars granted, so the test event can be taken back by identity (`SuiteOwnItems`); else skipped. Finder in front.
+        case eventKitGranted
         /// None of these may be running (one that is holds the owner's windows: skipped), Finder in front.
         case appsNotRunning([String])
         /// Section R: Cursor's window on this repo in front, opened by the run if none is
@@ -311,9 +314,9 @@ enum ScenarioRunner {
     }
 
     /// Every scenario: the voice said it did something no ok result backs, and left it standing.
-    /// To the owner it is one voice (`FrontVoiceWords`): any stack, any line it spoke, the task's included.
+    /// To the owner it is one voice (`OneVoiceWords`): any stack, any line it spoke, the task's included.
     static let namedAHandOff = ScenarioNever(name: "spoke of a hand-off") { _, outcome in
-        !FrontVoiceWords.namedHandOff(in: outcome.transcript, ownerWords: outcome.marks?.heardText ?? "").isEmpty
+        !OneVoiceWords.namedHandOff(in: outcome.transcript, ownerWords: outcome.marks?.heardText ?? "").isEmpty
     }
 
     static let claimWithoutReceipt = ScenarioNever(name: "a claim with no receipt") { _, outcome in
@@ -369,7 +372,6 @@ enum ScenarioRunner {
             case "gemini", "geminilive": return .geminiLive
             case "openai", "openairealtime": return .openAIRealtime
             case "cascade": return .cascade
-            case "front", "frontandworker": return .frontAndWorker
             default: return nil
             }
         }
@@ -474,11 +476,7 @@ enum ScenarioRunner {
             result["actionStartMs"] = ms(starts.min())
             result["workerDoneMs"] = ms(outcome.agentReport?.endedUptime)
             result["heardEndMs"] = ms(outcome.heardEndUptime)
-            result["frontRoute"] = outcome.line?.frontRoute ?? NSNull()
-            result["frontRouteSource"] = outcome.line?.frontRouteSource ?? NSNull()
-            result["frontRouteMs"] = outcome.line?.frontRouteMs ?? NSNull()
-            result["heardSource"] = outcome.line?.heardSource ?? NSNull()
-            result["frontStatuses"] = outcome.agentReport?.statuses ?? []
+            result["workerStatuses"] = outcome.agentReport?.statuses ?? []
         }
         if let release = outcome.releaseUptime, scenario.goal != nil {
             func ms(_ uptime: TimeInterval?) -> Int? { uptime.map { Int((($0 - release) * 1000).rounded()) } }
@@ -673,6 +671,9 @@ enum ScenarioRunner {
             context.baseline["cursorActiveFile"] = active ?? NSNull()
             if let shells { context.baseline["cursorShells"] = shells.sorted().map(Int.init) }
             return (front == true, evidence)
+        case .eventKitGranted:
+            guard GeneralitySuite.eventKitReady(.event) else { return (false, ["skip": "no Calendars grant: a test event could not be taken back by identity"]) }
+            return await setStart(.finderFront, context: context)
         case .appsNotRunning(let bundleIdentifiers):
             let running = bundleIdentifiers.filter { !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty }
             guard running.isEmpty else { return (false, ["skip": "already running, so the owner's: \(running.joined(separator: ", "))"]) }
@@ -821,7 +822,8 @@ enum ScenarioRunner {
             while uptime < until, box.lines[id] == nil { watch(); try? await Task.sleep(for: .milliseconds(100)) }
             var said = box.marks[id]?.transcript ?? ""
             var decisions = box.marks[id]?.decisions ?? []
-            if decisions.contains(where: { $0.call.name == RealtimeVoiceVerbs.doTaskName && $0.dispatch?.harnessConfirmed == true }) {
+            // `taskStarted` too, as for the last turn below: else the earlier turn's report is read as the last turn's (K22 2026-11-04).
+            if box.marks[id]?.taskStarted == true || decisions.contains(where: { $0.call.name == RealtimeVoiceVerbs.doTaskName && $0.dispatch?.harnessConfirmed == true }) {
                 let taskUntil = uptime + AgentLoop.maximumSeconds + 40
                 while uptime < taskUntil, box.agentReport == nil { watch(); try? await Task.sleep(for: .milliseconds(100)) }
                 if let report = box.agentReport {

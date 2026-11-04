@@ -52,6 +52,8 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
     case didntTake(reason: String)
     /// Sent, and no change could be read (`notVerified`): not a failure, and never shown as one while the voice says it could not confirm.
     case unconfirmed(subject: String)
+    /// A task's news the voice could not say at all (`WorkerStatus`): read here instead, never lost.
+    case unspoken(text: String)
     /// The turn ended and nothing came back: no words, no tool call.
     case noReply
     /// Just after the release, briefly: what "this" means this turn (`OwnerFocusNote.notchName`,
@@ -69,6 +71,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .needsYou: return "needsYou"
         case .didntTake: return "didntTake"
         case .unconfirmed: return "unconfirmed"
+        case .unspoken: return "unspoken"
         case .noReply: return "noReply"
         case .focus: return "focus"
         }
@@ -78,7 +81,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         switch self {
         case .idle: return .idle
         case .listening, .thinking, .speaking: return .compact
-        case .intent, .proof, .needsYou, .didntTake, .unconfirmed, .noReply, .focus: return .expanded
+        case .intent, .proof, .needsYou, .didntTake, .unconfirmed, .unspoken, .noReply, .focus: return .expanded
         }
     }
 
@@ -87,6 +90,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         switch self {
         case .proof: return 1.8
         case .didntTake, .unconfirmed: return 2.5
+        case .unspoken: return 8
         case .noReply: return 2
         case .focus: return 1.2
         default: return nil
@@ -102,6 +106,7 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .didntTake: return "Didn\u{2019}t take"
         case .unconfirmed(let subject): return subject.isEmpty ? "Sent" : subject
         case .noReply: return "No reply"
+        case .unspoken(let text): return text
         case .focus(let name): return "Focus: \(name)"
         default: return nil
         }
@@ -171,6 +176,8 @@ nonisolated enum JarvisNotchState: Hashable, Sendable {
         case .focusShown(let name):
             // Only over thinking: a reply, a tool call or a new press already owns the notch.
             return self == .thinking ? .focus(name: name) : nil
+        case .statusUnspoken(let text):
+            return self == .listening ? nil : .unspoken(text: text)
         case .turnFailed(let reason):
             switch self {
             case .thinking, .intent, .needsYou, .noReply, .focus: return .didntTake(reason: reason)
@@ -200,6 +207,7 @@ nonisolated enum JarvisNotchEvent: Equatable, Sendable {
     case turnEnded
     /// The voice service refused the turn; `reason` is `JarvisNotchReason.plain(forTurnFailure:)`.
     case turnFailed(reason: String)
+    case statusUnspoken(text: String)
     /// The turn ended with no words and no tool call, or the watchdog gave up on it.
     case noReply
     /// The owner's focus this turn, resolved at the release (`OwnerFocusNote.notchName`).
@@ -1020,7 +1028,7 @@ private struct JarvisNotchView: View {
             JVGlyph(kind: .arcDown, size: 14)
         case .didntTake:
             JVGlyph(kind: .brokenRing, size: 14)
-        case .unconfirmed:
+        case .unconfirmed, .unspoken:
             JVGlyph(kind: .ellipsis, size: 14)
         case .noReply:
             JVGlyph(kind: .ellipsis, size: 14)

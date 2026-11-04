@@ -265,7 +265,7 @@ final class RealtimeVoiceSession {
             await model.setOnFallback { [weak self] in
                 Task { @MainActor [weak self] in
                     self?.agentLoop?.noteActivity()
-                    if let self, self.isFrontStack { self.enqueueFrontStatus(.modelFallback) }
+                    if let self, self.syncsWithWorker { self.enqueueWorkerStatus(.modelFallback) }
                 }
             }
             _ = self
@@ -358,21 +358,16 @@ final class RealtimeVoiceSession {
         }
         connection.onDoTask = { [weak self] goal, heard, startBundle, focus in
             guard let self else { return ["ok": false, "status": NSNull(), "error": "noSession", "message": "that cannot be done right now"] }
-            return self.isFrontStack ? self.startOrQueueFront(goal: goal, heard: heard, startBundle: startBundle, focus: focus)
+            return self.syncsWithWorker ? self.startOrQueue(goal: goal, heard: heard, startBundle: startBundle, focus: focus)
                 : self.startAgentLoop(goal: goal, heard: heard, startBundle: startBundle, focus: focus)
         }
-        connection.onFrontTurn = { [weak self] marks, frontUp in
-            await self?.planFrontTurn(marks, frontUp: frontUp) ?? FrontTurnPlan(lines: [], plain: nil)
-        }
-        connection.onTaskStatus = { [weak self] in self?.agentStatusLine() }
-        connection.onFrontSocket = { [weak self] event in
-            guard let self else { return }
-            MeasurementLogFile.appendJSONLine(["kind": "frontSocket", "event": event, "run": self.lastTask?.loop.runID ?? NSNull(),
-                                               "taskRunning": self.agentLoop?.isRunning == true, "uptime": MeasurementLogFile.roundedUptime(self.uptime)],
-                                              toFileNamed: self.liveTurnLogFileName)
-            self.onFrontSocketForProbe?(event)
+        // The moment the owner's words are complete, before the model is asked: stop words act now, and "is it done?" reads the task as it stands now.
+        connection.contextForHeardWords = { [weak self] marks in
+            guard let self else { return nil }
+            return self.stopTaskIfOwnerSaidSo(marks) ?? self.agentStatusLine()
         }
         connection.isAgentLoopRunning = { [weak self] in self?.agentLoop?.isRunning == true }
+        connection.continuesOpenRequest = { [weak self] heard in self?.liveOpenRequest(continuedBy: heard) != nil }
         connection.onCardAnswered = { [weak self] text, askStillCurrent, line in
             self?.cardAnswered(text, askStillCurrent: askStillCurrent, line: line)
         }
@@ -397,163 +392,101 @@ final class RealtimeVoiceSession {
     /// The answered card's outcome, waiting for the next system line or owner turn.
     private var taskCardOutcomeLine: String?
 
-    // MARK: Front and worker (`FrontAndWorker.swift`)
+    // MARK: In step with the task (`WorkerSync.swift`)
 
-    /// What waits to be said (`FrontStatusQueue`), and the one consumer of it.
-    private var frontStatuses = FrontStatusQueue()
-    private var frontPump: Task<Void, Never>?
-    private var frontDeliveries: [String] = []
-    private var frontLastSpoken: TimeInterval?
+    /// What waits to be said (`WorkerStatusQueue`), and the one consumer of it.
+    private var workerStatuses = WorkerStatusQueue()
+    private var statusPump: Task<Void, Never>?
+    private var statusDeliveries: [String] = []
+    private var statusLastSpoken: TimeInterval?
     /// Requests the owner made while a task ran: they go next, in order, on their own words. One keyboard, so never two planners.
     private struct QueuedRequest { let goal: String; let heard: String; let startBundle: String?; let focus: OwnerFocusNote? }
-    private var frontQueued: [QueuedRequest] = []
-    private var frontWatchdog: Task<Void, Never>?
-    /// The owner's words of the last turn, and when: a follow-up ("yeah do it") is judged with them.
-    private var frontPreviousWords: (words: String, uptime: TimeInterval)?
-    /// A follow-up older than this is not one. ponytail: guessed from a conversation's pace; the scenarios' follow-ups come within 30 s.
-    private nonisolated static let frontPreviousWordsSeconds: TimeInterval = 120
-    /// What recent acknowledgements said, so the next one differs.
-    private var frontRecentAcks: [String] = []
-    private var isFrontStack: Bool { selectedStack == .frontAndWorker }
-    /// `--front-probe`: the worker's model stalls this long.
+    private var queuedRequests: [QueuedRequest] = []
+    private var workerWatchdog: Task<Void, Never>?
+    private var syncsWithWorker: Bool { selectedStack == .cascade }
+    /// `--sync-probe`: the worker's model stalls this long.
     func stallWorkerForProbe(seconds: Double) { Task { await agentModel.stallForProbe(seconds: seconds) } }
     var connectionForProbe: RealtimeVoiceConnection? { connection }
-    /// Runner only: nothing asks for the same speech twice; `--front-probe` reads what was delivered, and how.
-    var onFrontStatusDelivered: ((FrontStatus, RealtimeTurnMarks?) -> Void)?
-    var onFrontSocketForProbe: ((String) -> Void)?
-
-    /// Nova-3's final. Starts the worker if this turn is for it, and says what Gemini is to do about the turn.
-    private func planFrontTurn(_ marks: RealtimeTurnMarks, frontUp: Bool) async -> FrontTurnPlan {
-        let words = SecretScanner.redact(marks.heardText.trimmingCharacters(in: .whitespacesAndNewlines))
-        guard words.contains(where: { $0.isLetter || $0.isNumber }) else {
-            marks.frontRoute = "unheard"
-            return FrontTurnPlan(lines: [FrontPrompt.unheardLine], plain: FrontPrompt.plainUnheard)
-        }
-        let heardLine = FrontPrompt.heardLine(words)
-        var lines = [heardLine]
-        if let status = agentStatusLine() {
-            lines.append(status)
-            AgentLoop.appendTrace(["kind": "statusSent", "turn": marks.turnID ?? NSNull(), "run": lastTask?.loop.runID ?? NSNull(),
-                                   "state": lastTask?.loop.phase?.rawValue ?? NSNull(), "step": lastTask?.loop.step ?? NSNull(),
-                                   "at": ISO8601DateFormatter().string(from: Date()), "uptime": MeasurementLogFile.roundedUptime(uptime)])
-        }
-        let previous = frontPreviousWords.flatMap { uptime - $0.uptime <= Self.frontPreviousWordsSeconds ? $0.words : nil }
-        frontPreviousWords = (words, uptime)
-        let verdict: FrontVerdict
-        if Self.isOnlyStop(words) {
-            verdict = FrontVerdict(route: .chat, source: "stopWords")
-        } else if !frontUp {
-            // Gemini cannot answer this one, and the worker can answer anything.
-            verdict = FrontVerdict(route: .act, source: "frontDown")
-        } else if interruptedOffer != nil, Self.isResumeAnswer(words) {
-            verdict = FrontVerdict(route: .act, source: "resume")
-        } else {
-            verdict = await FrontRouter.decide(words: words, context: .init(
-                runningGoal: agentLoop?.isRunning == true ? agentLoop?.goal : nil, question: lastTask?.loop.pausedAsk?.question, previousWords: previous))
-        }
-        marks.frontRouteSource = verdict.source
-        marks.frontRouteMilliseconds = verdict.milliseconds
-        marks.cascadeUsage = verdict.usage
-        // A press since: its turn decides now.
-        guard !marks.supersededByPress else { return FrontTurnPlan(lines: [], plain: nil) }
-        guard verdict.route == .act else {
-            marks.frontRoute = "chat"
-            lines.append(FrontPrompt.chatLine)
-            return FrontTurnPlan(lines: lines, plain: FrontPrompt.plainLostChat)
-        }
-        // The heard words are what guards judge: the owner's, this turn's, plus the turn these words lean on.
-        let heard = verdict.continuesPrevious ? [previous, words].compactMap { $0 }.joined(separator: ". ") : words
-        let started = startOrQueueFront(goal: words, heard: heard, startBundle: marks.keyDownFrontBundle, focus: marks.ownerFocus,
-                                        replacesRunning: verdict.replacesRunningWork)
-        let queued = started["status"] as? String == "queued"
-        marks.frontRoute = queued ? "queued" : "act"
-        if started["ok"] as? Bool == true { marks.taskStarted = true }
-        var decision = RealtimeToolDecision(call: RealtimeToolCall(callID: "route", name: RealtimeVoiceVerbs.doTaskName, goal: words), callUptime: uptime)
-        decision.dispatch = RealtimeToolDispatch(result: started, harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: nil)
-        marks.decisions.append(decision)
-        lines.append(queued ? FrontPrompt.queuedLine : FrontPrompt.acknowledgeLine(recent: frontRecentAcks))
-        return FrontTurnPlan(lines: lines, plain: queued ? FrontPrompt.plainQueued : FrontPrompt.plainAcknowledgements.randomElement())
-    }
-
-    /// Nothing asked for but stopping: "stop", "never mind", "forget it, thanks". The stop itself already happened (`stopTaskIfOwnerSaidSo`).
-    nonisolated static func isOnlyStop(_ words: String) -> Bool {
-        guard ownerWordsStopTask(words) else { return false }
-        let phrases = Set(taskStopPhrases.flatMap { $0.split(separator: " ").map(String.init) })
-        let filler: Set<String> = ["it", "that", "this", "please", "now", "the", "task", "thanks", "thank", "you", "sir", "just", "ok", "okay", "right"]
-        return RealtimeVoiceVerbs.foldedTokens(words).allSatisfy { phrases.contains($0) || filler.contains($0) || RealtimeHeardCheck.spokenFillers.contains($0) }
-    }
+    /// Runner only: nothing asks for the same speech twice; `--sync-probe` reads what was delivered.
+    var onWorkerStatusDelivered: ((WorkerStatus, RealtimeTurnMarks?) -> Void)?
 
     /// One planner: a task already running keeps going and this waits its turn, unless the owner's words call the running one off.
-    private func startOrQueueFront(goal: String, heard: String, startBundle: String?, focus: OwnerFocusNote?, replacesRunning: Bool = false) -> [String: Any] {
+    private func startOrQueue(goal: String, heard: String, startBundle: String?, focus: OwnerFocusNote?) -> [String: Any] {
         if agentLoop?.isRunning == true {
-            guard replacesRunning else {
-                frontQueued.append(QueuedRequest(goal: goal, heard: heard, startBundle: startBundle, focus: focus))
+            guard Self.replacesRunningTask(heard) else {
+                queuedRequests.append(QueuedRequest(goal: goal, heard: heard, startBundle: startBundle, focus: focus))
                 return ["ok": true, "status": "queued", "error": NSNull(),
                         "message": "this comes straight after what is under way; say so in a few words, and claim nothing"]
             }
             _ = stopAgentLoop()
-            enqueueFrontStatus(FrontStatus.forOutcome(.cancelled, goal: goal, lastProgress: nil, step: 0))
         }
         return startAgentLoop(goal: goal, heard: heard, startBundle: startBundle, focus: focus)
     }
 
-    private func enqueueFrontStatus(_ status: FrontStatus) {
-        logFrontStatus(status, event: "queued", turn: nil, waitedMs: nil)
-        frontStatuses.add(status)
-        guard frontPump == nil else { return }
-        frontPump = Task { @MainActor [weak self] in
-            while let self, !self.frontStatuses.waiting.isEmpty {
+    /// "no, open chrome instead". ponytail: words, not a model: a miss only queues it behind the task, and "stop" still stops that.
+    nonisolated static func replacesRunningTask(_ heard: String) -> Bool {
+        let words = RealtimeVoiceVerbs.foldedTokens(heard)
+        return words.contains("instead") || words.prefix(2).contains { ["no", "nope", "actually"].contains($0) }
+    }
+
+    private func enqueueWorkerStatus(_ status: WorkerStatus) {
+        logWorkerStatus(status, event: "queued", turn: nil, waitedMs: nil)
+        workerStatuses.add(status)
+        guard statusPump == nil else { return }
+        statusPump = Task { @MainActor [weak self] in
+            while let self, !self.workerStatuses.waiting.isEmpty {
                 // Never over the owner, nor over what is still being said: it waits rather than go missing.
                 let queuedAt = self.uptime
                 while self.liveTurn != nil || self.isReplyAudioPlaying { try? await Task.sleep(for: .milliseconds(100)) }
-                guard let next = self.frontStatuses.next() else { break }
+                guard let next = self.workerStatuses.next() else { break }
                 let previous = self.agentSpeech
                 let delivery = Task { @MainActor [weak self] in
                     await previous?.value
-                    await self?.deliverFrontStatus(next, queuedAt: queuedAt)
+                    await self?.deliverWorkerStatus(next, queuedAt: queuedAt)
                 }
                 self.agentSpeech = delivery
                 await delivery.value
             }
-            self?.frontPump = nil
+            self?.statusPump = nil
         }
     }
 
-    /// One status through the system-line path; the connection falls back to the exact words if Gemini cannot say it.
-    private func deliverFrontStatus(_ status: FrontStatus, queuedAt: TimeInterval) async {
+    /// One status, its exact words through TTS (which retries a lost socket once, `CascadeVoicePipeline.speechLost`).
+    /// A status that cannot be spoken at all is shown: nothing dies silently.
+    private func deliverWorkerStatus(_ status: WorkerStatus, queuedAt: TimeInterval) async {
         let waited = Int(((uptime - queuedAt) * 1000).rounded())
-        guard let connection = try? await readyConnection() else {
-            // No worker reachable means no Deepgram either: the notch is what is left.
-            logFrontStatus(status, event: "undelivered", turn: nil, waitedMs: waited)
-            JarvisNotch.shared.handle(.turnFailed(reason: "no connection"))
-            onFrontStatusDelivered?(status, nil)
-            return
+        func undelivered(_ turn: RealtimeTurnMarks?) {
+            logWorkerStatus(status, event: "undelivered", turn: turn, waitedMs: waited)
+            JarvisNotch.shared.handle(.statusUnspoken(text: RealtimeOpenAppTool.captionName(status.plain)))
+            onWorkerStatusDelivered?(status, turn)
         }
-        let told = taskCardOutcomeLine
-        taskCardOutcomeLine = nil
+        guard let connection = try? await readyConnection() else { return undelivered(nil) }
+        if let told = taskCardOutcomeLine {
+            taskCardOutcomeLine = nil
+            try? await connection.sendContextText(told)
+        }
         do {
-            try await connection.beginSystemTurn(text: told.map { $0 + " " + status.line } ?? status.line, variant: .textOnly, speechOnly: true, plain: status.plain)
+            try await connection.beginSystemTurn(text: status.plain, variant: .textOnly, speechOnly: true, plain: status.plain)
             let turn = connection.turn
             agentSpokenTurns.append(turn)
-            _ = try? await turn.finished.value(timeoutSeconds: 30, timeoutKind: "frontStatus")
+            let spoke = (try? await turn.finished.value(timeoutSeconds: 30, timeoutKind: "workerStatus")) != nil
             while isReplyAudioPlaying { try? await Task.sleep(for: .milliseconds(100)) }
-            frontLastSpoken = uptime
-            frontDeliveries.append("\(status.kind.rawValue):\(turn.frontVia ?? "?")")
-            logFrontStatus(status, event: "delivered", turn: turn, waitedMs: waited)
-            onFrontStatusDelivered?(status, turn)
+            if !spoke, !turn.supersededByPress { return undelivered(turn) }
+            statusLastSpoken = uptime
+            statusDeliveries.append(status.kind.rawValue)
+            logWorkerStatus(status, event: "delivered", turn: turn, waitedMs: waited)
+            onWorkerStatusDelivered?(status, turn)
         } catch {
-            logFrontStatus(status, event: "failed", turn: nil, waitedMs: waited)
-            onFrontStatusDelivered?(status, nil)
+            undelivered(nil)
         }
     }
 
     /// Counts and kinds, joinable on the task's run id: the status line holds what the worker reported, so it stays out of this log.
-    private func logFrontStatus(_ status: FrontStatus, event: String, turn: RealtimeTurnMarks?, waitedMs: Int?) {
+    private func logWorkerStatus(_ status: WorkerStatus, event: String, turn: RealtimeTurnMarks?, waitedMs: Int?) {
         func value(_ optional: Any?) -> Any { optional ?? NSNull() }
         MeasurementLogFile.appendJSONLine([
-            "kind": "frontStatus", "event": event, "status": status.kind.rawValue, "speaks": status.speaks, "run": value(lastTask?.loop.runID),
-            "via": value(turn?.frontVia), "waitedMs": value(waitedMs),
-            "saidWords": value(turn.map { $0.transcript.split(separator: " ").count }),
+            "kind": "workerStatus", "event": event, "status": status.kind.rawValue, "speaks": status.speaks, "run": value(lastTask?.loop.runID),
+            "waitedMs": value(waitedMs), "saidWords": value(turn.map { $0.transcript.split(separator: " ").count }),
             "firstAudioMs": value(Self.milliseconds(from: turn?.lastAudioSentUptime, to: turn?.firstAudioUptime)),
             "uptime": MeasurementLogFile.roundedUptime(uptime)
         ], toFileNamed: liveTurnLogFileName)
@@ -561,8 +494,8 @@ final class RealtimeVoiceSession {
 
     /// The worker going quiet is noticed and said; much longer, and it is stopped, with the owner told why.
     private func watchWorker(_ loop: AgentLoop) {
-        frontWatchdog?.cancel()
-        frontWatchdog = Task { @MainActor [weak self, weak loop] in
+        workerWatchdog?.cancel()
+        workerWatchdog = Task { @MainActor [weak self, weak loop] in
             var said = false
             // By its phase, not `isRunning`: that is set once the run's own task gets going, which may be after this one.
             while let self, let loop, self.agentLoop === loop, loop.phase?.isMidTask == true, !Task.isCancelled {
@@ -571,17 +504,17 @@ final class RealtimeVoiceSession {
                 let waiting = [.waitingForCard, .waitingForOwner].contains(loop.phase)
                 if waiting { loop.noteActivity() }
                 let quiet = self.uptime - loop.lastActivityUptime
-                if quiet < FrontWatchdog.sayAfterSeconds { said = false }
-                switch FrontWatchdog.step(quietSeconds: quiet, waiting: waiting, alreadySaid: said) {
+                if quiet < WorkerWatchdog.sayAfterSeconds { said = false }
+                switch WorkerWatchdog.step(quietSeconds: quiet, waiting: waiting, alreadySaid: said) {
                 case .none: break
                 case .say:
                     said = true
-                    self.enqueueFrontStatus(.stuck(lastProgress: loop.lastProgress))
+                    self.enqueueWorkerStatus(.stuck(lastProgress: loop.lastProgress))
                 case .cancel:
                     let step = loop.step
                     AgentLoop.appendTrace(["kind": "watchdogCancel", "run": loop.runID, "step": step, "quietSeconds": Int(quiet),
                                            "uptime": MeasurementLogFile.roundedUptime(self.uptime)])
-                    self.enqueueFrontStatus(.stalledOut(step: step, lastProgress: loop.lastProgress))
+                    self.enqueueWorkerStatus(.stalledOut(lastProgress: loop.lastProgress))
                     loop.cancel()
                     self.agentTask?.cancel()
                     // A step stuck in a call nothing can cancel must not hold the next request.
@@ -593,9 +526,9 @@ final class RealtimeVoiceSession {
     }
 
     /// The next request the owner made while the last one ran. A task paused on a question keeps the line: its answer comes first.
-    private func startNextQueuedFront() {
-        guard agentLoop?.isRunning != true, lastTask?.loop.pausedAsk == nil, !frontQueued.isEmpty else { return }
-        let next = frontQueued.removeFirst()
+    private func startNextQueued() {
+        guard agentLoop?.isRunning != true, lastTask?.loop.pausedAsk == nil, !queuedRequests.isEmpty else { return }
+        let next = queuedRequests.removeFirst()
         _ = startAgentLoop(goal: next.goal, heard: next.heard, startBundle: next.startBundle, focus: next.focus)
     }
 
@@ -660,6 +593,39 @@ final class RealtimeVoiceSession {
         return asked
     }
 
+    /// K22, K23: the next task ends failed at once, as a task refused every way would, so the follow-up has only the earlier words to go on.
+    nonisolated(unsafe) static var failNextTaskForProbe = false
+
+    /// What the owner asked and a task has not finished (`OpenRequest`). Set when a task ends short of done; gone when one ends done or they say stop.
+    private var openRequest: OpenRequest?
+
+    /// The open request, if it is still in time and these words carry it on.
+    private func liveOpenRequest(continuedBy heard: String) -> OpenRequest? {
+        guard let openRequest, openRequest.isAlive(now: uptime), openRequest.continued(by: heard) else { return nil }
+        return openRequest
+    }
+
+    /// What a turn's model hears while a request is open: it may carry on without being asked twice, and the words it would lose stand.
+    private func openRequestLine() -> String? {
+        guard let openRequest, openRequest.isAlive(now: uptime) else { return nil }
+        return "system context, not the owner's words: this request of the owner's is still open, not done: <<\(openRequest.turns.joined(separator: ". "))>>. "
+            + "if what they say now carries it on (try again, yes, do it, you have access now, a day or a detail), call do_task at once, and never ask for "
+            + "what those words already give or tell them to do it themselves. anything else is a new request."
+    }
+
+    /// After the reply: the model answered with words where the request needed doing. It goes on in code, on the owner's words, and the outcome is said.
+    /// Backstop: the line above and `handedToTask` should have caught it first.
+    private func carryOnIfReplyLeftItOpen(_ marks: RealtimeTurnMarks) {
+        guard !marks.taskStarted, !marks.isSystemTurn, agentLoop?.isRunning != true else { return }
+        let heard = marks.heardText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !heard.isEmpty else { return }
+        let leftOpen = liveOpenRequest(continuedBy: heard) != nil
+        let askedInstead = marks.toolCalls.isEmpty && marks.transcript.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?") && RealtimeHeardCheck.asksToMakeSomething(heard)
+        guard leftOpen || askedInstead else { return }
+        marks.events.append(("carriedOnInCode", uptime))
+        _ = startAgentLoop(goal: heard, heard: heard, startBundle: marks.keyDownFrontBundle, focus: marks.ownerFocus)
+    }
+
     /// The words a new task is judged by, and the root kept if it asks again.
     nonisolated static func taskWords(heard: String, asked: AskedOwner?, now: TimeInterval) -> (words: String, root: String) {
         guard let asked, now - asked.uptime <= askOwnerAnswerWindowSeconds else { return (heard, heard) }
@@ -674,11 +640,15 @@ final class RealtimeVoiceSession {
     /// `heard`: the owner's words of the turn that called it.
     /// `startBundle`: the app in front at the owner's key-down — where the task began.
     /// `focus`: what "this" meant in the turn that asked (`OwnerFocusNote`); a new task's first step is told it.
-    private func startAgentLoop(goal: String, heard: String, startBundle: String?, focus: OwnerFocusNote? = nil) -> [String: Any] {
+    private func startAgentLoop(goal requestedGoal: String, heard: String, startBundle: String?, focus: OwnerFocusNote? = nil) -> [String: Any] {
         agentTask?.cancel()
-        // The old task's lines must not speak over the new one. On the front its end is still news (`FrontStatusQueue`), and what is cut off is said in order.
-        if isFrontStack { frontStatuses.dropTransient() } else { agentSpeech?.cancel() }
-        let (words, root) = Self.taskWords(heard: heard, asked: askedOwner, now: uptime)
+        // The old task's lines must not speak over the new one. In step, its end is still news (`WorkerStatusQueue`), and what is cut off is said in order.
+        if syncsWithWorker { workerStatuses.dropTransient() } else { agentSpeech?.cancel() }
+        // A follow-up carries the open request's words with it: authority and the date parser judge them all, and the task is told all of it.
+        let carried = askedOwner == nil ? liveOpenRequest(continuedBy: heard) : nil
+        let goal = carried?.goal(adding: heard) ?? requestedGoal
+        let judged = Self.taskWords(heard: heard, asked: askedOwner, now: uptime)
+        let words = carried?.words(adding: heard) ?? judged.words, root = carried?.words(adding: heard) ?? judged.root
         // The press right after a question, inside its window, answers it: the SAME task resumes.
         let answering = askedOwner.map { uptime - $0.uptime <= Self.askOwnerAnswerWindowSeconds } ?? false
         askedOwner = nil
@@ -724,8 +694,8 @@ final class RealtimeVoiceSession {
             let at = ProcessInfo.processInfo.systemUptime
             Task { @MainActor [weak self, weak loop] in
                 try? await Task.sleep(for: .seconds(3))
-                guard let self, let loop, self.isFrontStack, self.agentLoop === loop, loop.isRunning, loop.lastActivityUptime <= at else { return }
-                self.enqueueFrontStatus(.retrying)
+                guard let self, let loop, self.syncsWithWorker, self.agentLoop === loop, loop.isRunning, loop.lastActivityUptime <= at else { return }
+                self.enqueueWorkerStatus(.retrying)
             }
         }
         let setAside = paused != nil && !resuming
@@ -735,25 +705,31 @@ final class RealtimeVoiceSession {
         lastTask = TaskRecord(loop: loop)
         agentLoop = loop
         agentSpokenTurns = []
-        let isFront = isFrontStack
-        let started = uptime
-        frontLastSpoken = nil
-        if isFront { watchWorker(loop) }
+        let inStep = syncsWithWorker
+        statusLastSpoken = nil
+        if inStep { watchWorker(loop) }
         agentTask = Task { @MainActor [weak self] in
-            let outcome = resuming ? await loop.resume(answer: heard, words: words)
+            let forcedFailure = Self.failNextTaskForProbe
+            Self.failNextTaskForProbe = false
+            if forcedFailure { loop.move(to: .failed) }
+            let outcome = forcedFailure ? AgentLoop.Outcome.failed(reason: "the first way in did not work") : resuming ? await loop.resume(answer: heard, words: words)
                 : continuing ? await loop.run(goal: loop.goal, heard: resumedWords ?? heard)
                 : await loop.run(goal: goal, heard: words)
             guard let self else { return }
             if self.lastTask?.loop === loop { self.lastTask?.endedUptime = self.uptime }
             if case .askOwner = outcome { self.askedOwner = AskedOwner(heard: root, uptime: self.uptime) }
-            if isFront {
+            switch outcome {
+            case .done, .cancelled: self.openRequest = nil
+            default: self.openRequest = OpenRequest(words: words, uptime: self.uptime)
+            }
+            if inStep {
                 let ended = self.uptime
-                self.enqueueFrontStatus(FrontStatus.forOutcome(outcome, goal: goal, lastProgress: loop.lastProgress, step: loop.step))
+                self.enqueueWorkerStatus(WorkerStatus.forOutcome(outcome, lastProgress: loop.lastProgress))
                 if self.agentLoop === loop { self.agentLoop = nil }
                 // Spoken before the next request starts, so its lines come after this one's.
-                await self.frontPump?.value
+                await self.statusPump?.value
                 await self.reportAgentLoop(loop, outcome: outcome, endedUptime: ended)
-                self.startNextQueuedFront()
+                self.startNextQueued()
                 return
             }
             if let final = AgentLoop.finalLine(outcome, goal: goal, lastProgress: loop.lastProgress, step: loop.step), !Task.isCancelled {
@@ -804,8 +780,7 @@ final class RealtimeVoiceSession {
         guard agentLoop?.isRunning == true else { return }
         let deadline = uptime + 120
         // Live B8, cascade, 2026-11-03: "Stop." stopped the task, but the request had left before this poll's line, and the
-        // voice answered "I have no way to halt the task". The words' last moment gets the same stop, in the same tick.
-        connection?.contextForHeardWords = { [weak self] marks in self?.stopTaskIfOwnerSaidSo(marks) }
+        // voice answered "I have no way to halt the task". The words' last moment gets the same stop, in the same tick (`contextForHeardWords`).
         Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self, self.agentLoop?.isRunning == true, self.uptime < deadline else { return }
@@ -829,8 +804,9 @@ final class RealtimeVoiceSession {
     private func stopTaskIfOwnerSaidSo(_ marks: RealtimeTurnMarks) -> String? {
         guard agentLoop?.isRunning == true, Self.ownerWordsStopTask(marks.heardText), let stoppedAt = stopAgentLoop() else { return nil }
         // Stop means stop: what was waiting behind it too.
-        frontQueued = []
-        frontStatuses.dropTransient()
+        queuedRequests = []
+        openRequest = nil
+        workerStatuses.dropTransient()
         return AgentLoop.stoppedContextLine(step: stoppedAt)
     }
 
@@ -841,8 +817,8 @@ final class RealtimeVoiceSession {
         let running = agentLoop.flatMap { $0.isRunning ? $0.step : nil }
         if running != nil { agentLoop?.cancel() }
         agentTask?.cancel()
-        // On the front what is being said was cut off by the press, and what waits is `frontStatuses`'.
-        if !isFrontStack { agentSpeech?.cancel() }
+        // In step, what is being said was cut off by the press, and what waits is `workerStatuses`'.
+        if !syncsWithWorker { agentSpeech?.cancel() }
         return running
     }
 
@@ -863,13 +839,13 @@ final class RealtimeVoiceSession {
     /// one is in flight is dropped rather than queued.
     @discardableResult
     private func enqueueAgentSpeech(_ text: String, final: Bool) -> Task<Void, Never>? {
-        // The front's progress: by its own pace (`admitsProgress`), and the latest wins while it waits.
-        if isFrontStack {
+        // In step, progress goes by its own pace (`admitsProgress`), and the latest wins while it waits.
+        if syncsWithWorker {
             guard !final else { return nil }
             let started = lastTask?.loop.startedUptime ?? uptime
-            if FrontStatusQueue.admitsProgress(now: uptime, started: started, lastSpoken: frontLastSpoken) {
-                frontLastSpoken = uptime
-                enqueueFrontStatus(.progress(line: text))
+            if WorkerStatusQueue.admitsProgress(now: uptime, started: started, lastSpoken: statusLastSpoken) {
+                statusLastSpoken = uptime
+                enqueueWorkerStatus(.progress(lastTask?.loop.lastProgress))
             }
             return nil
         }
@@ -937,7 +913,7 @@ final class RealtimeVoiceSession {
         guard let onAgentLoopFinished else { return }
         onAgentLoopFinished(AgentLoopReport(outcome: outcome, steps: loop.step, decisions: loop.decisions,
                                             spoken: agentSpokenTurns.map(\.transcript).joined(separator: " "),
-                                            endedUptime: endedUptime ?? uptime, statuses: frontDeliveries))
+                                            endedUptime: endedUptime ?? uptime, statuses: statusDeliveries))
     }
 
     // MARK: Push-to-talk
@@ -1095,8 +1071,8 @@ final class RealtimeVoiceSession {
             var withheld: ScreenSecretGuard.Report?
             if case .failure(let error) = screenshotResult { withheld = (error as? ScreenSecretGuard.Withheld)?.report }
             let guardLine = RealtimeOpenAppTool.credentialGuardContextLine(secureInput: secureInput, withheld: withheld)
-            // The front's status goes with the routed turn (`planFrontTurn`), as it stands at the release.
-            let frontStack = connection.stack == .frontAndWorker
+            // On the cascade the status goes with the owner's finished words (`contextForHeardWords`), as it stands then.
+            let statusAtWords = connection.stack == .cascade
             // A press since this one owns the connection now: its `beginTurn` must not be replaced by ours.
             guard !Task.isCancelled else { return }
             // A press while the last answer still played cut words off it: those
@@ -1114,7 +1090,7 @@ final class RealtimeVoiceSession {
             let stoppedLine = toldParts.isEmpty ? nil : toldParts.joined(separator: " ")
             agentStoppedLine = nil
             taskCardOutcomeLine = nil
-            let taskStatusLine = frontStack ? nil : agentStatusLine()
+            let taskStatusLine = statusAtWords ? nil : agentStatusLine()
             // What the voice was told, as agent-loop.log keeps it (phase and step, no words): a reply is judged against it.
             if taskStatusLine != nil {
                 AgentLoop.appendTrace(["kind": "statusSent", "turn": liveTurn?.line.turnID ?? NSNull(), "run": lastTask?.loop.runID ?? interruptedOffer?.taskId ?? NSNull(),
@@ -1128,10 +1104,13 @@ final class RealtimeVoiceSession {
             // The pointer line waits for the release: a selection, a circle or a rest replaces it (`OwnerFocusTracker`).
             let contextSend = Task { @MainActor () -> String? in
                 if let guardLine, connection.turn === marks {
-                    try? await connection.sendMachineContext(guardLine)
+                    try? await connection.sendContextText(guardLine)
                 }
                 if let stoppedLine, connection.turn === marks {
                     try? await connection.sendContextText(stoppedLine)
+                }
+                if let open = self.openRequestLine(), connection.turn === marks {
+                    try? await connection.sendContextText(open)
                 }
                 if let taskStatusLine, connection.turn === marks {
                     try? await connection.sendContextText(taskStatusLine)
@@ -1139,7 +1118,7 @@ final class RealtimeVoiceSession {
                 let front = await frontmostLineTask.value
                 marks.keyDownFrontBundle = front?.bundle
                 if let frontmostLine = front?.line, connection.turn === marks {
-                    try? await connection.sendMachineContext(frontmostLine)
+                    try? await connection.sendContextText(frontmostLine)
                 }
                 if connection.pointFormat == .native, connection.stack == .openAIRealtime, let screenshotPixelSize, connection.turn === marks {
                     try? await connection.sendContextText(RealtimeOpenAppTool.screenshotSizeContextLine(pixels: screenshotPixelSize))
@@ -1178,7 +1157,7 @@ final class RealtimeVoiceSession {
                                 screenshot: (try? screenshotResult.get())?.imageData, display: screenshotDisplayFrame,
                                 pixels: screenshotPixelSize)
             } else if let pointerLine, connection.turn === marks {
-                try? await connection.sendMachineContext(pointerLine)
+                try? await connection.sendContextText(pointerLine)
             }
             guard !Task.isCancelled else { return }
             try await connection.endTurn()
@@ -1195,6 +1174,7 @@ final class RealtimeVoiceSession {
             defer { watchdog.cancel() }
             _ = try await connection.turn.finished.value(timeoutSeconds: Self.turnTimeoutSeconds, timeoutKind: "turnTimeout")
             await liveTurn?.marks?.waitForFreshLook()
+            if !probeMode, let marks = liveTurn?.marks, !marks.supersededByPress { carryOnIfReplyLeftItOpen(marks) }
             if !probeMode, let liveTurn, self.liveTurn === liveTurn, let marks = liveTurn.marks, connection.turn === marks, !marks.supersededByPress {
                 await afterReply(liveTurn, marks: marks, connection: connection)
             }
@@ -1231,7 +1211,7 @@ final class RealtimeVoiceSession {
         guard connection.turn === marks, !Task.isCancelled else { return }
         guard let note else {
             // Hover: the key-down pointer line says it; the agent loop gets the same as a note.
-            if let pointerLine { try? await connection.sendMachineContext(pointerLine) }
+            if let pointerLine { try? await connection.sendContextText(pointerLine) }
             marks.ownerFocus = OwnerFocusNote.hoverNote(target: marks.keyDownPointer, closeUp: closeUp)
             if let name = marks.keyDownPointer?.candidate?.name { JarvisNotch.shared.handle(.focusShown(name: OwnerFocusNote.notchName(name))) }
             return
@@ -1244,7 +1224,7 @@ final class RealtimeVoiceSession {
             display.flatMap { RealtimeOpenAppTool.pointerPosition(mouse: point, display: $0, format: connection.pointFormat,
                                                                    stack: connection.stack, pixels: pixels) }
         }, closeUpWasSentAtPress: closeUp != nil)
-        try? await connection.sendMachineContext(line)
+        try? await connection.sendContextText(line)
         marks.ownerFocus = note
         if let target { marks.keyDownPointer = target }
         JarvisNotch.shared.handle(.focusShown(name: note.notchName))
@@ -1253,9 +1233,10 @@ final class RealtimeVoiceSession {
     /// The gate heard a voice, a task is running, and no words came back. It may have been "stop": the task
     /// must not run on unnoticed, and it must not be cancelled on a guess. B8, cascade, 2026-11-03: empty, silent, task done.
     private func tellOwnerIfUnheardDuringTask(_ liveTurn: LiveTurn?) {
-        guard !isFrontStack, Self.unheardDuringTask(heard: liveTurn?.marks?.heardText ?? "", superseded: liveTurn?.marks?.supersededByPress ?? false,
+        guard Self.unheardDuringTask(heard: liveTurn?.marks?.heardText ?? "", superseded: liveTurn?.marks?.supersededByPress ?? false,
                                      gotReply: liveTurn?.marks.map { $0.firstAudioUptime != nil || !$0.toolCalls.isEmpty } ?? false,
                                      taskRunning: agentLoop?.isRunning == true) else { return }
+        if syncsWithWorker { return enqueueWorkerStatus(.unheard) }
         enqueueAgentSpeech(Self.unheardDuringTaskLine, final: true)
     }
 
@@ -1357,31 +1338,13 @@ final class RealtimeVoiceSession {
                 transcript: marks.transcript,
                 okToolNames: RealtimeOpenAppTool.okReceiptNames(marks.decisions))
             line.internalWordsSpoken = RealtimeOpenAppTool.internalWordsSpoken(marks.transcript).count
-            if line.stack == VoiceStackChoice.frontAndWorker.rawValue {
-                line.cascadeSttFinalMs = Self.milliseconds(from: released, to: marks.cascadeSttFinalUptime)
-                line.cascadeUsage = marks.cascadeUsage
-                line.frontRoute = marks.frontRoute
-                line.frontRouteSource = marks.frontRouteSource
-                line.frontRouteMs = marks.frontRouteMilliseconds
-                line.frontVia = marks.frontVia
-                line.heardSource = marks.heardFallback ? "geminiFallback" : "nova3"
-                line.handOffWordsSpoken = FrontVoiceWords.namedHandOff(in: marks.transcript, ownerWords: marks.heardText).count
-                if marks.frontRoute == "act", !marks.transcript.isEmpty, !bargedIn {
-                    frontRecentAcks = Array((frontRecentAcks + [String(marks.transcript.prefix(60))]).suffix(3))
-                }
-                // Both ears, for the register (voice-stack-register.md), on the words each made of the same audio.
-                let (nova3, gemini) = (marks.heardFallback ? "" : marks.heardText, marks.geminiHeardText)
-                MeasurementLogFile.appendJSONLine([
-                    "kind": "hearing", "turnId": line.turnID, "nova3": SecretScanner.redact(nova3), "gemini": SecretScanner.redact(gemini),
-                    "agree": FrontHearing.agree(nova3, gemini), "heardSource": line.heardSource ?? NSNull()
-                ], toFileNamed: liveTurnLogFileName)
-            }
             if line.stack == VoiceStackChoice.cascade.rawValue {
                 line.cascadeSttFinalMs = Self.milliseconds(from: released, to: marks.cascadeSttFinalUptime)
                 line.cascadeFirstTextMs = Self.milliseconds(from: marks.cascadeSttFinalUptime, to: marks.cascadeFirstTextUptime)
                 line.cascadeTtsFirstAudioMs = Self.milliseconds(from: marks.cascadeFirstSpeakUptime, to: marks.firstAudioUptime)
                 line.cascadeUsage = marks.cascadeUsage
                 line.cascadeThinkingBlocks = marks.cascadeThinkingBlocks
+                line.handOffWordsSpoken = OneVoiceWords.namedHandOff(in: marks.transcript, ownerWords: marks.heardText).count
             }
             // One line per tool call to voice-decisions.log, joinable on turnId.
             RealtimeDecisionTrace.append(marks.decisions, turnID: line.turnID, stack: line.stack, source: probeMode ? "notchProbe" : fixtureMic ? "scenarioRun" : "live",
@@ -1484,7 +1447,7 @@ final class RealtimeVoiceSession {
 
     func stop() {
         agentTask?.cancel()
-        frontWatchdog?.cancel()
+        workerWatchdog?.cancel()
         stopMic()
         stopPlayback()
         playbackEngine.stop()
@@ -1568,11 +1531,6 @@ nonisolated struct RealtimeLiveTurnLine {
     var cascadeThinkingBlocks: Int?
     /// Front and worker only: act | chat | queued | unheard | fallback, who decided (local | haiku | timeout...), how long the
     /// router took, who spoke it (gemini | deepgram), whose ear it went by, and hand-off words said aloud.
-    var frontRoute: String?
-    var frontRouteSource: String?
-    var frontRouteMs: Int?
-    var frontVia: String?
-    var heardSource: String?
     var handOffWordsSpoken = 0
 
     init(stack: String, turnID: String, sessionWasWarm: Bool) {
@@ -1608,8 +1566,7 @@ nonisolated struct RealtimeLiveTurnLine {
             "cascadeSttFinalMs": value(cascadeSttFinalMs), "cascadeFirstTextMs": value(cascadeFirstTextMs),
             "cascadeTtsFirstAudioMs": value(cascadeTtsFirstAudioMs), "cascadeUsage": value(cascadeUsage),
             "cascadeThinkingBlocks": value(cascadeThinkingBlocks),
-            "frontRoute": value(frontRoute), "frontRouteSource": value(frontRouteSource), "frontRouteMs": value(frontRouteMs),
-            "frontVia": value(frontVia), "heardSource": value(heardSource), "handOffWordsSpoken": handOffWordsSpoken
+            "handOffWordsSpoken": handOffWordsSpoken
         ]
     }
 }

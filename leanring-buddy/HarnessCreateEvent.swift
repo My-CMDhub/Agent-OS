@@ -70,17 +70,34 @@ nonisolated enum HarnessCreateEvent {
         return "\(plan.title), \(when), in your \(calendarName) calendar"
     }
 
-    static var isAuthorized: Bool { EKEventStore.authorizationStatus(for: .event) == .fullAccess }
+    static var isAuthorized: Bool { !refusedForProbe && EKEventStore.authorizationStatus(for: .event) == .fullAccess }
+    /// K21-K23: the API refuses as without a grant, while the scenario's own check and cleanup keep EventKit (`SuiteOwnItems`).
+    nonisolated(unsafe) static var refusedForProbe = false
 
-    /// The one line an event task's first turn carries while EventKit is granted; nil when the
-    /// owner's words name no event, or a reminder (its own note speaks).
-    static func note(heard: String, now: Date = Date(), calendar: Calendar = .current, locale: Locale = .current) -> String? {
+    /// The owner's words ask for an event ("meeting", "event", "appointment"), not a reminder.
+    static func namesEvent(_ heard: String) -> Bool {
         let tokens = RealtimeVoiceVerbs.foldedTokens(heard)
         func names(_ app: String) -> Bool {
             let stems = RealtimeHeardCheck.builtInTaskNouns[app] ?? []
             return tokens.contains { token in stems.contains { token.hasPrefix($0) } }
         }
-        guard names("Calendar.app"), !names("Reminders.app") else { return nil }
+        return names("Calendar.app") && !names("Reminders.app")
+    }
+
+    /// Titles of the events starting within a minute of `start`, from a fresh store. nil: EventKit may not be read.
+    static func titles(at start: Date) -> [String]? {
+        guard isAuthorized else { return nil }
+        let store = EKEventStore()
+        let found = store.events(matching: store.predicateForEvents(withStart: start.addingTimeInterval(-60), end: start.addingTimeInterval(60), calendars: nil))
+            .filter { abs($0.startDate.timeIntervalSince(start)) < 60 }.map { $0.title ?? "" }
+        withExtendedLifetime(store) {}
+        return found
+    }
+
+    /// The one line an event task's first turn carries while EventKit is granted; nil when the
+    /// owner's words name no event, or a reminder (its own note speaks).
+    static func note(heard: String, now: Date = Date(), calendar: Calendar = .current, locale: Locale = .current) -> String? {
+        guard namesEvent(heard) else { return nil }
         let due = ReminderDue.parse(heard, now: now, calendar: calendar)
         let quoted = due.phrase.map { "\"\(heard[$0])\"" } ?? ""
         let tool = "Create it with create_event (title: the event's name only, never the date words \(quoted); no invitees); "

@@ -76,12 +76,10 @@ nonisolated enum RealtimeVoiceVerbs {
     static let agentOnlyToolNames: Set<String> = [findMenuBarItemsName, pressMenuBarItemName]
     /// Declared to the voice model only, never to the agent loop: session text is model text a page may have
     /// steered, so it is spoken to the owner and never becomes a step's input.
-    static let voiceOnlyToolNames: Set<String> = [briefSessionsName, taskStatusName]
-    /// The front's read of how the work stands (`.frontAndWorker`): voice only, changes nothing.
-    static let taskStatusName = "task_status"
+    static let voiceOnlyToolNames: Set<String> = [briefSessionsName]
     static let allToolNames: Set<String> = [RealtimeOpenAppTool.name, focusAppName, findMenuItemsName, pressMenuName, searchHelpName,
                                             findOnScreenName, pointAtName, pressElementName, scrollName, typeTextName, closeName,
-                                            openURLName, doTaskName, taskStatusName, annotateName, SettingsPaneLinks.toolName, goToFolderName,
+                                            openURLName, doTaskName, annotateName, SettingsPaneLinks.toolName, goToFolderName,
                                             findFileName, renameItemName, moveItemsName, setValueName, createReminderName,
                                             createEventName, findMenuBarItemsName, pressMenuBarItemName, listOpenAppsName,
                                             briefSessionsName, readCalendarName, dragItemName, pressKeysName]
@@ -480,14 +478,6 @@ nonisolated enum RealtimeVoiceVerbs {
             ]
         }
     }
-
-    /// The front's whole table on Gemini: it starts the work and reads how it stands, and does nothing itself. do_task takes no argument:
-    /// there is nothing a model could write that the worker would read (`RealtimeVoiceConnection.frontGoal`).
-    static let frontGeminiDeclaration: [String: Any] = ["functionDeclarations": [
-        ["name": doTaskName, "description": "Gets the owner's request done on the mac, in the owner's own words. Use it for anything on or about "
-            + "the mac, the screen, or the web. Returns at once; what happens comes later in system lines."],
-        ["name": taskStatusName, "description": "Reads how the current work stands: what it is on, what it has done. Changes nothing."]
-    ]]
 
     /// Gemini Live `setup.tools` entry: one object holding every function.
     static var geminiDeclaration: [String: Any] { geminiDeclaration(pointFormat: .live) }
@@ -959,7 +949,7 @@ nonisolated enum RealtimeVoiceVerbs {
     static func isActingTool(_ toolName: String) -> Bool {
         toolName != findMenuItemsName && toolName != findOnScreenName && toolName != doTaskName && toolName != annotateName
             && toolName != searchHelpName && toolName != findFileName && toolName != findMenuBarItemsName && toolName != listOpenAppsName
-            && toolName != briefSessionsName && toolName != readCalendarName && toolName != taskStatusName
+            && toolName != briefSessionsName && toolName != readCalendarName
     }
 }
 
@@ -1001,7 +991,7 @@ nonisolated enum RealtimePointFormat: String, CaseIterable, Sendable {
         case .geminiLive:
             guard let point, point.count == 2 else { return (nil, nil) }
             return (point[1] / 1000, point[0] / 1000)
-        case .openAIRealtime, .cascade, .frontAndWorker:
+        case .openAIRealtime, .cascade:
             guard let x, let y, let size = screenshotPixels, size.width > 0, size.height > 0 else { return (nil, nil) }
             return (x / Double(size.width), y / Double(size.height))
         }

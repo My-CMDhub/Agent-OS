@@ -768,6 +768,23 @@ nonisolated enum RealtimeHeardCheck {
     static let politeRequestWords: Set<String> = ["can", "could", "would", "possible", "able", "please", "mind"]
 
     /// "is xcode open right now?": a yes-or-no question. K15 2026-11-03: Gemini brought the owner's Xcode to the front to answer it.
+    /// Making something takes more than one step in any app's window ("book the meeting", "add an event"), so its first acting call is the whole
+    /// request's (`RealtimeVoiceConnection.handedToTask`), whichever tool the model reached for. Live 2026-11-04: pressed Add Event, then "tell me what to type".
+    static func asksToMakeSomething(_ transcript: String) -> Bool {
+        let spoken = RealtimeVoiceVerbs.foldedTokens(transcript).filter { !spokenFillers.contains($0) && !AgentLoop.leadIns.contains($0) }
+        guard let verb = spoken.first(where: makingVerbs.contains) else { return false }
+        // The verb opens the request, not somewhere deep in it ("press the add button" names a button).
+        return spoken.firstIndex(of: verb)! <= 3 && spoken.first.map { !["press", "click", "tap", "open", "close", "find"].contains($0) } == true
+    }
+    static let makingVerbs: Set<String> = ["add", "book", "schedule", "create", "make", "write", "draft", "compose", "set", "fill"]
+
+    /// The failures a direct call may end on that do not end the request: a data API not granted, a control not where the model thought,
+    /// a time it read from one turn's words alone. The task finds its way on the screen with every guard still on (`handedAfterFailure`).
+    /// Never a card, a guard's refusal or a question only the owner can answer: those are said as they are.
+    static let failuresWithAnotherRoute: Set<String> = [
+        "calendarNotAuthorized", "remindersNotAuthorized", "eventTimeMissing", "eventTimeUnclear", "reminderDueUnclear", "titleNotOwnersWords",
+        "elementNotFound", "notPressable", "performFailed", "nothingAtPoint", "noFocusedElement", "noFieldAtPoint", "clickTargetObscured", "elementMoved", "notOffered"]
+
     static func isYesNoQuestion(_ transcript: String) -> Bool {
         let spoken = RealtimeVoiceVerbs.foldedTokens(transcript)
         guard let first = spoken.first(where: { !spokenFillers.contains($0) }), questionLeadWords.contains(first) else { return false }

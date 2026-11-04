@@ -522,8 +522,8 @@ struct RealtimeVoiceVerbsTests {
         let openAINames = RealtimeVoiceVerbs.openAIDeclarations.compactMap { $0["name"] as? String }
         let geminiNames = (RealtimeVoiceVerbs.geminiDeclaration["functionDeclarations"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
         // The menu-bar pair is the agent loop's alone (MenuBarItemsTests).
-        #expect(Set(openAINames) == RealtimeVoiceVerbs.allToolNames.subtracting(RealtimeVoiceVerbs.agentOnlyToolNames).subtracting([RealtimeVoiceVerbs.taskStatusName]))
-        #expect(Set(geminiNames) == RealtimeVoiceVerbs.allToolNames.subtracting(RealtimeVoiceVerbs.agentOnlyToolNames).subtracting([RealtimeVoiceVerbs.taskStatusName]))
+        #expect(Set(openAINames) == RealtimeVoiceVerbs.allToolNames.subtracting(RealtimeVoiceVerbs.agentOnlyToolNames))
+        #expect(Set(geminiNames) == RealtimeVoiceVerbs.allToolNames.subtracting(RealtimeVoiceVerbs.agentOnlyToolNames))
     }
 
     // MARK: App identity
