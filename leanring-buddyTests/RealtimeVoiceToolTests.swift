@@ -131,22 +131,21 @@ struct RealtimeVoiceToolTests {
 
     // MARK: Picker
 
-    @Test func pickerDefaultsToOpenAIAndPersistsTheChoice() throws {
+    @Test func pickerDefaultsToTheCascadeAndPersistsTheChoice() throws {
         let defaults = try #require(UserDefaults(suiteName: "RealtimeVoiceToolTests-\(UUID().uuidString)"))
-        #expect(VoiceStackChoice.stored(in: defaults) == .openAIRealtime)
+        #expect(VoiceStackChoice.stored(in: defaults) == .cascade)
         VoiceStackChoice.geminiLive.store(in: defaults)
         #expect(defaults.string(forKey: "selectedVoiceStack") == "geminiLive")
         #expect(VoiceStackChoice.stored(in: defaults) == .geminiLive)
         defaults.set("claude-sonnet-4-6", forKey: "selectedVoiceStack")
-        #expect(VoiceStackChoice.stored(in: defaults) == .openAIRealtime)
+        #expect(VoiceStackChoice.stored(in: defaults) == .cascade)
         #expect(VoiceStackChoice.allCases.map(\.pickerLabel) == ["OpenAI", "Gemini", "Cascade (Deepgram + Haiku)"])
         #expect(VoiceStackChoice.openAIRealtime.inputSampleRate == 24_000)
         #expect(VoiceStackChoice.geminiLive.inputSampleRate == 16_000)
         #expect(VoiceStackChoice.cascade.inputSampleRate == 16_000)
-        // Selectable and stored, and never the default: the owner decides that from the numbers.
-        VoiceStackChoice.cascade.store(in: defaults)
-        #expect(VoiceStackChoice.stored(in: defaults) == .cascade)
-        #expect(VoiceStackChoice.defaultChoice == .openAIRealtime)
+        VoiceStackChoice.openAIRealtime.store(in: defaults)
+        #expect(VoiceStackChoice.stored(in: defaults) == .openAIRealtime)
+        #expect(VoiceStackChoice.defaultChoice == .cascade)
     }
 
     // MARK: Fresh look

@@ -30,20 +30,27 @@ nonisolated enum VoiceStackChoice: String, CaseIterable, Sendable {
     case cascade
 
     static let defaultsKey = "selectedVoiceStack"
-    /// OpenAI by the 2026-09-23 bench: first audio median 682 ms against Gemini's 1,204 ms.
-    static let defaultChoice = VoiceStackChoice.openAIRealtime
+    /// The one place the default stack is named (owner's decision 2026-11-04).
+    static let defaultChoice = VoiceStackChoice.cascade
+    /// Set by a choice from the menu, and by the one-time move below: from then on the stored value is the owner's.
+    static let settledKey = "selectedVoiceStackSettled"
 
     /// An unknown stored value (a renamed case, a hand-edited default) falls back
     /// to the default rather than leaving push-to-talk with no stack.
     static func stored(in defaults: UserDefaults) -> VoiceStackChoice {
         let stored = defaults.string(forKey: defaultsKey)
-        // The J.A.R.V.I.S. stack (Gemini's voice over Haiku's hands), discontinued 2026-11-04: its owner goes to their everyday stack.
-        if stored == "frontAndWorker" { return .geminiLive }
+        // Once: `geminiLive` here was the old default, never chosen, and `frontAndWorker` is discontinued. A later choice of Gemini from the menu stands.
+        if ["geminiLive", "frontAndWorker"].contains(stored), !defaults.bool(forKey: settledKey) {
+            defaults.set(true, forKey: settledKey)
+            defaultChoice.store(in: defaults)
+            return defaultChoice
+        }
         return stored.flatMap(VoiceStackChoice.init(rawValue:)) ?? defaultChoice
     }
 
     func store(in defaults: UserDefaults) {
         defaults.set(rawValue, forKey: Self.defaultsKey)
+        defaults.set(true, forKey: Self.settledKey)
     }
 
     var pickerLabel: String {

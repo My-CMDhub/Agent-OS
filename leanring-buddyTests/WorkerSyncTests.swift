@@ -219,11 +219,26 @@ struct ReplacesRunningTaskTests {
 
 @MainActor
 struct StackRetiredTests {
-    /// A stored J.A.R.V.I.S. stack (Gemini's voice over the worker) lands on Gemini; no case of it is left to pick.
-    @Test func aStoredFrontStackBecomesTheEverydayStack() throws {
+    /// A stored J.A.R.V.I.S. stack (Gemini's voice over the worker) lands on the default; no case of it is left to pick.
+    @Test func aStoredFrontStackBecomesTheDefault() throws {
         let defaults = try #require(UserDefaults(suiteName: "StackRetiredTests-\(UUID().uuidString)"))
         defaults.set("frontAndWorker", forKey: VoiceStackChoice.defaultsKey)
-        #expect(VoiceStackChoice.stored(in: defaults) == .geminiLive)
+        #expect(VoiceStackChoice.stored(in: defaults) == VoiceStackChoice.defaultChoice)
         #expect(VoiceStackChoice.allCases == [.openAIRealtime, .geminiLive, .cascade])
+    }
+
+    /// Gemini stored and never chosen was the old default: moved once. Chosen from the menu after that, it stands, and so does a choice made before the move.
+    @Test func theOldDefaultMovesOnceAndAChoiceStands() throws {
+        let defaults = try #require(UserDefaults(suiteName: "StackRetiredTests-\(UUID().uuidString)"))
+        defaults.set("geminiLive", forKey: VoiceStackChoice.defaultsKey)
+        #expect(VoiceStackChoice.stored(in: defaults) == .cascade)
+        #expect(defaults.string(forKey: VoiceStackChoice.defaultsKey) == "cascade")
+        VoiceStackChoice.geminiLive.store(in: defaults)
+        #expect(VoiceStackChoice.stored(in: defaults) == .geminiLive)
+        #expect(VoiceStackChoice.stored(in: defaults) == .geminiLive)
+
+        let openAI = try #require(UserDefaults(suiteName: "StackRetiredTests-\(UUID().uuidString)"))
+        openAI.set("openAIRealtime", forKey: VoiceStackChoice.defaultsKey)
+        #expect(VoiceStackChoice.stored(in: openAI) == .openAIRealtime)
     }
 }
