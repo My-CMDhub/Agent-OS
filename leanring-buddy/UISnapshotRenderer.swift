@@ -88,6 +88,43 @@ enum UISnapshotRenderer {
         }
         _ = unreadableStore.deleteItem()
 
+        // The Permissions row and page, one file per state a row can be in. Readings pinned in
+        // memory; nothing here reads TCC or can raise a prompt.
+        companionManager.pinPanelStateForSnapshot(missing: [], onboarded: true)
+        let on = Dictionary(uniqueKeysWithValues: JarvisPermission.allCases.map { ($0, PermissionReading.granted) })
+        func readings(_ changes: [JarvisPermission: PermissionReading]) -> [JarvisPermission: PermissionReading] {
+            on.merging(changes) { $1 }
+        }
+        let live = readings([.filesAndFolders: .unknownUntilUsed])
+        let permissionStates: [(name: String, readings: [JarvisPermission: PermissionReading], visited: Set<JarvisPermission>,
+                                page: CompanionPanelView.Page, note: String)] = [
+            ("panel-permissions-row-all-on", live, [], .standby, "Standby's row when nothing is missing"),
+            ("panel-permissions-row-missing", readings([.calendars: .neverAsked, .reminders: .neverAsked, .filesAndFolders: .unknownUntilUsed]), [], .standby,
+             "Standby's row with two missing; Files & Folders before use is not counted"),
+            ("panel-permissions-all-on", on, [], .permissions, "the page, everything on (Files & Folders read on a click)"),
+            ("panel-permissions-calendar-not-asked", readings([.calendars: .neverAsked, .reminders: .neverAsked, .filesAndFolders: .unknownUntilUsed]), [], .permissions,
+             "the state the owner's machine is in: Allow raises macOS's prompt right there"),
+            ("panel-permissions-first-run", [.microphone: .neverAsked, .accessibility: .off, .screenRecording: .off, .screenContent: .neverAsked,
+                                             .calendars: .neverAsked, .reminders: .neverAsked, .filesAndFolders: .unknownUntilUsed], [], .permissions,
+             "nothing granted: Screen Content's row absent until Screen Recording is on"),
+            ("panel-permissions-denied", [.microphone: .off, .accessibility: .off, .screenRecording: .off, .screenContent: .neverAsked,
+                                          .calendars: .off, .reminders: .off, .filesAndFolders: .off], [], .permissions,
+             "every prompt spent: Open Settings on each, with what to flip"),
+            ("panel-permissions-back-from-settings", [.microphone: .granted, .accessibility: .off, .screenRecording: .off, .screenContent: .neverAsked,
+                                                      .calendars: .granted, .reminders: .granted, .filesAndFolders: .unknownUntilUsed],
+             [.accessibility, .screenRecording], .permissions, "Settings visited, switch still reads off: Reopen beside Open Settings"),
+            ("panel-permissions-edge-states", readings([.microphone: .blocked, .calendars: .addOnly, .reminders: .askedWithNoAnswer, .filesAndFolders: .unknownUntilUsed]), [], .permissions,
+             "profile-blocked, add only, and an older build's entry that swallowed the prompt"),
+        ]
+        for state in permissionStates {
+            let (confirmations, store) = fixtureConfirmations(tickets: [], rules: [])
+            let model = JarvisPermissions(pinned: state.readings, visitedSettings: state.visited)
+            manifest += renderBoth(AnyView(CompanionPanelView(companionManager: companionManager, confirmations: confirmations, permissions: model,
+                                                              pinnedState: .idle, page: state.page)),
+                                   name: state.name, note: state.note)
+            _ = store.deleteItem()
+        }
+
         // The menu-bar icon: the open arc, a template image, on a light and a dark bar.
         manifest += renderBoth(AnyView(Image(nsImage: MenuBarPanelManager.makeArcMenuBarIcon()).renderingMode(.template)
                                     .foregroundStyle(.primary).frame(width: 44, height: 24)),

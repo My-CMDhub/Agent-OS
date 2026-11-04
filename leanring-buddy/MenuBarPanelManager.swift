@@ -128,6 +128,7 @@ final class MenuBarPanelManager: NSObject {
 
         // The rules live in the keychain, not in this view: read them as the panel opens.
         confirmations.refreshAlwaysRules()
+        JarvisPermissions.shared.startWatching()
         NotificationCenter.default.post(name: .jarvisPanelWillShow, object: nil)
         positionPanelBelowStatusItem()
 
@@ -138,6 +139,7 @@ final class MenuBarPanelManager: NSObject {
 
     private func hidePanel() {
         panel?.orderOut(nil)
+        JarvisPermissions.shared.stopWatching()
         removeClickOutsideMonitor()
     }
 
@@ -258,6 +260,7 @@ final class MenuBarPanelManager: NSObject {
                 if !self.companionManager.allPermissionsGranted && !NSApp.isActive {
                     return
                 }
+                if JarvisPermissions.shared.holdsPanelOpen { return }
 
                 self.hidePanel()
             }

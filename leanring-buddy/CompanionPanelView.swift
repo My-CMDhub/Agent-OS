@@ -61,11 +61,12 @@ enum PanelPermission: CaseIterable, Equatable {
 struct CompanionPanelView: View {
     static let width: CGFloat = 300
 
-    enum Page { case standby, rules }
+    enum Page { case standby, rules, permissions }
 
     @ObservedObject var companionManager: CompanionManager
     @ObservedObject var confirmations: HarnessConfirmations
     @ObservedObject private var notch: JarvisNotch
+    @ObservedObject private var permissions: JarvisPermissions
     /// UI snapshots only: the notch state and receipt to draw instead of the live ones.
     private let pinnedState: JarvisNotchState?
     private let pinnedReceipt: JarvisProofReceipt?
@@ -74,10 +75,11 @@ struct CompanionPanelView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(companionManager: CompanionManager, confirmations: HarnessConfirmations, notch: JarvisNotch = .shared,
-         pinnedState: JarvisNotchState? = nil, pinnedReceipt: JarvisProofReceipt? = nil, page: Page = .standby) {
+         permissions: JarvisPermissions = .shared, pinnedState: JarvisNotchState? = nil, pinnedReceipt: JarvisProofReceipt? = nil, page: Page = .standby) {
         self.companionManager = companionManager
         self.confirmations = confirmations
         _notch = ObservedObject(wrappedValue: notch)
+        _permissions = ObservedObject(wrappedValue: permissions)
         self.pinnedState = pinnedState
         self.pinnedReceipt = pinnedReceipt
         _page = State(initialValue: page)
@@ -95,6 +97,10 @@ struct CompanionPanelView: View {
             case .rules:
                 AlwaysRulesPage(confirmations: confirmations, back: { show(.standby) })
                     .transition(pageTransition(edge: .trailing))
+            case .permissions:
+                PermissionsPage(permissions: permissions, back: { show(.standby) },
+                                requestScreenContent: { companionManager.requestScreenContentPermission() })
+                    .transition(pageTransition(edge: .trailing))
             }
         }
         .frame(width: Self.width, alignment: .top)
@@ -103,7 +109,9 @@ struct CompanionPanelView: View {
         .environment(\.colorScheme, .dark)
         .clipShape(RoundedRectangle(cornerRadius: JV.panelRadius, style: .continuous))
         .jvGlass(radius: JV.panelRadius)
-        .onReceive(NotificationCenter.default.publisher(for: .jarvisPanelWillShow)) { _ in page = .standby }
+        .onReceive(NotificationCenter.default.publisher(for: .jarvisPanelWillShow)) { _ in
+            if !(page == .permissions && permissions.keepsPageOnReopen) { page = .standby }
+        }
     }
 
     private func pageTransition(edge: Edge) -> AnyTransition {
@@ -134,6 +142,7 @@ struct CompanionPanelView: View {
             if companionManager.hasCompletedOnboarding {
                 Rectangle().fill(JV.hairline).frame(height: 1)
                 VStack(spacing: 0) {
+                    permissionsRow
                     alwaysAllowedRow
                     voiceRow
                 }
@@ -406,6 +415,29 @@ struct CompanionPanelView: View {
 
     // MARK: Settings rows
 
+    private var permissionsRow: some View {
+        let missing = permissions.missingCount
+        return Button { show(.permissions) } label: {
+            HStack(spacing: 8) {
+                Text("Permissions")
+                    .font(JV.bodyMedium)
+                    .foregroundStyle(JV.ink)
+                Spacer()
+                Text(PermissionRowModel.summary(missing: missing))
+                    .font(JV.meta)
+                    .foregroundStyle(missing > 0 ? JV.ink : JV.ink3)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(JV.ink3)
+            }
+            .padding(.vertical, 9)
+            .frame(minHeight: 36)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
     private var alwaysAllowedRow: some View {
         let problem = confirmations.alwaysRulesProblem
         let unreadable = problem == HarnessConfirmations.unreadableRulesMessage
@@ -463,6 +495,136 @@ struct CompanionPanelView: View {
             .pointerCursor()
         }
         .frame(height: 36)
+    }
+}
+
+// MARK: - Permissions (a page inside the panel)
+
+/// One compact row per permission, essentials first. "Allow" raises macOS's own prompt right here;
+/// "Open Settings" lands on the exact pane once a prompt cannot return. Only the owner can answer
+/// either, so the page says so once and each row says only what to flip.
+struct PermissionsPage: View {
+    @ObservedObject var permissions: JarvisPermissions
+    let back: () -> Void
+    let requestScreenContent: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: back) {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("Permissions")
+                        .font(JV.bodySemibold)
+                }
+                .foregroundStyle(JV.ink)
+                .frame(height: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .padding(.horizontal, 16)
+
+            Text("Only you can grant these. I raise macOS\u{2019}s prompt, or open the exact switch.")
+                .font(JV.caption)
+                .foregroundStyle(JV.ink2)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+
+            section(PermissionRowModel.visible(JarvisPermission.essentials, readings: permissions.readings))
+            Rectangle().fill(JV.hairline).frame(height: 1)
+            section(JarvisPermission.onDemand)
+        }
+        .padding(.bottom, 6)
+    }
+
+    private func section(_ rows: [JarvisPermission]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(rows, id: \.self) { row($0) }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 4)
+    }
+
+    /// One filled button on the page, the first thing to do; the rest stay quiet, so it never reads as a bill.
+    private var firstAction: JarvisPermission? {
+        (PermissionRowModel.visible(JarvisPermission.essentials, readings: permissions.readings) + JarvisPermission.onDemand)
+            .first { model($0).button != nil }
+    }
+
+    private func model(_ permission: JarvisPermission) -> PermissionRowModel {
+        PermissionRowModel.make(permission, permissions.readings[permission] ?? .unknownUntilUsed,
+                                visitedSettings: permissions.visitedSettings.contains(permission))
+    }
+
+    private func row(_ permission: JarvisPermission) -> some View {
+        let isOn = permissions.readings[permission] == .granted
+        let model = model(permission)
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(isOn ? JV.ink : Color.clear)
+                    .overlay(Circle().strokeBorder(isOn ? Color.clear : JV.ink3, lineWidth: JV.stroke))
+                    .frame(width: 8, height: 8)
+                Text(permission.name)
+                    .font(JV.bodyMedium)
+                    .foregroundStyle(isOn ? JV.ink2 : JV.ink)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if let button = model.button { actionButton(button, on: permission, filled: permission == firstAction) }
+                if isOn {
+                    Text("On")
+                        .font(JV.meta)
+                        .foregroundStyle(JV.ink3)
+                }
+            }
+            .frame(minHeight: 28)
+            if model.detail != nil || model.secondary != nil {
+                VStack(alignment: .leading, spacing: 3) {
+                    if let detail = model.detail {
+                        Text(detail)
+                            .font(JV.caption)
+                            .foregroundStyle(JV.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let secondary = model.secondary {
+                        Button {
+                            permissions.perform(secondary, on: permission, requestScreenContent: requestScreenContent)
+                        } label: {
+                            Text(secondary == .reopen ? "Reopen J.A.R.V.I.S." : secondary.title)
+                                .font(JV.caption)
+                                .underline()
+                                .foregroundStyle(JV.ink)
+                        }
+                        .buttonStyle(.plain)
+                        .pointerCursor()
+                    }
+                }
+                .padding(.leading, 16)
+                .padding(.bottom, 5)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(permission.name + (isOn ? ", on" : ", \(model.detail ?? "off")"))
+    }
+
+    private func actionButton(_ action: PermissionAction, on permission: JarvisPermission, filled: Bool) -> some View {
+        Button {
+            permissions.perform(action, on: permission, requestScreenContent: requestScreenContent)
+        } label: {
+            Text(action.title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(filled ? JV.glass : JV.ink)
+                .padding(.horizontal, 10)
+                .frame(height: 24)
+                .background(RoundedRectangle(cornerRadius: JV.bandRadius, style: .continuous).fill(filled ? JV.ink : JV.raised))
+                .contentShape(RoundedRectangle(cornerRadius: JV.bandRadius, style: .continuous))
+                .fixedSize()
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(action.title), \(permission.name)")
+        .pointerCursor()
     }
 }
 
