@@ -165,7 +165,7 @@ enum ScenarioCatalog {
                            (await read(context) { ScenarioRunnerAX.tabCount($0.element, processIdentifier: $0.processIdentifier) } ?? 0) > 2
                        }]),
         RunnerScenario(id: "A3", start: .pages(["article.html"]),
-                       baseline: { context in context.baseline["scroll"] = await pageState(context, "scroll") ?? NSNull() },
+                       baseline: { context in context.baseline["scroll"] = await pageState(context, "scroll") { _ in true } ?? NSNull() },
                        check: { context, _ in
                            let scroll = await pageState(context, "scroll") { (Int($0) ?? 0) > 0 }
                            return verdict((Int(scroll ?? "0") ?? 0) > 0 && context.baseline["scroll"] as? String == "0",

@@ -1204,6 +1204,8 @@ final class AgentLoop {
                 }
                 if case .hint(let hint) = noProgressVerdict, shown["repeatedRefusal"] == nil { shown["repeatedCall"] = hint }
                 answer(shown, image: image)
+                if ok, calls.count == 1, planID == nil, !readOnly, let heard, let call,
+                   let line = Self.deedEnd(call: call, verification: result["verification"] as? String, heard: heard) { return finish(.done(summary: line)) }
                 if Self.readingTools.contains(kind), readInBatch == nil { readInBatch = "this reply's \(toolName)" }
                 if !Self.readingTools.contains(kind), kind != RealtimeVoiceVerbs.pointAtName { acted = true }
 
@@ -1471,7 +1473,43 @@ final class AgentLoop {
         if let heard, let due = ReminderDue.note(heard: heard, structured: HarnessCreateReminder.isAuthorized) { text += "\n" + SecretScanner.redact(due) }
         if let heard, HarnessCreateEvent.isAuthorized, let start = HarnessCreateEvent.note(heard: heard) { text += "\n" + SecretScanner.redact(start) }
         if readOnly { text += "\n" + readOnlyNote }
+        else if let heard, saysOneThing(heard) { text += "\n" + oneActionNote }
         return text
+    }
+
+    /// 2026-11-04: told in the system prompt alone, 1 of 10 replies put done beside its action, and the round spent only on done was 1.9 s of every simple command.
+    static let oneActionNote = "If one tool call does all of this, your reply is that call and done together, done last, citing this step. If it takes more, carry on as usual."
+
+    /// The whole request, proved by the receipt: the owner's one clause asks for exactly the deed this verified call did, so no model round follows
+    /// (2026-11-04: even told to, Haiku put done beside the action on 2 of 5; the round spent only on done was 1.9 s of each simple command, and it could add nothing).
+    /// By the owner's words and the call's own fields, so a first step towards more ("delete the first draft", which selects it) never ends here. nil: the model goes on.
+    static func deedEnd(call: RealtimeToolCall, verification: String?, heard: String) -> String? {
+        guard saysOneThing(heard) else { return nil }
+        let words = Set(RealtimeVoiceVerbs.foldedTokens(heard)).subtracting(RealtimeHeardCheck.spokenFillers).subtracting(FrontRouter.leadIns)
+        switch call.name {
+        case RealtimeVoiceVerbs.closeName where verification == "confirmed":
+            // The close tool does nothing but close, whatever words led to it ("get rid of this", "I don't need this window").
+            return call.what == "app" ? "Quit it." : "Closed the \(call.what ?? "window")."
+        case RealtimeVoiceVerbs.pressMenuName where verification == "confirmed":
+            // A window verb the owner said themselves: "hide text edit" -> Hide TextEdit.
+            guard let leaf = call.path?.last, let verb = RealtimeVoiceVerbs.foldedTokens(leaf).first,
+                  ["hide", "minimize", "minimise"].contains(verb), words.contains(verb) || words.contains("minimise") && verb == "minimize" else { return nil }
+            return "Done: \(leaf)."
+        case RealtimeVoiceVerbs.scrollName where verification == "confirmed":
+            return words.subtracting(["scroll", "down", "up", "a", "bit", "little", "it", "this", "page"]).isEmpty && words.contains("scroll") ? "Scrolled \(call.direction ?? "")." : nil
+        case RealtimeOpenAppTool.name:
+            // An ok open_app waited for the app's own frontmost and a window (`launch`). Only its name beside the verb: "open a new document" goes on.
+            guard let name = call.appName, !words.isDisjoint(with: ["open", "launch", "start"]) else { return nil }
+            return words.subtracting(["open", "launch", "start", "up", "my", "app", "application"]).subtracting(RealtimeVoiceVerbs.foldedTokens(name)).isEmpty ? "Opened \(name)." : nil
+        default:
+            return nil
+        }
+    }
+
+    /// One clause: no "and" or "then", which is when a first ok result can already be the whole request.
+    static func saysOneThing(_ heard: String) -> Bool {
+        let words = RealtimeVoiceVerbs.foldedTokens(heard)
+        return !words.isEmpty && words.allSatisfy { $0 != "and" && $0 != "then" }
     }
 
     /// "Saturday, 24 October 2026 at 11:58 am (UTC+11:00)": the Mac's own clock, zone and locale. The offset is for

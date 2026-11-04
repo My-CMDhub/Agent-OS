@@ -67,11 +67,43 @@ struct AgentOneThingTests {
         #expect(AgentOneThing.refusal(call: closeAll, heard: "close all my windows", receipts: []) == nil)
     }
 
-    /// K05's shape through the loop itself: two verified closes never run, and the owner hears what happened.
+    @MainActor @Test func oneClauseHearsItCanEndInOneReply() {
+        #expect(AgentLoop.goalText(goal: "x", heard: "close this").contains(AgentLoop.oneActionNote))
+        #expect(!AgentLoop.goalText(goal: "x", heard: "close this and open safari").contains(AgentLoop.oneActionNote))
+        #expect(!AgentLoop.goalText(goal: "x", heard: "what is open", readOnly: true).contains(AgentLoop.oneActionNote))
+        #expect(!AgentLoop.goalText(goal: "x", heard: nil).contains(AgentLoop.oneActionNote))
+    }
+
+    @MainActor @Test func aDeedTheOwnerAskedForEndsOnItsReceipt() {
+        func end(_ call: RealtimeToolCall, _ heard: String, verification: String? = "confirmed") -> String? {
+            AgentLoop.deedEnd(call: call, verification: verification, heard: heard)
+        }
+        let close = call(RealtimeVoiceVerbs.closeName, what: "window")
+        #expect(end(close, "get rid of this") == "Closed the window.")
+        #expect(end(close, "get rid of this", verification: "notObserved") == nil)
+        #expect(end(close, "close this and open safari") == nil)
+        let hide = call(RealtimeVoiceVerbs.pressMenuName, path: ["TextEdit", "Hide TextEdit"])
+        #expect(end(hide, "hide text edit, would you") == "Done: Hide TextEdit.")
+        #expect(end(call(RealtimeVoiceVerbs.pressMenuName, path: ["Window", "Minimize"]), "can you minimise the text edit in front of me") == "Done: Minimize.")
+        // A first step towards more, in a menu or by a press, is the model's to judge.
+        #expect(end(call(RealtimeVoiceVerbs.pressMenuName, path: ["File", "New"]), "open a new text edit document") == nil)
+        #expect(end(call(RealtimeVoiceVerbs.pressElementName, element: "First draft"), "delete the first draft") == nil)
+        var open = call(RealtimeOpenAppTool.name); open.appName = "Safari"
+        #expect(end(open, "open safari", verification: nil) == "Opened Safari.")
+        var editor = call(RealtimeOpenAppTool.name); editor.appName = "TextEdit"
+        #expect(end(editor, "open a new text edit document", verification: nil) == nil)
+        var finder = call(RealtimeOpenAppTool.name); finder.appName = "Notes"
+        #expect(end(finder, "find my note about the trip", verification: nil) == nil)
+        var scroll = call(RealtimeVoiceVerbs.scrollName); scroll.direction = "down"
+        #expect(end(scroll, "scroll down") == "Scrolled down.")
+        #expect(end(scroll, "scroll to the plans") == nil)
+    }
+
+    /// K05's shape through the loop itself, by the menu (no deed's end there): a second verified close never runs, and the owner hears what happened.
     @MainActor @Test func theLoopEndsAtTheSecondClose() async {
         var replies: [[String: Any]] = [
-            ["stop_reason": "tool_use", "content": [["type": "tool_use", "id": "a", "name": "close", "input": ["what": "window", "app": "TextEdit"]]]],
-            ["stop_reason": "tool_use", "content": [["type": "tool_use", "id": "b", "name": "close", "input": ["what": "window", "app": "TextEdit"]]]]]
+            ["stop_reason": "tool_use", "content": [["type": "tool_use", "id": "a", "name": "press_menu", "input": ["app": "TextEdit", "path": ["File", "Close"]]]]],
+            ["stop_reason": "tool_use", "content": [["type": "tool_use", "id": "b", "name": "press_menu", "input": ["app": "TextEdit", "path": ["File", "Close"]]]]]]
         var executed = 0
         let agent = AgentLoop(dependencies: AgentLoop.Dependencies(
             model: { _, _ in AgentModelReply(json: replies.removeFirst(), model: "fake", milliseconds: 1) },
