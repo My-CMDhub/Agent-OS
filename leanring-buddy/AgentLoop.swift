@@ -548,7 +548,21 @@ final class AgentLoop {
         if phase == .cancelled { return .cancelled }
         self.goal = goal
         self.heard = heard
-        return await proceed()
+        if let carry = liveCarry, carry.readOnly { carry.surfaceAtStart = await Task.detached { HarnessPanels.surfaceOpen() }.value }
+        let outcome = await proceed()
+        await closeWhatLookingOpened()
+        return outcome
+    }
+
+    /// Whoever opens a panel, pop-up or sheet to read it closes it (2026-11-04: unseen F07 left Finder's Go to Folder sheet up, L03 a Wi-Fi panel).
+    /// Only what was not open when the owner asked, and not a window: "show me the Get Info window" keeps its window.
+    private func closeWhatLookingOpened() async {
+        guard let carry = liveCarry, carry.readOnly, pausedAsk == nil, carry.surfaceAtStart == nil, let answer = carry.harnessAnswer else { return }
+        for _ in 0..<2 {
+            guard let open = await Task.detached(operation: { HarnessPanels.surfaceOpen() }).value else { return }
+            _ = await Task.detached { answer(HarnessPanels.escapeLine) }.value
+            noteActivity(); dependencies.trace(["kind": "surfaceClosed", "run": runID, "surface": open.rawValue])
+        }
     }
 
     /// The owner's answer to this run's ask_owner. `words`: what the guards now
@@ -570,7 +584,9 @@ final class AgentLoop {
                                                                    "note": "the owner's own words, answering your question"])]
             + paused.skippedAfter
             + [["type": "text", "text": "The owner answered your question. Go on with the same task from where it paused."]]
-        return await proceed()
+        let outcome = await proceed()
+        await closeWhatLookingOpened()
+        return outcome
     }
 
     /// Moves the phase if the table allows it; the same phase is no move.
@@ -1555,7 +1571,10 @@ final class AgentLoop {
     static let readOnlyNote = "This task is read-only, by the owner's words: look, scroll, follow links, tabs and search results, search, "
         + "and play a video (muted if you can). Never press anything that sends, posts, comments, likes or reacts, connects, follows, "
         + "messages, shares, saves, joins, applies, closes or deletes, and type only into a search field: such a step is refused as readOnlyTask. "
-        + "Only menu items that show or navigate may be pressed: the View, Go, Window and Help menus, and items like Show…, Get Info, Find, Sort By."
+        + "Only menu items that show or navigate may be pressed: the View, Go, Window and Help menus, and items like Show…, Get Info, Find, Sort By. "
+        + "Opening a menu, pop-up or panel to read it is looking, a menu-bar icon included, by its name or its position: press it and read it; never "
+        + "press anything inside it that changes something, and what you opened is closed for you when the task ends. A click at a position is "
+        + "judged by the name at that position, as a named press is."
 
 
     /// agent-loop.log's args: `loggedArguments` with the words a page or the
@@ -2341,10 +2360,11 @@ final class AgentLoop {
             // AXSelected 1 and Light/Auto publish none; names alone sent two models round to the cap).
             let toggle = ["AXCheckBox", "AXRadioButton"].contains(element["role"] as? String ?? "")
             let state = element["selected"] as? Bool == true ? " [selected]" : element["selected"] as? Bool == false && toggle ? " [off]" : ""
-            let line = String(name.prefix(1500)) + state
+            let shows = (element["shows"] as? String).map { ": " + String($0.prefix(200)) } ?? ""
+            let line = String(name.prefix(1500)) + shows + state
             if lines.last == line { continue }
             lines.append(line)
-            total += min(name.count, 1500) + state.count + 1
+            total += min(name.count, 1500) + shows.count + state.count + 1
             if total > pageTextCharacterLimit { return (SecretScanner.redact(lines.joined(separator: "\n")), true) }
         }
         return (SecretScanner.redact(lines.joined(separator: "\n")), false)
@@ -2420,6 +2440,7 @@ extension AgentLoop {
         carry.onCardAnswered = { [weak loop] in loop?.onCardAnswered?($0) }
         carry.heard = heard
         carry.readOnly = isReadOnlyTask(words: heard)
+        carry.harnessAnswer = harnessAnswer
         loop.readOnly = carry.readOnly
         loop.liveCarry = carry
         loop.provider = model.provider
@@ -2446,6 +2467,9 @@ extension AgentLoop {
         var startBundle: String?
         /// The owner's words made the task explore-only: every request passes `readOnlyGuardedAnswer`.
         var readOnly = false
+        /// What was open over the app in front when the owner asked: theirs to leave open (`closeWhatLookingOpened`).
+        var surfaceAtStart: HarnessPanels.Surface?
+        var harnessAnswer: (@Sendable (String) -> String)?
         /// The owner's words every step is judged by; an answer to ask_owner adds its own (`resume`).
         var heard = ""
         /// A ticket opened for this step's call: the loop's `waitingForCard`.
@@ -2686,7 +2710,9 @@ extension AgentLoop {
         "accepted", "invite", "invited", "apply", "applied", "save", "saved", "unsave", "close", "delete", "remove", "report",
         "block", "hide", "dismiss", "mark", "archive", "pin", "unpin", "publish", "submit", "reply", "vote", "upvote", "downvote",
         "pay", "buy", "purchase", "checkout", "order", "donate", "withdraw", "ignore", "edit", "write", "add", "create", "upload",
-        "retweet", "tweet", "recommend", "request", "sign", "logout", "signout", "poke", "push"]
+        "retweet", "tweet", "recommend", "request", "sign", "logout", "signout", "poke", "push",
+        // A click at a point reaches these too: what the kernel only asks about, a look never does.
+        "empty", "erase", "install", "uninstall", "reset", "restart", "shutdown", "eject", "quit", "trash"]
 
     /// Generality suite 2026-10-06: G03, G07, G11 and G17 lost every menu to
     /// `readOnlyTask`. A read-only task may press only a menu item that shows or
@@ -2748,7 +2774,9 @@ extension AgentLoop {
     nonisolated static func reachingWord(_ name: String) -> String? {
         let words = name.lowercased().split { !$0.isLetter }.map(String.init)
         if let word = words.first(where: reachingWords.contains) { return word }
-        return zip(words, words.dropFirst()).first { $0.0 == "log" && ["out", "in"].contains($0.1) }.map { "\($0.0) \($0.1)" }
+        return zip(words, words.dropFirst()).first {
+            ($0.0 == "log" && ["out", "in"].contains($0.1)) || ($0.0 == "turn" && ["off", "on"].contains($0.1)) || ($0.0 == "shut" && $0.1 == "down")
+        }.map { "\($0.0) \($0.1)" }
     }
 
     /// Why a read-only task may not send this harness request, nil when it is
@@ -2770,14 +2798,8 @@ extension AgentLoop {
         case .scroll, .openURL, .focus, .launch, .helpSearch, .goToFolder:
             return nil
         case .click, .press, .select:
-            // Owner's ruling R2: opening a conversation or message marks it read, and the sender may see it.
-            if verb == .select || listItemRoles.contains(request["role"] as? String ?? ""), frontAppMarksRead() {
-                return "opening an item in a messaging, mail or web app marks it read and the sender may see that; read the previews in the "
-                    + "list as they are, without opening any"
-            }
-            let names = [request["title"], request["labelTitle"]].compactMap { $0 as? String }.filter { !$0.allSatisfy(\.isWhitespace) }
-            guard !names.isEmpty else { return "a press of something with no name cannot be judged" }
-            return names.lazy.compactMap(reachingWord).first.map { "pressing an element named with \"\($0)\" reaches people or changes something" }
+            let names = [request["title"], request["labelTitle"]].compactMap { $0 as? String }
+            return readOnlyNameRefusal(names: names, role: request["role"] as? String, isSelect: verb == .select, marksRead: frontAppMarksRead)
         case .menu:
             // A menu-bar icon only shows its panel or menu; a press inside it is judged on its own (unseen R12/N04
             // 2026-10-24: "what is the volume" and "which networks are nearby" could not open the panel holding the answer).
@@ -2803,12 +2825,13 @@ extension AgentLoop {
             // harness can read the element, so it judges, under `onlyPlainFolder` — which refuses, never cards.
             return request["onlyPlainFolder"] as? Bool == true ? nil : "opening goes only into a plain folder in Finder"
         case .pointer:
-            // The universal hand (2026-10-31): a hover and a wheel only look. What a press, drag or right-click at a point
-            // hits is read only by the harness, at the point — nothing here can judge it first, so a read-only task makes
-            // none. ponytail: a read that needs a panel opened goes by name (press_menu_bar_item, press_element).
+            // The universal hand (2026-10-31): a hover and a wheel only look. What a click hits is read only by the harness,
+            // at the point, so it judges there, under `onlyLooking`, by the same `readOnlyPressRefusal` (launch L03 2026-11-04).
+            // A drag moves something, and a double- or right-click opens or offers more than a look needs.
             let action = request["action"] as? String
-            return action == PointerAction.move.rawValue || action == PointerAction.scroll.rawValue ? nil
-                : "a \(action ?? "press") at a point cannot be judged before it is made"
+            if action == PointerAction.move.rawValue || action == PointerAction.scroll.rawValue { return nil }
+            return action == PointerAction.click.rawValue && request["onlyLooking"] as? Bool == true
+                ? nil : "a \(action ?? "press") at a point is not a look"
         case .key:
             // Keys that only move through what is shown; a shortcut or Return / Space may press anything.
             guard let chord = (request["keys"] as? String).flatMap(HarnessKeys.parse), !chord.command, !chord.control, !chord.option,
@@ -2817,6 +2840,35 @@ extension AgentLoop {
         default:
             return "\(verb.rawValue) is not navigation"
         }
+    }
+
+    /// Pressing these changes a value in place, whatever they are called; a tab (`AXTabButton`) only shows.
+    nonisolated static let changesOnPressRoles: Set<String> = ["AXSwitch", "AXCheckBox", "AXRadioButton", "AXSlider", "AXIncrementor", "AXColorWell"]
+
+    /// What a read-only press may not be, by its name alone: what the request itself says, judged before the harness is asked.
+    nonisolated static func readOnlyNameRefusal(names: [String], role: String?, isSelect: Bool = false, marksRead: () -> Bool) -> String? {
+        // Owner's ruling R2: opening a conversation or message marks it read, and the sender may see it.
+        if isSelect || listItemRoles.contains(role ?? ""), marksRead() {
+            return "opening an item in a messaging, mail or web app marks it read and the sender may see that; read the previews in the "
+                + "list as they are, without opening any"
+        }
+        let names = names.filter { !$0.allSatisfy(\.isWhitespace) }
+        guard !names.isEmpty else { return "a press of something with no name cannot be judged" }
+        return names.lazy.compactMap(reachingWord).first.map { "pressing an element named with \"\($0)\" reaches people or changes something" }
+    }
+
+    /// The one judgement of a read-only press, by what it IS: a press by name and a click at a point, both in the harness (`onlyLooking`),
+    /// which alone reads the role. Nil when it only looks. Opening a pop-up, a menu or a panel is looking; picking inside one is not,
+    /// unless the item only shows. ponytail: an AppKit tab with no AXTabButton subrole is refused as a radio button (Xcode's inspector tabs).
+    nonisolated static func readOnlyPressRefusal(names: [String], role: String?, subrole: String?, isSelect: Bool = false, marksRead: () -> Bool) -> String? {
+        if let refusal = readOnlyNameRefusal(names: names, role: role, isSelect: isSelect, marksRead: marksRead) { return refusal }
+        if changesOnPressRoles.contains(role ?? "") || subrole == "AXSwitch", subrole != "AXTabButton" {
+            return "pressing this \(RealtimeScreenVerbs.roleWord(role: role ?? "", subrole: subrole)) would change it; read its state instead"
+        }
+        if role == "AXMenuItem", let item = names.first, !isShowingMenuItem([item]) || changingMenuWord(item) != nil {
+            return "the menu item \"\(item)\" is not one that only shows or navigates"
+        }
+        return nil
     }
 
     /// Keys a read-only task may press: they move focus, selection or the view, and press nothing.
@@ -2836,7 +2888,10 @@ extension AgentLoop {
     }
 
     nonisolated static func liveFrontAppMarksRead() -> Bool {
-        guard let url = AccessibilityTreeWalker.focusedApplication()?.bundleURL else { return false }
+        AccessibilityTreeWalker.focusedApplication()?.bundleURL.map(appMarksRead(at:)) ?? false
+    }
+
+    nonisolated static func appMarksRead(at url: URL) -> Bool {
         let category = Bundle(url: url)?.infoDictionary?["LSApplicationCategoryType"] as? String
         func handles(_ address: String) -> Bool {
             NSWorkspace.shared.urlsForApplications(toOpen: URL(string: address)!).contains { $0.standardizedFileURL == url.standardizedFileURL }
@@ -2862,12 +2917,22 @@ extension AgentLoop {
                     request = narrowed
                 }
             }
+            // A press goes on only as a look: the harness judges what it resolves, or what is at the point (`onlyLooking`).
+            if ["click", "press", "select"].contains(request?["verb"] as? String ?? "")
+                || (request?["verb"] as? String == HarnessVerb.pointer.rawValue && request?["action"] as? String == PointerAction.click.rawValue),
+               var narrowed = request {
+                narrowed["onlyLooking"] = true
+                if let data = try? JSONSerialization.data(withJSONObject: narrowed, options: [.sortedKeys]) {
+                    line = String(decoding: data, as: UTF8.self)
+                    request = narrowed
+                }
+            }
             guard let reason = readOnlyRefusal(request, focusedField: readFocusedField, frontAppMarksRead: frontAppMarksRead) else { return answer(line) }
             // `target`: the judged name, for the run's report (the model's result keeps only the message).
             let target = (request?["labelTitle"] ?? request?["title"] ?? request?["verb"]) as? String
             return MeasurementLogFile.jsonLine(["ok": false, "error": "readOnlyTask", "target": target.map { String($0.prefix(80)) } ?? NSNull(),
                 "message": "nothing was done: this task is read-only by the owner's words, and \(reason). Look, scroll, follow links, "
-                    + "search, or report what you see instead."]) ?? "{\"ok\":false,\"error\":\"readOnlyTask\"}"
+                    + "open a menu or panel to read it, search, or report what you see instead."]) ?? "{\"ok\":false,\"error\":\"readOnlyTask\"}"
         }
     }
 

@@ -122,6 +122,8 @@ nonisolated enum RealtimeScreenVerbs {
         var selected: Bool? = nil
         /// Listed from the app's transient popup window, not the focused one (`popup` on the wire).
         var popup = false
+        /// What a pop-up button shows now (`shows` on the wire).
+        var shows: String? = nil
         /// A slider's or level indicator's position, percent of its range (`levelPercent` on the wire).
         var levelPercent: Int? = nil
         /// The level is the thumb's place on the track, not a published value (`levelApproximate` on the wire).
@@ -205,7 +207,7 @@ nonisolated enum RealtimeScreenVerbs {
             }
             let kept = PoolElement(name: name, role: role, subrole: subrole, frame: frame, pressable: pressable, parent: parentIndex,
                                    pressAncestor: ancestor, selected: element["selected"] as? Bool, popup: element["popup"] as? Bool == true,
-                                   levelPercent: element["levelPercent"] as? Int,
+                                   shows: element["shows"] as? String, levelPercent: element["levelPercent"] as? Int,
                                    levelApproximate: element["levelApproximate"] as? Bool == true)
             // One per name, except two clickable controls apart from each other (scenario
             // B12 2026-10-03: two "Download" buttons offered as one, and the press guessed).
@@ -270,7 +272,7 @@ nonisolated enum RealtimeScreenVerbs {
                 RealtimeScreenCandidate(name: element.name, role: element.role, frame: element.frame,
                                         position: positionPhrase(of: element.frame, neighbours: neighbours, screens: display),
                                         subrole: element.subrole, pressable: element.pressable, pressAncestor: element.pressAncestor,
-                                        selected: element.selected, inPopup: element.popup, levelPercent: element.levelPercent,
+                                        selected: element.selected, inPopup: element.popup, shows: element.shows, levelPercent: element.levelPercent,
                                         levelApproximate: element.levelApproximate)
             },
             elementCount: (response["elements"] as? [[String: Any]])?.count ?? 0,
@@ -564,6 +566,8 @@ nonisolated struct RealtimeScreenCandidate: Equatable, Sendable {
     /// From the app's transient popup window: the harness's name verbs read only the focused
     /// window, so a press goes by sight at its centre (`visionClick`, which re-checks the hit).
     var inPopup = false
+    /// What a pop-up button shows now; its name is only what it is for.
+    var shows: String? = nil
     /// A slider's or level indicator's position, percent of its range: a reading, never the picture's guess.
     var levelPercent: Int? = nil
     /// `levelPercent` read from the thumb's place on the track: "about 44%", so the model says "about".
@@ -590,6 +594,7 @@ nonisolated struct RealtimeScreenCandidate: Equatable, Sendable {
     var jsonObject: [String: Any] {
         var object: [String: Any] = ["name": name, "role": roleWord, "where": position]
         if let selected { object["selected"] = selected }
+        if let shows { object["shows"] = String(shows.prefix(200)) }
         if let levelPercent { object["level"] = levelApproximate ? "about \(levelPercent)%" : "\(levelPercent)%" }
         return object
     }

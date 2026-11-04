@@ -109,6 +109,48 @@ nonisolated enum HarnessGoToFolder {
         return nil
     }
 
+    /// A hidden folder: Go to Folder's own suggestions take it elsewhere (~/.Trash landed in its first hidden child, both with and without a
+    /// trailing slash; measured 2026-11-04, unseen F07), so Finder is asked to open it directly and shows it under its own name ("Bin").
+    static func isHidden(_ path: String, home: String) -> Bool {
+        standardized(path, home: home).split(separator: "/").contains { $0.hasPrefix(".") }
+    }
+
+    /// Opens a hidden folder in Finder and waits for the front window to change. The title it takes is Finder's to choose.
+    static func openHidden(_ path: String, application: AXUIElement, before: WindowReading?, home: String) -> Run {
+        var run = Run()
+        let url = URL(fileURLWithPath: standardized(path, home: home), isDirectory: true)
+        var isFolder: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder), isFolder.boolValue else {
+            run.failure = ("notObserved", "there is no folder at \(UntrustedText(path).forDisplay); nothing was opened")
+            return run
+        }
+        let opening = Date()
+        guard NSWorkspace.shared.open(url) else {
+            run.failure = ("goToFolderFailed", "Finder would not open \(UntrustedText(path).forDisplay)")
+            return run
+        }
+        var after: WindowReading?
+        repeat {
+            Thread.sleep(forTimeInterval: pollIntervalSeconds * 2)
+            after = frontWindow(application)
+        } while (after?.title == nil || after?.title == before?.title) && Date().timeIntervalSince(opening) < arrivalDeadlineSeconds
+        run.report["windowAfter"] = (after?.title).map { UntrustedText($0).forDisplay } ?? NSNull()
+        run.report["openedDirectly"] = true
+        if let title = after?.title, title != before?.title {
+            run.report["evidence"] = "Finder opened it, and the front window is now titled \(UntrustedText(title).forDisplay)"
+        } else {
+            run.failure = ("notObserved", "Finder did not show the folder within \(Int(arrivalDeadlineSeconds * 1000)) ms")
+        }
+        return run
+    }
+
+    /// Finder took a completion for the path and showed another folder.
+    static func arrivedElsewhere(before: WindowReading?, after: WindowReading?) -> String? {
+        guard let title = after?.title, title != before?.title else { return nil }
+        return "Finder went to a folder titled \(UntrustedText(title).forDisplay), not the one asked for: it took one of its own suggestions. "
+            + "Do not read that folder as the answer; reach the folder another way, such as its icon in the Dock or the Finder sidebar"
+    }
+
     // MARK: Live
 
     struct Run {
@@ -130,6 +172,7 @@ nonisolated enum HarnessGoToFolder {
         AXUIElementSetMessagingTimeout(application, readTimeoutSeconds)
         let home = NSHomeDirectory()
         let before = frontWindow(application)
+        if isHidden(path, home: home) { return openHidden(path, application: application, before: before, home: home) }
 
         func fail(_ code: String, _ message: String, cancelWithoutGo: Bool = false) -> Run {
             let cancelled = cancelPanel(application, requireGo: !cancelWithoutGo)
@@ -206,8 +249,9 @@ nonisolated enum HarnessGoToFolder {
         }
         run.report["leftInFront"] = after.map { "a window titled \(UntrustedText($0.title ?? "").forDisplay)" } ?? NSNull()
         run.report["timings"] = timings
-        run.failure = ("notObserved", "Finder did not show the folder within \(Int(arrivalDeadlineSeconds * 1000)) ms; whatever Finder shows "
-            + "now (perhaps an alert that the folder can't be found) was left as it is for the owner")
+        run.failure = ("notObserved", arrivedElsewhere(before: before, after: after)
+            ?? ("Finder did not show the folder within \(Int(arrivalDeadlineSeconds * 1000)) ms; whatever Finder shows "
+                + "now (perhaps an alert that the folder can't be found) was left as it is for the owner"))
         return run
     }
 

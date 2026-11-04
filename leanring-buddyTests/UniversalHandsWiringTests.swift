@@ -313,19 +313,19 @@ struct UniversalHandsWiringTests {
 
     // MARK: Guards on what the members send
 
-    /// Read-only (the owner's words): a hover and a wheel look; a click, drag or right-click at a point is refused,
-    /// and only keys that move through what is shown pass.
-    @Test func aReadOnlyTaskRefusesAPointerPressAndAShortcut() throws {
+    /// Read-only (the owner's words): a hover and a wheel look; a click goes on only for the harness to judge what is at the point
+    /// (`ReadOnlyLookTests`); a drag or a right-click is refused, and only keys that move through what is shown pass.
+    @Test func aReadOnlyTaskRefusesAPointerDragAndAShortcut() throws {
         func refused(_ request: [String: Any]) -> Bool { AgentLoop.readOnlyRefusal(request, focusedField: { nil }) != nil }
         var click = RealtimeToolCall(callID: "a", name: "press_element", appName: "com.apple.finder", x: 0.5, y: 0.5)
         click.pointerAction = "click"
         let point = RealtimeScreenTarget(candidate: nil, point: CGPoint(x: 10, y: 10), app: nil, source: .vision)
         let line = try RealtimeOpenAppTool.harnessRequestLine(for: click, screenTarget: point).get()
-        #expect(refused(object(line)))
-        // Through the live wrapper the harness never hears it.
+        #expect(refused(object(line)), "without the narrowing the wrapper adds, a click is not a look")
+        // Through the live wrapper it reaches the harness only narrowed.
         let seen = Seen()
         let guarded = AgentLoop.readOnlyGuardedAnswer({ seen.lines.append($0); return "{\"ok\":true}" }, readFocusedField: { nil })
-        #expect(object(guarded(line))["error"] as? String == "readOnlyTask" && seen.lines.isEmpty)
+        #expect(object(guarded(line))["ok"] as? Bool == true && object(seen.lines.last ?? "")["onlyLooking"] as? Bool == true)
         for action in ["doubleClick", "rightClick", "drag"] { #expect(refused(["verb": "pointer", "action": action])) }
         for action in ["move", "scroll"] { #expect(!refused(["verb": "pointer", "action": action])) }
         for keys in ["escape", "down", "pagedown", "tab"] { #expect(!refused(["verb": "key", "keys": keys]), "\(keys)") }

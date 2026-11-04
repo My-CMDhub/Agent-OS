@@ -157,6 +157,23 @@ enum HarnessPointer {
         return strongest(decisions)
     }
 
+    static let panelLookRefusal = "pressing anything inside a Control Centre panel can switch something or join a network; read it instead"
+
+    /// A click inside a Control Centre panel, by what is pressed: only a disclosure triangle shows more (live, "Other Networks").
+    static func panelRefusal(role: String?) -> String? { role == "AXDisclosureTriangle" ? nil : panelLookRefusal }
+
+    /// A read-only task's click, by what was read at the point: the judgement a named press gets
+    /// (`AgentLoop.readOnlyPressRefusal`). A point with no AX name acts only on the menu bar, where a click opens
+    /// what it shows; elsewhere pixels cannot tell a switch from a label, so it is not a look.
+    static func lookRefusal(names: [String], role: String?, subrole: String?, surface: Surface, owner: String?, marksRead: () -> Bool) -> String? {
+        if owner == AgentLoop.controlCentreBundleIdentifier { return panelRefusal(role: role) }
+        guard role != nil else {
+            if surface == .menuBar { return names.lazy.compactMap(AgentLoop.reachingWord).first.map { "the words there say \"\($0)\"" } }
+            return "nothing at that point has a name in the app's own structure, so what a click does cannot be judged"
+        }
+        return AgentLoop.readOnlyPressRefusal(names: names, role: role, subrole: subrole, marksRead: marksRead)
+    }
+
     /// A Dock element as read at the point: its role, subrole and AXURL. `readFailed`: one of
     /// them failed to read (an absent attribute is not a failure).
     struct DockItem: Equatable {

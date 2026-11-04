@@ -97,6 +97,8 @@ struct HarnessRawRequest: Decodable {
     let draftScope: Bool?
     /// See `HarnessRequest.onlyPlainFolder`.
     let onlyPlainFolder: Bool?
+    /// See `HarnessRequest.onlyLooking`.
+    let onlyLooking: Bool?
     /// See `HarnessRequest.unnamedApp`.
     let unnamedApp: Bool?
     /// pointer only: click | doubleClick | rightClick | move | drag | scroll.
@@ -388,6 +390,9 @@ struct HarnessRequest: Equatable {
     /// open only: a read-only task's open (`AgentLoop.readOnlyGuardedAnswer` sets it) —
     /// anything but a plain Finder folder is refused, never carded. Only ever narrows.
     var onlyPlainFolder: Bool = false
+    /// click, press, select, pointer click: a read-only task's press (`AgentLoop.readOnlyGuardedAnswer` sets it): what is
+    /// resolved, or read at the point, is judged by `AgentLoop.readOnlyPressRefusal`. Refused, never carded. Only ever narrows.
+    var onlyLooking: Bool = false
     /// An agent step in an app the owner's words did not name for the task, that the
     /// task neither started in nor opened (owner's ruling 2026-10-24): `gate` turns the
     /// kernel's allow into a card. Only ever adds a question; a read never asks, so it ignores it.
@@ -932,6 +937,9 @@ enum HarnessPolicy {
         if raw.onlyPlainFolder == true, verb != .open {
             return .failure(.invalidField(field: "onlyPlainFolder", value: "true"))
         }
+        if raw.onlyLooking == true, ![.click, .press, .select, .pointer].contains(verb) {
+            return .failure(.invalidField(field: "onlyLooking", value: "true"))
+        }
         // An acting verb that never reaches `gate` could not ask, and running it would lower the question to nothing.
         if raw.unnamedApp == true, verb.isMutating, !HarnessVerb.gatedForUnnamedApp.contains(verb) {
             return .failure(.invalidField(field: "unnamedApp", value: "true"))
@@ -1061,6 +1069,7 @@ enum HarnessPolicy {
             ownerPointed: raw.ownerPointed ?? false,
             draftScope: raw.draftScope ?? false,
             onlyPlainFolder: raw.onlyPlainFolder ?? false,
+            onlyLooking: raw.onlyLooking ?? false,
             unnamedApp: raw.unnamedApp ?? false,
             pointerAction: pointerAction,
             to: to,
@@ -2490,6 +2499,9 @@ final class HarnessServer {
                 // and a COUNT, never the text; absent when not read, never false / 0.
                 if let selected = node.selected { entry["selected"] = selected }
                 if let valueLength = node.valueLength, !node.mightBeSecure { entry["valueLength"] = valueLength }
+                // What a pop-up shows is its AXValue, and its name is what it is for (Xcode's "Active Scheme"; generality G11 2026-11-04:
+                // "which scheme is selected" had only the name). An option, never typed text, so it may leave.
+                if node.role == "AXPopUpButton", let shown = node.value?.raw, shown != node.listedName?.raw { entry["shows"] = shown }
                 if let level = node.levelPercent { entry["levelPercent"] = level }
                 if node.levelPercent != nil, node.levelIsApproximate { entry["levelApproximate"] = true }
                 listed.append(entry)
@@ -3532,6 +3544,20 @@ final class HarnessServer {
             audit(request, dryRun: dryRun, kernel: "n/a", outcome: "readOnlyTask", startedAt: startedAt)
             return response
         }
+        // A read-only task's press, judged as what it resolved to: a label's switch is a switch, and a Control Centre panel changes what it shows.
+        if request.onlyLooking, [.press, .click, .select].contains(action) {
+            let names = [resolvedNode.displayName?.raw, labelTitle, request.title].compactMap { $0 }
+            let reason = snapshot.bundleIdentifier == AgentLoop.controlCentreBundleIdentifier ? HarnessPointer.panelRefusal(role: resolvedNode.role)
+                : AgentLoop.readOnlyPressRefusal(names: names, role: resolvedNode.role, subrole: resolvedNode.subrole, isSelect: action == .select,
+                                                 marksRead: { snapshot.application?.bundleURL.map(AgentLoop.appMarksRead(at:)) ?? false })
+            if let reason {
+                response["ok"] = false
+                response["error"] = "readOnlyTask"
+                response["message"] = "nothing was done: this task is read-only by the owner's words, and \(reason)"
+                audit(request, dryRun: dryRun, kernel: "n/a", outcome: "readOnlyTask", startedAt: startedAt)
+                return response
+            }
+        }
         // A line break goes by paste, only into a note or document editor — judged before
         // the kernel, so a refused request never puts a card in front of the owner.
         if action == .type, request.text.contains("\n"), let pid = snapshot.application?.processIdentifier,
@@ -4413,6 +4439,19 @@ final class HarnessServer {
                 }
             }
             ends.append(end)
+        }
+
+        // A read-only task's click: judged by what was read at the point, before any card (`AgentLoop.readOnlyPressRefusal`).
+        if request.onlyLooking {
+            let end = ends[0]
+            let surface = HarnessPointer.surface(end.window, displayTopLeft: CGDisplayBounds(end.display.displayID))
+            let named = end.candidate.map { candidate in (candidate.pressAncestor?.role ?? candidate.role, candidate.pressAncestor == nil ? candidate.subrole : nil) }
+            if let reason = HarnessPointer.lookRefusal(
+                names: end.names + (request.label.map { [$0] } ?? []), role: named?.0, subrole: named?.1, surface: surface, owner: end.actingBundle,
+                marksRead: { end.actingBundle.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first?.bundleURL }
+                    .map(AgentLoop.appMarksRead(at:)) ?? false }) {
+                return fail("readOnlyTask", "nothing was done: this task is read-only by the owner's words, and \(reason)")
+            }
         }
 
         func describe(_ end: End) -> [String: Any] {
