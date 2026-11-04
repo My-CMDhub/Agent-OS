@@ -512,7 +512,7 @@ enum GeneralitySuite {
                 sandboxBefore = listing
             }
             // Counted before the goal, the app launched behind if it is quit: what is new afterwards is this task's (`SuiteOwnItems`).
-            // What the task makes goes again (`SuiteOwnItems`); if it could not, the task does not run. Notes reads through its window, launched behind if it is quit.
+            // What the task makes goes again (`SuiteOwnItems`); if it could not, the task does not run: no grant, or Notes' list not readable by identity.
             let ownItems = SuiteOwnItems.byTask[task.id] ?? []
             if let reason = SuiteOwnItems.needsGrant(ownItems) {
                 result["status"] = "skipped"
@@ -524,6 +524,14 @@ enum GeneralitySuite {
             }
             var ownBefore: [SuiteOwnItems.Item: SuiteOwnItems.Before] = [:]
             for item in ownItems { ownBefore[item] = await readLaunchingIfNeeded(item.bundle) { SuiteOwnItems.before(item) } }
+            if let unread = ownItems.first(where: { ownBefore[$0] == nil }) {
+                result["status"] = "skipped"
+                result["reason"] = "\(unread.title): what is already in \(unread.bundle) could not be read by identity, so what this task makes could not be taken back"
+                results.append(result)
+                save()
+                print("🧭 \(task.id): skipped — \(result["reason"] ?? "")")
+                continue
+            }
             let pre = await task.pre?() ?? [:]
             // A pre-read that cannot make the task provable stops it BEFORE the agent acts (E01/E02, 2026-10-14).
             if let reason = pre[skipReasonKey] as? String {
