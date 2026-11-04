@@ -2253,6 +2253,17 @@ final class HarnessServer {
             }
         }
 
+        // A Control Centre panel holds the focus against every app's activation (`HarnessPanels`): a step that acts in
+        // another app gets past it, the owner's panel or a task's, as a click in that app would. Measured: launch U05 2026-11-04.
+        if !dryRun, request.verb.isMutating, let elsewhere = request.expectApp ?? request.app ?? (request.verb == .openURL ? "a page" : nil),
+           !HarnessPolicy.appMatches(expected: elsewhere, bundleIdentifier: AgentLoop.controlCentreBundleIdentifier, name: "Control Centre"),
+           let panel = NSRunningApplication.runningApplications(withBundleIdentifier: AgentLoop.controlCentreBundleIdentifier).first,
+           AccessibilityTreeWalker.focusedApplication()?.processIdentifier == panel.processIdentifier, HarnessPanels.controlCentrePanelIsOpen {
+            Self.auditDirectClose(tool: "HarnessPanels", processIdentifier: panel.processIdentifier, windowNumber: nil,
+                                  why: "a step acts in \(HarnessPolicy.cappedAuditTarget(elsewhere)), and the panel holds the focus",
+                                  closed: HarnessPanels.closeControlCentrePanelInFront())
+        }
+
         switch request.verb {
         case .ping:
             return pingResponse(request, dryRun: dryRun, startedAt: startedAt)

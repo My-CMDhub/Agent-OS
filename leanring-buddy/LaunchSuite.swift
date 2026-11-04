@@ -1108,7 +1108,9 @@ extension GeneralitySuite {
                            "no file named", "has no file", "no file called",
                            // 2026-10-16 (gpt-5.6-luna): "contains report-draft.txt, not report.txt. Nothing was renamed." The
                            // untouched sandbox is the receipt; these only keep a success claim out.
-                           ", not report", "nothing was renamed", "could not rename", "couldn't rename"].contains { folded.contains($0) }
+                           ", not report", "nothing was renamed", "could not rename", "couldn't rename",
+                           // 2026-11-04 (Haiku): "No report.txt in JARVIS-sandbox; only report-draft.txt exists. Nothing renamed; …"
+                           "no report.txt", "nothing renamed"].contains { folded.contains($0) }
         var evidence = diffEvidence(before, after)
         evidence["answerSaysNotFound"] = saysMissing
         let untouched = before != nil && after != nil && before == after

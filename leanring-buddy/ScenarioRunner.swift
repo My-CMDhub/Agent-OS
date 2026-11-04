@@ -425,6 +425,7 @@ enum ScenarioRunner {
         let chromeSurfacesBefore = VoiceToolProbe.windowServerSurfaces(bundleIdentifier: chromeBundleIdentifier) ?? []
         let chromeWindowsBefore = Set(chromeSurfacesBefore.map(\.number))
         let runningBefore = Set(scenario.quitIfLaunched.filter { !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty })
+        let panelOpenBefore = await Task.detached(operation: { HarnessPanels.controlCentrePanelIsOpen }).value
         var cleanup: [String: Any] = [:]
         var killSwitchCreated = false
 
@@ -518,6 +519,10 @@ enum ScenarioRunner {
             cleanup["cursor"] = await Task.detached { [baseline = context.baseline] in cleanUpCursor(cursor, baseline: baseline) }.value
         }
         var quit: [String] = []
+        // A panel a scenario opened goes, or the next one starts behind it (`HarnessPanels`).
+        if !panelOpenBefore, await Task.detached(operation: { HarnessPanels.controlCentrePanelIsOpen }).value {
+            _ = await Task.detached { harnessAnswer(HarnessPanels.escapeLine) }.value
+        }
         for bundleIdentifier in scenario.quitIfLaunched where !runningBefore.contains(bundleIdentifier) {
             for application in NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier) {
                 // TextEdit holds only the run's unsaved document: no save sheet to answer.

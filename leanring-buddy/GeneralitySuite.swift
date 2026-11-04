@@ -490,6 +490,7 @@ enum GeneralitySuite {
             // A neutral start: Finder in front, as when the owner asks from the desktop.
             NSRunningApplication.runningApplications(withBundleIdentifier: finder).first?.activate()
             try? await Task.sleep(for: .seconds(1))
+            let panelOpenBefore = await Task.detached(operation: { HarnessPanels.controlCentrePanelIsOpen }).value
             var state = before(task.apps)
             state.files = await Task.detached { userFolderEntries() }.value
             let machineBefore = await Task.detached { SuiteSideEffects.snapshot() }.value
@@ -554,6 +555,11 @@ enum GeneralitySuite {
                 // Its app may be quit by now, or may have been running behind: read, removed, then closed as usual.
                 let before = ownBefore
                 result["ownItems"] = await readLaunchingIfNeeded(ownItems[0].bundle) { SuiteOwnItems.remove(ownItems, before: before) } ?? ["left": ["unreadable"]]
+            }
+            // A panel this task opened goes, or the next task starts behind it (launch U02 -> U05, 2026-11-04).
+            if !panelOpenBefore, await Task.detached(operation: { HarnessPanels.controlCentrePanelIsOpen }).value {
+                _ = await Task.detached { harness.answer(line: HarnessPanels.escapeLine) }.value
+                result["panelClosed"] = await Task.detached(operation: { !HarnessPanels.controlCentrePanelIsOpen }).value
             }
             let cleanup = await undo(state, apps: task.apps)
             result["cleanup"] = cleanup

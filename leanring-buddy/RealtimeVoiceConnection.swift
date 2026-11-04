@@ -1637,6 +1637,9 @@ final class RealtimeVoiceConnection {
         let isAgentStep = turn.isAgentStep
         let agentOpenedBundles = turn.agentOpenedBundles
         let agentStartBundle = turn.agentStartBundle
+        // A Control Centre panel is no app an owner names, so no word of theirs can be about another app in its stead: a step
+        // may close it or read it whoever opened it (launch U05 2026-11-04: Escape refused heardUnavailable on "report.txt").
+        let actsInItsOwn = agentOpenedBundles.union([AgentLoop.controlCentreBundleIdentifier])
         let mayRefuseCall = RealtimeHeardCheck.mayRefuse(toolName: call.name)
         let (decision, namedAppIsRunning, actsInUnnamedApp, callIsPageApp) = await Task.detached { () -> (RealtimeHeardCheck.Decision, Bool, String?, Bool) in
             var callBundle: String?
@@ -1673,7 +1676,7 @@ final class RealtimeVoiceConnection {
                 return (proceeding, true, nil, pageApp)
             }
             if isAgentStep, decision.outcome == .appNameUnclear,
-               agentStepMayActDespiteUnclearWord(callBundle: callBundle, openedByTask: agentOpenedBundles,
+               agentStepMayActDespiteUnclearWord(callBundle: callBundle, openedByTask: actsInItsOwn,
                                                  unclearWords: decision.heardSlot, among: RealtimeVoiceVerbs.installedAppNames()) {
                 var proceeding = RealtimeHeardCheck.Decision(outcome: .noAppHeard, heardApps: [], tier: nil)
                 proceeding.heardSlot = decision.heardSlot
@@ -1681,7 +1684,7 @@ final class RealtimeVoiceConnection {
             }
             // The same for another app named where to act: a page this task opened is its own
             // (live 2026-10-08: "…then send it on LinkedIn" refused every press in the Meet tab it opened).
-            if isAgentStep, agentStepMayActDespiteMismatch(outcome: decision.outcome, callBundle: callBundle, openedByTask: agentOpenedBundles,
+            if isAgentStep, agentStepMayActDespiteMismatch(outcome: decision.outcome, callBundle: callBundle, openedByTask: actsInItsOwn,
                                                             startBundle: agentStartBundle) {
                 var proceeding = RealtimeHeardCheck.Decision(outcome: .noAppHeard, heardApps: [], tier: nil)
                 proceeding.heardSlot = decision.heardSlot
