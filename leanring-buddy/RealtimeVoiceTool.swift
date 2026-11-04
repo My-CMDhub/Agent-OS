@@ -1687,8 +1687,7 @@ nonisolated enum RealtimeOpenAppTool {
                              RealtimeVoiceVerbs.annotateName, RealtimeVoiceVerbs.pressMenuBarItemName]),
         (["scrolled"], [RealtimeVoiceVerbs.scrollName]),
         (["typed"], [RealtimeVoiceVerbs.typeTextName]),
-        // A close done by pressing is a close (a menu's Close Tab: A7 on the front stack; `AgentLoop.doneChallenge` already says so).
-        (["closed"], [RealtimeVoiceVerbs.closeName, RealtimeVoiceVerbs.pressMenuName, RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressKeysName]),
+        (["closed"], [RealtimeVoiceVerbs.closeName]),
         // Live 2026-10-02 row 16: "website beating chrome" was answered as if a page had opened.
         // G16 2026-10-11: an ok open_settings_pane backs "opened" (and go_to_folder).
         (["opened"], [RealtimeOpenAppTool.name, RealtimeVoiceVerbs.openURLName, RealtimeVoiceVerbs.focusAppName,
@@ -1717,6 +1716,12 @@ nonisolated enum RealtimeOpenAppTool {
         var names = Set(ok.map(\.call.name))
         if ok.contains(where: { $0.call.name == RealtimeVoiceVerbs.pressElementName && pressedRole($0.dispatch?.harnessResponse).map(toggleRoles.contains) == true }) {
             names.insert(toggleReceipt)
+        }
+        // A close done by pressing is a close (a menu's Close Tab: A7 on the front stack), but only a press of something that closes:
+        // "I closed it" after pressing Sign In is a claim with no receipt. A position names nothing, so it is not held against it.
+        if ok.contains(where: { [RealtimeVoiceVerbs.pressMenuName, RealtimeVoiceVerbs.pressElementName, RealtimeVoiceVerbs.pressKeysName].contains($0.call.name)
+            && (AgentOneThing.kind(of: $0.call) == .close || AgentOneThing.kind(of: $0.call) == .quit || ($0.call.path == nil && $0.call.elementName == nil && $0.call.shortcut == nil)) }) {
+            names.insert(RealtimeVoiceVerbs.closeName)
         }
         return names
     }

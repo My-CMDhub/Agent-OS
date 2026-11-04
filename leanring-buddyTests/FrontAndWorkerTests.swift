@@ -283,7 +283,18 @@ struct SettingsWordsTests {
 
 struct ClosedClaimTests {
     @Test func aCloseDoneByPressingIsBacked() {
-        #expect(!RealtimeOpenAppTool.claimedWithoutReceipt(transcript: "I have closed the tab.", okToolNames: [RealtimeVoiceVerbs.pressMenuName]))
-        #expect(RealtimeOpenAppTool.claimedWithoutReceipt(transcript: "I have closed the tab.", okToolNames: [RealtimeVoiceVerbs.findOnScreenName]))
+        func decision(_ call: RealtimeToolCall) -> RealtimeToolDecision {
+            var decision = RealtimeToolDecision(call: call, callUptime: 0)
+            decision.dispatch = RealtimeToolDispatch(result: ["ok": true], harnessMilliseconds: 0, waitedForConfirmation: false, harnessResponse: ["ok": true])
+            return decision
+        }
+        func standing(_ call: RealtimeToolCall) -> Bool {
+            ScenarioRunner.claimLeftStanding(transcript: "I have closed the tab.", decisions: [decision(call)], pointed: false, corrected: false)
+        }
+        #expect(!standing(RealtimeToolCall(callID: "1", name: RealtimeVoiceVerbs.pressMenuName, appName: "Safari", path: ["File", "Close Tab"])))
+        #expect(!standing(RealtimeToolCall(callID: "1", name: RealtimeVoiceVerbs.pressKeysName, appName: "Safari", shortcut: "cmd+w")))
+        // A press of something else backs no close: this is what the first version of this rule let through.
+        #expect(standing(RealtimeToolCall(callID: "1", name: RealtimeVoiceVerbs.pressElementName, appName: "Safari", elementName: "Sign In")))
+        #expect(standing(RealtimeToolCall(callID: "1", name: RealtimeVoiceVerbs.findOnScreenName, appName: "Safari")))
     }
 }

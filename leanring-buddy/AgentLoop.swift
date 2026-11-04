@@ -445,6 +445,8 @@ final class AgentLoop {
         var moreBelow = false
         /// The items a rename_item / move_items named, ok or not (`unnamedSubstitute`). In memory only.
         var targets: [String]? = nil
+        /// An ok call that closed, quit or removed something and showed a change (`AgentOneThing`). In memory only.
+        var takesAway: AgentOneThing.Kind? = nil
     }
 
     /// An ask_owner the run paused on: its call's id, and the results of the
@@ -1069,6 +1071,10 @@ final class AgentLoop {
                                 + "what was not done, or ask them")
                             break
                         }
+                        if let told = AgentOneThing.refusal(call: mappedCall, heard: heard ?? goal, receipts: receipts) {
+                            traced(["tool": "computer.\(toolName)", "args": args, "ok": false, "error": AgentOneThing.error])
+                            return finish(.done(summary: told))
+                        }
                         for _ in 0..<repeats {
                             let dispatch = await dependencies.execute(mappedCall, true, observation, remaining())
                             result = dispatch.result
@@ -1143,6 +1149,10 @@ final class AgentLoop {
                         call = parsed
                         break
                     }
+                    if let told = AgentOneThing.refusal(call: parsed, heard: heard ?? goal, receipts: receipts) {
+                        traced(["tool": toolName, "args": args, "ok": false, "error": AgentOneThing.error])
+                        return finish(.done(summary: told))
+                    }
                     let dispatch = await dependencies.execute(parsed, true, observation, remaining())
                     (result, harnessMs, waited, call) = (dispatch.result, dispatch.harnessMilliseconds, dispatch.waitedForConfirmation, parsed)
                     if result["error"] as? String == "confirmationDenied" { ownerDeniedACard = true }
@@ -1178,7 +1188,8 @@ final class AgentLoop {
                                             && result["fieldCommitsOnConfirm"] as? Bool == true,
                                         opensEdit: ok && opensEdit,
                                         moreBelow: ok && toolName == AgentLoopTools.readPageName && result["moreBelow"] as? Bool == true,
-                                        targets: call.flatMap(Self.itemTargets)))
+                                        targets: call.flatMap(Self.itemTargets),
+                                        takesAway: ok && result["verification"] as? String != "notObserved" ? call.flatMap(AgentOneThing.kind(of:)) : nil))
                 var fields: [String: Any] = ["tool": isMember ? "computer.\(toolName)" : toolName, "args": args, "ok": ok, "error": error ?? NSNull(), "harnessMs": harnessMs,
                                              "waitedForConfirmation": waited, "verification": result["verification"] ?? NSNull()]
                 if !(web is NSNull) { fields["web"] = web }

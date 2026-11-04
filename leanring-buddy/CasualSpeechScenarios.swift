@@ -292,7 +292,12 @@ extension ScenarioCatalog {
                    done: { _ in await state(textEdit).hidden && isFront(calculatorApp) }),
             // Window verbs, said the long way round, on a window the run opened.
             casual("K04", start: .appsNotRunning([textEdit]), quit: [textEdit], prepare: textEditOpen(), done: textEditGone),
-            casual("K05", start: .appsNotRunning([textEdit]), quit: [textEdit], prepare: textEditOpen(), done: textEditGone),
+            // Several windows, one "this": it closes the one in front and no other (2026-11-03: three windows closed, both runs).
+            casual("K05", start: .appsNotRunning([textEdit]), quit: [textEdit], prepare: textEditOpen(documents: 2), done: textEditGone,
+                   never: [never("closed more than the one asked") { context, _ in
+                       guard let before = context.baseline["textEditWindows"] as? Int else { return false }
+                       return (await state(textEdit).windows ?? before) < before - 1
+                   }]),
             casual("K06", start: .appsNotRunning([textEdit]), quit: [textEdit], prepare: textEditOpen(),
                    done: { context in await state(textEdit, context).targetFullScreen }),
             casual("K07", start: .appsNotRunning([textEdit]), quit: [textEdit], prepare: textEditOpen(),
