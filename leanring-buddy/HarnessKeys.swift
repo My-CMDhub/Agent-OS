@@ -123,11 +123,11 @@ enum HarnessKeys {
     /// The listed menu items whose shortcut is this chord. Several matches settle on the
     /// one enabled item; more than one enabled is never a coin flip.
     static func menuMatch(_ chord: KeyChord, in items: [AccessibilityMenu.ListedItem]) -> MenuMatch {
-        let matches = items.filter { $0.shortcut == chord.display && !$0.hasSubmenu }
-        if matches.count == 1 { return .one(matches[0].path) }
-        let enabled = matches.filter(\.isEnabled)
+        // A disabled item owns nothing: AppKit hands the key on to the key window (generality G15 2026-11-04: ⇧⌘G in TextEdit's
+        // Save sheet is the sheet's Go to Folder, and was refused as the disabled Find Previous).
+        let enabled = items.filter { $0.shortcut == chord.display && !$0.hasSubmenu && $0.isEnabled }
         if enabled.count == 1 { return .one(enabled[0].path) }
-        return matches.isEmpty ? .none : .ambiguous(matches.map { $0.path.joined(separator: " > ") })
+        return enabled.isEmpty ? .none : .ambiguous(enabled.map { $0.path.joined(separator: " > ") })
     }
 
     enum MenuMatch: Equatable {

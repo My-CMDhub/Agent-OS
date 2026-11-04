@@ -4695,7 +4695,9 @@ final class HarnessServer {
         // No menu item owns it: posted — navigation freely, Return / Space judged by what they press,
         // Command/Option-Delete refused, anything else asked once.
         let everyDisplay = EscalationLadder.displays().map(\.appKitFrame).reduce(CGRect.null) { $0.union($1) }
-        let route = HarnessKeys.unmatched(chord)
+        var route = HarnessKeys.unmatched(chord)
+        // In a file panel ⇧⌘G is its own Go to Folder: navigation, known by the panel, not a shortcut of unknown effect.
+        if case .ask = route, chord.display == HarnessPanels.goToFolderShortcut, HarnessPanels.frontSheetIsFilePanel(processIdentifier: processIdentifier) { route = .post }
         var decision = HarnessKeys.unmatchedDecision(route) ?? .allow
         var judged = "navigation"
         var target = chord.display
