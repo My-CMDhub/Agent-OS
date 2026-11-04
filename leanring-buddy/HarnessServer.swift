@@ -3729,7 +3729,10 @@ final class HarnessServer {
             var afterWrite = HarnessHands.AfterWrite.keystrokes
             let keystrokesFirst = HarnessHands.typeStartsWithKeystrokes(
                 forced: request.forcedTypeMethod,
-                inWebContent: request.forcedTypeMethod == nil && HarnessHands.isWebContent(element, application: snapshot.application))
+                // Calendar on macOS 27: an AX write shows in the field and is not the event's (K21 2026-11-04: quick entry's box left up after its confirm, twice;
+                // a title written to Event Title gave an event with no title). Keystrokes made the right event at once.
+                inWebContent: request.forcedTypeMethod == nil && (HarnessHands.isWebContent(element, application: snapshot.application)
+                    || snapshot.application?.bundleIdentifier == HarnessCreateEvent.calendarBundleIdentifier))
             if keystrokesFirst, request.forcedTypeMethod == nil { response["axWriteSkipped"] = "webContent" }
             if !keystrokesFirst {
                 // Read apart from the performer's, which collapses "no value" into "": unreadable is not empty.
