@@ -77,13 +77,35 @@ nonisolated struct ReminderDue: Equatable {
         return rebased(date, now: now, calendar: calendar)
     }
 
+    /// Exactly a day with no hour and an hour with no day.
+    private static func dayAndHourApart(_ matches: [NSTextCheckingResult], in heard: String) -> (day: Date, hour: Range<String.Index>)? {
+        guard matches.count == 2 else { return nil }
+        func parts(_ match: NSTextCheckingResult) -> (range: Range<String.Index>, date: Date, day: Bool, hour: Bool)? {
+            guard let range = Range(match.range, in: heard), let date = match.date else { return nil }
+            let words = String(heard[range]).lowercased()
+            return (range, date, namesDay(words), words.range(of: #"\d|\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon|midnight)\b"#, options: .regularExpression) != nil)
+        }
+        guard let first = parts(matches[0]), let second = parts(matches[1]) else { return nil }
+        if first.day, !first.hour, second.hour, !second.day { return (first.date, second.range) }
+        if second.day, !second.hour, first.hour, !first.day { return (second.date, first.range) }
+        return nil
+    }
+
     /// `dayOf`: the day to use when these words name no day of their own.
     private static func parseOne(_ heard: String, dayOf: Date?, now: Date, calendar: Calendar) -> ReminderDue {
         let matches = matches(in: heard)
         guard let match = matches.first, let found = match.date, let range = Range(match.range, in: heard) else {
             return ReminderDue(kind: .none, phrase: nil)
         }
-        if matches.count > 1 { return ReminderDue(kind: .ambiguous("more than one date or time was heard"), phrase: range) }
+        if matches.count > 1 {
+            // "Today, a meeting at 7 pm": the detector reads a day and an hour apart (live 2026-11-04, 3 turns lost to it). That is one time.
+            if let apart = dayAndHourApart(matches, in: heard) {
+                let hour = String(heard[apart.hour])
+                let read = parseOne(hour, dayOf: rebased(apart.day, now: now, calendar: calendar), now: now, calendar: calendar)
+                return ReminderDue(kind: read.kind, phrase: apart.hour)
+            }
+            return ReminderDue(kind: .ambiguous("more than one date or time was heard"), phrase: range)
+        }
 
         let words = heard[range].lowercased()
         func has(_ pattern: String) -> Bool { words.range(of: pattern, options: .regularExpression) != nil }
