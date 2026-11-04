@@ -9,7 +9,7 @@
 //  causes: the model doing date arithmetic, and navigation the verifier cannot see. So the range is
 //  resolved by CODE from the owner's own words (the model's `when` only when theirs name no day),
 //  and the events come from the app's data API, a rung above the tree. Reads only, in-process like
-//  `find_file`; no harness verb, and never prompts for access from inside a task.
+//  `find_file`; no harness verb. A prompt, if one is due, was raised before this runs (`RealtimeOpenAppTool.dispatch`).
 //
 
 import EventKit
@@ -181,9 +181,7 @@ nonisolated enum CalendarReader {
         case .success(let found): range = found
         }
         guard HarnessCreateEvent.isAuthorized else {
-            return refusal("calendarNotAuthorized", "J.A.R.V.I.S. has no full access to Calendar (status "
-                + "\(EKEventStore.authorizationStatus(for: .event).rawValue)); nothing was read. Tell the owner, who can grant it in "
-                + "System Settings > Privacy & Security > Calendars")
+            return refusal("calendarNotAuthorized", EventKitAccess.notAuthorizedMessage(.event, outcome: "nothing was read", fallback: "Tell the owner", at: "readCalendar"))
         }
         let store = EKEventStore()
         let found = store.events(matching: store.predicateForEvents(withStart: range.start, end: range.end, calendars: nil)).map {

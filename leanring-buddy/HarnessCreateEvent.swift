@@ -105,8 +105,7 @@ nonisolated enum HarnessCreateEvent {
     static func create(_ plan: Plan, calendarName: String?) -> (report: [String: Any], failure: Failure?) {
         guard isAuthorized else {
             return ([:], Failure(code: "calendarNotAuthorized",
-                                 message: "J.A.R.V.I.S. has no full access to Calendar (status \(EKEventStore.authorizationStatus(for: .event).rawValue)); "
-                                    + "nothing was created. Use the Calendar app instead"))
+                                 message: EventKitAccess.notAuthorizedMessage(.event, outcome: "nothing was created", fallback: "Use the Calendar app instead", at: "createEvent")))
         }
         let store = EKEventStore()
         let writable = store.calendars(for: .event).filter(\.allowsContentModifications)

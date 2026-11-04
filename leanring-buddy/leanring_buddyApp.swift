@@ -63,6 +63,20 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Reads every permission's status, writes it, quits (`--reopen`: through the panel's Reopen). No prompt can fire;
+        // Files & Folders is left unread because any read of it can. Witness: tccd's log shows no prompt for this pid.
+        if CommandLine.arguments.contains("--permissions-status") {
+            let started = Date()
+            let read = JarvisPermissions.liveReadings(files: nil)
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            let lines = JarvisPermission.allCases.map { "\($0.name): \(read[$0].map { "\($0)" } ?? "?")" }
+                + ["calendars raw: \(EventKitAccess.status(.event).rawValue)", "reminders raw: \(EventKitAccess.status(.reminder).rawValue)",
+                   "ownerSession: \(EventKitAccess.isOwnerSession)", "read ms: \(ms)"]
+            try? lines.joined(separator: "\n").write(toFile: "/private/tmp/clicky-permissions-status.txt", atomically: true, encoding: .utf8)
+            if CommandLine.arguments.contains("--reopen") { JarvisPermissions.reopen() } else { NSApp.terminate(nil) }
+            return
+        }
+
         // Owner at the desk: lists each protected folder once so macOS asks for Files & Folders
         // (Clicky is not in /Applications, so Settings offers no "+"). Counts only, never names.
         if CommandLine.arguments.contains("--folder-access-request") {

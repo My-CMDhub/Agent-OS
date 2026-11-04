@@ -126,8 +126,7 @@ nonisolated enum HarnessCreateReminder {
     static func create(_ plan: Plan, listName: String?) -> (report: [String: Any], failure: Failure?) {
         guard isAuthorized else {
             return ([:], Failure(code: "remindersNotAuthorized",
-                                 message: "J.A.R.V.I.S. has no full access to Reminders (status \(EKEventStore.authorizationStatus(for: .reminder).rawValue)); "
-                                    + "nothing was created. Use the Reminders app instead"))
+                                 message: EventKitAccess.notAuthorizedMessage(.reminder, outcome: "nothing was created", fallback: "Use the Reminders app instead", at: "createReminder")))
         }
         let store = EKEventStore()
         let lists = store.calendars(for: .reminder)

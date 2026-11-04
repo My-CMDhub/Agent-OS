@@ -1470,8 +1470,8 @@ final class AgentLoop {
         text += "\nIt is now \(nowLine(now)) on this Mac."
         if let heard, !heard.allSatisfy(\.isWhitespace) { text += "\nThe owner's own words: \(SecretScanner.redact(heard))" }
         // Siri's shape (2026-10-21): the due is read from the OWNER's words by code, never the goal the model wrote.
-        if let heard, let due = ReminderDue.note(heard: heard, structured: HarnessCreateReminder.isAuthorized) { text += "\n" + SecretScanner.redact(due) }
-        if let heard, HarnessCreateEvent.isAuthorized, let start = HarnessCreateEvent.note(heard: heard) { text += "\n" + SecretScanner.redact(start) }
+        if let heard, let due = ReminderDue.note(heard: heard, structured: EventKitAccess.remindersUsable) { text += "\n" + SecretScanner.redact(due) }
+        if let heard, EventKitAccess.calendarsUsable, let start = HarnessCreateEvent.note(heard: heard) { text += "\n" + SecretScanner.redact(start) }
         if readOnly { text += "\n" + readOnlyNote }
         else if let heard, saysOneThing(heard) { text += "\n" + oneActionNote }
         return text

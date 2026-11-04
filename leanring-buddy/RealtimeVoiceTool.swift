@@ -852,6 +852,8 @@ nonisolated enum RealtimeOpenAppTool {
                 answeredUptime: ProcessInfo.processInfo.systemUptime
             )
         }
+        // Calendars / Reminders never asked: macOS's own prompt now, and the owner's answer, not a refusal (2026-11-04).
+        await EventKitAccess.requestIfAskable(forTool: call.name)
         // open_settings_pane: a verified deep link, proven by its window title; no harness verb acts.
         if call.name == SettingsPaneLinks.toolName {
             // So the harness's dry run cannot stop it, and it is the one tool here that changes the screen: live
