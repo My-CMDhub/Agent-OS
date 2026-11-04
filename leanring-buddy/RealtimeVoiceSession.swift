@@ -553,6 +553,7 @@ final class RealtimeVoiceSession {
         MeasurementLogFile.appendJSONLine([
             "kind": "frontStatus", "event": event, "status": status.kind.rawValue, "speaks": status.speaks, "run": value(lastTask?.loop.runID),
             "via": value(turn?.frontVia), "waitedMs": value(waitedMs),
+            "saidWords": value(turn.map { $0.transcript.split(separator: " ").count }),
             "firstAudioMs": value(Self.milliseconds(from: turn?.lastAudioSentUptime, to: turn?.firstAudioUptime)),
             "uptime": MeasurementLogFile.roundedUptime(uptime)
         ], toFileNamed: liveTurnLogFileName)

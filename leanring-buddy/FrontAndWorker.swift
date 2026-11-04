@@ -221,9 +221,12 @@ nonisolated struct FrontStatus: Equatable, Sendable {
         let line = AgentLoop.finalLine(outcome, goal: goal, lastProgress: lastProgress, step: step) ?? ""
         let progress = lastProgress.map { " I got as far as: \($0)." } ?? ""
         switch outcome {
-        // The acknowledgement already took a turn, so the result is short: ~7 s of it was most of the wait after the work ended (section K, 2026-11-03).
+        // The acknowledgement already took a turn, so the result is short: speaking it was 7.5 s median of what came after the work ended (51 runs, 2026-11-03).
+        // `finalLine`'s "one to three short sentences" beat a fifteen-word limit added behind it, so the front has its own line.
         case .done(let summary):
-            return FrontStatus(kind: .done, line: line + " at most fifteen words, unless the owner asked you to report or read something.", plain: summary)
+            return FrontStatus(kind: .done, line: "system event, not the owner's words: what you were doing is finished; each step was checked. say this as your own, "
+                + "nothing added, no opening phrase and no \"as requested\": at most eight words if it reports an action, every fact if it answers something, keeping every name and number. "
+                + "end there, asking nothing: \(summary) call no tool.", plain: summary)
         case .askOwner(let question): return FrontStatus(kind: .waitingForOwner, line: line, plain: question)
         case .unconfirmed(let summary, _): return FrontStatus(kind: .unconfirmed, line: line, plain: "\(summary) I couldn't confirm all of that.")
         case .failed(let reason): return FrontStatus(kind: .failed, line: line, plain: "I couldn't finish that: \(AgentLoop.spokenReason(reason)).\(progress)")
